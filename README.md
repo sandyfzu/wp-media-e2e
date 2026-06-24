@@ -1,0 +1,73 @@
+# wp-media-projects-e2e
+
+End-to-end tests for WP Media products (WP Rocket, BackWPup), built on
+[Playwright](https://playwright.dev) + [playwright-bdd](https://vitalets.github.io/playwright-bdd/)
+(Cucumber/Gherkin). ESM, Node 24, TypeScript 6 (strict).
+
+The authoritative design is in [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md).
+
+## Quick start
+
+```bash
+npm install          # also downloads Chromium (see "Browsers" below)
+npm run test:wp-rocket -- --project=apache
+```
+
+A fresh checkout has no `sites.json`, so the example placeholder data is used: the auth
+setup is skipped and the `@noauth` smoke scenarios pass, proving the harness is wired up.
+
+## Concepts
+
+- **Product** — `wp-rocket` / `backwpup`. Each declares its own features, steps, sites,
+  and (BackWPup only) service credentials. Configs live in `src/projects/<product>/config/`.
+- **Cell** — a named environment (`apache`, `nginx`, future `nginx@php8.2`). Cells are
+  data-driven: they are the top-level keys of a product's `sites.json`.
+- **Pool** — the list of interchangeable WordPress sites under one cell. Each worker binds
+  to one site by `parallelIndex`, so scenarios are distributed across the pool.
+- **Run unit** — one `(product × cell)`. Run exactly one cell per invocation with
+  `--project=<cell>`; selecting two cells at once fails fast (the global `parallelIndex`
+  would overflow a smaller pool — see plan §3.2).
+
+## Running
+
+```bash
+npm run test:wp-rocket -- --project=<cell>     # one product, one cell
+npm run test:backwpup  -- --project=<cell>
+npm run test:wp-rocket -- --project=apache --grep @smoke
+```
+
+Reports accumulate per run at `reports/<product>/<cell>/<RUN_ID>/`. Set `REPORT_MODE=rich`
+for an external report with the embedded trace viewer.
+
+## Configuring sites
+
+Copy the committed example and edit it (the real file is git-ignored — it holds secrets):
+
+```bash
+cp src/projects/wp-rocket/config/sites.example.json src/projects/wp-rocket/config/sites.json
+```
+
+Credentials live only in `sites.json` and never enter Playwright reports.
+
+## Environment
+
+Copy `.env.example` to `.env` and fill in what you need (BackWPup storage credentials,
+optional runtime flags). Real environment variables always win over `.env`.
+
+## Browsers
+
+`npm install` downloads Chromium via a `postinstall` hook. This repo commits an
+`.npmrc` with `ignore-scripts=false` so that hook runs even on machines that disable
+install scripts globally. If browsers are ever missing, run:
+
+```bash
+npm run setup        # = playwright install chromium
+```
+
+## Quality gates
+
+```bash
+npm run typecheck    # tsc --noEmit
+npm run lint         # eslint .
+npm run format:check # prettier --check .
+```

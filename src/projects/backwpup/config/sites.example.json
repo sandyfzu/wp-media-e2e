@@ -1,0 +1,45 @@
+{
+  "free@apache": {
+    "edition": "free",
+    "sites": [
+      {
+        "baseURL": "https://backwpup.free-apache.example.test",
+        "username": "admin",
+        "password": "change-me",
+        "transport": {
+          "mode": "ssh",
+          "host": "203.0.113.20",
+          "username": "ubuntu",
+          "privateKeyPath": "/home/ci/.ssh/id_ed25519",
+          "rootDir": "/var/www/html/backwpup-free-apache"
+        }
+      }
+    ]
+  },
+  "pro@nginx": {
+    "edition": "pro",
+    "sites": [
+      {
+        "baseURL": "https://backwpup.pro-nginx.example.test",
+        "username": "admin",
+        "password": "change-me",
+        "transport": {
+          "mode": "ssh",
+          "host": "203.0.113.21",
+          "username": "ubuntu",
+          "privateKeyPath": "/home/ci/.ssh/id_ed25519",
+          "rootDir": "/var/www/html/backwpup-pro-nginx"
+        },
+        "overrides": {
+          "storage": {
+            "ftp": {
+              "host": "203.0.113.99",
+              "username": "backwpup-ftp-2",
+              "password": "change-me"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+# Normalize line endings: store text files with LF in the repository and let
+# Git handle checkout conversion. Keeps diffs stable across operating systems.
+* text=auto eol=lf
+
+# Treat known binary file types as binary (no EOL conversion, no text diff).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.zip binary
+*.gz binary
+*.pdf binary

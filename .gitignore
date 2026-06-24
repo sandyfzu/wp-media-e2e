@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+
+# Build output and coverage
+dist/
+build/
+coverage/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Caches and incremental build info
+.cache/
+.eslintcache
+*.tsbuildinfo
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
+
+# Per-run authentication state (storageState)
+/.auth/
+
+# Accumulating per-cell reports (pruned to newest N by report:prune, a later phase)
+/reports/
+
+# Allure (later phase)
+/allure-results/
+/allure-report/
+
+# playwright-bdd generated specs
+/.features-gen/
+
+# Per-product site pools & secrets (committed example only)
+src/projects/*/config/sites.json

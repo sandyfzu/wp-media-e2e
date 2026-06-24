@@ -1,0 +1,40 @@
+{
+  "name": "wp-media-projects-e2e",
+  "version": "0.0.1",
+  "description": "Projects E2E Tests with Playwright",
+  "license": "UNLICENSED",
+  "author": "WP Media",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "postinstall": "playwright install chromium",
+    "setup": "playwright install chromium",
+    "bddgen": "bddgen",
+    "test": "bddgen && playwright test",
+    "test:wp-rocket": "bddgen --config playwright.wp-rocket.config.ts && playwright test --config playwright.wp-rocket.config.ts",
+    "test:backwpup": "bddgen --config playwright.backwpup.config.ts && playwright test --config playwright.backwpup.config.ts",
+    "test:ui": "bddgen && playwright test --ui",
+    "test:headed": "bddgen && playwright test --headed",
+    "report": "playwright show-report",
+    "typecheck": "tsc",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "engines": {
+    "node": ">=24.16.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^24.13.2",
+    "eslint": "^10.5.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.7.0",
+    "playwright-bdd": "^9.2.0",
+    "prettier": "^3.8.4",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.62.0"
+  }
+}

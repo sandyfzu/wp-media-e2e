@@ -1,0 +1,42 @@
+{
+  // Visit https://aka.ms/tsconfig to read more about this file.
+  //
+  // The Playwright runner transpiles these files on the fly with esbuild: no
+  // build step and no file extensions required in imports. `tsc` is used only
+  // for type-checking (`noEmit`), so resolution mirrors the bundler.
+  "compilerOptions": {
+    // --- Environment ---
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "esnext",
+    "lib": ["esnext", "dom", "dom.iterable"],
+    "types": ["node"],
+    "moduleDetection": "force",
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "noEmit": true,
+
+    // --- Strictness ---
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noUncheckedSideEffectImports": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // --- Performance ---
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*", "playwright*.config.ts"],
+  "exclude": [
+    "node_modules",
+    ".features-gen",
+    "test-results",
+    "playwright-report"
+  ]
+}

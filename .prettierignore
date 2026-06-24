@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output and coverage
+dist/
+build/
+coverage/
+
+# Playwright + playwright-bdd
+.features-gen/
+playwright-report/
+test-results/
+blob-report/
+
+# Logs and caches
+*.log
+.cache/
+.eslintcache
+
+# Generated lockfiles (managed by the package manager, not Prettier)
+package-lock.json
+
+# Curated design docs (manually formatted; not Prettier's to reflow)
+docs/
