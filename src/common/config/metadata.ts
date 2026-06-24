@@ -1,3 +1,4 @@
+import { isNonEmptyString, isObject } from "../guards";
 import type { Edition, SiteConfig } from "./types";
 
 /**
@@ -39,21 +40,20 @@ function parseEdition(value: unknown): Edition | undefined {
 
 /** Reads and validates the routing carried in a Playwright project's `metadata`. */
 export function readRouting(metadata: unknown): ProjectRouting {
-  if (typeof metadata !== "object" || metadata === null) {
+  if (!isObject(metadata)) {
     throw new Error(
-      "[metadata] project metadata is missing; expected { product, cell }.",
+      "[metadata] project metadata is missing or not an object; expected { product, cell }.",
     );
   }
-  const m = metadata as Record<string, unknown>;
-  if (typeof m.product !== "string" || typeof m.cell !== "string") {
+  if (!isNonEmptyString(metadata.product) || !isNonEmptyString(metadata.cell)) {
     throw new Error(
-      "[metadata] project metadata must carry string `product` and `cell`.",
+      "[metadata] project metadata must carry non-empty string `product` and `cell`.",
     );
   }
-  const edition = parseEdition(m.edition);
+  const edition = parseEdition(metadata.edition);
   return edition === undefined
-    ? { product: m.product, cell: m.cell }
-    : { product: m.product, cell: m.cell, edition };
+    ? { product: metadata.product, cell: metadata.cell }
+    : { product: metadata.product, cell: metadata.cell, edition };
 }
 
 // Per-process registry: (product, cell) -> resolved site pool (with credentials).

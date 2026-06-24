@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { isNonEmptyString, isObject } from "../guards";
 import type {
   CellConfig,
   CellMap,
@@ -69,14 +70,9 @@ export function isPlaceholderSite(site: { readonly baseURL: string }): boolean {
   }
 }
 
-/** Type guard: true for a non-null, non-array object (i.e. a JSON object). */
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /** Returns `value` when it is a non-empty string; otherwise throws an error naming `path`. */
 function requireString(value: unknown, path: string): string {
-  if (typeof value !== "string" || value.trim() === "") {
+  if (!isNonEmptyString(value)) {
     throw new Error(`[sites] ${path} must be a non-empty string.`);
   }
   return value;

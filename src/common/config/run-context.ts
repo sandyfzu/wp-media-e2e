@@ -1,6 +1,7 @@
 import "./load-env";
 import { argv, env as processEnv, pid } from "node:process";
 
+import { isNonEmptyString } from "../guards";
 import { env } from "./env";
 
 /**
@@ -26,7 +27,7 @@ function stamp(): string {
 /** Resolves the run token: a non-blank inherited `RUN_ID`, else a fresh stamp pinned into env. */
 function resolveRunId(): string {
   const provided = processEnv.RUN_ID;
-  if (provided !== undefined && provided.trim() !== "") return provided;
+  if (isNonEmptyString(provided)) return provided;
   const stamped = stamp();
   // Pin it so every worker process (which re-imports this module) inherits one token.
   processEnv.RUN_ID = stamped;
@@ -48,7 +49,7 @@ export function selectedCells(): string[] {
   const cells = new Set<string>();
 
   const fromEnv = processEnv.CELL;
-  if (fromEnv !== undefined && fromEnv.trim() !== "") cells.add(fromEnv.trim());
+  if (isNonEmptyString(fromEnv)) cells.add(fromEnv.trim());
 
   const eq = "--project=";
   for (let i = 0; i < argv.length; i += 1) {
