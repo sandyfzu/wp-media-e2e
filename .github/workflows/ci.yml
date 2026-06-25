@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Type-check · lint · format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      # --ignore-scripts: skip the Playwright browser postinstall + husky; not needed for static checks.
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
+
+  e2e-smoke:
+    name: E2E smoke (Chromium)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+      - run: npx playwright install --with-deps chromium
+      # No sites.json in CI → the example placeholders are used: auth setup is skipped and the
+      # @noauth smoke runs, exercising config + bddgen + step wiring + a real Chromium launch.
+      - run: npm run test:wp-rocket
+      - run: npm run test:backwpup
+      - name: Upload report on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            reports/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Single required status check for branch protection: green only if every job above passed.
+  # `if: always()` so it still runs (and fails) when a dependency fails — avoiding the
+  # "skipped check counts as passed" footgun.
+  gate:
+    name: CI gate
+    needs: [quality, e2e-smoke]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require all jobs to pass
+        run: |
+          echo "quality=${{ needs.quality.result }}  e2e-smoke=${{ needs.e2e-smoke.result }}"
+          if [ "${{ needs.quality.result }}" != "success" ] || [ "${{ needs.e2e-smoke.result }}" != "success" ]; then
+            echo "::error::CI gate failed — one or more jobs did not pass."
+            exit 1
+          fi

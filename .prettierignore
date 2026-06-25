@@ -22,3 +22,6 @@ package-lock.json
 
 # Curated design docs (manually formatted; not Prettier's to reflow)
 docs/
+
+# Husky hook scripts (shell; Prettier has no parser for them)
+.husky/
