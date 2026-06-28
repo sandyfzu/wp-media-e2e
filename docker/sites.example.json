@@ -1,0 +1,18 @@
+{
+  "apache": [
+    {
+      "baseURL": "http://localhost:8100",
+      "username": "admin",
+      "password": "admin_password",
+      "transport": { "mode": "docker", "container": "wpme-wpcli-apache" }
+    }
+  ],
+  "nginx": [
+    {
+      "baseURL": "http://localhost:8101",
+      "username": "admin",
+      "password": "admin_password",
+      "transport": { "mode": "docker", "container": "wpme-wpcli-nginx" }
+    }
+  ]
+}

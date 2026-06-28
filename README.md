@@ -64,6 +64,28 @@ install scripts globally. If browsers are ever missing, run:
 npm run setup        # = playwright install chromium
 ```
 
+## Local WordPress (Docker) — the `docker` transport
+
+A self-contained WordPress environment for the `docker` transport lives in [`docker/`](docker/):
+two **independent** installs over one MariaDB — **Apache** on `:8100` and **Nginx** (php-fpm)
+on `:8101` — each with a kept-alive `wp-cli` container the suite drives via `docker exec`.
+
+```bash
+npm run env:up      # start containers + install both sites (idempotent) — needs the Docker daemon
+npm run env:down    # stop and remove everything (incl. volumes)
+npm run env:logs    # tail container logs
+```
+
+Point a product at it by copying the docker cells into its `sites.json`:
+
+```bash
+cp docker/sites.example.json src/projects/wp-rocket/config/sites.json
+npm run test:wp-rocket -- --project=apache    # or --project=nginx
+```
+
+The cells use `transport: { mode: "docker", container: "wpme-wpcli-apache" | "wpme-wpcli-nginx" }`,
+matching the compose `container_name`s. Sites are installed as `admin` / `admin_password`.
+
 ## Quality gates
 
 ```bash

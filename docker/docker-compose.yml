@@ -1,0 +1,106 @@
+# Local WordPress environment for the `docker` transport (plan §7.1).
+#
+# Two INDEPENDENT installs over ONE MariaDB: Apache on :8100 and Nginx (php-fpm) on :8101.
+# Each install has its own files volume + database + a kept-alive `wp-cli` container that the
+# exec layer targets via `docker exec <container> wp …` (the container_name is the cell's
+# `transport.container`). Bring up + install with `npm run env:up`; tear down with `npm run env:down`.
+#
+# Image tags default here and are overridable via the environment; confirm exact tags on Docker Hub.
+name: wpme
+
+# `x-`-prefixed keys are not services — they are anchor templates merged into the services
+# below via `<<: *name`, so shared settings are written once.
+x-wp-common: &wp-common
+  restart: unless-stopped
+  depends_on:
+    db:
+      condition: service_healthy
+
+x-wp-env: &wp-env
+  WORDPRESS_DB_HOST: db
+  WORDPRESS_DB_USER: wordpress
+  WORDPRESS_DB_PASSWORD: wordpress
+  WORDPRESS_DEBUG: "1"
+  # WP_DEBUG_LOG writes wp-content/debug.log — the file src/common/wp/log.ts reads and scans.
+  WORDPRESS_CONFIG_EXTRA: |
+    define('WP_DEBUG_LOG', true);
+    define('WP_DEBUG_DISPLAY', false);
+
+services:
+  db:
+    image: mariadb:${MARIADB_TAG:-11.4}
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: wp_apache
+      MARIADB_USER: wordpress
+      MARIADB_PASSWORD: wordpress
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      # start_period covers first-init (initializing the data dir + creating the wp_apache DB)
+      # so early healthcheck failures don't mark the container unhealthy and abort its dependents.
+      start_period: 60s
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  wp-apache:
+    <<: *wp-common
+    image: wordpress:${WP_APACHE_TAG:-php8.3-apache}
+    container_name: wpme-apache
+    environment:
+      <<: *wp-env
+      WORDPRESS_DB_NAME: wp_apache
+    ports:
+      - "${APACHE_PORT:-8100}:80"
+    volumes:
+      - wp_apache:/var/www/html
+
+  wp-fpm:
+    <<: *wp-common
+    image: wordpress:${WP_FPM_TAG:-php8.3-fpm}
+    container_name: wpme-fpm
+    environment:
+      <<: *wp-env
+      WORDPRESS_DB_NAME: wp_nginx
+    volumes:
+      - wp_nginx:/var/www/html
+
+  nginx:
+    build: ./nginx # bakes the vhost in (build context is sent to the daemon — no host bind needed)
+    container_name: wpme-nginx
+    restart: unless-stopped
+    depends_on:
+      - wp-fpm
+    ports:
+      - "${NGINX_PORT:-8101}:80"
+    volumes:
+      - wp_nginx:/var/www/html:ro # read-only: nginx serves static files; PHP writes go via wp-fpm
+
+  wp-cli-apache:
+    <<: *wp-common
+    image: wordpress:${WP_CLI_TAG:-cli-php8.3}
+    container_name: wpme-wpcli-apache
+    user: "33:33" # www-data — matches the wordpress containers' file ownership; no --allow-root needed
+    environment:
+      <<: *wp-env
+      WORDPRESS_DB_NAME: wp_apache
+    volumes:
+      - wp_apache:/var/www/html
+    command: ["tail", "-f", "/dev/null"] # keep alive so `docker exec … wp` works
+
+  wp-cli-nginx:
+    <<: *wp-common
+    image: wordpress:${WP_CLI_TAG:-cli-php8.3}
+    container_name: wpme-wpcli-nginx
+    user: "33:33"
+    environment:
+      <<: *wp-env
+      WORDPRESS_DB_NAME: wp_nginx
+    volumes:
+      - wp_nginx:/var/www/html
+    command: ["tail", "-f", "/dev/null"]
+
+volumes:
+  wp_apache:
+  wp_nginx:
