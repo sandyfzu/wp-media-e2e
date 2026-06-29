@@ -12,6 +12,11 @@ playwright-report/
 test-results/
 blob-report/
 
+# Generated reports (per-cell run output + Allure analytics)
+reports/
+allure-results/
+allure-report/
+
 # Logs and caches
 *.log
 .cache/

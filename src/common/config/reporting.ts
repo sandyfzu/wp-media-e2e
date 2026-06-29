@@ -15,6 +15,10 @@ import { env } from "./env";
  *                        Playwright HTML report).
  *      • REPORT_MODE=rich → `externalAttachments: true` — a separate `data/` folder
  *                        with the embedded interactive trace viewer (serve over http).
+ *  - `allure-playwright` — raw Allure results under `<reportDir>/allure-results`. The
+ *                        analytics report (history/trends, flaky categories, dashboard)
+ *                        is generated from them by `scripts/allure.mjs` (`npm run
+ *                        report:allure`); report config lives in `allurerc.mjs`.
  */
 export function reporters(reportDir: string): ReporterDescription[] {
   const rich = env("REPORT_MODE") === "rich";
@@ -26,5 +30,6 @@ export function reporters(reportDir: string): ReporterDescription[] {
       externalAttachments: rich,
       skipAttachments: rich ? false : ["application/zip"],
     }),
+    ["allure-playwright", { resultsDir: `${reportDir}/allure-results` }],
   ];
 }

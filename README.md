@@ -86,6 +86,31 @@ npm run test:wp-rocket -- --project=apache    # or --project=nginx
 The cells use `transport: { mode: "docker", container: "wpme-wpcli-apache" | "wpme-wpcli-nginx" }`,
 matching the compose `container_name`s. Sites are installed as `admin` / `admin_password`.
 
+## Reporting
+
+Every run writes a layered set of reports into `reports/<product>/<cell>/<RUN_ID>/`:
+
+- **`playwright/`** — Playwright's HTML report with the interactive **trace viewer**, video, and
+  screenshots. Open with `npx playwright show-report reports/<product>/<cell>/<RUN_ID>/playwright`.
+- **`cucumber/`** — the Gherkin (BDD) report. By default it is one portable, self-contained HTML
+  with screenshots/video embedded on failure; set `REPORT_MODE=rich` for an external report that
+  embeds the interactive trace viewer (serve it over http, not `file://`).
+- **`allure-results/`** — raw results for **Allure**, the analytics layer (history/trends, flaky
+  detection, dashboard).
+
+Generate the Allure report from the most recent run:
+
+```bash
+npm run report:allure                              # newest run of any cell
+npm run report:allure -- wp-rocket apache          # a specific product/cell
+npm run report:allure -- wp-rocket apache --open   # generate and serve in the browser
+```
+
+The report lands in `reports/<product>/<cell>/<RUN_ID>/allure/`. **Trends accumulate across runs**
+via a per-cell history file (`reports/<product>/<cell>/allure-history.jsonl`), so the trend chart
+fills in from the second run onward; flaky tests are flagged per run from retries. Report content
+(categories, dashboard widgets, single-file output) is configured in [`allurerc.mjs`](allurerc.mjs).
+
 ## Quality gates
 
 ```bash
