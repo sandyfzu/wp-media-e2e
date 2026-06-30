@@ -5,6 +5,7 @@ import { defineBddConfig } from "playwright-bdd";
 import { registerPool, routingMetadata } from "./metadata";
 import { reporters } from "./reporting";
 import { dirs, selectedCells } from "./run-context";
+import { VISUAL_EXPECT, snapshotPathTemplateFor } from "./visual";
 import type { Edition, ProductConfig, SiteConfig, SitePool } from "./types";
 
 /** Per-product Playwright config factory: expands a {@link ProductConfig} into a runnable Playwright config. */
@@ -124,6 +125,11 @@ export function createProductConfig(
         ? selectedCellConfig.sites.length
         : 1,
     reporter: reporters(dirs(product.name, reportCell).report),
+    // Committed-baseline visual checks (`toHaveScreenshot`): comparison tolerance + where the
+    // per-product/cell baselines live. WP Rocket's A/B check (visual/ab.ts) diffs live renders and
+    // does NOT use this — it is the wiring for the general committed-baseline capability (plan §7.6).
+    expect: VISUAL_EXPECT,
+    snapshotPathTemplate: snapshotPathTemplateFor(product.name),
     use: {
       trace: "retain-on-failure",
       screenshot: "only-on-failure",

@@ -111,6 +111,34 @@ via a per-cell history file (`reports/<product>/<cell>/allure-history.jsonl`), s
 fills in from the second run onward; flaky tests are flagged per run from retries. Report content
 (categories, dashboard widgets, single-file output) is configured in [`allurerc.mjs`](allurerc.mjs).
 
+## Visual regression
+
+Visual checks assert that a page renders the **same with optimizations active as with them bypassed**
+(`?nowprocket`) — i.e. lazy-load, CSS/JS handling, etc. don't visually break the page. Both renders
+are captured live in the same run and pixel-diffed against each other, via [`src/common/visual/ab.ts`](src/common/visual/ab.ts):
+
+```ts
+import { expectOptimizedToMatchUnoptimized } from "../../../common/visual/ab";
+
+await expectOptimizedToMatchUnoptimized(page, "/pricing");
+await expectOptimizedToMatchUnoptimized(page, "/pricing", {
+  mask: [page.locator(".ad-slot")], // ignore regions that legitimately differ
+  maxDiffPixelRatio: 0.02, // loosen tolerance for this page
+});
+```
+
+It navigates to the bypassed page (`?nowprocket`) and the optimized page, stabilises each (scrolls to
+load lazy media, waits for fonts), and fails if they differ beyond the tolerance — attaching both
+renders and a highlighted diff to the report. A size difference also fails (a layout change is a
+regression). Tolerances live in [`src/common/config/visual.ts`](src/common/config/visual.ts).
+
+Tag such scenarios `@visual` so they can be run as a group, and run them in the Playwright container
+(as CI does) for pixel-deterministic rendering:
+
+```bash
+npm run test:wp-rocket -- --project=apache --grep @visual
+```
+
 ## Quality gates
 
 ```bash

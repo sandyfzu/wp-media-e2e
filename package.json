@@ -38,6 +38,7 @@
     "allure-playwright": "^3.10.2",
     "@playwright/test": "^1.61.1",
     "@types/node": "^24.13.2",
+    "@types/pngjs": "^6.0.5",
     "eslint": "^10.6.0",
     "eslint-config-prettier": "^10.1.8",
     "execa": "^9.6.1",
@@ -45,7 +46,9 @@
     "husky": "^9.1.7",
     "lint-staged": "^17.0.8",
     "node-ssh": "^13.2.1",
+    "pixelmatch": "^7.2.0",
     "playwright-bdd": "^9.2.0",
+    "pngjs": "^7.0.0",
     "prettier": "^3.9.3",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.62.1"

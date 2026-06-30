@@ -21,8 +21,11 @@ export const BACKWPUP_PLUGIN_PATHS: readonly RegExp[] = [
  * so a fatal triggered anywhere still surfaces. Add patterns to `ignore` for lines confirmed
  * benign from real test runs — discovered from output, not guessed.
  *
- *   const scan = await scanDebugLog(transport, BACKWPUP_LOG_OPTIONS);
- *   if (scan.fatals.length > 0) throw new Error(scan.fatals.join("\n"));
+ * @example
+ * ```ts
+ * const scan = await scanDebugLog(transport, BACKWPUP_LOG_OPTIONS);
+ * if (scan.fatals.length > 0) throw new Error(scan.fatals.join("\n"));
+ * ```
  */
 export const BACKWPUP_LOG_OPTIONS: ScanDebugLogOptions = {
   ignore: [

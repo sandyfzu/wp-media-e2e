@@ -41,8 +41,8 @@ export class PluginsPage {
    * Activate/Deactivate are regular navigations (not AJAX), so a successful click reloads the
    * page; the expected action link appearing afterwards confirms the outcome.
    *
-   * @throws PluginNotInstalledError if the plugin is absent.
-   * @throws PluginActivationFailedError if the Deactivate link never appears after the click.
+   * @throws {@link PluginNotInstalledError} if the plugin is absent.
+   * @throws {@link PluginActivationFailedError} if the Deactivate link never appears after the click.
    */
   async activate(
     slug: string,
@@ -65,8 +65,8 @@ export class PluginsPage {
   /**
    * Deactivates the plugin. No-op if already inactive.
    *
-   * @throws PluginNotInstalledError if the plugin is absent.
-   * @throws PluginDeactivationFailedError if the Activate link never appears after the click.
+   * @throws {@link PluginNotInstalledError} if the plugin is absent.
+   * @throws {@link PluginDeactivationFailedError} if the Activate link never appears after the click.
    */
   async deactivate(
     slug: string,
@@ -105,9 +105,9 @@ export class PluginsPage {
    *    authoritatively after a reload (WordPress's in-place row removal does not reliably fire
    *    under automation), by requiring the plugin's action links to be gone.
    *
-   * @throws PluginNotInstalledError if the plugin is absent before deletion.
-   * @throws PluginDeactivationFailedError if an active plugin cannot be deactivated first.
-   * @throws PluginDeletionFailedError if the deletion request never lands or the plugin is
+   * @throws {@link PluginNotInstalledError} if the plugin is absent before deletion.
+   * @throws {@link PluginDeactivationFailedError} if an active plugin cannot be deactivated first.
+   * @throws {@link PluginDeletionFailedError} if the deletion request never lands or the plugin is
    *   still present after `timeout` ms.
    */
   async delete(

@@ -11,8 +11,11 @@ export const WP_ROCKET_PLUGIN_PATH = /wp-content\/plugins\/wp-rocket\//;
  * so a fatal triggered anywhere still surfaces. Add patterns to `ignore` for lines confirmed
  * benign from real test runs — discovered from output, not guessed.
  *
- *   const scan = await scanDebugLog(transport, WP_ROCKET_LOG_OPTIONS);
- *   if (scan.fatals.length > 0) throw new Error(scan.fatals.join("\n"));
+ * @example
+ * ```ts
+ * const scan = await scanDebugLog(transport, WP_ROCKET_LOG_OPTIONS);
+ * if (scan.fatals.length > 0) throw new Error(scan.fatals.join("\n"));
+ * ```
  */
 export const WP_ROCKET_LOG_OPTIONS: ScanDebugLogOptions = {
   ignore: [
