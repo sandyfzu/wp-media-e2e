@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  deletePlugin,
   ensurePluginAbsent,
   isPluginActive,
   isPluginInstalled,
+  uninstallPlugin,
 } from "./plugin";
-import { PluginDeletionFailedError, PluginNotInstalledError } from "./errors";
+import { PluginNotInstalledError, PluginUninstallFailedError } from "./errors";
 import type { LocalTransport } from "../config/types";
 
 // A stub `wp` on PATH exercises plugin.ts + the real exec layer with deterministic exit codes —
@@ -17,8 +17,8 @@ import type { LocalTransport } from "../config/types";
 const STUB_WP = `#!/usr/bin/env bash
 # $WP_STUB_MODE: absent | stuck | vanishes
 #   absent   → 'plugin is-installed' exits 1 (not installed)
-#   stuck    → 'plugin is-installed' exits 0 (delete never removes it)
-#   vanishes → installed (exit 0) until 'plugin delete' records removal via $WP_STUB_MARKER
+#   stuck    → 'plugin is-installed' exits 0 (uninstall never removes it)
+#   vanishes → installed (exit 0) until 'plugin uninstall' records removal via $WP_STUB_MARKER
 sub="$1 $2"
 case "$WP_STUB_MODE" in
   absent)
@@ -29,7 +29,7 @@ case "$WP_STUB_MODE" in
     if [ "$sub" = "plugin is-installed" ]; then
       [ -f "$WP_STUB_MARKER" ] && exit 1 || exit 0
     fi
-    if [ "$sub" = "plugin delete" ]; then
+    if [ "$sub" = "plugin uninstall" ]; then
       : > "$WP_STUB_MARKER"
       exit 0
     fi ;;
@@ -77,29 +77,29 @@ test.describe("plugin lifecycle over a stub wp", () => {
     await expect(ensurePluginAbsent(local, "x")).resolves.toBeUndefined();
   });
 
-  test("ensurePluginAbsent deletes a present plugin, then verifies it gone", async () => {
+  test("ensurePluginAbsent uninstalls a present plugin, then verifies it gone", async () => {
     process.env.WP_STUB_MODE = "vanishes";
     process.env.WP_STUB_MARKER = freshMarker();
     await expect(ensurePluginAbsent(local, "x")).resolves.toBeUndefined();
   });
 
-  test("deletePlugin on an absent plugin throws PluginNotInstalledError", async () => {
+  test("uninstallPlugin on an absent plugin throws PluginNotInstalledError", async () => {
     process.env.WP_STUB_MODE = "absent";
-    await expect(deletePlugin(local, "x")).rejects.toBeInstanceOf(
+    await expect(uninstallPlugin(local, "x")).rejects.toBeInstanceOf(
       PluginNotInstalledError,
     );
   });
 
-  test("deletePlugin that does not take effect throws PluginDeletionFailedError", async () => {
-    process.env.WP_STUB_MODE = "stuck"; // is-installed stays 0 after delete
-    await expect(deletePlugin(local, "x")).rejects.toBeInstanceOf(
-      PluginDeletionFailedError,
+  test("uninstallPlugin that does not take effect throws PluginUninstallFailedError", async () => {
+    process.env.WP_STUB_MODE = "stuck"; // is-installed stays 0 after uninstall
+    await expect(uninstallPlugin(local, "x")).rejects.toBeInstanceOf(
+      PluginUninstallFailedError,
     );
   });
 
-  test("deletePlugin succeeds when the plugin is present then removed", async () => {
+  test("uninstallPlugin succeeds when the plugin is present then removed", async () => {
     process.env.WP_STUB_MODE = "vanishes";
     process.env.WP_STUB_MARKER = freshMarker();
-    await expect(deletePlugin(local, "x")).resolves.toBeUndefined();
+    await expect(uninstallPlugin(local, "x")).resolves.toBeUndefined();
   });
 });
