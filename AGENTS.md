@@ -92,7 +92,8 @@ npm run format                     # prettier --write .
 npm run format:check               # prettier --check .
 
 # Reporting
-npm run report                     # open the last Playwright HTML report
+npm run report                     # open the newest Playwright HTML report
+npm run report -- wp-rocket apache # open a specific product/cell's newest report
 npm run report:allure              # generate Allure report for the newest run
 npm run report:allure -- wp-rocket apache --open
 

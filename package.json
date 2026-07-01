@@ -18,7 +18,7 @@
     "test:unit": "playwright test --config playwright.unit.config.ts",
     "test:unit:ui": "playwright test --config playwright.unit.config.ts --ui",
     "healthcheck": "tsx healthcheck.ts",
-    "report": "playwright show-report",
+    "report": "node scripts/report.mjs",
     "report:allure": "node scripts/allure.mjs",
     "env:up": "bash docker/setup.sh",
     "env:down": "docker compose -f docker/docker-compose.yml down -v",

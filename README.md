@@ -117,7 +117,8 @@ matching the compose `container_name`s. Sites are installed as `admin` / `admin_
 Every run writes a layered set of reports into `reports/<product>/<cell>/<RUN_ID>/`:
 
 - **`playwright/`** — Playwright's HTML report with the interactive **trace viewer**, video, and
-  screenshots. Open with `npx playwright show-report reports/<product>/<cell>/<RUN_ID>/playwright`.
+  screenshots. Open the newest with `npm run report` (add `-- <product> <cell>` to target one), or a
+  specific one with `npx playwright show-report reports/<product>/<cell>/<RUN_ID>/playwright`.
 - **`cucumber/`** — the Gherkin (BDD) report. By default it is one portable, self-contained HTML
   with screenshots/video embedded on failure; set `REPORT_MODE=rich` for an external report that
   embeds the interactive trace viewer (serve it over http, not `file://`).
@@ -158,8 +159,8 @@ load lazy media, waits for fonts), and fails if they differ beyond the tolerance
 renders and a highlighted diff to the report. A size difference also fails (a layout change is a
 regression). Tolerances live in [`src/common/config/visual.ts`](src/common/config/visual.ts).
 
-Tag such scenarios `@visual` so they can be run as a group, and run them in the Playwright container
-(as CI does) for pixel-deterministic rendering:
+Tag such scenarios `@visual` so they can be run as a group, and run them in the Playwright
+container image for pixel-deterministic rendering:
 
 ```bash
 npm run test:wp-rocket -- --project=apache --grep @visual
