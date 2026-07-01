@@ -4,6 +4,7 @@ import { styleText } from "node:util";
 import { execa } from "execa";
 
 import { exec } from "../wp/exec";
+import type { ExecResult } from "../wp/exec";
 import { isPlaceholderSite } from "../config/sites";
 import type {
   DockerTransport,
@@ -128,41 +129,109 @@ async function checkWpCli(
 }
 
 /**
- * Confirms a real, installed WordPress is reachable through the transport via
- * `wp core is-installed` — which checks that WordPress's standard database tables exist, so
- * exit 0 proves the core files load, the database connects, AND the install is complete.
+ * WordPress's own "PHP is too old to run me" bootstrap message, matched on the stable middle of
+ * the sentence core emits from `wp_check_php_mysql_versions()`.
  *
- * The command is silent and communicates via exit code, so any stderr on a non-zero exit is
- * an operational error (no `wp-load.php` at the target, or the database is unreachable); a
- * bare exit 1 means WordPress can boot but is simply not installed (its tables are missing).
- * Run this only after {@link checkWpCli} passes, so a missing `wp` is not reported twice.
+ * This case is exactly why {@link classifyIsInstalled} must read stdout, not just stderr: core
+ * prints this line with `printf()` (to STDOUT) and `exit(1)` *before* WP-CLI can wrap it into a
+ * stderr `Error:`. By exit code alone it is indistinguishable from "not installed" (both exit 1),
+ * so only the text tells them apart — and matching it lets the hint point at PHP instead of a
+ * phantom missing database.
+ */
+const PHP_VERSION_ERROR_RE =
+  /running PHP version .+ but WordPress .+ requires at least/i;
+
+/**
+ * Classifies the outcome of `wp core is-installed` into a {@link CheckResult}. Pure (no I/O), so
+ * the exit-code/stream matrix that separates the three real-world outcomes is unit-testable in
+ * isolation.
+ *
+ * `is-installed` has a deliberately narrow contract: exit 0 = installed; exit 1 with NO output =
+ * not installed (its tables are missing) — it is silent on that path by design. So ANY output on a
+ * non-zero exit, on EITHER stream, means WordPress could not even be evaluated — its bootstrap
+ * failed (PHP too old, database down, a fatal in a must-use plugin) — which is a DIFFERENT problem
+ * from "not installed" and must never be reported as one. Mislabeling the former as the latter is
+ * the false negative this fixes.
+ *
+ * @param name - the check's report label.
+ * @param result - the raw {@link ExecResult} from `wp core is-installed`.
+ */
+function classifyIsInstalled(name: string, result: ExecResult): CheckResult {
+  if (result.exitCode === 0) {
+    return {
+      name,
+      ok: true,
+      detail: "WordPress is installed and its database is reachable.",
+    };
+  }
+
+  // Merge both streams: the PHP-version guard prints to stdout, database/other bootstrap
+  // failures to stderr. `is-installed` emits nothing only when WordPress is genuinely not installed.
+  const output = [result.stdout, result.stderr]
+    .map((stream) => stream.trim())
+    .filter((stream) => stream !== "")
+    .join("\n");
+
+  // Silent exit 1 — the one and only "not installed" verdict.
+  if (output === "" && result.exitCode === 1) {
+    return {
+      name,
+      ok: false,
+      detail: `WordPress is not installed at the target (exit ${String(result.exitCode)}): its database tables are missing.`,
+      hint: [
+        "The target boots WordPress but has no install. Confirm the transport points at the",
+        "intended site; if it is genuinely empty, install it (`wp core install`).",
+      ].join("\n"),
+    };
+  }
+
+  // A PHP-too-old bootstrap failure disguised as exit 1 — report it as a PHP problem, not a
+  // missing install, and aim the hint at the PHP version WP-CLI used.
+  if (PHP_VERSION_ERROR_RE.test(output)) {
+    return {
+      name,
+      ok: false,
+      detail: `WordPress could not be evaluated (exit ${String(result.exitCode)}): ${output}`,
+      hint: [
+        "WordPress rejected the PHP version WP-CLI ran it under — a PHP problem, not a missing",
+        "install. Point WP-CLI at a new-enough PHP (the `php` on PATH, or set WP_CLI_PHP) that",
+        "satisfies this WordPress, then re-run.",
+      ].join("\n"),
+    };
+  }
+
+  // Any other non-zero exit: WordPress could not boot. Surface whatever it said, verbatim.
+  return {
+    name,
+    ok: false,
+    detail: output
+      ? `WordPress could not be evaluated (exit ${String(result.exitCode)}): ${output}`
+      : `WordPress could not be evaluated (exit ${String(result.exitCode)}) and produced no output.`,
+    hint: [
+      "`wp core is-installed` failed before it could answer — WordPress could not boot. Common",
+      "causes: the database is down or wp-config.php credentials are wrong, a fatal in a",
+      "plugin/theme, or the wrong rootDir/container. Run it there directly to see the full error.",
+    ].join("\n"),
+  };
+}
+
+/**
+ * Confirms a real, installed WordPress answers through the transport via `wp core is-installed`.
+ *
+ * Exit 0 proves the core files load, the database connects, AND the install is complete. A
+ * non-zero exit is classified by {@link classifyIsInstalled}, which separates "genuinely not
+ * installed" from "WordPress could not boot" (PHP too old, DB down, fatal) so an environment
+ * fault is never mislabeled as a missing install. Run only after {@link checkWpCli} passes, so a
+ * missing `wp` is not reported twice.
  */
 async function checkWordPress(transport: Transport): Promise<CheckResult> {
   const name = "WordPress installed";
   try {
     const result = await exec(transport, "wp", ["core", "is-installed"]);
-    if (result.exitCode === 0) {
-      return {
-        name,
-        ok: true,
-        detail: "WordPress is installed and its database is reachable.",
-      };
-    }
-    const stderr = result.stderr.trim();
-    return {
-      name,
-      ok: false,
-      detail: stderr
-        ? `Not a usable WordPress install (exit ${String(result.exitCode)}): ${stderr}`
-        : `WordPress is not installed at the target (exit ${String(result.exitCode)}): its database tables are missing.`,
-      hint: [
-        "Confirm the transport points at a fully installed WordPress:",
-        "  - the WP root (rootDir / container WORKDIR) contains wp-load.php,",
-        "  - the database is running and wp-config.php credentials are valid,",
-        "  - the site has been installed (run `wp core install` if not).",
-      ].join("\n"),
-    };
+    return classifyIsInstalled(name, result);
   } catch (err) {
+    // Could not run the command at all (transport dropped, `wp` vanished): an environment fault,
+    // not a WordPress verdict — mirrors the exec layer's "couldn't run ⇒ throw" contract.
     const msg = err instanceof Error ? err.message : String(err);
     return {
       name,

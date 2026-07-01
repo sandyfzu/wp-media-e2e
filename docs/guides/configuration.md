@@ -116,6 +116,14 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 | `OUTPUT_ROOT` | `test-results`         | Ephemeral Playwright artifact root.                                     |
 | `AUTH_ROOT`   | `.auth`                | Ephemeral `storageState` root.                                          |
 
+### Fleet health check (`npm run healthcheck`)
+
+| Var                           | Default | Purpose                                                                        |
+| ----------------------------- | ------- | ------------------------------------------------------------------------------ |
+| `HEALTHCHECK_CONCURRENCY`     | `4`     | Max sites checked at once within a product (1–32).                             |
+| `HEALTHCHECK_LOGIN_TIMEOUT_MS`| `30000` | Per-site UI-login settle budget in ms (1000–300000); raise for slow remotes.  |
+| `HEALTHCHECK_HEADED`          | `false` | Run the browser headed (visible). `npm run healthcheck:ui` sets this.          |
+
 ### BackWPup storage credentials
 
 Read by [`backwpup.config.ts`](../../src/projects/backwpup/config/backwpup.config.ts)

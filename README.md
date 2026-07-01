@@ -49,11 +49,18 @@ npm run healthcheck
 
 Verifies every configured site — across **all** products, cells, and pools, not just
 one selected cell — is reachable and usable: transport connectivity, WP-CLI, a real
-installed WordPress, and a working UI login (`healthcheck.ts`). Each site is checked
-independently and reported the moment it finishes, with color-coded ✔/✖/⚠ status and,
-for failures, the specific failing check plus an actionable hint. A cell with no real
-sites yet (placeholder data) is reported as skipped, not failed. Exits `0` only when
-every real site passed, `1` if any failed — safe to wire into CI or a cron monitor.
+installed WordPress, and a working UI login (`healthcheck.ts`). Output is grouped **per
+product** so projects never blur together. Each site is checked independently and
+reported the moment it finishes, with color-coded ✔/✖/⚠ status; every site lists the
+individual checks it ran, and failures add the specific failing check plus an actionable
+hint. A cell with no real sites yet (placeholder data) is reported as skipped, not
+failed. Exits `0` only when every real site passed, `1` if any failed — safe to wire
+into CI or a cron monitor. Tune concurrency and the login timeout with
+`HEALTHCHECK_CONCURRENCY` / `HEALTHCHECK_LOGIN_TIMEOUT_MS`.
+
+Run `npm run healthcheck:ui` for the same checks with the browser **visible on screen**
+(headed) — handy for watching a login happen or debugging a flaky site. It behaves
+identically otherwise.
 
 ## Configuring sites
 

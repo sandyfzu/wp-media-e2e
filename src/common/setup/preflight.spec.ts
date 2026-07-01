@@ -8,9 +8,13 @@ import type { SiteConfig } from "../config/types";
 
 // A stub `wp` on PATH exercises the real exec layer + preflight with deterministic exit codes —
 // no WordPress, no database. Behaviour is chosen per test via two env vars:
-//   $WP_STUB_INFO       fail            → `wp --info` exits 1 (WP-CLI "missing")
-//   $WP_STUB_INSTALLED  no | nowp | *   → `wp core is-installed`: exit 1 (not installed) |
-//                                          exit 1 + stderr (no WordPress at all) | exit 0 (installed)
+//   $WP_STUB_INFO       fail                     → `wp --info` exits 1 (WP-CLI "missing")
+//   $WP_STUB_INSTALLED  no | nowp | phpold | *   → `wp core is-installed`:
+//        no     → exit 1, silent            (genuinely not installed — tables missing)
+//        nowp   → exit 1, stderr "Error…"   (target is not a WordPress directory)
+//        phpold → exit 1, stdout PHP error  (installed, but PHP too old to boot — core printf()s
+//                                            to STDOUT and exit(1); the historical false negative)
+//        *      → exit 0                     (installed)
 const STUB_WP = `#!/usr/bin/env bash
 if [ "$1" = "--info" ]; then
   [ "$WP_STUB_INFO" = "fail" ] && { echo "wp: not found" >&2; exit 1; }
@@ -19,9 +23,10 @@ if [ "$1" = "--info" ]; then
 fi
 if [ "$1 $2" = "core is-installed" ]; then
   case "$WP_STUB_INSTALLED" in
-    no)   exit 1 ;;
-    nowp) echo "Error: This does not seem to be a WordPress installation." >&2; exit 1 ;;
-    *)    exit 0 ;;
+    no)     exit 1 ;;
+    nowp)   echo "Error: This does not seem to be a WordPress installation." >&2; exit 1 ;;
+    phpold) echo "Your server is running PHP version 7.3.33 but WordPress 7.0 requires at least 7.4."; exit 1 ;;
+    *)      exit 0 ;;
   esac
 fi
 exit 0
@@ -89,6 +94,26 @@ test.describe("verifyPool — local transport over a stub wp", () => {
     await expect(
       verifyPool([localSite()], "wp-rocket", "local"),
     ).rejects.toThrow(/does not seem to be a WordPress installation/);
+  });
+
+  test("reports a PHP-version bootstrap error as unusable, not 'not installed'", async () => {
+    // The real-world false negative: WordPress IS installed, but WP-CLI ran it under a PHP older
+    // than WordPress requires, so core printf()s its version error to STDOUT and exit(1) — which
+    // by exit code alone is indistinguishable from a genuinely missing install.
+    delete process.env.WP_STUB_INFO;
+    process.env.WP_STUB_INSTALLED = "phpold";
+    const error = await verifyPool([localSite()], "wp-rocket", "local").catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    // Must NOT be misreported as a missing install...
+    expect(message).not.toContain("not installed");
+    expect(message).not.toContain("database tables are missing");
+    // ...must surface WordPress's own message (which core prints to stdout, not stderr)...
+    expect(message).toContain("requires at least 7.4");
+    // ...and steer the operator toward PHP rather than a phantom missing database.
+    expect(message).toMatch(/PHP/);
   });
 
   test("skips the WordPress check when WP-CLI itself is unavailable", async () => {

@@ -83,6 +83,7 @@ npm run test:unit:ui
 
 # Fleet health check
 npm run healthcheck                # preflight + login across every product/cell/site
+npm run healthcheck:ui             # same, but headed — the browser is visible on screen
 
 # Quality gates (see "Required workflow after every edit")
 npm run typecheck                  # tsc
@@ -146,8 +147,10 @@ is a dependency project that runs before any BDD scenarios. It does two things i
    transport is reachable and functional (SSH connectivity + WP-CLI + rootDir access;
    Docker container running + WP-CLI in container; local rootDir + WP-CLI in PATH) and
    that a real, installed WordPress answers (`wp core is-installed` — so core files load,
-   the database connects, and the install is complete). A failure throws a formatted,
-   actionable report and skips the whole BDD project.
+   the database connects, and the install is complete). A non-zero exit is classified so a
+   WordPress that cannot boot (PHP too old, DB down, a fatal — errors it prints to stdout or
+   stderr) is reported as such and never mislabeled as "not installed". A failure throws a
+   formatted, actionable report and skips the whole BDD project.
 2. **Authentication** — logs into each real site once through the WordPress UI and
    saves the session to that site's `storageState`, which the BDD project reuses.
 
@@ -157,12 +160,18 @@ The entire setup is skipped when only placeholder sites exist. Details:
 **Fleet health check:** [`healthcheck.ts`](healthcheck.ts) (`npm run healthcheck`) runs
 the same pre-flight + login checks as the auth setup above, but standalone (no
 Playwright test run) and across **every** product × cell × site instead of one
-selected cell. Each site is checked independently — one site's failure never aborts
-another's check — and its pass/fail is printed as soon as it is known, with the
-failing pre-flight/login checks and actionable hints inline. A cell with only
-placeholder sites is reported as skipped, not failed. Exits `0` only if every real
-site passed; exits `1` if any failed. No `storageState` is written. Useful as a fleet
-monitor (cron/CI) independent of running the full suite.
+selected cell. Output is grouped **per product** (wp-rocket / backwpup / future
+imagify never blur together): products run one section at a time, sites within a
+product run concurrently, and each site — pass or fail — lists every individual check
+it ran (failures add actionable hints). Each site is checked independently — one
+site's failure never aborts another's check — and its result prints as soon as it is
+known; a final summary breaks the fleet down per product. A cell with only placeholder
+sites is reported as skipped, not failed. Exits `0` only if every real site passed;
+exits `1` if any failed. No `storageState` is written. Tune with `HEALTHCHECK_CONCURRENCY`
+and `HEALTHCHECK_LOGIN_TIMEOUT_MS`. Useful as a fleet monitor (cron/CI) independent of
+running the full suite. `npm run healthcheck:ui` runs the exact same checks with the browser
+**headed** (visible on screen) so you can watch each login — the only difference is
+visibility (via `--headed` / `HEALTHCHECK_HEADED=true`).
 
 ## WordPress automation layer
 
