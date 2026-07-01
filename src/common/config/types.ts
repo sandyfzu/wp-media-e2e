@@ -26,8 +26,13 @@ export interface DockerTransport {
 
 export interface LocalTransport {
   readonly mode: "local";
-  /** WordPress root on the host; optional when `wp` resolves it from the working directory. */
-  readonly rootDir?: string;
+  /**
+   * WordPress root on the host — the directory containing `wp-load.php`. The exec layer runs
+   * `wp` with this as its working directory so WP-CLI resolves the right install. Required: an
+   * absent `rootDir` would silently run `wp` from the process CWD and target the wrong (or no)
+   * WordPress, so a `local` site must always declare it.
+   */
+  readonly rootDir: string;
 }
 
 /** How WP-CLI reaches a given site. Discriminated on `mode`. */

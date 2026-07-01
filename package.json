@@ -17,6 +17,7 @@
     "test:headed": "bddgen && playwright test --headed",
     "test:unit": "playwright test --config playwright.unit.config.ts",
     "test:unit:ui": "playwright test --config playwright.unit.config.ts --ui",
+    "healthcheck": "tsx healthcheck.ts",
     "report": "playwright show-report",
     "report:allure": "node scripts/allure.mjs",
     "env:up": "bash docker/setup.sh",
@@ -34,11 +35,11 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "allure": "^3.13.2",
-    "allure-playwright": "^3.10.2",
     "@playwright/test": "^1.61.1",
     "@types/node": "^24.13.2",
     "@types/pngjs": "^6.0.5",
+    "allure": "^3.14.0",
+    "allure-playwright": "^3.10.2",
     "eslint": "^10.6.0",
     "eslint-config-prettier": "^10.1.8",
     "execa": "^9.6.1",
@@ -49,8 +50,16 @@
     "pixelmatch": "^7.2.0",
     "playwright-bdd": "^9.2.0",
     "pngjs": "^7.0.0",
-    "prettier": "^3.9.3",
+    "prettier": "^3.9.4",
+    "tsx": "^4.22.4",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.62.1"
+  },
+  "allowScripts": {
+    "cpu-features@0.0.10": true,
+    "esbuild@0.28.1": true,
+    "fsevents@2.3.2": true,
+    "fsevents@2.3.3": true,
+    "ssh2@1.17.0": true
   }
 }

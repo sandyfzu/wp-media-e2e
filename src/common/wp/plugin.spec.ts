@@ -37,8 +37,7 @@ esac
 exit 0
 `;
 
-const local: LocalTransport = { mode: "local" };
-
+let local: LocalTransport;
 let stubDir: string;
 let originalPath: string;
 let markerSeq = 0;
@@ -53,6 +52,8 @@ test.beforeAll(() => {
   stubDir = mkdtempSync(join(tmpdir(), "wp-stub-"));
   writeFileSync(join(stubDir, "wp"), STUB_WP);
   chmodSync(join(stubDir, "wp"), 0o755);
+  // The stub `wp` ignores cwd; rootDir just needs to be a real directory for the exec layer.
+  local = { mode: "local", rootDir: stubDir };
   originalPath = process.env.PATH ?? "";
   process.env.PATH = `${stubDir}:${originalPath}`;
 });

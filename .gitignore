@@ -50,3 +50,5 @@ Thumbs.db
 
 # Per-product site pools & secrets (committed example only)
 src/projects/*/config/sites.json
+src/projects/*/config/sites.*.json
+!src/projects/*/config/sites.example.json

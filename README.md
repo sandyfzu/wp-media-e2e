@@ -13,15 +13,17 @@ npm install          # also downloads Chromium (see "Browsers" below)
 npm run test:wp-rocket -- --project=apache
 ```
 
-A fresh checkout has no `sites.json`, so the example placeholder data is used: the auth
-setup is skipped and the `@noauth` smoke scenarios pass, proving the harness is wired up.
+A fresh checkout has no `sites.json` or `sites.*.json`, so the example placeholder data is
+used: the auth setup is skipped and the `@noauth` smoke scenarios pass, proving the harness
+is wired up.
 
 ## Concepts
 
 - **Product** — `wp-rocket` / `backwpup`. Each declares its own features, steps, sites,
   and (BackWPup only) service credentials. Configs live in `src/projects/<product>/config/`.
 - **Cell** — a named environment (`apache`, `nginx`, future `nginx@php8.2`). Cells are
-  data-driven: they are the top-level keys of a product's `sites.json`.
+  data-driven: they are the merged top-level keys of a product's sites files (`sites.json`
+  and any `sites.*.json` overlays).
 - **Pool** — the list of interchangeable WordPress sites under one cell. Each worker binds
   to one site by `parallelIndex`, so scenarios are distributed across the pool.
 - **Run unit** — one `(product × cell)`. Run exactly one cell per invocation with
@@ -39,15 +41,39 @@ npm run test:wp-rocket -- --project=apache --grep @smoke
 Reports accumulate per run at `reports/<product>/<cell>/<RUN_ID>/`. Set `REPORT_MODE=rich`
 for an external report with the embedded trace viewer.
 
+## Health check
+
+```bash
+npm run healthcheck
+```
+
+Verifies every configured site — across **all** products, cells, and pools, not just
+one selected cell — is reachable and usable: transport connectivity, WP-CLI, a real
+installed WordPress, and a working UI login (`healthcheck.ts`). Each site is checked
+independently and reported the moment it finishes, with color-coded ✔/✖/⚠ status and,
+for failures, the specific failing check plus an actionable hint. A cell with no real
+sites yet (placeholder data) is reported as skipped, not failed. Exits `0` only when
+every real site passed, `1` if any failed — safe to wire into CI or a cron monitor.
+
 ## Configuring sites
 
-Copy the committed example and edit it (the real file is git-ignored — it holds secrets):
+A product's sites are declared in one or more JSON files under
+`src/projects/<product>/config/` (all git-ignored — they hold credentials):
+
+- **`sites.json`** — the primary file.
+- **`sites.<name>.json`** overlays (e.g. `sites.docker.json`, `sites.local.json`,
+  `sites.ssh.json`) — merged in alphabetically after `sites.json`. Each file owns a
+  disjoint set of cells; a cell name in two files is a hard error.
+
+When none of the above exist, the committed `sites.example.json` is used (placeholder data,
+`.example.test` hostnames) so the suite still loads and the `@noauth` smoke scenarios pass
+on a fresh checkout.
 
 ```bash
 cp src/projects/wp-rocket/config/sites.example.json src/projects/wp-rocket/config/sites.json
 ```
 
-Credentials live only in `sites.json` and never enter Playwright reports.
+Credentials live only in sites files and never enter Playwright reports.
 
 ## Environment
 
@@ -76,10 +102,10 @@ npm run env:down    # stop and remove everything (incl. volumes)
 npm run env:logs    # tail container logs
 ```
 
-Point a product at it by copying the docker cells into its `sites.json`:
+Point a product at it by copying the docker example into its sites file:
 
 ```bash
-cp docker/sites.example.json src/projects/wp-rocket/config/sites.json
+cp docker/sites.example.json src/projects/wp-rocket/config/sites.docker.json
 npm run test:wp-rocket -- --project=apache    # or --project=nginx
 ```
 

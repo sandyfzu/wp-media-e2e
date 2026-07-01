@@ -1,0 +1,527 @@
+import { existsSync, statSync } from "node:fs";
+import { styleText } from "node:util";
+
+import { execa } from "execa";
+
+import { exec } from "../wp/exec";
+import { isPlaceholderSite } from "../config/sites";
+import type {
+  DockerTransport,
+  LocalTransport,
+  SiteConfig,
+  SiteInput,
+  SshTransport,
+  Transport,
+} from "../config/types";
+
+/**
+ * Pre-flight transport verification — runs before authentication and tests.
+ *
+ * Validates that every real (non-placeholder) site's transport is reachable and
+ * functional BEFORE the test suite attempts authentication or any WP-CLI commands.
+ * This surfaces environment problems (SSH unreachable, container stopped, WP-CLI
+ * missing, wrong path) with actionable guidance instead of letting them cascade into
+ * cryptic test failures spread across many scenarios.
+ *
+ * Checks by transport mode (each ends by confirming a real, installed WordPress answers):
+ *   ssh    — SSH connection + WP-CLI in PATH + rootDir accessible + WordPress installed
+ *   docker — container exists + is running + WP-CLI in container + WordPress installed
+ *   local  — rootDir exists + WP-CLI in PATH + WordPress installed
+ *
+ * "WordPress installed" runs `wp core is-installed`, which checks WordPress's standard DB
+ * tables — so it proves the core files load, the database connects, and the install is
+ * complete, not merely that the `wp` binary exists.
+ *
+ * All sites in the pool are checked concurrently. If any fail, a formatted report
+ * is thrown as an Error so Playwright's setup project surfaces it clearly, skips
+ * the dependent BDD project, and preserves the full error message in the report.
+ */
+
+// ── Result types ──────────────────────────────────────────────────────────────
+
+/** The outcome of one named check within a site's pre-flight (e.g. "WP-CLI", "rootDir accessible"). */
+export interface CheckResult {
+  /** Short, stable label for the check, shown in reports (e.g. "WP-CLI", "WordPress installed"). */
+  readonly name: string;
+  /** Whether the check passed. */
+  readonly ok: boolean;
+  /** Human-readable outcome, always present: the success message when `ok`, the failure reason otherwise. */
+  readonly detail: string;
+  /** Actionable next step, shown only on failure. Omitted when `detail` alone is already actionable. */
+  readonly hint?: string;
+}
+
+/** The full pre-flight result for one site: its identity plus every check run against it. */
+export interface SitePreflightResult {
+  /** The site's position in its pool (matches the `parallelIndex` a worker binds to), for report labeling. */
+  readonly index: number;
+  /** The site's configured base URL, shown in reports. */
+  readonly baseURL: string;
+  /** The site's transport, shown in reports via {@link transportLabel}. */
+  readonly transport: Transport;
+  /** Every check run for this site, in execution order. The site is healthy iff every entry is `ok`. */
+  readonly checks: CheckResult[];
+}
+
+// ── Transport label (used in error output) ─────────────────────────────────────
+
+/** Human-readable label for a site's transport, e.g. `ssh: ubuntu@203.0.113.10`. Used in reports. */
+export function transportLabel(transport: Transport): string {
+  switch (transport.mode) {
+    case "ssh":
+      return `ssh: ${transport.username}@${transport.host}`;
+    case "docker":
+      return `docker: ${transport.container}`;
+    case "local":
+      return `local: ${transport.rootDir}`;
+  }
+}
+
+// ── Shared WP-CLI / WordPress checks ────────────────────────────────────────────
+
+/** Extracts the version from `wp --info` stdout (the `WP-CLI version:` line), or "unknown". */
+function wpCliVersion(stdout: string): string {
+  const line = stdout.split("\n").find((l) => l.startsWith("WP-CLI version:"));
+  return line?.split(":")[1]?.trim() ?? "unknown";
+}
+
+/**
+ * Confirms the `wp` binary is present and runnable through the transport (`wp --info`). This
+ * proves WP-CLI exists and executes — NOT that a WordPress install is present; pair it with
+ * {@link checkWordPress}, which is only meaningful once this passes.
+ *
+ * @param transport - transport to run `wp` through.
+ * @param name - report label (wording differs per transport, e.g. "WP-CLI in container").
+ * @param notFoundHint - actionable guidance shown when `wp` is missing or errors.
+ */
+async function checkWpCli(
+  transport: Transport,
+  name: string,
+  notFoundHint: string,
+): Promise<CheckResult> {
+  try {
+    const result = await exec(transport, "wp", ["--info"]);
+    if (result.exitCode === 0) {
+      return {
+        name,
+        ok: true,
+        detail: `wp-cli ${wpCliVersion(result.stdout)}.`,
+      };
+    }
+    return {
+      name,
+      ok: false,
+      detail:
+        `WP-CLI exited ${String(result.exitCode)}` +
+        (result.stderr.trim() ? `: ${result.stderr.trim()}` : "."),
+      hint: notFoundHint,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      name,
+      ok: false,
+      detail: `WP-CLI is not accessible: ${msg}`,
+      hint: notFoundHint,
+    };
+  }
+}
+
+/**
+ * Confirms a real, installed WordPress is reachable through the transport via
+ * `wp core is-installed` — which checks that WordPress's standard database tables exist, so
+ * exit 0 proves the core files load, the database connects, AND the install is complete.
+ *
+ * The command is silent and communicates via exit code, so any stderr on a non-zero exit is
+ * an operational error (no `wp-load.php` at the target, or the database is unreachable); a
+ * bare exit 1 means WordPress can boot but is simply not installed (its tables are missing).
+ * Run this only after {@link checkWpCli} passes, so a missing `wp` is not reported twice.
+ */
+async function checkWordPress(transport: Transport): Promise<CheckResult> {
+  const name = "WordPress installed";
+  try {
+    const result = await exec(transport, "wp", ["core", "is-installed"]);
+    if (result.exitCode === 0) {
+      return {
+        name,
+        ok: true,
+        detail: "WordPress is installed and its database is reachable.",
+      };
+    }
+    const stderr = result.stderr.trim();
+    return {
+      name,
+      ok: false,
+      detail: stderr
+        ? `Not a usable WordPress install (exit ${String(result.exitCode)}): ${stderr}`
+        : `WordPress is not installed at the target (exit ${String(result.exitCode)}): its database tables are missing.`,
+      hint: [
+        "Confirm the transport points at a fully installed WordPress:",
+        "  - the WP root (rootDir / container WORKDIR) contains wp-load.php,",
+        "  - the database is running and wp-config.php credentials are valid,",
+        "  - the site has been installed (run `wp core install` if not).",
+      ].join("\n"),
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      name,
+      ok: false,
+      detail: `Could not run \`wp core is-installed\`: ${msg}`,
+      hint: "Verify the transport reaches the target and `wp` is available there.",
+    };
+  }
+}
+
+// ── SSH checks ────────────────────────────────────────────────────────────────
+
+async function verifySsh(transport: SshTransport): Promise<CheckResult[]> {
+  const checks: CheckResult[] = [];
+  let wpCliOk = false;
+
+  // Check 1: SSH connectivity + WP-CLI in PATH.
+  // A single `wp --info` call validates both: it requires an SSH connection AND
+  // that `wp` is executable. If the connection itself fails, exec() throws.
+  try {
+    const result = await exec(transport, "wp", ["--info"]);
+    if (result.exitCode === 0) {
+      wpCliOk = true;
+      checks.push({
+        name: "SSH + WP-CLI",
+        ok: true,
+        detail: `Connected. wp-cli ${wpCliVersion(result.stdout)}.`,
+      });
+    } else {
+      checks.push({
+        name: "SSH + WP-CLI",
+        ok: false,
+        detail:
+          `WP-CLI exited ${String(result.exitCode)}` +
+          (result.stderr.trim() ? `: ${result.stderr.trim()}` : "."),
+        hint: `Ensure 'wp' is in PATH on ${transport.host} for user '${transport.username}'.`,
+      });
+      // We connected (the command ran), so we still check rootDir below.
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    checks.push({
+      name: "SSH connection",
+      ok: false,
+      detail: msg,
+      hint: [
+        `Verify host "${transport.host}" is reachable on port 22.`,
+        `Test locally: ssh -i "${transport.privateKeyPath}" ${transport.username}@${transport.host} "echo ok"`,
+      ].join("\n"),
+    });
+    // Cannot connect → rootDir check is moot.
+    return checks;
+  }
+
+  // Check 2: rootDir exists, is a directory, and the SSH user can traverse INTO it —
+  // which is what WP-CLI needs, since the exec layer runs `wp` with cwd = rootDir. The
+  // trailing `/.` forces `ls` to resolve into the directory, so this requires execute
+  // (search) permission on rootDir itself and fails on a non-directory. Plain
+  // `ls -d <path>` only stats the entry via its parent, so it would pass even for a
+  // regular file or a directory the user cannot enter — neither of which is usable here.
+  // (It does NOT require read/list permission on the directory, which WP-CLI never needs.)
+  try {
+    const result = await exec(transport, "ls", [
+      "-d",
+      `${transport.rootDir}/.`,
+    ]);
+    if (result.exitCode === 0) {
+      checks.push({
+        name: "rootDir accessible",
+        ok: true,
+        detail: `"${transport.rootDir}" exists and is a traversable directory.`,
+      });
+    } else {
+      checks.push({
+        name: "rootDir accessible",
+        ok: false,
+        detail:
+          `"${transport.rootDir}" is not a usable directory (exit ${String(result.exitCode)})` +
+          (result.stderr.trim() ? `: ${result.stderr.trim()}` : "."),
+        hint: [
+          `Confirm the path exists, is a directory, and user "${transport.username}" can enter it`,
+          `(WP-CLI runs from this directory, so it needs execute/search permission — not read):`,
+          `  ssh -i "${transport.privateKeyPath}" ${transport.username}@${transport.host} "ls -ld '${transport.rootDir}'"`,
+          `  If access is restricted, grant traverse rights via chmod, ACLs, or group membership.`,
+        ].join("\n"),
+      });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    checks.push({
+      name: "rootDir accessible",
+      ok: false,
+      detail: `Error checking "${transport.rootDir}": ${msg}`,
+      hint: `Verify the rootDir path in your sites.json is correct.`,
+    });
+  }
+
+  // Check 3: a real, installed WordPress answers (only worth running once `wp` works).
+  if (wpCliOk) {
+    checks.push(await checkWordPress(transport));
+  }
+
+  return checks;
+}
+
+// ── Docker checks ─────────────────────────────────────────────────────────────
+
+async function verifyDocker(
+  transport: DockerTransport,
+): Promise<CheckResult[]> {
+  const checks: CheckResult[] = [];
+
+  // Check 1: container exists and its current status.
+  // `docker inspect --format '{{.State.Status}}' <container>` prints the status
+  // (running | exited | paused | …) and exits 0 only when the container exists.
+  try {
+    const inspectResult = await execa(
+      "docker",
+      ["inspect", "--format", "{{.State.Status}}", transport.container],
+      { reject: false, timeout: 15_000 },
+    );
+
+    // When Docker is not installed or the daemon is not running, the process
+    // may fail to spawn (exitCode undefined) rather than exit non-zero.
+    const exitCode: number | undefined =
+      typeof inspectResult.exitCode === "number"
+        ? inspectResult.exitCode
+        : undefined;
+
+    if (exitCode === undefined) {
+      checks.push({
+        name: "Docker daemon",
+        ok: false,
+        detail:
+          "Cannot reach the Docker daemon (is Docker installed and running?).",
+        hint: `Verify Docker is installed and the daemon is running: docker info`,
+      });
+      return checks;
+    }
+
+    if (exitCode !== 0) {
+      checks.push({
+        name: "Container exists",
+        ok: false,
+        detail: `Container "${transport.container}" does not exist.`,
+        hint: [
+          `Run 'docker ps -a' to list all containers.`,
+          `If using the project's Docker setup: npm run env:up`,
+        ].join("\n"),
+      });
+      return checks;
+    }
+
+    const status = inspectResult.stdout.trim();
+    if (status !== "running") {
+      checks.push({
+        name: "Container running",
+        ok: false,
+        detail: `Container "${transport.container}" exists but is not running (status: ${status}).`,
+        hint: [
+          `Start the container: docker start ${transport.container}`,
+          `Or with compose: docker compose up -d  (or: npm run env:up)`,
+        ].join("\n"),
+      });
+      return checks;
+    }
+
+    checks.push({
+      name: "Container running",
+      ok: true,
+      detail: `Container "${transport.container}" is running.`,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    checks.push({
+      name: "Docker check",
+      ok: false,
+      detail: `docker inspect failed: ${msg}`,
+      hint: `Ensure Docker is installed and running: docker info`,
+    });
+    return checks;
+  }
+
+  // Check 2: WP-CLI accessible inside the running container.
+  const wpCli = await checkWpCli(
+    transport,
+    "WP-CLI in container",
+    `Verify the container image includes WP-CLI: docker exec ${transport.container} wp --info`,
+  );
+  checks.push(wpCli);
+
+  // Check 3: a real, installed WordPress is reachable inside the container.
+  if (wpCli.ok) {
+    checks.push(await checkWordPress(transport));
+  }
+
+  return checks;
+}
+
+// ── Local checks ──────────────────────────────────────────────────────────────
+
+async function verifyLocal(transport: LocalTransport): Promise<CheckResult[]> {
+  const checks: CheckResult[] = [];
+
+  // Check 1: rootDir exists and is a directory.
+  let isDir = false;
+  try {
+    isDir =
+      existsSync(transport.rootDir) &&
+      statSync(transport.rootDir).isDirectory();
+  } catch {
+    // isDir stays false
+  }
+
+  if (isDir) {
+    checks.push({
+      name: "rootDir exists",
+      ok: true,
+      detail: `"${transport.rootDir}" is a directory.`,
+    });
+  } else {
+    const exists = existsSync(transport.rootDir);
+    checks.push({
+      name: "rootDir exists",
+      ok: false,
+      detail: exists
+        ? `"${transport.rootDir}" exists but is not a directory.`
+        : `"${transport.rootDir}" does not exist.`,
+      hint: [
+        `Update rootDir in your sites.json to the WordPress root directory`,
+        `(the directory that contains wp-load.php).`,
+      ].join("\n"),
+    });
+    return checks;
+  }
+
+  // Check 2: WP-CLI accessible from the host.
+  const wpCli = await checkWpCli(
+    transport,
+    "WP-CLI",
+    `Ensure 'wp' is installed and in PATH. See: https://wp-cli.org/#installing`,
+  );
+  checks.push(wpCli);
+
+  // Check 3: a real, installed WordPress is reachable at rootDir.
+  if (wpCli.ok) {
+    checks.push(await checkWordPress(transport));
+  }
+
+  return checks;
+}
+
+// ── Per-site dispatcher ───────────────────────────────────────────────────────
+
+/**
+ * Runs the transport + WordPress checks for one site. Exported so callers other than
+ * {@link verifyPool} (e.g. the standalone `healthcheck.ts`) can run and report per-site
+ * results without throwing. Takes a bare {@link SiteInput} — it never reads `storageState`.
+ */
+export async function verifySite(
+  site: SiteInput,
+  index: number,
+): Promise<SitePreflightResult> {
+  let checks: CheckResult[];
+  switch (site.transport.mode) {
+    case "ssh":
+      checks = await verifySsh(site.transport);
+      break;
+    case "docker":
+      checks = await verifyDocker(site.transport);
+      break;
+    case "local":
+      checks = await verifyLocal(site.transport);
+      break;
+  }
+  return { index, baseURL: site.baseURL, transport: site.transport, checks };
+}
+
+// ── Pool verification ─────────────────────────────────────────────────────────
+
+/**
+ * Verifies the transport for every real (non-placeholder) site in the pool.
+ * All sites are checked concurrently. If any fail, a formatted report is thrown so
+ * Playwright's setup project surfaces it clearly, skips the dependent BDD project,
+ * and preserves the full error in the test report.
+ *
+ * Call this in the auth setup project before the authentication loop. Placeholder
+ * sites (example.test hostnames) are silently skipped — they have no real transport.
+ */
+export async function verifyPool(
+  pool: readonly SiteConfig[],
+  product: string,
+  cell: string,
+): Promise<void> {
+  const real = pool
+    .map((site, i) => ({ site, i }))
+    .filter(({ site }) => !isPlaceholderSite(site));
+
+  if (real.length === 0) return;
+
+  const results = await Promise.all(
+    real.map(({ site, i }) => verifySite(site, i)),
+  );
+
+  const failed = results.filter((r) => r.checks.some((c) => !c.ok));
+  if (failed.length === 0) return;
+
+  throw new Error(buildReport(failed, results.length, product, cell));
+}
+
+// ── Error report formatting ───────────────────────────────────────────────────
+
+function buildReport(
+  failed: SitePreflightResult[],
+  total: number,
+  product: string,
+  cell: string,
+): string {
+  const lines: string[] = [];
+
+  lines.push(
+    styleText(
+      ["bold"],
+      `[preflight] Transport verification failed — ${String(failed.length)} of ${String(total)} site(s) in "${product}/${cell}" could not be verified.`,
+    ),
+  );
+  lines.push("Fix the issues below before re-running the suite:\n");
+
+  for (const result of failed) {
+    const label = `Site ${String(result.index)} — ${result.baseURL}  [${transportLabel(result.transport)}]`;
+    lines.push(
+      `  ${styleText(["bold", "red"], "✗")} ${styleText(["bold"], label)}`,
+    );
+
+    for (const check of result.checks) {
+      if (check.ok) {
+        lines.push(
+          `    ${styleText(["green"], "✓")} ${check.name}: ${check.detail}`,
+        );
+      } else {
+        lines.push(
+          `    ${styleText(["red"], "✗")} ${styleText(["bold"], check.name)}: ${check.detail}`,
+        );
+        if (check.hint !== undefined) {
+          for (const hintLine of check.hint.split("\n")) {
+            lines.push(`      ${styleText(["yellow"], "→")} ${hintLine}`);
+          }
+        }
+      }
+    }
+    lines.push("");
+  }
+
+  const passed = total - failed.length;
+  lines.push(
+    passed > 0
+      ? `${String(passed)} of ${String(total)} site(s) passed. Resolve the issues above and re-run.`
+      : `All sites failed pre-flight. Resolve the issues above and re-run.`,
+  );
+
+  return lines.join("\n");
+}

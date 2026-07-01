@@ -32,7 +32,7 @@
     // --- Performance ---
     "skipLibCheck": true
   },
-  "include": ["src/**/*", "playwright*.config.ts"],
+  "include": ["src/**/*", "playwright*.config.ts", "healthcheck.ts"],
   "exclude": [
     "node_modules",
     ".features-gen",

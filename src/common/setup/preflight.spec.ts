@@ -1,0 +1,118 @@
+import { test, expect } from "@playwright/test";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { verifyPool } from "./preflight";
+import type { SiteConfig } from "../config/types";
+
+// A stub `wp` on PATH exercises the real exec layer + preflight with deterministic exit codes —
+// no WordPress, no database. Behaviour is chosen per test via two env vars:
+//   $WP_STUB_INFO       fail            → `wp --info` exits 1 (WP-CLI "missing")
+//   $WP_STUB_INSTALLED  no | nowp | *   → `wp core is-installed`: exit 1 (not installed) |
+//                                          exit 1 + stderr (no WordPress at all) | exit 0 (installed)
+const STUB_WP = `#!/usr/bin/env bash
+if [ "$1" = "--info" ]; then
+  [ "$WP_STUB_INFO" = "fail" ] && { echo "wp: not found" >&2; exit 1; }
+  echo "WP-CLI version: 2.10.0"
+  exit 0
+fi
+if [ "$1 $2" = "core is-installed" ]; then
+  case "$WP_STUB_INSTALLED" in
+    no)   exit 1 ;;
+    nowp) echo "Error: This does not seem to be a WordPress installation." >&2; exit 1 ;;
+    *)    exit 0 ;;
+  esac
+fi
+exit 0
+`;
+
+let stubDir: string;
+let wpRoot: string;
+let originalPath: string;
+
+/** A real, non-placeholder local site pointing `wp` at `wpRoot`. */
+function localSite(baseURL = "http://localhost:8100"): SiteConfig {
+  return {
+    baseURL,
+    username: "admin",
+    password: "admin_password",
+    transport: { mode: "local", rootDir: wpRoot },
+    storageState: join(wpRoot, "state.json"),
+  };
+}
+
+test.beforeAll(() => {
+  stubDir = mkdtempSync(join(tmpdir(), "wp-stub-"));
+  writeFileSync(join(stubDir, "wp"), STUB_WP);
+  chmodSync(join(stubDir, "wp"), 0o755);
+  // A real directory so the rootDir check passes; the stub ignores its contents.
+  wpRoot = mkdtempSync(join(tmpdir(), "wp-root-"));
+  originalPath = process.env.PATH ?? "";
+  process.env.PATH = `${stubDir}:${originalPath}`;
+});
+
+test.afterAll(() => {
+  process.env.PATH = originalPath;
+  delete process.env.WP_STUB_INFO;
+  delete process.env.WP_STUB_INSTALLED;
+  rmSync(stubDir, { recursive: true, force: true });
+  rmSync(wpRoot, { recursive: true, force: true });
+});
+
+test.describe("verifyPool — local transport over a stub wp", () => {
+  test("resolves when WP-CLI runs and WordPress is installed", async () => {
+    delete process.env.WP_STUB_INFO;
+    process.env.WP_STUB_INSTALLED = "yes";
+    await expect(
+      verifyPool([localSite()], "wp-rocket", "local"),
+    ).resolves.toBeUndefined();
+  });
+
+  test("throws an actionable report when WordPress is not installed", async () => {
+    delete process.env.WP_STUB_INFO;
+    process.env.WP_STUB_INSTALLED = "no";
+    const error = await verifyPool([localSite()], "wp-rocket", "local").catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("WordPress installed");
+    expect(message).toContain("not installed");
+    // The WP-CLI step still passed, so it is reported as a green check, not the failure.
+    expect(message).toContain("wp-cli 2.10.0");
+  });
+
+  test("surfaces wp-cli's stderr when the target is not a WordPress install", async () => {
+    delete process.env.WP_STUB_INFO;
+    process.env.WP_STUB_INSTALLED = "nowp";
+    await expect(
+      verifyPool([localSite()], "wp-rocket", "local"),
+    ).rejects.toThrow(/does not seem to be a WordPress installation/);
+  });
+
+  test("skips the WordPress check when WP-CLI itself is unavailable", async () => {
+    process.env.WP_STUB_INFO = "fail";
+    process.env.WP_STUB_INSTALLED = "yes"; // would pass — but must never be reached
+    const error = await verifyPool([localSite()], "wp-rocket", "local").catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("WP-CLI");
+    // Gated on the WP-CLI check, so the WordPress probe must not run or be reported.
+    expect(message).not.toContain("WordPress installed");
+  });
+
+  test("silently skips placeholder (.example.test) sites", async () => {
+    // Even with a broken WordPress, a placeholder site has no real transport to verify.
+    process.env.WP_STUB_INSTALLED = "no";
+    await expect(
+      verifyPool(
+        [localSite("https://shop.example.test")],
+        "wp-rocket",
+        "local",
+      ),
+    ).resolves.toBeUndefined();
+  });
+});

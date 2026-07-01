@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { isNonEmptyString, isObject } from "../guards";
@@ -14,47 +14,33 @@ import type {
 } from "./types";
 
 /**
- * Loads and validates a product's site pools from `sites.json`.
+ * Loads and validates a product's site pools from its sites file(s).
  *
- * `sites.json` is git-ignored (it holds credentials). When it is absent, the
- * committed `sites.example.json` is used so the suite still loads and lists —
- * with a clear warning, since the example holds placeholder data only.
+ * Reads `sites.json` (primary) plus any `sites.<name>.json` overlays present in
+ * `configDir` — e.g. `sites.docker.json`, `sites.local.json`, `sites.ssh.json`.
+ * Each file declares a disjoint set of cells; a cell name appearing in more than one
+ * file is a hard error. Files are merged in stable order: `sites.json` first, then
+ * overlays alphabetically.
  *
- * Every field is validated with an actionable error that names the offending
- * cell and index, so a malformed file fails fast instead of crashing later.
+ * When no real sites files exist the committed `sites.example.json` is loaded with a
+ * warning, so the suite still starts and lists tests on a fresh checkout.
+ *
+ * Every field is validated with an actionable error naming the offending cell/index,
+ * so a malformed file fails fast instead of crashing later in the test run.
  */
 export function loadSites(configDir: string): CellMap {
-  const primary = join(configDir, "sites.json");
-  const example = join(configDir, "sites.example.json");
+  const files = findSitesFiles(configDir);
 
-  let raw: string;
-  let source: string;
-  try {
-    raw = readFileSync(primary, "utf8");
-    source = primary;
-  } catch {
-    try {
-      raw = readFileSync(example, "utf8");
-      source = example;
-      console.warn(
-        `[sites] ${primary} not found; using ${example} (placeholder data). ` +
-          "Create sites.json for real runs.",
-      );
-    } catch {
-      throw new Error(
-        `[sites] Neither sites.json nor sites.example.json found in "${configDir}".`,
-      );
-    }
+  if (files.length === 0) {
+    return loadFallback(configDir);
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (cause) {
-    throw new Error(`[sites] ${source} is not valid JSON.`, { cause });
+  const loaded: { source: string; cells: CellMap }[] = [];
+  for (const filePath of files) {
+    loaded.push({ source: filePath, cells: loadAndValidateFile(filePath) });
   }
 
-  return validateCellMap(parsed, source);
+  return mergeCellMaps(loaded, configDir);
 }
 
 /**
@@ -69,6 +55,115 @@ export function isPlaceholderSite(site: { readonly baseURL: string }): boolean {
     return false;
   }
 }
+
+// ── File discovery ─────────────────────────────────────────────────────────────
+
+/**
+ * Returns the list of sites files to load from `configDir`, in merge order:
+ * `sites.json` first (if present), then `sites.<name>.json` overlays alphabetically.
+ * `sites.example.json` is never included — it is the fallback used only when NO real
+ * files exist. Files whose names contain more than one dot between "sites" and ".json"
+ * (e.g. `sites.a.b.json`) are ignored to keep the pattern unambiguous.
+ */
+function findSitesFiles(configDir: string): string[] {
+  let entries: string[];
+  try {
+    entries = readdirSync(configDir);
+  } catch {
+    return [];
+  }
+
+  const files: string[] = [];
+
+  if (entries.includes("sites.json")) {
+    files.push(join(configDir, "sites.json"));
+  }
+
+  // Matches sites.<single-segment>.json — one dot between "sites" and ".json",
+  // with the segment containing no dots itself. Excludes sites.example.json explicitly.
+  const overlayRe = /^sites\.[^.]+\.json$/;
+  const overlays = entries
+    .filter((name) => name !== "sites.example.json" && overlayRe.test(name))
+    .sort();
+
+  for (const name of overlays) {
+    files.push(join(configDir, name));
+  }
+
+  return files;
+}
+
+// ── Single-file loading ────────────────────────────────────────────────────────
+
+/** Loads the committed `sites.example.json` (placeholder data) with a warning; used when no real sites file exists. */
+function loadFallback(configDir: string): CellMap {
+  const example = join(configDir, "sites.example.json");
+  console.warn(
+    `[sites] No sites.json or sites.*.json found in "${configDir}"; ` +
+      `using ${example} (placeholder data). Create sites.json for real runs.`,
+  );
+  return loadAndValidateFile(example);
+}
+
+/** Reads, JSON-parses, and validates one sites file into a {@link CellMap}, throwing an actionable error on read/parse/schema failure. */
+function loadAndValidateFile(filePath: string): CellMap {
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch (cause) {
+    throw new Error(`[sites] Cannot read "${filePath}".`, { cause });
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (cause) {
+    throw new Error(`[sites] "${filePath}" is not valid JSON.`, { cause });
+  }
+
+  return validateCellMap(parsed, filePath);
+}
+
+// ── Merging ────────────────────────────────────────────────────────────────────
+
+/**
+ * Merges the per-file {@link CellMap}s (in load order) into one. A cell defined in two files is a
+ * hard error naming both; edition consistency is re-checked across the merged set.
+ */
+function mergeCellMaps(
+  loaded: { source: string; cells: CellMap }[],
+  configDir: string,
+): CellMap {
+  const result: Record<string, CellConfig> = {};
+  const cellSource: Record<string, string> = {};
+
+  for (const { source, cells } of loaded) {
+    for (const [cell, config] of Object.entries(cells)) {
+      const prior = cellSource[cell];
+      if (prior !== undefined) {
+        throw new Error(
+          `[sites] Cell "${cell}" is defined in both "${prior}" and "${source}". ` +
+            "Each cell must appear in only one sites file.",
+        );
+      }
+      result[cell] = config;
+      cellSource[cell] = source;
+    }
+  }
+
+  // Edition consistency must hold across the full merged set. The per-file
+  // validateCellMap already catches within-file problems early; this catches
+  // across-file problems (e.g. one file editionless, another edition-ful).
+  const sourceList = loaded.map((l) => l.source).join(", ");
+  checkEditionConsistency(
+    result,
+    `merged sites in "${configDir}" (${sourceList})`,
+  );
+
+  return result;
+}
+
+// ── Validation helpers ─────────────────────────────────────────────────────────
 
 /** Returns `value` when it is a non-empty string; otherwise throws an error naming `path`. */
 function requireString(value: unknown, path: string): string {
@@ -101,9 +196,7 @@ function validateTransport(value: unknown, path: string): Transport {
     case "local":
       return {
         mode: "local",
-        ...(typeof value.rootDir === "string"
-          ? { rootDir: value.rootDir }
-          : {}),
+        rootDir: requireString(value.rootDir, `${path}.rootDir`),
       };
     default:
       throw new Error(
@@ -199,7 +292,7 @@ function validateOverrides(value: unknown, path: string): ServiceOverrides {
   };
 }
 
-/** Validates one entry into a {@link SiteInput}: its four required fields plus an optional `overrides` block. */
+/** Validates one entry into a {@link SiteInput}: its required fields plus an optional `overrides` block. */
 function validateSite(value: unknown, path: string): SiteInput {
   if (!isObject(value)) throw new Error(`[sites] ${path} must be an object.`);
   const base = {
@@ -252,9 +345,29 @@ function validateCell(value: unknown, path: string): CellConfig {
 }
 
 /**
- * Validates the parsed file into a {@link CellMap} (cell name → {@link CellConfig}).
- * Editions are all-or-none across a product's cells: if any cell declares one, every cell
- * must, so an edition-ful product can never silently run a cell with no edition.
+ * Editions are all-or-none across a set of cells: if any cell declares one, every cell
+ * must. This is checked per-file (to surface problems early) and again on the merged
+ * result (to catch cross-file inconsistencies).
+ */
+function checkEditionConsistency(
+  cells: Record<string, CellConfig>,
+  label: string,
+): void {
+  const entries = Object.entries(cells);
+  const missing = entries
+    .filter(([, cellConfig]) => cellConfig.edition === undefined)
+    .map(([cell]) => cell);
+  if (missing.length > 0 && missing.length !== entries.length) {
+    throw new Error(
+      `[sites] ${label}: editions are all-or-none across cells; ` +
+        `these cells declare none: ${missing.join(", ")}.`,
+    );
+  }
+}
+
+/**
+ * Validates the parsed JSON of one file into a {@link CellMap}. Checks edition
+ * consistency within the file; cross-file consistency is checked after merging.
  */
 function validateCellMap(value: unknown, source: string): CellMap {
   if (!isObject(value)) {
@@ -266,15 +379,6 @@ function validateCellMap(value: unknown, source: string): CellMap {
   for (const [cell, raw] of Object.entries(value)) {
     result[cell] = validateCell(raw, `${source} → ${cell}`);
   }
-
-  const entries = Object.entries(result);
-  const missing = entries
-    .filter(([, cellConfig]) => cellConfig.edition === undefined)
-    .map(([cell]) => cell);
-  if (missing.length > 0 && missing.length !== entries.length) {
-    throw new Error(
-      `[sites] ${source}: editions are all-or-none across cells; these declare none: ${missing.join(", ")}.`,
-    );
-  }
+  checkEditionConsistency(result, source);
   return result;
 }
