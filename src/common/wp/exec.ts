@@ -112,6 +112,8 @@ async function connection(transport: SshTransport): Promise<NodeSSH> {
   const key = connectionKey(transport);
   const existing = connections.get(key);
   if (existing?.isConnected()) return existing;
+  // A cached-but-dead client is replaced below; release its resources first.
+  existing?.dispose();
   const ssh = new NodeSSH();
   await ssh.connect({
     host: transport.host,

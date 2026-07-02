@@ -1,6 +1,7 @@
 import { test as base, createBdd } from "playwright-bdd";
 
 import { getPool, readRouting } from "./config/metadata";
+import { isPlaceholderSite } from "./config/sites";
 import type { Edition, SiteConfig } from "./config/types";
 
 /**
@@ -80,6 +81,15 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     if ($tags.includes("@noauth")) {
       await use({ cookies: [], origins: [] });
       return;
+    }
+    // The auth setup skips placeholder sites, so no storageState file exists for one; failing
+    // here with the cause beats the ENOENT Playwright would otherwise throw reading that file.
+    if (boundSite !== undefined && isPlaceholderSite(boundSite)) {
+      throw new Error(
+        "This scenario needs an authenticated session, but this worker is bound to a " +
+          `placeholder/example site (${boundSite.baseURL}) that the auth setup skips. ` +
+          "Create the product's sites.json for real runs, or tag the scenario @noauth.",
+      );
     }
     await use(boundSite?.storageState ?? storageState);
   },

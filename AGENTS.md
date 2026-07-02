@@ -182,7 +182,8 @@ ssh). Highlights — full reference in
 - Commands are file + args arrays (never shell strings) → no injection.
 - `exec` / `wpCli` return a structured `ExecResult`; callers branch on `exitCode`.
 - Plugin lifecycle separates idempotent **cleanup** (`ensurePluginAbsent`) from
-  asserted **deletion under test** (`deletePlugin`); typed errors in `wp/errors.ts`.
+  asserted **removal under test** (`uninstallPlugin`); both run
+  `wp plugin uninstall --deactivate` (files + DB footprint); typed errors in `wp/errors.ts`.
 - UI plugin actions live in the [`PluginsPage`](src/common/pages/plugins.page.ts) page object.
 
 ### Debug-log feature
@@ -349,3 +350,7 @@ Update it when you change anything about:
 - The Docker local environment (`env:up` / `env:down` / `env:logs`, port numbers, credentials).
 - The visual regression walkthrough (the A/B model, how to run `@visual` scenarios).
 - Quality-gate commands (`typecheck`, `lint`, `format:check`) or the CI behaviour.
+
+### All docs and code files
+
+In docs or in code comments, there might be `NOTE FROM DEV:`, they are mostly added for the IA next read to that file, so, you must read it carefuly, becuse there might be instructions for you to fix something in that doc file or the code of that file.

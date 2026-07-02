@@ -36,6 +36,11 @@ setup("authenticate site pool", async ({ browser }, testInfo) => {
       "in use). Create sites.json for real runs.",
   );
 
+  // Preflight (concurrent, but SSH round-trips add up) plus one SERIAL UI login per
+  // site can far exceed the default per-test timeout on slow remote sites, so the
+  // budget scales with the pool instead of failing spuriously on a healthy fleet.
+  setup.setTimeout(60_000 + real.length * 60_000);
+
   // Verify every site's transport before attempting authentication. A failure here
   // throws a formatted report, which Playwright surfaces as a setup error and uses
   // to skip the dependent BDD project — preventing cascading failures.

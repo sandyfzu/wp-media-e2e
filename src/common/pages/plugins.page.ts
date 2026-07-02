@@ -145,10 +145,15 @@ export class PluginsPage {
         await Promise.all([
           this.page.waitForResponse(
             (response) => {
-              const body = response.request().postData() ?? "";
+              const body = response.request().postData();
+              if (body === null) return false;
+              // Parse the form body for an EXACT slug match — a substring check on
+              // `slug=<slug>` would also match a longer slug sharing the prefix
+              // (e.g. "backwpup" matching a "backwpup-pro" deletion).
+              const params = new URLSearchParams(body);
               return (
-                body.includes("action=delete-plugin") &&
-                body.includes(`slug=${encodeURIComponent(slug)}`)
+                params.get("action") === "delete-plugin" &&
+                params.get("slug") === slug
               );
             },
             { timeout },

@@ -32,17 +32,25 @@ Key design points:
 
 ## Plugin lifecycle ([`wp/plugin.ts`](../../src/common/wp/plugin.ts))
 
-Two delete intents are **deliberately separated** because they have opposite
+Removal runs `wp plugin uninstall --deactivate`, **not** `wp plugin delete`:
+`delete` only removes the plugin's files, leaving its database footprint (options,
+custom tables, cron events) behind, whereas `uninstall` first runs the plugin's own
+uninstall procedure (`uninstall.php` / `register_uninstall_hook()`) and then deletes
+the files. `--deactivate` is required because WP-CLI skips the uninstall procedure
+for an active plugin. The net effect is a clean baseline for the next scenario.
+
+Two removal intents are **deliberately separated** because they have opposite
 correctness semantics:
 
-| Function                          | Intent                          | Already-absent behaviour          |
-| --------------------------------- | ------------------------------- | --------------------------------- |
-| `ensurePluginAbsent(transport, slug)` | **Cleanup** (Before/After hooks) | Success (no-op).                  |
-| `deletePlugin(transport, slug)`       | **Deletion under test**         | Throws `PluginNotInstalledError`. |
+| Function                               | Intent                           | Already-absent behaviour          |
+| -------------------------------------- | -------------------------------- | --------------------------------- |
+| `ensurePluginAbsent(transport, slug)`  | **Cleanup** (Before/After hooks) | Success (no-op).                  |
+| `uninstallPlugin(transport, slug)`     | **Removal under test**           | Throws `PluginNotInstalledError`. |
 
-`wp plugin delete` exits non-zero for *both* "not found" and a genuine failure, so
-its exit code is not trusted — removal is always re-verified with `is-installed`
-(exit `0` = installed, `1` = not). Other helpers:
+`wp plugin uninstall` exits non-zero for *both* "not found" and a genuine failure,
+so its exit code is not trusted — removal is always re-verified with `is-installed`
+(exit `0` = installed, `1` = not); a plugin that survives throws
+`PluginUninstallFailedError`. Other helpers:
 
 - `isPluginInstalled` / `isPluginActive` — boolean state checks.
 - `installPlugin(transport, source, opts?)` — install from slug, local zip, or URL;
@@ -56,12 +64,13 @@ see [authoring-tests.md](../guides/authoring-tests.md).
 ## Error types ([`wp/errors.ts`](../../src/common/wp/errors.ts))
 
 Distinct classes so steps and reports can tell failure modes apart — including the
-two `wp plugin delete`'s ambiguous exit code cannot, and the UI-only deactivation
-case:
+two that WP-CLI's ambiguous plugin-removal exit codes cannot, and the UI-only
+activation/deactivation cases:
 
 - `PluginNotInstalledError` — expected-present plugin is absent.
 - `PluginActivationFailedError` / `PluginDeactivationFailedError` — UI action failed.
-- `PluginDeletionFailedError` — plugin still present after a delete attempt.
+- `PluginUninstallFailedError` — plugin still installed after a WP-CLI `plugin uninstall`.
+- `PluginDeletionFailedError` — plugin still installed after the admin-UI Delete action.
 
 ## Debug-log scanning ([`wp/log.ts`](../../src/common/wp/log.ts))
 
