@@ -79,7 +79,7 @@ it owns the wp-admin Plugins screen and exposes `goto`, `isInstalled`, `isActive
    WP-CLI work via `site.transport`.
 4. Document every new function/method with TSDoc; type everything explicitly.
 5. Run the quality gates (typecheck, lint, format, unit tests) — see
-   [AGENTS.md](../../AGENTS.md#required-workflow-after-every-edit).
+   [CLAUDE.md](../../CLAUDE.md#required-workflow-after-every-edit).
 6. Verify against a real cell: `npm run test:<product> -- --project=<cell>`.
 
 ## Unit / integration tests

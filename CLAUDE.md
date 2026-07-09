@@ -1,4 +1,4 @@
-# AGENTS.md
+# CLAUDE.md
 
 Operating guide for AI agents (and humans) working in this repository. Read this
 first, then follow the links into [`docs/`](docs/) for depth. Keep it accurate —
@@ -280,11 +280,11 @@ the gates yourself.
 
 ## When to update these docs
 
-All files in `docs/`, `AGENTS.md`, and `README.md` must stay in sync with the code.
+All files in `docs/`, `CLAUDE.md`, and `README.md` must stay in sync with the code.
 The rule is: whoever makes the code change owns the doc update. Use the table below
 to find the right file.
 
-### This file (AGENTS.md)
+### This file (CLAUDE.md)
 
 Update it when you:
 
@@ -299,7 +299,7 @@ Update it when you:
   `@mobile` viewport support becomes active, or a new `wp/` module lands.
 - **Change a convention** stated here (error handling, typing, TSDoc, workflow).
 
-When a change is too detailed for AGENTS.md, put it in the relevant `docs/` file
+When a change is too detailed for CLAUDE.md, put it in the relevant `docs/` file
 instead and link it from the [Documentation map](#documentation-map).
 
 ### docs/architecture/execution-model.md
