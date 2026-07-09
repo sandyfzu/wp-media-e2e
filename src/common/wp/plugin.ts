@@ -1,18 +1,30 @@
-import { PluginNotInstalledError, PluginUninstallFailedError } from "./errors";
+import {
+  PluginDeactivationFailedError,
+  PluginNotInstalledError,
+  PluginUninstallFailedError,
+} from "./errors";
 import { wpCli } from "./exec";
 import type { Transport } from "../config/types";
 
 /**
  * WordPress plugin lifecycle over WP-CLI (transport-agnostic — see ./exec).
  *
- * Removal uses `wp plugin uninstall --deactivate`, NOT `wp plugin delete`. `delete` only removes
- * the plugin's files ("without deactivating or uninstalling" — WP-CLI handbook), so it leaves the
- * plugin's database footprint (options, custom tables, cron events) behind. `uninstall` runs the
- * plugin's uninstall procedure — `uninstall.php`, or the callback registered via
+ * Removal uses `wp plugin uninstall`, NOT `wp plugin delete`. `delete` only removes the plugin's
+ * files ("without deactivating or uninstalling" — WP-CLI handbook), so it leaves the plugin's
+ * database footprint (options, custom tables, cron events) behind. `uninstall` runs the plugin's
+ * uninstall procedure — `uninstall.php`, or the callback registered via
  * `register_uninstall_hook()` — which is where a well-behaved plugin clears that state, and then
- * deletes the files (we do NOT pass `--skip-delete`). `--deactivate` is required: WP-CLI only runs
- * the uninstall procedure on an inactive plugin and otherwise warns and skips, so without it an
- * active plugin would survive. The net effect is a clean baseline for the next scenario.
+ * deletes the files (we do NOT pass `--skip-delete`).
+ *
+ * Deactivate and uninstall are always TWO SEPARATE WP-CLI calls — never `uninstall --deactivate`.
+ * That flag deactivates and uninstalls in one PHP process, but the plugin's main file was already
+ * `include`d for that process to boot, and PHP cannot unload an include: deactivating just flips
+ * a DB flag, it doesn't remove the plugin's class from memory. So the uninstall procedure still
+ * finds the plugin "loaded", and a well-behaved plugin guards its uninstall.php against exactly
+ * that (loaded ⇒ might still be active ⇒ skip) — cleanup silently never runs. Deactivating first,
+ * as its own WP-CLI call, means the second call (plain `uninstall`, no `--deactivate` — the
+ * plugin is already inactive, so passing it would just draw a WP-CLI warning) starts a fresh PHP
+ * process that never loads the plugin at all, so its guard passes and cleanup actually runs.
  *
  * Two removal intents are deliberately separated (plan §7.3): idempotent CLEANUP for Before/After
  * hooks (`ensurePluginAbsent` — already-absent ⇒ no-op) vs. asserted REMOVAL-UNDER-TEST
@@ -41,6 +53,22 @@ export async function isPluginActive(
 }
 
 /**
+ * CLEANUP (idempotent). Deactivates the plugin if it's active, then no-ops — nothing left to do.
+ * A genuine failure to deactivate throws {@link PluginDeactivationFailedError}. Always its own
+ * WP-CLI call, kept separate from uninstall — see the module doc for why.
+ */
+export async function ensurePluginDeactivated(
+  transport: Transport,
+  slug: string,
+): Promise<void> {
+  if (!(await isPluginActive(transport, slug))) return;
+  await wpCli(transport, ["plugin", "deactivate", slug]);
+  if (await isPluginActive(transport, slug)) {
+    throw new PluginDeactivationFailedError(slug);
+  }
+}
+
+/**
  * CLEANUP (idempotent). For Before/After hooks: uninstalls the plugin so both its files and its
  * database footprint are gone, leaving a clean baseline. Already-absent is success (no-op); a
  * genuine failure to uninstall throws {@link PluginUninstallFailedError}.
@@ -50,9 +78,12 @@ export async function ensurePluginAbsent(
   slug: string,
 ): Promise<void> {
   if (!(await isPluginInstalled(transport, slug))) return;
-  // `uninstall --deactivate` fires the uninstall procedure (DB cleanup) and deletes the files;
-  // exit code is ambiguous, so re-assert removal below.
-  await wpCli(transport, ["plugin", "uninstall", slug, "--deactivate"]);
+  // Deactivate first, as its own WP-CLI call — see the module doc for why `uninstall
+  // --deactivate` can't be trusted to run the plugin's cleanup.
+  await ensurePluginDeactivated(transport, slug);
+  // Fires the uninstall procedure (DB cleanup) and deletes the files; exit code is ambiguous,
+  // so re-assert removal below.
+  await wpCli(transport, ["plugin", "uninstall", slug]);
   if (await isPluginInstalled(transport, slug)) {
     throw new PluginUninstallFailedError(slug);
   }
@@ -60,9 +91,10 @@ export async function ensurePluginAbsent(
 
 /**
  * UNINSTALL UNDER TEST. For scenarios that verify the uninstall flow: the plugin must be present
- * first (throws {@link PluginNotInstalledError} otherwise), then it is uninstalled — running its
- * uninstall procedure and deleting its files — and removal is re-asserted (throws
- * {@link PluginUninstallFailedError} if it survives).
+ * first (throws {@link PluginNotInstalledError} otherwise), then deactivated (its own WP-CLI
+ * call — see the module doc for why) and uninstalled — running its uninstall procedure and
+ * deleting its files — and removal is re-asserted (throws {@link PluginUninstallFailedError} if
+ * it survives).
  */
 export async function uninstallPlugin(
   transport: Transport,
@@ -71,7 +103,8 @@ export async function uninstallPlugin(
   if (!(await isPluginInstalled(transport, slug))) {
     throw new PluginNotInstalledError(slug);
   }
-  await wpCli(transport, ["plugin", "uninstall", slug, "--deactivate"]);
+  await ensurePluginDeactivated(transport, slug);
+  await wpCli(transport, ["plugin", "uninstall", slug]);
   if (await isPluginInstalled(transport, slug)) {
     throw new PluginUninstallFailedError(slug);
   }

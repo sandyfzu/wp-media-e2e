@@ -4,7 +4,8 @@
  * (see ./plugin.ts): "expected present but absent" and "still present after removal". The WP-CLI
  * path removes plugins with `wp plugin uninstall` ({@link PluginUninstallFailedError}); the
  * admin-UI Delete action removes them through the browser ({@link PluginDeletionFailedError},
- * see ../pages/plugins.page.ts). Deactivation is UI-only.
+ * see ../pages/plugins.page.ts). {@link PluginDeactivationFailedError} covers both: the admin-UI
+ * Deactivate action (../pages/plugins.page.ts) and WP-CLI's `plugin deactivate` (./plugin.ts).
  */
 
 /** A plugin expected to be installed is absent (e.g. before a removal-under-test). */
@@ -23,7 +24,7 @@ export class PluginActivationFailedError extends Error {
   }
 }
 
-/** A plugin could not be deactivated through the admin UI. */
+/** A plugin could not be deactivated (admin UI or WP-CLI). */
 export class PluginDeactivationFailedError extends Error {
   constructor(slug: string) {
     super(`Plugin "${slug}" could not be deactivated.`);

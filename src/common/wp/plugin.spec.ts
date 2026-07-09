@@ -1,33 +1,64 @@
 import { test, expect } from "@playwright/test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   ensurePluginAbsent,
+  ensurePluginDeactivated,
   isPluginActive,
   isPluginInstalled,
   uninstallPlugin,
 } from "./plugin";
-import { PluginNotInstalledError, PluginUninstallFailedError } from "./errors";
+import {
+  PluginDeactivationFailedError,
+  PluginNotInstalledError,
+  PluginUninstallFailedError,
+} from "./errors";
 import type { LocalTransport } from "../config/types";
 
 // A stub `wp` on PATH exercises plugin.ts + the real exec layer with deterministic exit codes —
-// no WordPress. Behavior is chosen per test via $WP_STUB_MODE.
+// no WordPress. Behavior is chosen per test via $WP_STUB_MODE. Two independent markers track
+// install-state and active-state separately, so a test can observe deactivate flipping
+// active → false while the plugin stays installed, ahead of a later, separate uninstall call.
 const STUB_WP = `#!/usr/bin/env bash
-# $WP_STUB_MODE: absent | stuck | vanishes
-#   absent   → 'plugin is-installed' exits 1 (not installed)
-#   stuck    → 'plugin is-installed' exits 0 (uninstall never removes it)
-#   vanishes → installed (exit 0) until 'plugin uninstall' records removal via $WP_STUB_MARKER
+# $WP_STUB_MODE: absent | stuck | stuck-inactive | stuck-active | vanishes
+#   absent         → 'plugin is-installed'/'is-active' exit 1 (not installed, so not active either)
+#   stuck          → 'plugin is-installed' exits 0 (uninstall never removes it); is-active exits 0
+#   stuck-inactive → like 'stuck', but already inactive, so deactivate is a no-op
+#   stuck-active   → 'plugin is-active' exits 0 always (deactivate never takes effect)
+#   vanishes     → installed+active until 'plugin deactivate'/'plugin uninstall' record their
+#                  effect via $WP_STUB_ACTIVE_MARKER / $WP_STUB_MARKER
+[ -n "$WP_STUB_LOG" ] && printf '%s\\n' "$*" >> "$WP_STUB_LOG"
 sub="$1 $2"
 case "$WP_STUB_MODE" in
   absent)
-    [ "$sub" = "plugin is-installed" ] && exit 1 ;;
+    [ "$sub" = "plugin is-installed" ] && exit 1
+    [ "$sub" = "plugin is-active" ] && exit 1 ;;
   stuck)
     [ "$sub" = "plugin is-installed" ] && exit 0 ;;
+  stuck-inactive)
+    [ "$sub" = "plugin is-installed" ] && exit 0
+    [ "$sub" = "plugin is-active" ] && exit 1 ;;
+  stuck-active)
+    [ "$sub" = "plugin is-installed" ] && exit 0
+    [ "$sub" = "plugin is-active" ] && exit 0 ;;
   vanishes)
     if [ "$sub" = "plugin is-installed" ]; then
       [ -f "$WP_STUB_MARKER" ] && exit 1 || exit 0
+    fi
+    if [ "$sub" = "plugin is-active" ]; then
+      [ -f "$WP_STUB_ACTIVE_MARKER" ] && exit 1 || exit 0
+    fi
+    if [ "$sub" = "plugin deactivate" ]; then
+      : > "$WP_STUB_ACTIVE_MARKER"
+      exit 0
     fi
     if [ "$sub" = "plugin uninstall" ]; then
       : > "$WP_STUB_MARKER"
@@ -63,6 +94,10 @@ test.afterAll(() => {
   rmSync(stubDir, { recursive: true, force: true });
 });
 
+test.beforeEach(() => {
+  delete process.env.WP_STUB_LOG;
+});
+
 test.describe("plugin lifecycle over a stub wp", () => {
   test("isPluginInstalled / isPluginActive reflect the exit code", async () => {
     process.env.WP_STUB_MODE = "absent";
@@ -70,6 +105,27 @@ test.describe("plugin lifecycle over a stub wp", () => {
     process.env.WP_STUB_MODE = "stuck"; // is-installed → 0
     expect(await isPluginInstalled(local, "x")).toBe(true);
     expect(await isPluginActive(local, "x")).toBe(true);
+  });
+
+  test("ensurePluginDeactivated is a no-op when already inactive", async () => {
+    process.env.WP_STUB_MODE = "absent"; // is-active → 1 (not installed ⇒ not active)
+    await expect(ensurePluginDeactivated(local, "x")).resolves.toBeUndefined();
+  });
+
+  test("ensurePluginDeactivated deactivates an active plugin, then verifies it inactive", async () => {
+    process.env.WP_STUB_MODE = "vanishes";
+    process.env.WP_STUB_MARKER = freshMarker();
+    process.env.WP_STUB_ACTIVE_MARKER = freshMarker();
+    expect(await isPluginActive(local, "x")).toBe(true);
+    await expect(ensurePluginDeactivated(local, "x")).resolves.toBeUndefined();
+    expect(await isPluginActive(local, "x")).toBe(false);
+  });
+
+  test("ensurePluginDeactivated throws PluginDeactivationFailedError when deactivate has no effect", async () => {
+    process.env.WP_STUB_MODE = "stuck-active"; // is-active stays 0 after deactivate
+    await expect(ensurePluginDeactivated(local, "x")).rejects.toBeInstanceOf(
+      PluginDeactivationFailedError,
+    );
   });
 
   test("ensurePluginAbsent is a no-op when already gone", async () => {
@@ -80,6 +136,7 @@ test.describe("plugin lifecycle over a stub wp", () => {
   test("ensurePluginAbsent uninstalls a present plugin, then verifies it gone", async () => {
     process.env.WP_STUB_MODE = "vanishes";
     process.env.WP_STUB_MARKER = freshMarker();
+    process.env.WP_STUB_ACTIVE_MARKER = freshMarker();
     await expect(ensurePluginAbsent(local, "x")).resolves.toBeUndefined();
   });
 
@@ -91,7 +148,7 @@ test.describe("plugin lifecycle over a stub wp", () => {
   });
 
   test("uninstallPlugin that does not take effect throws PluginUninstallFailedError", async () => {
-    process.env.WP_STUB_MODE = "stuck"; // is-installed stays 0 after uninstall
+    process.env.WP_STUB_MODE = "stuck-inactive"; // already inactive; is-installed stays 0 after uninstall
     await expect(uninstallPlugin(local, "x")).rejects.toBeInstanceOf(
       PluginUninstallFailedError,
     );
@@ -100,6 +157,28 @@ test.describe("plugin lifecycle over a stub wp", () => {
   test("uninstallPlugin succeeds when the plugin is present then removed", async () => {
     process.env.WP_STUB_MODE = "vanishes";
     process.env.WP_STUB_MARKER = freshMarker();
+    process.env.WP_STUB_ACTIVE_MARKER = freshMarker();
     await expect(uninstallPlugin(local, "x")).resolves.toBeUndefined();
+  });
+
+  test("uninstallPlugin deactivates as its own call, before an `uninstall` with no --deactivate", async () => {
+    // Pins down the actual bug fix: `--deactivate` must never reach `plugin uninstall`, because
+    // WP-CLI would then deactivate and uninstall in the same PHP process, where the plugin's
+    // main class is still loaded from that process's bootstrap — see plugin.ts's module doc.
+    process.env.WP_STUB_MODE = "vanishes";
+    process.env.WP_STUB_MARKER = freshMarker();
+    process.env.WP_STUB_ACTIVE_MARKER = freshMarker();
+    process.env.WP_STUB_LOG = freshMarker();
+    await uninstallPlugin(local, "x");
+
+    const calls = readFileSync(process.env.WP_STUB_LOG, "utf8")
+      .split("\n")
+      .filter((line) => line.startsWith("plugin "));
+    const deactivateIndex = calls.indexOf("plugin deactivate x");
+    const uninstallIndex = calls.indexOf("plugin uninstall x");
+
+    expect(deactivateIndex).toBeGreaterThanOrEqual(0);
+    expect(uninstallIndex).toBeGreaterThan(deactivateIndex);
+    expect(calls).not.toContain("plugin uninstall x --deactivate");
   });
 });
