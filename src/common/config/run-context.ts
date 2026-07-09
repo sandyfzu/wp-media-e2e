@@ -1,8 +1,12 @@
 import "./load-env";
-import { argv, env as processEnv, pid } from "node:process";
 
 import { isNonEmptyString } from "../guards";
 import { env } from "./env";
+
+// Read the `process` global directly (as env.ts / project.ts do) rather than destructuring
+// `node:process`: `process.argv` is reassigned by our own tests and by tooling, and a
+// destructured `argv` binding can snapshot a stale array under some loaders. Reading it live
+// keeps cell selection loader-independent.
 
 /**
  * Run context: resolves the namespaced artifact directories for a (product, cell) and
@@ -21,16 +25,16 @@ import { env } from "./env";
 /** Filesystem-safe, lexically-sortable run token. Used ONLY to namespace the report directory. */
 function stamp(): string {
   // e.g. 2026-06-19T14-03-22-123Z-48217
-  return `${new Date().toISOString().replace(/[:.]/g, "-")}-${String(pid)}`;
+  return `${new Date().toISOString().replace(/[:.]/g, "-")}-${String(process.pid)}`;
 }
 
 /** Resolves the run token: a non-blank inherited `RUN_ID`, else a fresh stamp pinned into env. */
 function resolveRunId(): string {
-  const provided = processEnv.RUN_ID;
+  const provided = process.env.RUN_ID;
   if (isNonEmptyString(provided)) return provided;
   const stamped = stamp();
   // Pin it so every worker process (which re-imports this module) inherits one token.
-  processEnv.RUN_ID = stamped;
+  process.env.RUN_ID = stamped;
   return stamped;
 }
 
@@ -38,29 +42,28 @@ function resolveRunId(): string {
 export const RUN_ID: string = resolveRunId();
 
 /**
- * The cells a run targets. A correct invocation selects exactly one (so the global
- * `parallelIndex` stays in range — plan §3.2); this returns ALL requested values so the
- * config factory can reject an unsafe multi-cell selection fail-fast. Sources: the `CELL`
- * env var (orchestrator) plus every `--project` form on the command line (`--project=x`,
- * `--project x`, the variadic `--project x y`, and repeats). A `*` wildcard is returned
- * verbatim and resolves to no real cell (→ a safe serial run).
+ * The cells a run targets, read from the `--project` forms on the command line
+ * (`--project=x`, `--project x`, the variadic `--project x y`, and repeats). This is the
+ * single source of truth for cell selection — the exact signal Playwright itself uses to
+ * filter projects — so the config can never size workers for a cell Playwright is not
+ * running (plan §3.2). A correct invocation selects exactly one cell; this returns ALL
+ * requested values so the config factory can reject an unsafe multi-cell selection
+ * fail-fast. A `*` wildcard is returned verbatim and resolves to no real cell (→ a safe
+ * serial run).
  */
 export function selectedCells(): string[] {
   const cells = new Set<string>();
-
-  const fromEnv = processEnv.CELL;
-  if (isNonEmptyString(fromEnv)) cells.add(fromEnv.trim());
-
+  const args = process.argv;
   const eq = "--project=";
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
     if (arg === undefined) continue;
     if (arg.startsWith(eq)) {
       cells.add(arg.slice(eq.length));
     } else if (arg === "--project") {
       // Variadic: consume consecutive non-flag tokens (`--project a b`).
-      for (let j = i + 1; j < argv.length; j += 1) {
-        const next = argv[j];
+      for (let j = i + 1; j < args.length; j += 1) {
+        const next = args[j];
         if (next === undefined || next.startsWith("-")) break;
         cells.add(next);
         i = j;

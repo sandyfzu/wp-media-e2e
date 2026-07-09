@@ -108,7 +108,6 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 | Var           | Default                | Purpose                                                                 |
 | ------------- | ---------------------- | ----------------------------------------------------------------------- |
 | `REPORT_MODE` | _(unset)_ → self-contained | `rich` → external attachments + embedded trace viewer (serve over http). |
-| `CELL`        | _(via `--project`)_    | Cell to run (orchestrator path). Exactly one per invocation.            |
 | `RUN_ID`      | auto-stamped           | Per-run report token; pin to share one token across a batch.            |
 | `CI`          | _(unset)_              | Non-empty enables CI config (retries, `forbidOnly`).                    |
 | `PRODUCT`     | `wp-rocket`            | Default product for the bare `playwright.config.ts`.                    |
