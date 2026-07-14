@@ -52,3 +52,6 @@ Thumbs.db
 src/projects/*/config/sites.json
 src/projects/*/config/sites.*.json
 !src/projects/*/config/sites.example.json
+
+# User provided plugins directory
+plugins
