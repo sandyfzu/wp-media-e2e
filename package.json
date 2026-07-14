@@ -41,6 +41,7 @@
     "@types/pngjs": "^6.0.5",
     "allure": "^3.14.0",
     "allure-playwright": "^3.10.2",
+    "apvm-napi": "github:wp-media/automation-plugin-version-manager#cli/v3.0.0",
     "eslint": "^10.6.0",
     "eslint-config-prettier": "^10.1.8",
     "execa": "^9.6.1",

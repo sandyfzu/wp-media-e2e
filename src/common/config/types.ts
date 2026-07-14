@@ -8,6 +8,13 @@
  * edition (Free/Pro) for edition-ful products.
  */
 
+// Type-only import (erased at runtime under `verbatimModuleSyntax`), so the config↔artifacts
+// type reference introduces no runtime module cycle. The artifacts manifest schema lives with
+// the rest of that domain in `../artifacts/types`; it is re-exported here so product-config
+// authors get it and `ProductConfig` from one place.
+import type { ProductArtifacts } from "../artifacts/types";
+export type { ProductArtifacts };
+
 /** WordPress hosting mode — decides how WP-CLI is dispatched (see the exec layer, a later phase). */
 export type ServerMode = "ssh" | "docker" | "local";
 
@@ -87,7 +94,16 @@ export interface SiteConfig extends SiteInput {
 /** A pool of interchangeable sites backing one cell. */
 export type SitePool = readonly SiteInput[];
 
-/** Plugin edition under test. Free and Pro are separate plugin packages (e.g. BackWPup). */
+/**
+ * Plugin edition under test — the **behavioral tier** (Free vs Pro), a property of a cell.
+ * Free and Pro are separate plugin packages (e.g. BackWPup); edition drives scenario
+ * filtering (`@free`/`@pro`) and edition-aware page objects.
+ *
+ * Distinct from an APVM build **variant** (`free`/`pro-de`/`pro-en`): edition is binary and
+ * language-blind, whereas a variant names an exact buildable package including language. The
+ * artifacts manifest maps each edition to the one variant it builds (`pro` → `pro-en`); the
+ * two are deliberately different namespaces (see `artifacts/types.ts`).
+ */
 export type Edition = "free" | "pro";
 
 /**
@@ -110,5 +126,12 @@ export interface ProductConfig {
   readonly features: string | string[];
   readonly steps: string[];
   readonly sites: CellMap;
+  /**
+   * The plugin artifacts (zips under test) this product resolves and verifies per run —
+   * default refs, version/edition policy, and per-edition identity expectations. Required,
+   * so a new product can never silently ship without a build source. See
+   * {@link ProductArtifacts} and docs/plans/plugin-artifact-management-plan.md.
+   */
+  readonly artifacts: ProductArtifacts;
   readonly services?: ServiceConfig;
 }

@@ -94,6 +94,12 @@ every cell must — so an edition-ful product can never silently run an
 edition-less cell. The config factory turns a cell's edition into a Cucumber tag
 filter (`pro` → `not @free`, `free` → `not @pro`).
 
+**Edition vs. variant.** `edition` (our binary Free/Pro _behavioral_ tier) is distinct
+from an APVM build **variant** (`free`/`pro-de`/`pro-en`). Edition is language-blind and
+drives scenarios/POM; a variant is the exact package APVM builds. The artifacts manifest
+maps each edition to the single variant it builds (`pro` → `pro-en`) — see the
+[plugin-artifact management plan](../plans/plugin-artifact-management-plan.md).
+
 ## `.env` ([`.env.example`](../../.env.example))
 
 Copied to `.env` and loaded once by
@@ -114,6 +120,39 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 | `REPORT_ROOT` | `reports`              | Report artifact root (accumulates).                                     |
 | `OUTPUT_ROOT` | `test-results`         | Ephemeral Playwright artifact root.                                     |
 | `AUTH_ROOT`   | `.auth`                | Ephemeral `storageState` root.                                          |
+
+### Plugin artifacts (build & verify)
+
+Which plugin zips a run resolves, builds (via [APVM](https://github.com/wp-media/automation-plugin-version-manager)),
+and verifies. Two **roles** per product: `plugin` (the artifact under test) and
+`previous` (an older artifact some tests compare against — e.g. an update path).
+Full model and rationale:
+[plugin-artifact-management-plan.md](../plans/plugin-artifact-management-plan.md).
+
+| Var                    | Applies              | Purpose                                                                      |
+| ---------------------- | -------------------- | ---------------------------------------------------------------------------- |
+| `E2E_PLUGIN_REF`       | `plugin` (a ref)     | APVM ref to build the artifact under test (branch/tag/commit/PR/`release:*`). |
+| `E2E_PLUGIN_ZIP`       | `plugin` (a zip)     | Path to a prebuilt zip of the artifact under test (absolute or repo-relative). |
+| `E2E_PREVIOUS_REF`     | `previous` (a ref)   | APVM ref to build the previous-version artifact.                             |
+| `E2E_PREVIOUS_ZIP`     | `previous` (a zip)   | Path to a prebuilt previous-version zip.                                     |
+| `E2E_PLUGIN_VERSION`   | `plugin` build       | Version to build with (see version policy below).                           |
+| `E2E_PREVIOUS_VERSION` | `previous` build     | Version to build the previous-version artifact with.                        |
+
+Rules (enforced in
+[`request.ts`](../../src/common/artifacts/request.ts), unset all → per-product defaults):
+
+- **Ref XOR zip per role.** Setting both `E2E_PLUGIN_REF` and `E2E_PLUGIN_ZIP` (or both
+  `PREVIOUS` vars) fails fast — they are mutually exclusive and neither wins by default.
+- **Overrides need a cell.** On a serial (cell-less) run these are **ignored with a warning**
+  and the defaults are used — never a hard failure, so leftover/shared env can't abort a broad
+  run; select a cell with `--project=<cell>` to apply them. No override → defaults.
+- **Version policy.** BackWPup **requires** a version to build, defaulting to `9.99.99`
+  (`plugin`) / `9.99.98` (`previous`) — staggered so `previous` is older; WP Rocket /
+  Imagify embed their version, so a `_VERSION` var is optional but, when set, rewrites the
+  built artifact's version. A `_VERSION` is ignored (with a warning) alongside a `_ZIP`
+  path or a `release:*` ref.
+- **Unsupported role.** `E2E_PREVIOUS_*` vars are ignored (with a warning) for a product
+  with no `previous` role yet (BackWPup — see the plan's §5).
 
 ### Fleet health check (`npm run healthcheck`)
 
