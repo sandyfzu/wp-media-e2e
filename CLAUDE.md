@@ -280,11 +280,26 @@ the gates yourself.
 | You're editing sites files, transports, editions, or env vars.                   | [`docs/guides/configuration.md`](docs/guides/configuration.md)                           |
 | You want the full design rationale and decisions.                                | [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md)           |
 
+## In-progress plans
+
+Larger initiatives are tracked as living design docs in `docs/plans/`. Check
+these before starting related work — they hold the current plan, not history:
+
+- [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md) — full design rationale and decisions.
+- [`docs/plans/plugin-artifact-management-plan.md`](docs/plans/plugin-artifact-management-plan.md) — plugin artifact management.
+
 ## When to update these docs
 
 All files in `docs/`, `CLAUDE.md`, and `README.md` must stay in sync with the code.
 The rule is: whoever makes the code change owns the doc update. Use the table below
 to find the right file.
+
+**Edit vs. create:** edit an existing `docs/architecture/*` or `docs/guides/*` file
+whenever the topic fits one already listed below. Create a new file only for a
+genuinely new subsystem/guide topic (add it to the tables here and in
+[Documentation map](#documentation-map)). Start a new `docs/plans/*` doc only for
+a new initiative/rewrite worth tracking as a living design doc — update the
+existing plan doc for progress on one already in flight.
 
 ### This file (CLAUDE.md)
 
