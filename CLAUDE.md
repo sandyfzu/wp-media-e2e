@@ -246,6 +246,8 @@ These are requirements, not suggestions:
   non-trivial `common/` modules.
 - **Separate the code correctly.** Do a very well code separation, do not overengineer anything, but separate correctly by concerns. Make sure the functions/methods are not to long.
 - **Reuse code efficiently.** Create small utilities if they can be leveraged by other parts of the code instead of hardcoding everything in one isolated module (You can still isolate anything that doesn't make sense to have as "global" utility, you must assess and take the best decision case by case)
+- **Write unit-testable code.** Design for testability (small, pure, dependency-injected functions) and add a `*.spec.ts` unit test for as much logic as possible. Some code (e.g. thin UI glue, Playwright wiring) may not be testable — that's fine, but it must be the exception, not the default.
+- **Ship production-ready code.** Stable, robust, reliable — handle edge cases, no half-finished paths. Documentation and comments must be dense, not long: clear and understandable over verbose. Same for anything added to this file (CLAUDE.md) and plans — it must be clear and understandable, not verbose. Avoid overengineering, but do not underengineer either. Make sure to assess the best approach case by case.
 
 ## Required workflow after every edit
 
