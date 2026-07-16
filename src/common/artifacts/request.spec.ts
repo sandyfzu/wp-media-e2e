@@ -340,6 +340,35 @@ test.describe("serial (cell-less) runs", () => {
   });
 });
 
+// ── Degenerate comparison: identical plugin/previous requests (§2.8 case 12) ────
+
+test.describe("degenerate comparison warning", () => {
+  test("distinct default requests (develop vs tag) do not warn", () => {
+    expect(plan(WPR).warnings).toEqual([]);
+  });
+
+  test("identical build requests warn (previous ref equals the plugin default)", () => {
+    const p = plan(WPR, { env: { previousRef: "develop" } });
+    expect(build(role(p, "plugin")).params.gitRef).toBe("develop");
+    expect(build(role(p, "previous")).params.gitRef).toBe("develop");
+    expect(p.warnings.join("\n")).toMatch(/identical request.*degenerate/);
+  });
+
+  test("identical zip requests (same path for both roles) warn", () => {
+    const p = plan(WPR, {
+      env: { pluginZip: "/a.zip", previousZip: "/a.zip" },
+    });
+    expect(p.warnings.join("\n")).toMatch(/identical request.*degenerate/);
+  });
+
+  test("different zip paths per role do not warn", () => {
+    const p = plan(WPR, {
+      env: { pluginZip: "/a.zip", previousZip: "/b.zip" },
+    });
+    expect(p.warnings.join("\n")).not.toMatch(/degenerate/);
+  });
+});
+
 // ── readArtifactEnv (the impure boundary) ───────────────────────────────────────
 
 test.describe("readArtifactEnv", () => {

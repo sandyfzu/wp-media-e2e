@@ -1,7 +1,20 @@
 import "./load-env";
 
+import { fileURLToPath } from "node:url";
+
 import { isNonEmptyString } from "../guards";
 import { env } from "./env";
+
+/**
+ * Absolute repo root, derived from this module's own location
+ * (`…/src/common/config/run-context.ts` → three levels up), so callers can absolutize the
+ * repo-root-relative paths {@link dirs} returns **without depending on `process.cwd()`** —
+ * which the artifacts resolver needs (APVM requires an absolute `outputDir`, and a
+ * relative `E2E_*_ZIP` must resolve against the repo, not the process cwd — plan §2.8).
+ */
+export const REPO_ROOT: string = fileURLToPath(
+  new URL("../../../", import.meta.url),
+);
 
 // Read the `process` global directly (as env.ts / project.ts do) rather than destructuring
 // `node:process`: `process.argv` is reassigned by our own tests and by tooling, and a
@@ -82,6 +95,12 @@ export interface RunDirs {
   readonly auth: string;
   /** Ephemeral generated BDD specs directory. */
   readonly bdd: string;
+  /**
+   * Ephemeral resolved-plugin-artifacts directory (the zips under test). Repo-root-relative
+   * like the rest; the artifacts resolver joins it onto {@link REPO_ROOT} for the absolute
+   * path APVM needs, and wipes it whole on every resolution (plan §2.4).
+   */
+  readonly artifacts: string;
 }
 
 /**
@@ -96,5 +115,6 @@ export function dirs(product: string, cell: string): RunDirs {
     output: `${env("OUTPUT_ROOT", "test-results")}/${cellNs}`,
     auth: `${env("AUTH_ROOT", ".auth")}/${cellNs}`,
     bdd: `.features-gen/${cellNs}`,
+    artifacts: `${env("ARTIFACTS_ROOT", ".artifacts")}/${cellNs}`,
   };
 }

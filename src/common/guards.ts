@@ -16,3 +16,12 @@ export function isObject(value: unknown): value is Record<string, unknown> {
 export function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
 }
+
+/**
+ * Extracts a human-readable message from a caught `unknown`: an `Error`'s `message`, else the
+ * value stringified. Use at `catch` boundaries so error reporting never has to re-narrow
+ * `unknown` inline.
+ */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

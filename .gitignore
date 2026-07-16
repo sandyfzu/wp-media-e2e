@@ -37,6 +37,9 @@ Thumbs.db
 # Per-run authentication state (storageState)
 /.auth/
 
+# Ephemeral resolved plugin artifacts (zips under test) — wiped & rebuilt each run
+/.artifacts/
+
 # Accumulating per-cell reports (pruned to newest N by report:prune, a later phase)
 /reports/
 

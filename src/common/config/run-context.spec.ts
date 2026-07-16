@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
+import { isAbsolute } from "node:path";
 
-import { selectedCells } from "./run-context";
+import { dirs, REPO_ROOT, selectedCells } from "./run-context";
 
 /**
  * `selectedCells()` is the single source of truth for cell selection: it parses the
@@ -59,5 +60,34 @@ test.describe("selectedCells (parses --project)", () => {
     withArgv([], () => {
       expect(selectedCells()).toEqual([]);
     });
+  });
+});
+
+test.describe("dirs — artifacts directory", () => {
+  const ARTIFACTS_ROOT = "ARTIFACTS_ROOT";
+  const saved = process.env[ARTIFACTS_ROOT];
+
+  test.afterEach(() => {
+    if (saved === undefined)
+      Reflect.deleteProperty(process.env, ARTIFACTS_ROOT);
+    else process.env[ARTIFACTS_ROOT] = saved;
+  });
+
+  test("defaults to .artifacts, always namespaced by product/cell", () => {
+    Reflect.deleteProperty(process.env, ARTIFACTS_ROOT);
+    expect(dirs("wp-rocket", "nginx").artifacts).toBe(
+      ".artifacts/wp-rocket/nginx",
+    );
+  });
+
+  test("ARTIFACTS_ROOT overrides only the root prefix", () => {
+    process.env[ARTIFACTS_ROOT] = "/tmp/artifacts";
+    expect(dirs("backwpup", "pro@nginx").artifacts).toBe(
+      "/tmp/artifacts/backwpup/pro@nginx",
+    );
+  });
+
+  test("REPO_ROOT is absolute (so paths never depend on process.cwd())", () => {
+    expect(isAbsolute(REPO_ROOT)).toBe(true);
   });
 });

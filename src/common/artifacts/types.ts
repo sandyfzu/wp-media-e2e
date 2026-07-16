@@ -268,3 +268,24 @@ export interface ResolvedArtifact {
 export type CellArtifacts = Readonly<
   Partial<Record<ArtifactRole, ResolvedArtifact>>
 >;
+
+/**
+ * One role's resolution outcome (Phase 2, produced by `resolve.ts`, consumed by `verify.ts`):
+ * either the built/copied {@link ResolvedArtifact}, or a captured failure. Failures are values,
+ * not thrown, so a `plugin` failure never prevents `previous` from being resolved and verified —
+ * every role reaches the single aggregated report (plan §2.5).
+ */
+export type RoleOutcome =
+  | {
+      readonly role: ArtifactRole;
+      readonly kind: "resolved";
+      readonly artifact: ResolvedArtifact;
+    }
+  | {
+      readonly role: ArtifactRole;
+      readonly kind: "failed";
+      /** Why resolution failed (e.g. missing zip, APVM build error, missing token). */
+      readonly error: string;
+      /** Optional actionable next step, shown under the error in the report. */
+      readonly hint?: string;
+    };

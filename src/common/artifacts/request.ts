@@ -129,6 +129,7 @@ export function buildArtifactPlan(input: PlanInput): ArtifactPlan {
     requestForRole(product, role, edition, effectiveEnv, warnings),
   );
 
+  warnDegenerateComparison(requests, warnings);
   return { requests, warnings };
 }
 
@@ -339,4 +340,47 @@ function previousVarsSet(vars: ArtifactEnv): string[] {
       ? ARTIFACT_ENV_VARS.previous.version
       : undefined,
   ].filter((name): name is string => name !== undefined);
+}
+
+/**
+ * Warns when the `plugin` and `previous` roles resolve to the **identical** request — same zip
+ * path, or same build params — so a comparison/update-path test would pit an artifact against
+ * itself (plan §2.8 case 12). Allowed (not fatal): the config is valid, just degenerate.
+ */
+function warnDegenerateComparison(
+  requests: readonly ArtifactRequest[],
+  warnings: string[],
+): void {
+  const plugin = requests.find((r) => r.role === "plugin");
+  const previous = requests.find((r) => r.role === "previous");
+  if (plugin === undefined || previous === undefined) return;
+  if (!sameRequest(plugin, previous)) return;
+  warnings.push(
+    '[artifacts] the "plugin" and "previous" roles resolve to the identical request — a ' +
+      `comparison would be degenerate. Point one at a different ref/zip (e.g. ${ARTIFACT_ENV_VARS.previous.ref}) ` +
+      "to compare distinct versions.",
+  );
+}
+
+/** Whether two requests would produce the same artifact: same zip path, or same build params. */
+function sameRequest(a: ArtifactRequest, b: ArtifactRequest): boolean {
+  if (a.kind === "zip" && b.kind === "zip") return a.rawPath === b.rawPath;
+  if (a.kind === "build" && b.kind === "build") {
+    return (
+      a.params.project === b.params.project &&
+      a.params.gitRef === b.params.gitRef &&
+      a.params.version === b.params.version &&
+      sameVariants(a.params.variants, b.params.variants)
+    );
+  }
+  return false;
+}
+
+/** Order-sensitive equality for two optional variant lists (both absent counts as equal). */
+function sameVariants(
+  a: readonly string[] | undefined,
+  b: readonly string[] | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  return a.length === b.length && a.every((value, i) => value === b[i]);
 }

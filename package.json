@@ -37,8 +37,10 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.61.1",
+    "@types/adm-zip": "^0.5.8",
     "@types/node": "^24.13.2",
     "@types/pngjs": "^6.0.5",
+    "adm-zip": "^0.5.18",
     "allure": "^3.14.0",
     "allure-playwright": "^3.10.2",
     "apvm-napi": "github:wp-media/automation-plugin-version-manager#cli/v3.0.0",

@@ -2,6 +2,7 @@ import { defineConfig, devices } from "@playwright/test";
 import type { PlaywrightTestConfig, Project } from "@playwright/test";
 import { defineBddConfig } from "playwright-bdd";
 
+import { registerManifest } from "../artifacts/registry";
 import { registerPool, routingMetadata } from "./metadata";
 import { reporters } from "./reporting";
 import { dirs, selectedCells } from "./run-context";
@@ -41,9 +42,10 @@ function editionFilter(edition: Edition | undefined): string | undefined {
 }
 
 /**
- * Builds the config for one product. Each `cell` becomes a pair of projects: a setup
- * project that authenticates the cell's site pool, and the BDD project that depends on
- * it. A run targets exactly one cell via `--project=<cell>` (plan §3.2), which keeps
+ * Builds the config for one product. Each `cell` becomes three projects: two sibling setup
+ * projects — one authenticates the cell's site pool, one resolves & verifies its plugin
+ * artifacts — and the BDD project that depends on both (either failing skips the scenarios,
+ * plan §2.6). A run targets exactly one cell via `--project=<cell>` (plan §3.2), which keeps
  * the global `parallelIndex` in range for the worker→site binding; selecting more than
  * one cell at once is rejected fail-fast below.
  */
@@ -51,6 +53,10 @@ export function createProductConfig(
   product: ProductConfig,
 ): PlaywrightTestConfig {
   const cells = Object.keys(product.sites);
+
+  // Publish the product's artifact manifest to the per-process registry the artifacts setup
+  // reads by product name (it never imports product configs — see artifacts/registry.ts).
+  registerManifest(product.name, product.artifacts);
 
   // Resolve the targeted cell. Selecting multiple cells in one invocation is unsafe
   // (parallelIndex is global), so fail fast instead of silently mis-sizing workers.
@@ -78,8 +84,10 @@ export function createProductConfig(
     // which Playwright serializes into reports (see config/metadata.ts).
     registerPool(product.name, cell, pooled);
     const setupName = `setup:${cell}`;
+    const artifactsName = `artifacts:${cell}`;
     const firstSite = pooled[0];
     const tags = editionFilter(edition);
+    const routing = routingMetadata(product.name, cell, edition);
 
     return [
       {
@@ -87,7 +95,15 @@ export function createProductConfig(
         testDir: "src/common/auth",
         testMatch: /auth\.setup\.ts$/,
         use: { ...DESKTOP },
-        metadata: routingMetadata(product.name, cell, edition),
+        metadata: routing,
+      },
+      {
+        // Sibling of the auth setup (no dependency between them): resolves & verifies the
+        // cell's plugin artifacts. Needs no browser. Skips on placeholder-only pools.
+        name: artifactsName,
+        testDir: "src/common/artifacts",
+        testMatch: /artifacts\.setup\.ts$/,
+        metadata: routing,
       },
       {
         name: cell,
@@ -103,14 +119,14 @@ export function createProductConfig(
           ...(firstSite ? { baseURL: firstSite.baseURL } : {}),
         },
         outputDir: cellDirs.output,
-        dependencies: [setupName],
+        dependencies: [setupName, artifactsName],
         // Defensive upper bound only: per-project `workers` caps how many workers a
         // project uses, not which parallelIndex slots it sees, so it cannot by itself
         // keep parallelIndex within a smaller pool. Correctness rests on the
         // single-cell global `workers` below.
         workers: pool.length > 0 ? pool.length : 1,
         retries: isCI ? 2 : 0,
-        metadata: routingMetadata(product.name, cell, edition),
+        metadata: routing,
       },
     ];
   });

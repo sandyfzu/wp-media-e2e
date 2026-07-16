@@ -2,10 +2,16 @@ import { test, expect } from "@playwright/test";
 
 import {
   getArtifacts,
+  getManifest,
   registerArtifacts,
+  registerManifest,
   resetArtifactsRegistry,
 } from "./registry";
-import type { CellArtifacts, ResolvedArtifact } from "./types";
+import type {
+  CellArtifacts,
+  ProductArtifacts,
+  ResolvedArtifact,
+} from "./types";
 
 /**
  * Unit tests for the per-process resolved-artifacts registry. The registry is module-global
@@ -61,4 +67,38 @@ test("reset clears all entries", () => {
   registerArtifacts("wp-rocket", "nginx", CELL);
   resetArtifactsRegistry();
   expect(() => getArtifacts("wp-rocket", "nginx")).toThrow();
+});
+
+/** A minimal editionless manifest for the manifest-registry tests. */
+const MANIFEST: ProductArtifacts = {
+  project: "wp-rocket",
+  defaultRef: { plugin: "develop" },
+  version: { kind: "embedded" },
+  edition: {
+    kind: "editionless",
+    identity: {
+      slug: "wp-rocket",
+      mainFile: "wp-rocket.php",
+      pluginName: "WP Rocket",
+    },
+  },
+};
+
+test.describe("manifest registry", () => {
+  test("register then get returns the same manifest", () => {
+    registerManifest("wp-rocket", MANIFEST);
+    expect(getManifest("wp-rocket")).toBe(MANIFEST);
+  });
+
+  test("get throws an actionable error when nothing was registered", () => {
+    expect(() => getManifest("wp-rocket")).toThrow(
+      /no manifest registered for "wp-rocket"/,
+    );
+  });
+
+  test("reset clears registered manifests too", () => {
+    registerManifest("wp-rocket", MANIFEST);
+    resetArtifactsRegistry();
+    expect(() => getManifest("wp-rocket")).toThrow();
+  });
 });

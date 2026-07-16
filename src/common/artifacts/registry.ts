@@ -12,7 +12,46 @@
  * because resolution happens after the config is built, when metadata is already fixed.
  */
 
-import type { CellArtifacts } from "./types";
+import type { CellArtifacts, ProductArtifacts } from "./types";
+
+// ── Manifest registry (product → its artifact manifest) ─────────────────────────
+
+/**
+ * Per-process store of each product's artifact manifest, populated as a side effect of
+ * building the Playwright config (`createProductConfig`) — the same idiom as the pool
+ * registry in `config/metadata.ts`. The artifacts setup project reads it by product name
+ * (its only routing input), avoiding a `common → projects` import that would break the
+ * product-agnostic layering. The manifest is non-secret but stays out of project metadata
+ * to keep that channel to bare routing (plan §1.3).
+ */
+const manifests = new Map<string, ProductArtifacts>();
+
+/** Registers a product's artifact manifest. Called while building the config, in each process. */
+export function registerManifest(
+  product: string,
+  manifest: ProductArtifacts,
+): void {
+  manifests.set(product, manifest);
+}
+
+/**
+ * Returns a product's registered artifact manifest.
+ *
+ * @throws Error if none was registered for `product` in this process — meaning the config was
+ * not built here (a programming error, not bad input).
+ */
+export function getManifest(product: string): ProductArtifacts {
+  const manifest = manifests.get(product);
+  if (manifest === undefined) {
+    throw new Error(
+      `[artifacts] no manifest registered for "${product}". ` +
+        "The Playwright config must be built in this process before it is read.",
+    );
+  }
+  return manifest;
+}
+
+// ── Resolved-artifacts registry (per-process memo of a cell's resolved zips) ─────
 
 /** In-process store: `"<product>::<cell>"` → the cell's resolved artifacts. */
 const registry = new Map<string, CellArtifacts>();
@@ -53,7 +92,8 @@ export function getArtifacts(product: string, cell: string): CellArtifacts {
   return artifacts;
 }
 
-/** Clears the registry. For test isolation only — production code registers once per execution. */
+/** Clears both registries. For test isolation only — production code registers once per execution. */
 export function resetArtifactsRegistry(): void {
   registry.clear();
+  manifests.clear();
 }
