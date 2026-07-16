@@ -31,6 +31,37 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
 
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+      # src/common/pages + src/common/visual specs render via a real page (page.setContent), so
+      # Chromium must be installed even though these are "unit" tests with no external environment.
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:unit
+      - name: Upload report on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-results
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
   e2e-smoke:
     name: E2E smoke (Chromium)
     runs-on: ubuntu-24.04
@@ -70,15 +101,15 @@ jobs:
   # "skipped check counts as passed" footgun.
   gate:
     name: CI gate
-    needs: [quality, e2e-smoke]
+    needs: [quality, unit, e2e-smoke]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Require all jobs to pass
         run: |
-          echo "quality=${{ needs.quality.result }}  e2e-smoke=${{ needs.e2e-smoke.result }}"
-          if [ "${{ needs.quality.result }}" != "success" ] || [ "${{ needs.e2e-smoke.result }}" != "success" ]; then
+          echo "quality=${{ needs.quality.result }}  unit=${{ needs.unit.result }}  e2e-smoke=${{ needs.e2e-smoke.result }}"
+          if [ "${{ needs.quality.result }}" != "success" ] || [ "${{ needs.unit.result }}" != "success" ] || [ "${{ needs.e2e-smoke.result }}" != "success" ]; then
             echo "::error::CI gate failed — one or more jobs did not pass."
             exit 1
           fi
