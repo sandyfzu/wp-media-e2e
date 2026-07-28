@@ -368,6 +368,7 @@ these before starting related work — they hold the current plan, not history:
 
 - [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md) — full design rationale and decisions.
 - [`docs/plans/plugin-artifact-management-plan.md`](docs/plans/plugin-artifact-management-plan.md) — plugin artifact management.
+- [`docs/plans/phase-6-feature-porting-plan.md`](docs/plans/phase-6-feature-porting-plan.md) — feature porting (BackWPup first); supersedes the parent plan's Phase 6.
 
 ## When to update these docs
 
