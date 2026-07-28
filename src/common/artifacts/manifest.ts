@@ -73,7 +73,7 @@ export function resolveVariant(
  * the edition's identity.
  *
  * @param edition - the cell's edition; required for edition-ful products, ignored otherwise.
- * @throws Error under the same conditions as {@link resolveVariants}.
+ * @throws Error under the same conditions as {@link resolveVariant}.
  */
 export function resolveIdentity(
   manifest: ProductArtifacts,

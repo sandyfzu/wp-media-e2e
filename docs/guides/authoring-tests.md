@@ -23,6 +23,7 @@ src/
 │   ├── steps/                    # generic steps (e.g. world.steps.ts)
 │   ├── pages/                    # page objects (e.g. plugins.page.ts)
 │   ├── visual/                   # visual helpers (ab.ts, screenshot.ts, …)
+│   ├── artifacts/                # the plugin zips under test (see ../architecture/plugin-artifacts.md)
 │   └── wp/                       # WordPress automation (see ../architecture/wordpress-automation.md)
 └── projects/<product>/
     ├── config/<product>.config.ts   # ProductConfig + sites.json/sites.*.json/sites.example.json
@@ -46,21 +47,27 @@ instance with these fixtures:
 | `site`      | test     | The [`SiteConfig`](../../src/common/config/types.ts) bound to this worker. Throws if no pool.                  |
 | `edition`   | test     | The cell's `Edition` (`free`/`pro`). **Throws** if read in an editionless cell.                                |
 | `boundSite` | worker   | The site pinned to this worker (by `parallelIndex`), or `undefined` when there is no pool. Underpins `site`.   |
-| `pluginArtifact` | test | `pluginArtifact(role)` → the resolved zip for this cell (`"plugin"` = under test, `"previous"` = compare-against). `.zipPath` feeds `installPlugin`. **Throws** if the role is unsupported (plan §5) or the artifacts setup did not run. |
+| `pluginArtifact` | test | `pluginArtifact(role)` → the resolved zip for this cell (`"plugin"` = under test, `"previous"` = compare-against). `.zipPath` feeds `stageAndInstallPlugin`. **Throws** if the role is unsupported for the product or the artifacts setup did not run — see [plugin-artifacts.md](../architecture/plugin-artifacts.md). |
 | `baseURL`   | (override) | Points at the bound site, so relative navigations target it.                                                  |
 | `storageState` | (override) | The bound site's saved login, **or** an empty session for `@noauth` scenarios.                            |
 
 Use `site.transport` to drive the WordPress automation layer, and `page` (the
-standard Playwright fixture) for browser interaction. To install the zip under
-test, pass `pluginArtifact("plugin").zipPath` to
-[`installPlugin`](../architecture/wordpress-automation.md) (via `site.transport`);
-the artifacts setup has already built and verified it.
+standard Playwright fixture) for browser interaction. To install the zip under test,
+pass `pluginArtifact("plugin").zipPath` to
+[`stageAndInstallPlugin`](../architecture/wordpress-automation.md#site-staging--file-transfer-wpstagingts)
+(via `site.transport`); the artifacts setup has already built and verified it.
 
-> **`zipPath` is a path on the *runner*.** That works directly only for a `local`
-> transport, which shares the filesystem with the site. On `ssh`/`docker` the remote
-> `wp` cannot see it, so the artifact has to be copied onto the target first — the
-> per-site staging layer that does this is still pending (plan §2.9 / Phase 5). Until
-> it lands, install-from-artifact steps are `local`-only.
+```ts
+await stageAndInstallPlugin(site.transport, pluginArtifact("plugin").zipPath, {
+  activate: true,
+});
+```
+
+> **`zipPath` is a path on the _runner_.** Passing it straight to `installPlugin`
+> works only for a `local` transport, which shares the filesystem with the site. On
+> `ssh`/`docker` the remote `wp` cannot see it, so the artifact must be copied onto
+> the target first — which is exactly what `stageAndInstallPlugin` does (and
+> `stageArtifact` for non-plugin files).
 
 ## Tags
 

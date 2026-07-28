@@ -80,11 +80,22 @@ Discriminated on `mode` — see
 [wordpress-automation.md](../architecture/wordpress-automation.md) for dispatch
 detail.
 
-| `mode`   | Required fields                                          |
-| -------- | ------------------------------------------------------- |
-| `local`  | `rootDir`                                               |
-| `docker` | `container`                                             |
-| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`         |
+| `mode`   | Required fields                                  | Optional fields          |
+| -------- | ------------------------------------------------ | ------------------------ |
+| `local`  | `rootDir`                                        | `stagingDir`             |
+| `docker` | `container`                                      | `rootDir`, `stagingDir`  |
+| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`  | `stagingDir`             |
+
+- `rootDir` is the WordPress root (the directory holding `wp-load.php`), and the
+  working directory every WP-CLI command runs in. It is **optional for `docker`**
+  only because the container's `WORKDIR` already is that root; declare it to skip the
+  one-off `pwd` lookup, or when a custom image's `WORKDIR` differs.
+- `stagingDir` overrides where test artifacts (plugin zips, imports, dumps) are
+  copied **on that site** — absolute, or relative to `rootDir`. It beats the global
+  `E2E_SITE_STAGING_DIR`; both default to `.e2e_temp` under the WordPress root. It
+  must be a **dedicated** directory (cleanup removes it whole), so the WordPress root
+  itself, any ancestor of it, and top-level paths like `/var` are rejected. See
+  [wordpress-automation.md](../architecture/wordpress-automation.md#site-staging--file-transfer-wpstagingts).
 
 ## Editions (Free / Pro)
 
@@ -97,8 +108,8 @@ filter (`pro` → `not @free`, `free` → `not @pro`).
 **Edition vs. variant.** `edition` (our binary Free/Pro _behavioral_ tier) is distinct
 from an APVM build **variant** (`free`/`pro-de`/`pro-en`). Edition is language-blind and
 drives scenarios/POM; a variant is the exact package APVM builds. The artifacts manifest
-maps each edition to the single variant it builds (`pro` → `pro-en`) — see the
-[plugin-artifact management plan](../plans/plugin-artifact-management-plan.md).
+maps each edition to the single variant it builds (`pro` → `pro-en`) — see
+[plugin-artifacts.md](../architecture/plugin-artifacts.md).
 
 ## `.env` ([`.env.example`](../../.env.example))
 
@@ -121,6 +132,7 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 | `OUTPUT_ROOT` | `test-results`         | Ephemeral Playwright artifact root.                                     |
 | `AUTH_ROOT`   | `.auth`                | Ephemeral `storageState` root.                                          |
 | `ARTIFACTS_ROOT` | `.artifacts`        | Resolved plugin-zip root (**wiped & rebuilt each run**; see Plugin artifacts). |
+| `E2E_SITE_STAGING_DIR` | `.e2e_temp`   | Where artifacts are staged **on each site** (absolute, or relative to its WordPress root). A site's own `transport.stagingDir` wins over this. |
 
 ### Plugin artifacts (build & verify)
 
@@ -128,7 +140,7 @@ Which plugin zips a run resolves, builds (via [APVM](https://github.com/wp-media
 and verifies. Two **roles** per product: `plugin` (the artifact under test) and
 `previous` (an older artifact some tests compare against — e.g. an update path).
 Full model and rationale:
-[plugin-artifact-management-plan.md](../plans/plugin-artifact-management-plan.md).
+[plugin-artifacts.md](../architecture/plugin-artifacts.md).
 
 | Var                    | Applies              | Purpose                                                                      |
 | ---------------------- | -------------------- | ---------------------------------------------------------------------------- |
@@ -156,13 +168,14 @@ Rules (enforced in
   is wiped whole every time it resolves. Pointing a role at a zip inside *its own* cell's
   directory (e.g. reusing the previous run's build) is rejected up front rather than deleting
   the file; anywhere else under the tree simply disappears the next time that cell runs.
-- **Version policy.** BackWPup **requires** a version to build, defaulting to `9.99.99`
-  (`plugin`) / `9.99.98` (`previous`) — staggered so `previous` is older; WP Rocket /
-  Imagify embed their version, so a `_VERSION` var is optional but, when set, rewrites the
-  built artifact's version. A `_VERSION` is ignored (with a warning) alongside a `_ZIP`
-  path or a `release:*` ref.
-- **Unsupported role.** `E2E_PREVIOUS_*` vars are ignored (with a warning) for a product
-  with no `previous` role yet (BackWPup — see the plan's §5).
+- **Version policy.** BackWPup **requires** a version to build; its `plugin` role defaults to
+  `9.99.99` (a `previous` role, when added, gets its own default one patch lower so it is
+  always the older artifact). WP Rocket / Imagify embed their version, so a `_VERSION` var is
+  optional but, when set, rewrites the built artifact's version. A `_VERSION` is ignored (with
+  a warning) alongside a `_ZIP` path or a `release:*` ref.
+- **Unsupported role.** `E2E_PREVIOUS_*` vars are ignored (with a warning) for a product with
+  no `previous` role yet (BackWPup — see
+  [plugin-artifacts.md](../architecture/plugin-artifacts.md#deferred-obligations)).
 
 ### Fleet health check (`npm run healthcheck`)
 

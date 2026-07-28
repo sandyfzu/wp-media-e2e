@@ -218,6 +218,9 @@ Agreed behaviour for v1:
   report dirs (e.g. a build number); a later `report:prune` keeps the newest *N*.
 - **No merged report.** Each unit writes its own report folder (§6.3).
 - **Spawn-as-many-as-you-want, isolated** — see §3.5.
+- **Pre-warm the plugin artifacts first.** Call `warmArtifacts` before spawning, so the zips every unit
+  needs are built once into APVM's cache instead of once per cell. Already shipped (`npm run
+  artifacts:warm`); details and the Free/Pro single-build optimization are under Phase 9 (§9).
 
 **Future (planned, not designed here):** a long-running / continuous Auto E2E mode that keeps the
 orchestrator alive (e.g. under **PM2**), with a **CLI** to start/stop/kill individual cells, tail each
@@ -514,13 +517,25 @@ None of these is per-site, so edition is declared **once per cell**:
 // An editionless cell is just its pool (WP Rocket):  "nginx": [ { /* site */ } ]
 ```
 
-**Plugin package selection.** The product config maps each edition to its package; the plugin Before
-hook (§7.3) installs the cell's edition's package:
+**Plugin package selection — superseded by the artifacts capability.** This section originally
+sketched a static per-edition zip map in the product config
+(`plugin: { free: "…/backwpup-free.zip", pro: "…/backwpup-pro.zip" }`). That map is **gone**: a
+committed path to a hand-built zip cannot say *which build* it holds, and nothing verified that a
+`pro` cell was actually handed the Pro package. Both are now solved by the **plugin-artifact
+management** capability (implemented; design in
+[plugin-artifacts.md](../architecture/plugin-artifacts.md), rationale in the
+[artifact plan](plugin-artifact-management-plan.md)):
 
-```ts
-// backwpup.config.ts
-plugin: { free: "…/backwpup-free.zip", pro: "…/backwpup-pro.zip" }, // installed per the cell's edition
-```
+- Each product declares an `artifacts` manifest instead of a zip map. For an edition-ful product it
+  maps **edition → the one APVM variant** to build (`pro` → `pro-en`, `free` → `free`) plus the
+  **identity** a zip of that edition must have (slug + `Plugin Name:` header).
+- A per-cell `artifacts:<cell>` setup project resolves that edition's zip for the execution (build a
+  git ref through APVM, or copy an operator-provided zip) and a static preflight **asserts** the
+  identity — so a `pro` cell physically cannot install the Free package.
+- The plugin `Before` hook (§7.3) consumes the result through the `pluginArtifact("plugin")` fixture
+  rather than a config constant, so "which edition" and "which build" stay one decision made per run.
+- Edition (`free`/`pro`, ours) and APVM variant (`free`/`pro-en`/`pro-de`) are deliberately distinct
+  namespaces — the manifest is the projection between them.
 
 **Applicability via tags**, with a low-tax default (most scenarios need no tag):
 
@@ -588,7 +603,9 @@ edition resolves cleanly by product:
 **What it takes** (a thin addition, landing with Phase 6): an `Edition` type and the optional per-cell
 `edition` carried in routing metadata (`types.ts` / `metadata.ts`); the one all-or-none check in
 `sites.ts`; the `editionFilter` derivation in the factory (§4.4); the `edition` fixture; and the
-edition→package install map consumed by the plugin Before hook (§7.3).
+per-edition plugin install in the Before hook (§7.3), which reads the cell's resolved-and-verified zip
+from the `pluginArtifact` fixture. *(All of the above except the Before hook is now implemented — the
+edition model shipped with the artifacts capability rather than waiting for Phase 6.)*
 
 ---
 
@@ -965,7 +982,10 @@ cell manually with **no env vars** and the `@noauth` smoke is green on a fresh c
 **different** cells at once never conflicts; ephemeral build/state dirs **overwrite in place** while
 reports accumulate per cell; no credential appears in any report — no orchestrator yet.
 
-**Phase 3 — WordPress automation layer.** `exec.ts` (execa/node-ssh, `exitCode` on every mode); WP-CLI
+**Phase 3 — WordPress automation layer.** `exec.ts` (execa/node-ssh, `exitCode` on every mode, plus the
+per-transport **file transfer** `copyIntoTarget` and `wpRootDir` — WP-CLI reads files from the *site's*
+filesystem, so a runner path is useless to a remote `wp`); `staging.ts` (the per-site `.e2e_temp`
+staging area built on those primitives); WP-CLI
 helpers + UI plugin page-objects with idempotent cleanup vs. asserted deletion and distinct errors; the custom
 `docker compose` (Apache **and** Nginx + vhost). *Acceptance:* `wp core version` works in each mode and
 against both Apache and Nginx; deletion-under-test passes for an installed plugin; a `Before`/`After`
@@ -1008,11 +1028,21 @@ pixel difference, and masking ignores a differing region. The `@visual` scenario
 
 **Phase 6 — Feature porting (per product) — improve, don't copy.** Rewrite to modern idioms
 (web-first assertions, role/label locators, fixtures, `storageState`); port auth, POM, tag-scoped hooks,
-and the `debug.log` scan; migrate `wp-rocket` and `backwpup`. For BackWPup, land the **editions** model
-(§4.5): the per-cell `edition` (carried in routing metadata) + `Edition` type, the all-or-none edition
-check, the edition→package install map, the `editionFilter` derivation, and the `edition` fixture; tag
-scenarios `@free`/`@pro` (untagged = both). *Acceptance:* existing smoke features stay green; each cell
-installs its edition's package and `@pro`/`@free` scenarios run only on their edition's cells; a review
+and the `debug.log` scan; migrate `wp-rocket` and `backwpup`. The **editions** model (§4.5) is already
+in place (`Edition` type, per-cell `edition` in routing metadata, the all-or-none check, `editionFilter`,
+the `edition` fixture); what remains here is tagging scenarios `@free`/`@pro` (untagged = both) and the
+**plugin-install hook**, which must:
+
+- take the cell's zip from the `pluginArtifact("plugin")` fixture — already resolved *and* identity-verified
+  for this execution by the `artifacts:<cell>` setup — instead of any config-declared path (§4.5);
+- **stage it onto the site first** for `ssh`/`docker` targets (`stageAndInstallPlugin`, or
+  `stageArtifact` + `installPlugin`): the fixture yields a path on the *runner*, which only a `local`
+  transport's `wp` can read. See [wordpress-automation.md](../architecture/wordpress-automation.md);
+- wire `cleanSiteStaging` into the **worker teardown**, beside `disposeConnections`, as best-effort
+  cleanup so a run leaves no `.e2e_temp` behind on the site and never fails a passing scenario.
+
+*Acceptance:* existing smoke features stay green; each cell installs its edition's package (over `ssh`
+and `docker`, not only `local`) and `@pro`/`@free` scenarios run only on their edition's cells; a review
 checklist confirms no 1:1 carry-over. (Check retries in this phase, maybe 0 retries for local is not the best, must assess this)
 
 **Phase 7 - Tests output.** Display a very good progress in the terminal/console when tests are running, displaying how many tests were run, how many remaining, how many passed, how many failed, etc. And every time a test/scenario fails, display the name of the failed test/scenario + the failed step in the terminal (if not the default by Playwright).
@@ -1026,6 +1056,43 @@ product's sites file, spawn **all** by default with an optional `CONCURRENCY` ca
 **PM2**) and a **CLI** to start/stop/kill cells, tail per-cell logs, and restart. A standalone
 **`report:prune`** (keep the newest *N* reports per cell) bounds the accumulating report history and can
 land independently. None of this requires changing the E2E project's run model.
+
+*Plugin artifacts — pre-warm before spawning.* The orchestrator should call `warmArtifacts`
+(`src/common/artifacts/warm.ts`, already shipped and usable standalone as `npm run artifacts:warm`)
+**before** it spawns any cell, so N cells wanting one uncached build do not each build it and build
+minutes never count against test wall-time. It plans through the same request builder the per-cell
+resolver uses, which is what makes a warmed cache entry the one a run actually looks up (the parity
+invariant). Design: [plugin-artifacts.md](../architecture/plugin-artifacts.md).
+
+*Future optimization — one build for Free **and** Pro when the ref matches.* Today a `free@…` and a
+`pro@…` cell of the same product warm as **two independent APVM builds** of the very same commit and
+version, differing only in which package gets packaged — and a cold build is expensive (a real one
+measured **13.7 minutes** of composer/npm). **The identification problem is already solved** — nothing
+new needs discovering:
+
+- `buildArtifactPlan` derives, per `(product × cell)` and role, the exact
+  `{ project, gitRef, version?, variants? }` APVM will be given, from data alone (manifest + the cell's
+  edition + `E2E_*` env) — no clone, no network. So every artifact every cell will build is known
+  up front, refs and versions included.
+- `warm.ts` already **dedupes** on that tuple (`project::gitRef::version::variants`). Free vs Pro of one
+  product therefore produce two entries differing **only** in the `variants` segment whenever the ref
+  and version agree — i.e. the grouping key for this optimization is that same tuple *minus* `variants`.
+
+The change is confined to the warmer: group the deduped build requests by `{project, gitRef, version}`
+and **union their variants** into one `warmCache({ …, variants: ["free", "pro-en"] })` call, so a single
+build request produces both packages instead of two requests repeating the same source preparation
+(APVM reports `origin` per artifact, so a partial build where one variant is cached and the other is
+built is a supported outcome). Measure the actual saving when implementing it — APVM owns how much work
+a multi-variant build shares internally. Note the ids are
+APVM's **variants** (`free`, `pro-en`), not our editions (`free`, `pro`) — the manifest is the mapping.
+Each cell's own per-role `build()` still asks for its single variant afterwards and gets a cache copy:
+APVM's cache is keyed `<project>/commits/<version>/<commit>/` with the **per-variant** zips inside
+(verified on a real cache directory holding `backwpup-…` and `backwpup-pro-en-…` side by side), so a
+subset request hits what a multi-variant warm populated.
+
+Worth it only when Free and Pro cells routinely share a ref (the default `develop`/`develop` case, i.e.
+the common one). **Not required for the initial orchestrator** — the pre-warm above already removes the
+duplicate-build waste *across* cells; this removes the duplicate *clone + install* between editions.
 ((planed): Having a live http server/page to control nodes/cells running, start, stop, see logs, reports, etc, like a dashboard, apart from CLI. (idea): Having a way to stream the headless display buffer as a video through the previously mentioned http server/page (expore). (Planed): Having a way to select plugins versions/refs so it can build on next cell's run. (Planed): Having a way to select the plugins to run on the next cell's run, so it can build on next cell's run, and having a way to select "once", "always", etc, so if we select one version/ref (apvm), and we select "once", this will be overriden for one/next run, and the following runs will use the default/previous one selected as "always". (planed): Only one instance of the orchestrator should be running at a time)
 
 **Phase 10 — Cleanup & validation.** `deps:check` (e.g. `depcheck`) to catch unused deps; ensure no
@@ -1052,6 +1119,7 @@ dropped dependency reappears; `lint`/`typecheck`/`format:check` green; reports g
 | 13 | Execution / parallelism | **(product × cell)** run units, site pools, orchestrator; per-cell reports. §3 — *new capability*. |
 | 14 | Plugin editions (Free/Pro) | BackWPup Free & Pro as **one product**; edition is a **per-cell** property selecting the plugin package + scenario filter (`@free`/`@pro`) + POM branch. §4.5 — *new capability*. |
 | 15 | Credential safety | Site secrets resolved via an in-process registry, never via report-serialized `metadata`. §3.3 — *new capability*. |
+| 16 | Plugin zip selection (`new_release` / `previous_stable` paths) | Per-execution resolution: `plugin`/`previous` **roles** built from any git ref through APVM (or an operator zip), identity-verified per product **and edition** before scenarios run, consumed via the `pluginArtifact` fixture and staged onto `ssh`/`docker` targets. [plugin-artifacts.md](../architecture/plugin-artifacts.md) — *new capability*. |
 
 ---
 

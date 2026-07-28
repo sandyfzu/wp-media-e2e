@@ -18,7 +18,27 @@ export type { ProductArtifacts };
 /** WordPress hosting mode — decides how WP-CLI is dispatched (see the exec layer, a later phase). */
 export type ServerMode = "ssh" | "docker" | "local";
 
-export interface SshTransport {
+/**
+ * Fields every transport shares, independent of how commands reach the site. Kept on a common
+ * base so a site-level knob is declared once instead of three times; the union stays
+ * discriminated on `mode`.
+ */
+interface TransportBase {
+  /**
+   * Where this site's staging area lives — the directory on the **target** that test artifacts
+   * (plugin zips, WXR imports, DB dumps) are copied into before WP-CLI reads them. Absolute, or
+   * relative to the WordPress root. Defaults to `.e2e_temp` under the WordPress root, which is
+   * also the web docroot on our environments; override it when the transport's user cannot write
+   * there, or to keep staged files out of the docroot. Takes precedence over
+   * `E2E_SITE_STAGING_DIR` (a site's own declaration beats a global default).
+   *
+   * Must be a **dedicated** directory: cleanup removes it whole, so the WordPress root itself,
+   * any ancestor of it, and top-level paths are rejected (see `wp/staging.ts`).
+   */
+  readonly stagingDir?: string;
+}
+
+export interface SshTransport extends TransportBase {
   readonly mode: "ssh";
   readonly host: string;
   readonly username: string;
@@ -26,12 +46,19 @@ export interface SshTransport {
   readonly rootDir: string;
 }
 
-export interface DockerTransport {
+export interface DockerTransport extends TransportBase {
   readonly mode: "docker";
   readonly container: string;
+  /**
+   * WordPress root **inside** the container. Optional because the exec layer runs every command
+   * at the container's `WORKDIR`, which is the WordPress root in the images we use — so a
+   * relative path already resolves correctly and the absolute root can be read back with `pwd`.
+   * Declare it to skip that round-trip, or when a custom image's `WORKDIR` is not the WP root.
+   */
+  readonly rootDir?: string;
 }
 
-export interface LocalTransport {
+export interface LocalTransport extends TransportBase {
   readonly mode: "local";
   /**
    * WordPress root on the host — the directory containing `wp-load.php`. The exec layer runs

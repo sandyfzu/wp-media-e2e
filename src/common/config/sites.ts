@@ -176,9 +176,14 @@ function requireString(value: unknown, path: string): string {
 /** Validates a site's `transport` block into a typed {@link Transport} (discriminated on `mode`). */
 function validateTransport(value: unknown, path: string): Transport {
   if (!isObject(value)) throw new Error(`[sites] ${path} must be an object.`);
+  // Shared across all three modes; omitted from the result when absent so the optional
+  // property is genuinely missing rather than present-and-undefined.
+  const stagingDir = optionalString(value.stagingDir, `${path}.stagingDir`);
+  const base = stagingDir !== undefined ? { stagingDir } : {};
   switch (value.mode) {
     case "ssh":
       return {
+        ...base,
         mode: "ssh",
         host: requireString(value.host, `${path}.host`),
         username: requireString(value.username, `${path}.username`),
@@ -188,13 +193,19 @@ function validateTransport(value: unknown, path: string): Transport {
         ),
         rootDir: requireString(value.rootDir, `${path}.rootDir`),
       };
-    case "docker":
+    case "docker": {
+      // Optional for docker: the container's WORKDIR is the WP root in the images we use.
+      const rootDir = optionalString(value.rootDir, `${path}.rootDir`);
       return {
+        ...base,
         mode: "docker",
         container: requireString(value.container, `${path}.container`),
+        ...(rootDir !== undefined ? { rootDir } : {}),
       };
+    }
     case "local":
       return {
+        ...base,
         mode: "local",
         rootDir: requireString(value.rootDir, `${path}.rootDir`),
       };

@@ -40,7 +40,8 @@ src/
 │   ├── steps/              # generic step definitions
 │   ├── pages/              # Page Object Model (e.g. plugins.page.ts)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
-│   └── wp/                 # WordPress automation over WP-CLI (exec, plugin, log, db, errors)
+│   ├── artifacts/          # the plugin zips under test (resolve, verify, consume, pre-warm)
+│   └── wp/                 # WordPress automation over WP-CLI (exec, staging, plugin, log, db, errors)
 └── projects/<product>/
     ├── config/             # <product>.config.ts + sites.json / sites.*.json / sites.example.json
     ├── features/           # *.feature (Gherkin)
@@ -136,14 +137,14 @@ Two surfaces — schema reference in
 Import step builders and fixtures from [`src/common/fixtures.ts`](src/common/fixtures.ts),
 **not** from `playwright-bdd` directly. Available fixtures:
 
-| Fixture                   | Scope  | Purpose                                                                                                        |
-| ------------------------- | ------ | -------------------------------------------------------------------------------------------------------------- |
-| `site`                    | test   | The `SiteConfig` bound to this worker; throws if no pool (tag `@noauth` instead).                              |
-| `edition`                 | test   | The cell's `free`/`pro` edition; throws in editionless cells.                                                  |
-| `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                                               |
-| `pluginArtifact`          | test   | `pluginArtifact(role)` → the resolved zip under test; `.zipPath` feeds `installPlugin` (see Plugin artifacts). |
-| `baseURL` (override)      | —      | Points navigation at the bound site.                                                                           |
-| `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                               |
+| Fixture                   | Scope  | Purpose                                                                                                                |
+| ------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------- |
+| `site`                    | test   | The `SiteConfig` bound to this worker; throws if no pool (tag `@noauth` instead).                                      |
+| `edition`                 | test   | The cell's `free`/`pro` edition; throws in editionless cells.                                                          |
+| `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                                                       |
+| `pluginArtifact`          | test   | `pluginArtifact(role)` → the resolved zip under test; `.zipPath` feeds `stageAndInstallPlugin` (see Plugin artifacts). |
+| `baseURL` (override)      | —      | Points navigation at the bound site.                                                                                   |
+| `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                       |
 
 **Auth fixture / setup:** [`src/common/auth/auth.setup.ts`](src/common/auth/auth.setup.ts)
 is a dependency project that runs before any BDD scenarios. It does two things in order:
@@ -184,7 +185,9 @@ Every run resolves **and verifies** the plugin zips it will test before any
 scenario runs. Two **roles** per product: `plugin` (the artifact under test) and
 `previous` (an older artifact some tests compare against, e.g. an update path). The
 whole capability is product-agnostic under
-[`src/common/artifacts/`](src/common/artifacts/).
+[`src/common/artifacts/`](src/common/artifacts/); the full design — manifest,
+request model, resolution lifecycle, preflight, pre-warm — is in
+**[docs/architecture/plugin-artifacts.md](docs/architecture/plugin-artifacts.md)**.
 
 - **Resolution + preflight** run in the `artifacts:<cell>` setup project (a sibling
   of the auth setup; the BDD project depends on both). Per role it either **builds**
@@ -199,12 +202,11 @@ whole capability is product-agnostic under
   `gh auth login`. WP Rocket / Imagify are public (a token there only raises rate
   limits).
 - **Consumption:** a scenario reads its zip through the `pluginArtifact` fixture —
-  `installPlugin(site.transport, pluginArtifact("plugin").zipPath, { activate: true })`.
+  `stageAndInstallPlugin(site.transport, pluginArtifact("plugin").zipPath, { activate: true })`.
   It reads `resolution.json` (or the in-process memo). Requesting a role the product
   does not support throws (see the MUST below). **`zipPath` is a path on the runner**,
-  so installing it directly works only on a `local` transport; `ssh`/`docker` need the
-  artifact copied onto the site first, which the pending per-site staging layer will
-  own (plan §2.9).
+  so `installPlugin` alone works only on a `local` transport — `ssh`/`docker` need the
+  artifact staged onto the site first (see the WordPress automation layer below).
 - **Overrides:** six `E2E_*` env vars select a git ref **or** a prebuilt zip per role
   (ref XOR zip) — full table and rules in
   [configuration.md](docs/guides/configuration.md).
@@ -241,9 +243,20 @@ ssh). Highlights — full reference in
 
 - Commands are file + args arrays (never shell strings) → no injection.
 - `exec` / `wpCli` return a structured `ExecResult`; callers branch on `exitCode`.
+  Every command runs with the WordPress root as its working directory (`rootDir` for
+  `local`/`ssh`, the container `WORKDIR` for `docker`).
+- **Files must reach the site before `wp` can read them.** `exec.ts` also owns the
+  transfer primitives (`wpRootDir`, `copyIntoTarget` → `fs` copy / `docker cp` /
+  SFTP), and [`wp/staging.ts`](src/common/wp/staging.ts) builds the per-site
+  `.e2e_temp/<category>/` staging area on top: `stageArtifact` (any artifact),
+  `stageAndInstallPlugin` (stage + install a zip), `cleanSiteStaging` (teardown,
+  best-effort). Overridable per site (`transport.stagingDir`) or globally
+  (`E2E_SITE_STAGING_DIR`).
 - Plugin lifecycle separates idempotent **cleanup** (`ensurePluginAbsent`) from
-  asserted **removal under test** (`uninstallPlugin`); both run
-  `wp plugin uninstall --deactivate` (files + DB footprint); typed errors in `wp/errors.ts`.
+  asserted **removal under test** (`uninstallPlugin`); both **deactivate as their own
+  WP-CLI call**, then run plain `wp plugin uninstall` (files + DB footprint) — never
+  `uninstall --deactivate`, which makes a plugin's own cleanup skip itself; typed
+  errors in `wp/errors.ts`.
 - UI plugin actions live in the [`PluginsPage`](src/common/pages/plugins.page.ts) page object.
 
 ### Debug-log feature
@@ -343,6 +356,7 @@ the gates yourself.
 | You need the operational quick-start (install, run, report, Docker).             | [`README.md`](README.md)                                                                 |
 | You're touching the run/config machinery or wondering about cells/pools/workers. | [`docs/architecture/execution-model.md`](docs/architecture/execution-model.md)           |
 | You're working with WP-CLI, transports, plugin lifecycle, or debug-log.          | [`docs/architecture/wordpress-automation.md`](docs/architecture/wordpress-automation.md) |
+| You're touching how the plugin zips under test are resolved, built, or verified. | [`docs/architecture/plugin-artifacts.md`](docs/architecture/plugin-artifacts.md)         |
 | You're adding features, steps, fixtures, or page objects.                        | [`docs/guides/authoring-tests.md`](docs/guides/authoring-tests.md)                       |
 | You're editing sites files, transports, editions, or env vars.                   | [`docs/guides/configuration.md`](docs/guides/configuration.md)                           |
 | You want the full design rationale and decisions.                                | [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md)           |
@@ -401,9 +415,22 @@ Update it when you change anything about:
 Update it when you change anything about:
 
 - Transport modes (`local`, `docker`, `ssh`) or the `exec`/`wpCli` API.
+- The file-transfer primitives (`wpRootDir`, `copyIntoTarget`) or the site staging
+  area (`staging.ts`, `E2E_SITE_STAGING_DIR`, `transport.stagingDir`).
 - The plugin lifecycle functions or their error types.
 - The debug-log API (`readDebugLog`, `clearDebugLog`, `scanDebugLog`, `ScanDebugLogOptions`).
 - Any other `wp/` module (`db.ts`, `errors.ts`, `guards.ts`).
+
+### docs/architecture/plugin-artifacts.md
+
+Update it when you change anything about:
+
+- The `ProductArtifacts` manifest (default refs per role, version policy, edition →
+  variant mapping, identity expectations) or a product's copy of it.
+- The request/plan model, override precedence, or what throws vs. warns.
+- Resolution (the artifacts dir lifecycle, `resolution.json`) or the identity preflight.
+- The `pluginArtifact` consumption path, or pre-warming (`warmArtifacts`, `artifacts:warm`).
+- The APVM pin, or which products/editions exist.
 
 ### docs/guides/authoring-tests.md
 
