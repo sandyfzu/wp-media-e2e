@@ -5,7 +5,7 @@ import type { TestInfo } from "@playwright/test";
 
 import { getPool, readRouting } from "../config/metadata";
 import { isPlaceholderSite } from "../config/sites";
-import { REPO_ROOT, dirs, selectedCells } from "../config/run-context";
+import { REPO_ROOT, dirs, isCellTargeted } from "../config/run-context";
 import { getManifest, registerArtifacts } from "./registry";
 import { buildArtifactPlan, readArtifactEnv } from "./request";
 import { resolveArtifacts, writeResolutionFile } from "./resolve";
@@ -52,9 +52,11 @@ setup(
     setup.setTimeout(20 * 60_000);
 
     const manifest = getManifest(product);
-    // Serial (cell-less) runs use defaults and only warn about overrides: this
-    // cell counts as serial unless it was the one explicitly selected via --project.
-    const serial = !selectedCells().includes(cell);
+    // Serial (cell-less) runs use defaults and only warn about overrides, so an override meant
+    // for one cell never leaks into a sweep of all of them. `isCellTargeted` owns that question
+    // — including reading the selection from the env channel a worker (which has no CLI argv)
+    // depends on.
+    const serial = !isCellTargeted(cell, testInfo.project.name);
 
     // A ref+zip conflict in a cell run throws here (fail-fast); inert/ignored
     // vars come back as warnings to surface.

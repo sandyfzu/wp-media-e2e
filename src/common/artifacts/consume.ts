@@ -20,7 +20,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { errorMessage, isNonEmptyString, isObject } from "../guards";
-import { REPO_ROOT, dirs } from "../config/run-context";
+import { REPO_ROOT, RUN_ID, dirs } from "../config/run-context";
 import { rolesOf } from "./manifest";
 import { getManifest, peekArtifacts, registerArtifacts } from "./registry";
 import type {
@@ -78,6 +78,15 @@ export function readResolvedArtifact(
         `resolution — the artifacts setup may not have completed. Re-run the setup for "${cell}".`,
     );
   }
+  // The resolution names a zip; confirm it is still there. Handing a caller a path that no
+  // longer exists only defers the failure to `wp plugin install`, where the cause is invisible.
+  if (!existsSync(artifact.zipPath)) {
+    throw new Error(
+      `[artifacts] the resolved "${role}" zip for "${product}/${cell}" is gone ` +
+        `("${artifact.zipPath}" no longer exists). The artifacts directory is ephemeral — ` +
+        "re-run the artifacts setup for this cell (run via --project=<cell>, not --no-deps).",
+    );
+  }
   return artifact;
 }
 
@@ -103,9 +112,34 @@ function loadCellArtifacts(product: string, cell: string): CellArtifacts {
     );
   }
 
-  const artifacts = parseResolution(readResolutionDoc(path), path);
+  const doc = readResolutionDoc(path);
+  warnIfStale(doc, product, cell);
+  const artifacts = parseResolution(doc, path);
   registerArtifacts(product, cell, artifacts);
   return artifacts;
+}
+
+/**
+ * Warns when the resolution on disk was written by a **different** invocation — i.e. the
+ * artifacts setup did not run in this one (a `--no-deps` run, or a worker whose setup was
+ * skipped). The zips are still whatever that earlier run resolved and verified, so consuming
+ * them is workable and deliberately not fatal (it keeps the fast edit-run loop), but it must
+ * never be silent: the scenario would otherwise test a stale ref while looking fresh.
+ *
+ * Fires at most once per `(product, cell)` per process — the caller memoizes this read. Stays
+ * quiet for a resolution written before the stamp existed, and when an orchestrator pins one
+ * `RUN_ID` across a batch (then the runs genuinely are one execution).
+ */
+function warnIfStale(raw: unknown, product: string, cell: string): void {
+  const runId =
+    isObject(raw) && isNonEmptyString(raw.runId) ? raw.runId : undefined;
+  if (runId === undefined || runId === RUN_ID) return;
+  console.warn(
+    `[artifacts] using the resolution a PREVIOUS execution wrote for "${product}/${cell}" ` +
+      `(run "${runId}", this run is "${RUN_ID}") — the artifacts setup did not run here. The ` +
+      "zips may be older than the refs you expect; re-run via --project=<cell> without --no-deps " +
+      "to resolve them afresh.",
+  );
 }
 
 /** Absolute path to a cell's `resolution.json` (inside its ephemeral artifacts dir). */

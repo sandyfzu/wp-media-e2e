@@ -144,9 +144,18 @@ Rules (enforced in
 
 - **Ref XOR zip per role.** Setting both `E2E_PLUGIN_REF` and `E2E_PLUGIN_ZIP` (or both
   `PREVIOUS` vars) fails fast — they are mutually exclusive and neither wins by default.
-- **Overrides need a cell.** On a serial (cell-less) run these are **ignored with a warning**
-  and the defaults are used — never a hard failure, so leftover/shared env can't abort a broad
-  run; select a cell with `--project=<cell>` to apply them. No override → defaults.
+- **Overrides need a cell, named exactly.** On a serial (cell-less) run these are **ignored with
+  a warning** and the defaults are used — never a hard failure, so leftover/shared env can't
+  abort a broad run. Apply them with `--project=<cell>` (or `--project=artifacts:<cell>`, to
+  resolve zips without running scenarios). A wildcard or differently-cased `--project` still
+  runs the cell, but counts as a broad selection here and warns instead — spell the cell out.
+  No override → defaults.
+- **Values are trimmed**, so a stray space in `.env` or a CI YAML block never becomes part of a
+  ref or a path. A blank value means "unset".
+- **Don't keep a `_ZIP` under `ARTIFACTS_ROOT`.** That tree is ephemeral: each cell's directory
+  is wiped whole every time it resolves. Pointing a role at a zip inside *its own* cell's
+  directory (e.g. reusing the previous run's build) is rejected up front rather than deleting
+  the file; anywhere else under the tree simply disappears the next time that cell runs.
 - **Version policy.** BackWPup **requires** a version to build, defaulting to `9.99.99`
   (`plugin`) / `9.99.98` (`previous`) — staggered so `previous` is older; WP Rocket /
   Imagify embed their version, so a `_VERSION` var is optional but, when set, rewrites the

@@ -16,7 +16,12 @@
  * later, an orchestrator both call `warmArtifacts` with it.
  */
 
-import { assertToken, createBuildReporter, getApvm } from "./apvm";
+import {
+  assertToken,
+  createBuildReporter,
+  getApvm,
+  redactSecrets,
+} from "./apvm";
 import { errorMessage } from "../guards";
 import { buildArtifactPlan } from "./request";
 import type { ApvmBuildParams, ArtifactEnv, ProductArtifacts } from "./types";
@@ -184,7 +189,14 @@ async function warmRequest(
     const { fromCache } = await warmOne(params);
     return { params, wantedBy, ok: true, fromCache };
   } catch (error) {
-    return { params, wantedBy, ok: false, error: errorMessage(error) };
+    // Redact at the funnel too (idempotent): `createApvmWarmer` scrubs its own rejection, but
+    // an `Apvm` that failed to initialise — or any other injected warmer — surfaces here.
+    return {
+      params,
+      wantedBy,
+      ok: false,
+      error: redactSecrets(errorMessage(error)),
+    };
   }
 }
 
@@ -227,8 +239,9 @@ export function createApvmWarmer(): WarmOne {
     const output = await apvm
       .warmCache(options, reporter.onProgress)
       .catch((error: unknown) => {
+        // Redact: a private-repo warm's error text can echo the authenticated remote URL.
         throw new Error(
-          `APVM warm of ${label} failed: ${errorMessage(error)}${reporter.failureContext()}`,
+          `APVM warm of ${label} failed: ${redactSecrets(errorMessage(error))}${reporter.failureContext()}`,
         );
       });
     return { fromCache: output.fromCache };

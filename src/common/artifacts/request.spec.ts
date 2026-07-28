@@ -405,4 +405,14 @@ test.describe("readArtifactEnv", () => {
     expect(env.pluginVersion).toBeUndefined();
     expect(env.previousRef).toBeUndefined();
   });
+
+  test("trims surrounding whitespace (a stray space in .env / CI YAML is not part of the value)", () => {
+    process.env[ARTIFACT_ENV_VARS.plugin.ref] = "  develop\n";
+    process.env[ARTIFACT_ENV_VARS.plugin.zip] = " /tmp/plugin.zip ";
+    process.env[ARTIFACT_ENV_VARS.previous.version] = "\t3.15.0 ";
+    const env = readArtifactEnv();
+    expect(env.pluginRef).toBe("develop");
+    expect(env.pluginZip).toBe("/tmp/plugin.zip");
+    expect(env.previousVersion).toBe("3.15.0");
+  });
 });

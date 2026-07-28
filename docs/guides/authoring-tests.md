@@ -56,6 +56,12 @@ test, pass `pluginArtifact("plugin").zipPath` to
 [`installPlugin`](../architecture/wordpress-automation.md) (via `site.transport`);
 the artifacts setup has already built and verified it.
 
+> **`zipPath` is a path on the *runner*.** That works directly only for a `local`
+> transport, which shares the filesystem with the site. On `ssh`/`docker` the remote
+> `wp` cannot see it, so the artifact has to be copied onto the target first — the
+> per-site staging layer that does this is still pending (plan §2.9 / Phase 5). Until
+> it lands, install-from-artifact steps are `local`-only.
+
 ## Tags
 
 | Tag         | Effect                                                                                          |

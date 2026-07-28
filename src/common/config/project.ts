@@ -5,7 +5,7 @@ import { defineBddConfig } from "playwright-bdd";
 import { registerManifest } from "../artifacts/registry";
 import { registerPool, routingMetadata } from "./metadata";
 import { reporters } from "./reporting";
-import { dirs, selectedCells } from "./run-context";
+import { dirs, seedSelectedCells, selectedCells } from "./run-context";
 import { VISUAL_EXPECT, snapshotPathTemplateFor } from "./visual";
 import type { Edition, ProductConfig, SiteConfig, SitePool } from "./types";
 
@@ -53,6 +53,11 @@ export function createProductConfig(
   product: ProductConfig,
 ): PlaywrightTestConfig {
   const cells = Object.keys(product.sites);
+
+  // Publish the CLI's cell selection to the environment before anything reads it: worker
+  // processes rebuild this config with an empty argv, so this is their only way to tell an
+  // explicitly selected cell from a broad serial run (see run-context.ts).
+  seedSelectedCells();
 
   // Publish the product's artifact manifest to the per-process registry the artifacts setup
   // reads by product name (it never imports product configs — see artifacts/registry.ts).

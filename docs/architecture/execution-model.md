@@ -33,6 +33,25 @@ the smaller pool. The config factory therefore:
 > (`--project=<cell>`). Never "select all projects". A cell-less run is forced
 > serial (`workers = 1`) and is safe but exercises no pool.
 
+### Reading the selection from a worker
+
+`selectedCells()` ([`run-context.ts`](../../src/common/config/run-context.ts)) is
+the single source of truth for "which cells did this invocation target". It parses
+the `--project` forms from `process.argv` — but **a Playwright worker never receives
+the CLI argv**: it is forked with `[node, workerProcessEntry.js]`, and the project
+`metadata` a worker reads is the copy *it* just rebuilt, not the runner's. So an
+argv-derived decision cannot reach a worker through either channel.
+
+It rides the **environment** instead, exactly as `RUN_ID` does: the config factory
+calls `seedSelectedCells()` while the runner builds the config, and `selectedCells()`
+falls back to that inherited value when argv is empty. Reading `process.argv` directly
+from worker-side code is a bug.
+
+Worker-side code that needs the "was this cell explicitly targeted?" answer should ask
+`isCellTargeted(cell, projectName)` rather than re-deriving it — it also counts a
+`--project=artifacts:<cell>` selection, and it is the gate on whether per-run `E2E_*`
+overrides apply (a broad sweep must not inherit one cell's override).
+
 ## The config factory
 
 [`createProductConfig(product)`](../../src/common/config/project.ts) expands a
@@ -99,7 +118,9 @@ resolves all paths via `dirs(product, cell)`. Two lifecycles:
   refs re-resolve (a cache hit is a copy) and provided zips are copied in, so no
   stale zip from a prior execution can survive. `resolution.json` lives inside it,
   so it can never describe a previous run's zips — the cross-process channel the
-  BDD workers read through the `pluginArtifact` fixture.
+  BDD workers read through the `pluginArtifact` fixture. Because the wipe is
+  unconditional, an `E2E_*_ZIP` pointing **inside** this dir is rejected before
+  anything is deleted, rather than having the operator's file removed under them.
 - A cell-less run reports to an `_all` bucket so it is never mislabeled as a
   single cell.
 

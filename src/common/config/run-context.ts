@@ -55,16 +55,22 @@ function resolveRunId(): string {
 export const RUN_ID: string = resolveRunId();
 
 /**
- * The cells a run targets, read from the `--project` forms on the command line
- * (`--project=x`, `--project x`, the variadic `--project x y`, and repeats). This is the
- * single source of truth for cell selection — the exact signal Playwright itself uses to
- * filter projects — so the config can never size workers for a cell Playwright is not
- * running. A correct invocation selects exactly one cell; this returns ALL
- * requested values so the config factory can reject an unsafe multi-cell selection
- * fail-fast. A `*` wildcard is returned verbatim and resolves to no real cell (→ a safe
- * serial run).
+ * Internal channel carrying this invocation's `--project` selection to forked worker
+ * processes. Playwright forks a worker **without** the CLI argv but **with** the parent's
+ * environment, and each worker re-imports the config from scratch — so `process.argv` in a
+ * worker holds only `[node, workerProcessEntry.js]` and project `metadata` a worker reads is
+ * the one *it* just rebuilt, not the runner's. Any argv-derived decision must therefore ride
+ * the environment, exactly as {@link RUN_ID} does. Seeded by {@link seedSelectedCells} while
+ * the runner builds the config; never set by hand.
  */
-export function selectedCells(): string[] {
+const SELECTED_CELLS_ENV = "E2E_INTERNAL_SELECTED_CELLS";
+
+/**
+ * Parses the `--project` forms out of the live `process.argv` (`--project=x`, `--project x`,
+ * the variadic `--project x y`, and repeats) — the exact signal Playwright itself filters on.
+ * Empty in a worker process, which never receives the CLI argv.
+ */
+function cellsFromArgv(): string[] {
   const cells = new Set<string>();
   const args = process.argv;
   const eq = "--project=";
@@ -84,6 +90,71 @@ export function selectedCells(): string[] {
     }
   }
   return [...cells];
+}
+
+/** Reads the selection the runner seeded for its workers; `[]` when absent or unreadable. */
+function cellsFromEnv(): string[] {
+  const raw = process.env[SELECTED_CELLS_ENV];
+  if (!isNonEmptyString(raw)) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The cells a run targets: the `--project` values from the command line, or — in a forked
+ * worker, which has no argv — the selection {@link seedSelectedCells} published for it. This
+ * is the single source of truth for cell selection, so the config can never size workers for
+ * a cell Playwright is not running, and a worker can tell an explicitly selected cell from a
+ * broad serial run. A correct invocation selects exactly one cell; this returns ALL requested
+ * values so the config factory can reject an unsafe multi-cell selection fail-fast.
+ *
+ * Values come back **verbatim**, and callers compare them to cell names exactly. Playwright's
+ * own project filter is looser — case-insensitive, and `*` wildcards expand — so a selection
+ * like `--project='pro*'` runs a cell that no exact comparison here matches. That is deliberate:
+ * such a selection is treated as broad, which for the artifacts setup means overrides
+ * warn-and-drop rather than silently applying to cells the operator never named (and it keeps
+ * the documented `--project='*'` ⇒ serial behaviour). Name the cell exactly to target it.
+ */
+export function selectedCells(): string[] {
+  const fromArgv = cellsFromArgv();
+  return fromArgv.length > 0 ? fromArgv : cellsFromEnv();
+}
+
+/**
+ * Publishes the command line's cell selection into the environment so forked worker
+ * processes can read it back through {@link selectedCells}. Called once while the config is
+ * built: in the runner that captures the real selection, and in a worker (which rebuilds the
+ * same config) it is a no-op — argv is empty there, so the inherited value is never clobbered.
+ */
+export function seedSelectedCells(): void {
+  const fromArgv = cellsFromArgv();
+  if (fromArgv.length > 0) {
+    process.env[SELECTED_CELLS_ENV] = JSON.stringify(fromArgv);
+  }
+}
+
+/**
+ * Whether this invocation explicitly **targeted** one cell, as opposed to sweeping every cell.
+ * The inverse of a "serial" run, and the gate on whether per-run overrides may apply: an
+ * override the operator set for one cell must not leak into a broad sweep of all of them.
+ *
+ * True when the selection names the cell itself (`--project=<cell>`, whose dependency graph
+ * pulls the per-cell setup projects in) or names the caller's own project
+ * (`--project=artifacts:<cell>` — how you resolve a cell's zips without running its scenarios).
+ * `projectName` is a parameter because only the caller knows which project it is running as.
+ *
+ * @param cell - the cell this project belongs to (from its routing metadata).
+ * @param projectName - the running project's own name (`testInfo.project.name`).
+ */
+export function isCellTargeted(cell: string, projectName: string): boolean {
+  const selected = selectedCells();
+  return selected.includes(cell) || selected.includes(projectName);
 }
 
 export interface RunDirs {

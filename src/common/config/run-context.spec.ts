@@ -1,15 +1,27 @@
 import { test, expect } from "@playwright/test";
 import { isAbsolute } from "node:path";
 
-import { dirs, REPO_ROOT, selectedCells } from "./run-context";
+import {
+  dirs,
+  isCellTargeted,
+  REPO_ROOT,
+  seedSelectedCells,
+  selectedCells,
+} from "./run-context";
 
 /**
  * `selectedCells()` is the single source of truth for cell selection: it parses the
- * `--project` forms from `process.argv` (exactly what Playwright itself filters on).
- * These tests drive it by swapping `process.argv` and restoring it afterwards.
+ * `--project` forms from `process.argv` (exactly what Playwright itself filters on) and, in a
+ * forked worker — which receives the parent's environment but NOT its argv — falls back to the
+ * selection `seedSelectedCells()` published. These tests drive both channels by swapping
+ * `process.argv` / the env var and restoring them afterwards.
  */
 
 const ORIGINAL_ARGV = process.argv;
+
+/** The internal env channel `seedSelectedCells` writes; mirrored here so the test can drive it. */
+const SELECTED_CELLS_ENV = "E2E_INTERNAL_SELECTED_CELLS";
+const ORIGINAL_SEED = process.env[SELECTED_CELLS_ENV];
 
 /** Run `body` with `process.argv` set to a synthetic CLI, always restoring it after. */
 function withArgv(tail: string[], body: () => void): void {
@@ -21,8 +33,22 @@ function withArgv(tail: string[], body: () => void): void {
   }
 }
 
+/** Restores the seed env var to whatever the real process started with. */
+function restoreSeed(): void {
+  if (ORIGINAL_SEED === undefined) {
+    Reflect.deleteProperty(process.env, SELECTED_CELLS_ENV);
+  } else {
+    process.env[SELECTED_CELLS_ENV] = ORIGINAL_SEED;
+  }
+}
+
+test.beforeEach(() => {
+  restoreSeed();
+});
+
 test.afterEach(() => {
   process.argv = ORIGINAL_ARGV;
+  restoreSeed();
 });
 
 test.describe("selectedCells (parses --project)", () => {
@@ -59,6 +85,89 @@ test.describe("selectedCells (parses --project)", () => {
   test("returns empty when no --project is given (serial fallback)", () => {
     withArgv([], () => {
       expect(selectedCells()).toEqual([]);
+    });
+  });
+});
+
+test.describe("selection propagation to worker processes", () => {
+  test("seedSelectedCells publishes the argv selection, selectedCells reads it back", () => {
+    withArgv(["--project=pro@nginx"], () => {
+      seedSelectedCells();
+    });
+    // A worker: no argv, but the seeded environment survives the fork.
+    withArgv([], () => {
+      expect(selectedCells()).toEqual(["pro@nginx"]);
+    });
+  });
+
+  test("seedSelectedCells is a no-op without argv, so a worker never clobbers the seed", () => {
+    withArgv(["--project=apache", "--project=nginx"], () => {
+      seedSelectedCells();
+    });
+    withArgv([], () => {
+      seedSelectedCells(); // the worker re-building the config
+      expect(selectedCells()).toEqual(["apache", "nginx"]);
+    });
+  });
+
+  test("argv wins over a stale seed", () => {
+    withArgv(["--project=stale"], () => {
+      seedSelectedCells();
+    });
+    withArgv(["--project=fresh"], () => {
+      expect(selectedCells()).toEqual(["fresh"]);
+    });
+  });
+
+  test("an unparseable seed degrades to a serial run rather than throwing", () => {
+    process.env[SELECTED_CELLS_ENV] = "{not json";
+    withArgv([], () => {
+      expect(selectedCells()).toEqual([]);
+    });
+  });
+});
+
+test.describe("isCellTargeted (gates whether per-run overrides apply)", () => {
+  const CELL = "pro@nginx";
+  const PROJECT = `artifacts:${CELL}`;
+
+  test("true when the cell itself is selected — the usual invocation", () => {
+    withArgv([`--project=${CELL}`], () => {
+      expect(isCellTargeted(CELL, PROJECT)).toBe(true);
+    });
+  });
+
+  test("true when the caller's own setup project is selected by name", () => {
+    // How an operator resolves one cell's zips without running its scenarios.
+    withArgv([`--project=${PROJECT}`], () => {
+      expect(isCellTargeted(CELL, PROJECT)).toBe(true);
+    });
+  });
+
+  test("false with no selection — a broad sweep must not inherit one cell's overrides", () => {
+    withArgv([], () => {
+      expect(isCellTargeted(CELL, PROJECT)).toBe(false);
+    });
+  });
+
+  test("false for another cell's selection", () => {
+    withArgv(["--project=apache"], () => {
+      expect(isCellTargeted(CELL, PROJECT)).toBe(false);
+    });
+  });
+
+  test("false for a wildcard: broad by design, so overrides warn instead of applying", () => {
+    withArgv(["--project=*"], () => {
+      expect(isCellTargeted(CELL, PROJECT)).toBe(false);
+    });
+  });
+
+  test("reads the seeded selection, so it holds inside a worker (no argv there)", () => {
+    withArgv([`--project=${CELL}`], () => {
+      seedSelectedCells();
+    });
+    withArgv([], () => {
+      expect(isCellTargeted(CELL, PROJECT)).toBe(true);
     });
   });
 });

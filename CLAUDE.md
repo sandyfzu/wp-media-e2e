@@ -201,7 +201,10 @@ whole capability is product-agnostic under
 - **Consumption:** a scenario reads its zip through the `pluginArtifact` fixture —
   `installPlugin(site.transport, pluginArtifact("plugin").zipPath, { activate: true })`.
   It reads `resolution.json` (or the in-process memo). Requesting a role the product
-  does not support throws (see the MUST below).
+  does not support throws (see the MUST below). **`zipPath` is a path on the runner**,
+  so installing it directly works only on a `local` transport; `ssh`/`docker` need the
+  artifact copied onto the site first, which the pending per-site staging layer will
+  own (plan §2.9).
 - **Overrides:** six `E2E_*` env vars select a git ref **or** a prebuilt zip per role
   (ref XOR zip) — full table and rules in
   [configuration.md](docs/guides/configuration.md).

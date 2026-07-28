@@ -219,9 +219,18 @@ type TopLevel =
     };
 
 /**
+ * The resource-fork sidecar macOS's zipper writes beside the real payload. WordPress's own
+ * unzipper skips it explicitly (`unzip_file()` ignores anything under `__MACOSX/`), so a
+ * plugin zip produced by Finder's "Compress" installs perfectly — the identity check must not
+ * reject the same archive. Only ever relevant for an operator-provided `E2E_*_ZIP`; APVM's
+ * builds never contain it.
+ */
+const OS_SIDECAR_DIR = "__MACOSX";
+
+/**
  * Derives the archive's top-level structure from its entry names, tolerant of whether an explicit
- * directory entry (`"slug/"`) is present. A valid plugin zip has exactly one top-level directory
- * and no files at the root.
+ * directory entry (`"slug/"`) is present and of macOS's {@link OS_SIDECAR_DIR} sidecar. A valid
+ * plugin zip has exactly one top-level directory and no files at the root.
  */
 function topLevelDir(
   entries: readonly { readonly entryName: string }[],
@@ -233,18 +242,22 @@ function topLevelDir(
   let rootFile = false;
   for (const name of names) {
     const slash = name.indexOf("/");
-    if (slash === -1) {
-      rootFile = true;
-      top.add(name);
-    } else {
-      top.add(name.slice(0, slash));
-    }
+    const head = slash === -1 ? name : name.slice(0, slash);
+    if (head === OS_SIDECAR_DIR) continue;
+    if (slash === -1) rootFile = true;
+    top.add(head);
   }
 
   const only = [...top];
   const dir = only[0];
   if (only.length === 1 && !rootFile && dir !== undefined) {
     return { kind: "single", dir };
+  }
+  if (only.length === 0) {
+    return {
+      kind: "empty",
+      detail: `the zip holds only "${OS_SIDECAR_DIR}" metadata entries.`,
+    };
   }
   const found = only.map((t) => `"${t}"`).join(", ");
   return {
@@ -261,15 +274,27 @@ function headerBlock(data: Buffer): string {
 /**
  * Extracts a WordPress plugin header field (e.g. `Plugin Name`, `Version`) from a header block,
  * mirroring core's `get_file_data`: line-anchored, case-insensitive, tolerant of leading comment
- * punctuation. Returns the trimmed value, or `undefined` when the header is absent or blank.
+ * punctuation. Returns the cleaned value, or `undefined` when the header is absent or blank.
  */
 function parseHeader(block: string, field: string): string | undefined {
   const match = new RegExp(
     `^[ \\t/*#@]*${escapeRegExp(field)}:(.*)$`,
     "im",
   ).exec(block);
-  const value = match?.[1]?.trim();
-  return value === undefined || value === "" ? undefined : value;
+  const raw = match?.[1];
+  if (raw === undefined) return undefined;
+  const value = cleanHeaderValue(raw);
+  return value === "" ? undefined : value;
+}
+
+/**
+ * Trims a header value the way WordPress's `_cleanup_header_comment()` does: everything from a
+ * comment or PHP close tag onwards is dropped, so a header whose line also closes the docblock
+ * still yields exactly what core would read. Without this the exact-equality name check could
+ * reject an artifact WordPress itself reads correctly.
+ */
+function cleanHeaderValue(raw: string): string {
+  return raw.replace(/\s*(?:\*\/|\?>).*/, "").trim();
 }
 
 /** Escapes a literal string for safe interpolation into a `RegExp` source. */

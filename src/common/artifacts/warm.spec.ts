@@ -173,6 +173,26 @@ test("collects a per-request warm failure and marks the summary not ok", async (
   expect(summary.ok).toBe(false);
 });
 
+test("a warm failure is scrubbed before it reaches the summary", async () => {
+  // The summary is printed and, via an orchestrator, can be reported. A warmer that rejects
+  // with builder text carrying an authenticated remote URL must not leak it.
+  const units: WarmUnit[] = [
+    { label: "backwpup/pro@nginx", manifest: BWU, edition: "pro" },
+  ];
+  const warmOne: WarmOne = () =>
+    Promise.reject(
+      new Error(
+        "fatal: unable to access 'https://x-access-token:ghp_16CharsOrMoreAAAA@github.com/wp-media/backwpup-pro.git/'",
+      ),
+    );
+  const summary = await warmArtifacts(units, NO_ENV, warmOne);
+
+  const error = summary.results[0]?.error ?? "";
+  expect(error).not.toContain("ghp_16CharsOrMoreAAAA");
+  expect(error).not.toContain("x-access-token");
+  expect(error).toContain("github.com/wp-media/backwpup-pro.git");
+});
+
 test("an empty unit list is a clean no-op", async () => {
   const { warmOne, calls } = recorder();
   const summary = await warmArtifacts([], NO_ENV, warmOne);

@@ -23,7 +23,8 @@ import { wpRocket } from "./src/projects/wp-rocket/config/wp-rocket.config";
  * cells are skipped, so a fresh checkout warms nothing and needs no GitHub token.
  *
  * Usage: `npm run artifacts:warm [-- --product=<p>] [--cell=<c>]`. Exits `0` when every warm
- * succeeded, `1` if any plan or warm failed.
+ * succeeded, `1` if any plan or warm failed **or** a filter named something that does not exist —
+ * a typo must never look like a primed cache.
  */
 
 const PRODUCTS: readonly ProductConfig[] = [wpRocket, backwpup];
@@ -195,19 +196,62 @@ function printFooter(summary: WarmSummary): number {
   return 1;
 }
 
+/** Prints a fatal usage error and returns the exit code, so a typo never looks like success. */
+function usageError(message: string, detail: string): number {
+  console.error(
+    styleText(["red", "bold"], `[artifacts:warm] ${message}`) + detail,
+  );
+  return 1;
+}
+
+/**
+ * Validates the `--product` / `--cell` filters against the configured products and cells. A
+ * typo must fail loudly: silently warming nothing would leave CI believing the cache is primed,
+ * and the run it was meant to speed up then builds cold.
+ */
+function validateFilters(
+  productFilter: string | undefined,
+  cellFilter: string | undefined,
+): number | undefined {
+  const products = PRODUCTS.filter(
+    (p) => productFilter === undefined || p.name === productFilter,
+  );
+  if (productFilter !== undefined && products.length === 0) {
+    return usageError(
+      `unknown --product "${productFilter}".`,
+      ` Known products: ${PRODUCTS.map((p) => p.name).join(", ")}.`,
+    );
+  }
+  const cells = [...new Set(products.flatMap((p) => Object.keys(p.sites)))];
+  if (cellFilter !== undefined && !cells.includes(cellFilter)) {
+    return usageError(
+      `unknown --cell "${cellFilter}".`,
+      ` Known cells${productFilter !== undefined ? ` for "${productFilter}"` : ""}: ` +
+        `${cells.join(", ") || "(none)"}.`,
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Validate the filters, discover the warmable cells, warm, report.
+ *
+ * Every exit path sets `process.exitCode` and **returns**, letting Node exit on its own once
+ * the event loop drains — deliberately not `process.exit()`, which discards a pipe's pending
+ * async writes, and CI's stdout is a pipe rather than a TTY, so it can drop the very summary a
+ * failed warm needs. Confirmed that nothing keeps the loop alive after a warm on any path — a
+ * cache hit, a cold build (which shells out to composer/npm), or a failed ref resolve — so the
+ * natural exit is both prompt and lossless. Keep it that way: anything that leaves a live
+ * handle behind would turn this into a hang instead of an exit.
+ */
 async function main(): Promise<void> {
   const productFilter = readFlag("product");
   const cellFilter = readFlag("cell");
 
-  const known = PRODUCTS.map((p) => p.name);
-  if (productFilter !== undefined && !known.includes(productFilter)) {
-    console.error(
-      styleText(
-        ["red", "bold"],
-        `[artifacts:warm] unknown --product "${productFilter}".`,
-      ) + ` Known products: ${known.join(", ")}.`,
-    );
-    process.exit(1);
+  const invalid = validateFilters(productFilter, cellFilter);
+  if (invalid !== undefined) {
+    process.exitCode = invalid;
+    return;
   }
 
   const { units, skippedCells } = discover(PRODUCTS, productFilter, cellFilter);
@@ -217,10 +261,10 @@ async function main(): Promise<void> {
     console.log(
       styleText(
         ["yellow", "bold"],
-        "  Nothing to warm — no real cells matched (placeholder/example data only, or the filter matched none).",
+        "  Nothing to warm — every matched cell is placeholder/example data only, so no run will use it.",
       ),
     );
-    process.exit(0);
+    return;
   }
 
   const summary = await warmArtifacts(
@@ -229,7 +273,7 @@ async function main(): Promise<void> {
     createApvmWarmer(),
   );
   printSummary(summary);
-  process.exit(printFooter(summary));
+  process.exitCode = printFooter(summary);
 }
 
 await main();

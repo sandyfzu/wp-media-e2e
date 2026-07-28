@@ -16,7 +16,6 @@
  * keep the planner pure — the caller prints them.
  */
 
-import { isNonEmptyString } from "../guards";
 import type { Edition } from "../config/types";
 import { env } from "../config/env";
 import { defaultRefFor, hasPreviousRole, resolveVariant } from "./manifest";
@@ -60,13 +59,20 @@ export const ARTIFACT_ENV_VARS: Readonly<Record<ArtifactRole, RoleVars>> = {
 
 /**
  * Reads the six artifact env vars into a normalized {@link ArtifactEnv}, treating a blank
- * value as unset (via {@link env}) so an empty `E2E_PLUGIN_REF=` never masks a default.
- * This is the capability's single `process.env` touch point for these vars.
+ * value as unset so an empty `E2E_PLUGIN_REF=` never masks a default, and **trimming**
+ * surrounding whitespace — a stray space is easy to introduce in `.env` or a CI YAML block
+ * and would otherwise reach APVM as part of the ref, or `fs` as part of a zip path, failing
+ * with a message that hides the real cause. This is the capability's single `process.env`
+ * touch point for these vars.
+ *
+ * The trim belongs **here**, not in {@link env}: these six values are refs, paths and versions,
+ * where surrounding whitespace is never meaningful, whereas `env()` also serves credentials
+ * (e.g. `BWP_FTP_PASSWORD`) whose trailing whitespace can be part of the secret.
  */
 export function readArtifactEnv(): ArtifactEnv {
   const read = (name: string): string | undefined => {
-    const value = env(name);
-    return isNonEmptyString(value) ? value : undefined;
+    const value = env(name).trim();
+    return value === "" ? undefined : value;
   };
   return {
     pluginRef: read(ARTIFACT_ENV_VARS.plugin.ref),

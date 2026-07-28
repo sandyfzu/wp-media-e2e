@@ -164,6 +164,50 @@ test.describe("verifyArtifact — identity mismatches", () => {
   });
 });
 
+// ── verifyArtifact: tolerated packaging noise ───────────────────────────────────
+
+test.describe("verifyArtifact — tolerated packaging noise", () => {
+  test("a macOS __MACOSX sidecar does not break the structure check", () => {
+    // Finder's "Compress" adds this beside the payload; WordPress's unzipper skips it, so a
+    // hand-zipped `E2E_PLUGIN_ZIP` that installs fine must verify fine.
+    const zip = makeZip("mac-sidecar.zip", {
+      "wp-rocket/wp-rocket.php": pluginFile("WP Rocket", "3.17.4"),
+      "__MACOSX/._wp-rocket": "resource fork",
+      "__MACOSX/wp-rocket/._wp-rocket.php": "resource fork",
+    });
+    const { checks } = verifyArtifact(zip, WPR);
+    expect(checks.every((c) => c.ok)).toBe(true);
+    expect(requireCheck(checks, "single top-level directory").detail).toBe(
+      '"wp-rocket/".',
+    );
+  });
+
+  test("an archive holding only __MACOSX entries is reported as empty, not as a plugin", () => {
+    const zip = makeZip("only-sidecar.zip", { "__MACOSX/._x": "junk" });
+    const structure = requireCheck(
+      verifyArtifact(zip, WPR).checks,
+      "single top-level directory",
+    );
+    expect(structure.ok).toBe(false);
+    expect(structure.detail).toContain("__MACOSX");
+  });
+
+  test("a header line that also closes the comment or PHP tag yields the bare value", () => {
+    // WordPress's _cleanup_header_comment() drops either terminator; exact-equality must match it.
+    for (const [name, main] of [
+      ["comment-terminator.zip", "<?php\n/* Plugin Name: WP Rocket */\n"],
+      ["php-terminator.zip", "<?php\n# Plugin Name: WP Rocket ?>\n"],
+    ] as const) {
+      const zip = makeZip(name, { "wp-rocket/wp-rocket.php": main });
+      const check = requireCheck(
+        verifyArtifact(zip, WPR).checks,
+        "plugin name",
+      );
+      expect(check.ok, `${name}: ${check.detail}`).toBe(true);
+    }
+  });
+});
+
 // ── verifyArtifact: malformed / structurally wrong archives ─────────────────────
 
 test.describe("verifyArtifact — malformed archives", () => {
