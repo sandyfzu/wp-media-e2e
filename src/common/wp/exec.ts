@@ -181,7 +181,7 @@ export function wpCli(
   return exec(transport, "wp", args, options);
 }
 
-/** Closes all cached SSH connections. Call from a worker-teardown fixture (Phase 6). */
+/** Closes all cached SSH connections. Call from a worker-teardown fixture. */
 export function disposeConnections(): void {
   for (const ssh of connections.values()) {
     ssh.dispose();

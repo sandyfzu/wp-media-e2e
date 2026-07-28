@@ -10,7 +10,7 @@ import type { PixelDiffResult } from "./compare";
 import { stabilizeForSnapshot } from "./stabilize";
 
 /**
- * A/B visual check (plan §7.6): assert a page renders the SAME with the optimizing plugin active as
+ * A/B visual check: assert a page renders the SAME with the optimizing plugin active as
  * with it bypassed (WP Rocket's `?nowprocket`). Both renders are captured live in one run and
  * diffed against each other — there is no committed baseline, so nothing to `--update-snapshots`.
  * This is what proves an optimization (lazy-load, CSS/JS handling, …) is visually transparent, and

@@ -23,11 +23,11 @@ import {
  * over all of them and writes `resolution.json` for the worker processes that consume it.
  *
  * The BDD project depends on this **and** on the auth setup independently, so either failing
- * skips the scenarios (plan §2.6). Placeholder-only cells skip entirely, exactly like auth, so a
+ * skips the scenarios. Placeholder-only cells skip entirely, exactly like auth, so a
  * fresh checkout's `npm run test` clones/builds nothing and needs no GitHub token.
  *
  * Errors are aggregated: every role is resolved and verified even when an earlier one fails, then
- * a single formatted report is thrown (plan §2.5). Cold builds run composer/npm, so the timeout
+ * a single formatted report is thrown. Cold builds run composer/npm, so the timeout
  * is generous.
  */
 setup(
@@ -52,11 +52,11 @@ setup(
     setup.setTimeout(20 * 60_000);
 
     const manifest = getManifest(product);
-    // Serial (cell-less) runs use defaults and only warn about overrides (plan §2.2 rule 3): this
+    // Serial (cell-less) runs use defaults and only warn about overrides: this
     // cell counts as serial unless it was the one explicitly selected via --project.
     const serial = !selectedCells().includes(cell);
 
-    // A ref+zip conflict in a cell run throws here (fail-fast, plan §2.8 case 1); inert/ignored
+    // A ref+zip conflict in a cell run throws here (fail-fast); inert/ignored
     // vars come back as warnings to surface.
     const plan = buildArtifactPlan({
       product: manifest,

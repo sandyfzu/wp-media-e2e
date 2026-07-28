@@ -1,5 +1,7 @@
 import { test as base, createBdd } from "playwright-bdd";
 
+import { readResolvedArtifact } from "./artifacts/consume";
+import type { ArtifactRole, ResolvedArtifact } from "./artifacts/types";
 import { getPool, readRouting } from "./config/metadata";
 import { isPlaceholderSite } from "./config/sites";
 import type { Edition, SiteConfig } from "./config/types";
@@ -16,6 +18,13 @@ interface TestFixtures {
   site: SiteConfig;
   /** The bound cell's edition (Free/Pro). Throws if read in a cell that declares no edition. */
   edition: Edition;
+  /**
+   * Looks up a resolved plugin zip for this cell by role — `pluginArtifact("plugin").zipPath`
+   * is the artifact under test, `"previous"` the version to compare against. The artifacts
+   * setup resolved and verified it; this reads that result. Throws if the role is
+   * unsupported or the setup did not run for this cell.
+   */
+  pluginArtifact: (role: ArtifactRole) => ResolvedArtifact;
 }
 
 interface WorkerFixtures {
@@ -38,7 +47,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       if (site === undefined) {
         throw new Error(
           `No site for parallelIndex ${String(workerInfo.parallelIndex)} in a pool of ${String(pool.length)}. ` +
-            "Run one cell per invocation with workers = pool size (see docs/plans §3.2).",
+            "Run one cell per invocation with workers = pool size.",
         );
       }
       await use(site);
@@ -65,10 +74,19 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     if (edition === undefined) {
       throw new Error(
         "Fixture `edition` was requested, but this cell declares no edition. " +
-          "Editions are configured per cell for edition-ful products (see docs/plans §4.5).",
+          "Editions are configured per cell for edition-ful products.",
       );
     }
     await use(edition);
+  },
+
+  // Role → resolved zip lookup for this cell. Returns a plain function (fixtures cannot take
+  // arguments), so a step calls `pluginArtifact("plugin").zipPath`. Reading comes from the
+  // per-process memo or `resolution.json` (see artifacts/consume.ts); routing is from testInfo.
+  // eslint-disable-next-line no-empty-pattern -- no fixture deps; routing comes from testInfo.
+  pluginArtifact: async ({}, use, testInfo) => {
+    const { product, cell } = readRouting(testInfo.project.metadata);
+    await use((role) => readResolvedArtifact(product, cell, role));
   },
 
   // Override: point Playwright's baseURL at the bound site, so relative navigations target it.

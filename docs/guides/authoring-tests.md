@@ -46,11 +46,15 @@ instance with these fixtures:
 | `site`      | test     | The [`SiteConfig`](../../src/common/config/types.ts) bound to this worker. Throws if no pool.                  |
 | `edition`   | test     | The cell's `Edition` (`free`/`pro`). **Throws** if read in an editionless cell.                                |
 | `boundSite` | worker   | The site pinned to this worker (by `parallelIndex`), or `undefined` when there is no pool. Underpins `site`.   |
+| `pluginArtifact` | test | `pluginArtifact(role)` → the resolved zip for this cell (`"plugin"` = under test, `"previous"` = compare-against). `.zipPath` feeds `installPlugin`. **Throws** if the role is unsupported (plan §5) or the artifacts setup did not run. |
 | `baseURL`   | (override) | Points at the bound site, so relative navigations target it.                                                  |
 | `storageState` | (override) | The bound site's saved login, **or** an empty session for `@noauth` scenarios.                            |
 
 Use `site.transport` to drive the WordPress automation layer, and `page` (the
-standard Playwright fixture) for browser interaction.
+standard Playwright fixture) for browser interaction. To install the zip under
+test, pass `pluginArtifact("plugin").zipPath` to
+[`installPlugin`](../architecture/wordpress-automation.md) (via `site.transport`);
+the artifacts setup has already built and verified it.
 
 ## Tags
 

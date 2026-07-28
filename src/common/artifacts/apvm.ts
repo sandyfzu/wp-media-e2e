@@ -16,7 +16,7 @@ import type { JsBuildEvent } from "apvm-napi";
 /**
  * Projects whose source repository is **private**, so a build/warm needs a GitHub token.
  * BackWPup builds from `wp-media/backwpup-pro` (private); WP Rocket and Imagify are public
- * (a token there only raises rate limits — plan §1.1). Kept as data so adding a private
+ * (a token there only raises rate limits). Kept as data so adding a private
  * product later is a one-line change.
  */
 const TOKEN_REQUIRED_PROJECTS: ReadonlySet<string> = new Set(["backwpup"]);
@@ -40,7 +40,7 @@ let instance: Promise<Apvm> | undefined;
 /**
  * Returns the lazily-created, process-wide {@link Apvm}. Token resolution follows APVM's own
  * order (config → `GITHUB_TOKEN` → `GH_TOKEN` → `gh` CLI → gh config); we never set `cacheDir`,
- * leaving APVM's cache at its default `~/.apvm/cache` (plan §1.1). Created only on first build —
+ * leaving APVM's cache at its default `~/.apvm/cache`. Created only on first build —
  * a placeholder-only run that skips resolution never triggers token resolution.
  */
 export function getApvm(): Promise<Apvm> {
@@ -51,7 +51,7 @@ export function getApvm(): Promise<Apvm> {
 /**
  * Throws an actionable error if {@link project} needs a token and {@link apvm} has none — caught
  * *before* any clone/download is attempted, so a missing token surfaces as one clear message
- * with the fix, not a deep-in-the-build git failure (plan §2.8 case 7).
+ * with the fix, not a deep-in-the-build git failure.
  */
 export function assertToken(apvm: Apvm, project: string): void {
   if (requiresToken(project) && !apvm.hasToken()) {
@@ -78,7 +78,7 @@ export interface BuildReporter {
 /**
  * Creates a {@link BuildReporter} for one build. Progress maps to concise console lines
  * (`phase_started`, `warning`); `command_output` stays quiet but is buffered, so on failure the
- * reason and the last {@link OUTPUT_TAIL} output lines can be attached to the error (plan §2.6).
+ * reason and the last {@link OUTPUT_TAIL} output lines can be attached to the error.
  *
  * @param label - short identifier for the artifact being built (e.g. `plugin develop`), prefixed
  * onto each line so parallel-free serial builds still read clearly.

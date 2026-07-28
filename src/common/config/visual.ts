@@ -1,7 +1,7 @@
 import type { PlaywrightTestConfig } from "@playwright/test";
 
 /**
- * Shared visual-comparison tolerances and config (plan §7.6). Used by BOTH visual models so they
+ * Shared visual-comparison tolerances and config. Used by BOTH visual models so they
  * fail at the same sensitivity:
  *  - the optimized-vs-unoptimized A/B check (`src/common/visual/ab.ts`) — what WP Rocket uses, and
  *  - committed-baseline `toHaveScreenshot` (via {@link VISUAL_EXPECT}) — the general capability.

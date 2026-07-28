@@ -32,7 +32,12 @@
     // --- Performance ---
     "skipLibCheck": true
   },
-  "include": ["src/**/*", "playwright*.config.ts", "healthcheck.ts"],
+  "include": [
+    "src/**/*",
+    "playwright*.config.ts",
+    "healthcheck.ts",
+    "warm-artifacts.ts"
+  ],
   "exclude": [
     "node_modules",
     ".features-gen",

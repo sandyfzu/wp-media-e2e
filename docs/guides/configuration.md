@@ -120,6 +120,7 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 | `REPORT_ROOT` | `reports`              | Report artifact root (accumulates).                                     |
 | `OUTPUT_ROOT` | `test-results`         | Ephemeral Playwright artifact root.                                     |
 | `AUTH_ROOT`   | `.auth`                | Ephemeral `storageState` root.                                          |
+| `ARTIFACTS_ROOT` | `.artifacts`        | Resolved plugin-zip root (**wiped & rebuilt each run**; see Plugin artifacts). |
 
 ### Plugin artifacts (build & verify)
 

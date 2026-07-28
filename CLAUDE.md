@@ -31,7 +31,7 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 
 ## Repository structure
 
-```
+```text
 src/
 ├── common/                 # product-agnostic, shared by every product
 │   ├── config/             # env, sites loading, run-context, metadata, the config factory
@@ -85,6 +85,10 @@ npm run test:unit:ui
 npm run healthcheck                # preflight + login across every product/cell/site
 npm run healthcheck:ui             # same, but headed — the browser is visible on screen
 
+# Plugin artifacts (pre-warm APVM's cache for the zips under test)
+npm run artifacts:warm             # warm every real cell's requests (CI/local prep)
+npm run artifacts:warm -- --product=backwpup --cell=pro@nginx  # narrow to one unit
+
 # Quality gates (see "Required workflow after every edit")
 npm run typecheck                  # tsc
 npm run lint                       # eslint .
@@ -132,13 +136,14 @@ Two surfaces — schema reference in
 Import step builders and fixtures from [`src/common/fixtures.ts`](src/common/fixtures.ts),
 **not** from `playwright-bdd` directly. Available fixtures:
 
-| Fixture                   | Scope  | Purpose                                                                           |
-| ------------------------- | ------ | --------------------------------------------------------------------------------- |
-| `site`                    | test   | The `SiteConfig` bound to this worker; throws if no pool (tag `@noauth` instead). |
-| `edition`                 | test   | The cell's `free`/`pro` edition; throws in editionless cells.                     |
-| `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                  |
-| `baseURL` (override)      | —      | Points navigation at the bound site.                                              |
-| `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                  |
+| Fixture                   | Scope  | Purpose                                                                                                        |
+| ------------------------- | ------ | -------------------------------------------------------------------------------------------------------------- |
+| `site`                    | test   | The `SiteConfig` bound to this worker; throws if no pool (tag `@noauth` instead).                              |
+| `edition`                 | test   | The cell's `free`/`pro` edition; throws in editionless cells.                                                  |
+| `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                                               |
+| `pluginArtifact`          | test   | `pluginArtifact(role)` → the resolved zip under test; `.zipPath` feeds `installPlugin` (see Plugin artifacts). |
+| `baseURL` (override)      | —      | Points navigation at the bound site.                                                                           |
+| `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                               |
 
 **Auth fixture / setup:** [`src/common/auth/auth.setup.ts`](src/common/auth/auth.setup.ts)
 is a dependency project that runs before any BDD scenarios. It does two things in order:
@@ -172,6 +177,58 @@ and `HEALTHCHECK_LOGIN_TIMEOUT_MS`. Useful as a fleet monitor (cron/CI) independ
 running the full suite. `npm run healthcheck:ui` runs the exact same checks with the browser
 **headed** (visible on screen) so you can watch each login — the only difference is
 visibility (via `--headed` / `HEALTHCHECK_HEADED=true`).
+
+## Plugin artifacts (the zips under test)
+
+Every run resolves **and verifies** the plugin zips it will test before any
+scenario runs. Two **roles** per product: `plugin` (the artifact under test) and
+`previous` (an older artifact some tests compare against, e.g. an update path). The
+whole capability is product-agnostic under
+[`src/common/artifacts/`](src/common/artifacts/).
+
+- **Resolution + preflight** run in the `artifacts:<cell>` setup project (a sibling
+  of the auth setup; the BDD project depends on both). Per role it either **builds**
+  a git ref through APVM or **copies** an operator-provided zip into a wiped
+  `.artifacts/<product>/<cell>/`, then a static identity preflight asserts each zip
+  is the exact plugin **and edition** expected before writing `resolution.json`.
+  Placeholder-only cells skip it — a fresh checkout builds nothing and needs no token.
+- **APVM** ([`apvm-napi`](https://github.com/wp-media/automation-plugin-version-manager))
+  is pinned in `package.json` to `…#cli/v3.0.0` — it commits prebuilt native
+  binaries, so there is no Rust toolchain or build step. BackWPup builds from a
+  **private** source repo, so it needs a GitHub token: set `GITHUB_TOKEN` or run
+  `gh auth login`. WP Rocket / Imagify are public (a token there only raises rate
+  limits).
+- **Consumption:** a scenario reads its zip through the `pluginArtifact` fixture —
+  `installPlugin(site.transport, pluginArtifact("plugin").zipPath, { activate: true })`.
+  It reads `resolution.json` (or the in-process memo). Requesting a role the product
+  does not support throws (see the MUST below).
+- **Overrides:** six `E2E_*` env vars select a git ref **or** a prebuilt zip per role
+  (ref XOR zip) — full table and rules in
+  [configuration.md](docs/guides/configuration.md).
+- **Pre-warm:** `npm run artifacts:warm` primes APVM's cache for the cells a run will
+  need, so each `artifacts:<cell>` build becomes a cache copy. It plans through the
+  same request builder the resolver uses (the parity invariant), so a warmed entry is
+  always the one a run looks up.
+
+**Identity matrix** (what the preflight asserts — the slug alone pins product +
+edition; the header is a second, exact-equality witness):
+
+| Product / edition | Top-level dir (slug) | `Plugin Name:` header |
+| ----------------- | -------------------- | --------------------- |
+| WP Rocket         | `wp-rocket/`         | `WP Rocket`           |
+| BackWPup Free     | `backwpup/`          | `BackWPup`            |
+| BackWPup Pro      | `backwpup-pro/`      | `BackWPup Pro`        |
+
+**MUST — BackWPup `previous` role (deferred).** BackWPup has **no `previous` role
+yet** (no comparison tests): its manifest declares `plugin` only, so
+`pluginArtifact("previous")` **throws** and any `E2E_PREVIOUS_*` var is
+warned-and-ignored. When comparison tests arrive, add a `previous` default ref
+(`release:latest-stable`) **and** a `previous` default version to
+[`backwpup.config.ts`](src/projects/backwpup/config/backwpup.config.ts). Resolution
+and the preflight are manifest-driven, so declaring the role automatically enables
+the second artifact's verification — which **must not** be skipped (a comparison
+test may never consume an unverified zip). The obligation is mirrored as a comment
+on that manifest.
 
 ## WordPress automation layer
 
@@ -240,6 +297,13 @@ These are requirements, not suggestions:
   type annotations (`@param {type}`, `@type {…}`) in `.ts` files — types come from
   TypeScript. (The sole exception is the `@type` in `prettier.config.js`, which is
   load-bearing for type-checking a plain `.js` config.). Do not overexplain, make sure to be understandable, but not too long if not really required.
+- **Code is self-contained — never reference plans/design docs.** No `docs/plans/*`
+  mentions in code — not file paths, not `§` section numbers, not plan phase names —
+  anywhere: comments, TSDoc, or error/log messages. Plans move, rename, and get deleted,
+  and an operator hitting an error must never be pointed at an internal design doc; explain
+  the reasoning inline instead. Markdown docs and `.env.example` may cite plans. **UNLESS**
+  the user explicitly authorizes an exception, which must then be listed right here —
+  _current exceptions: none._
 - **Follow best practices.** Keep UI logic in page objects, WP-CLI logic in `wp/`,
   shared logic in `common/`, product specifics under `src/projects/<product>/`.
   Match the style of the surrounding code. Add a `*.spec.ts` unit test for

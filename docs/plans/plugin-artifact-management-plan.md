@@ -1,12 +1,12 @@
 # Plugin Artifact Management Plan — resolve, build & verify the zips under test
 
-> **Status:** Phases 1–2 implemented ✅; Phase 3 planned. Await explicit green light per phase.
-> **Verified against:** APVM `develop` (npm `3.0.0`), pinned tag `cli/v3.0.0` (confirmed cut 2026-07-14 — see §1.1), `wp-media/backwpup-pro` `gulpfile.ts`, `wp-media/wp-rocket` `wp-rocket.php`, and this repo's working tree.
-> **Relation to the [modernization plan](e2e-modernization-plan.md):** this designs the artifact source that §4.5's "edition→package install map" and Phase 6's plugin-install hooks consume, and the pre-warm contract Phase 9's orchestrator calls.
+> **Status:** Phases 1–3 implemented ✅; Phase 4 (documentation) & Phase 5 (site staging & transfer) planned. Await explicit green light per phase.
+> **Verified against:** APVM `develop` (npm `3.0.0`), pinned tag `cli/v3.0.0` (confirmed cut 2026-07-14 — see §1.1), `wp-media/backwpup-pro` `gulpfile.ts`, `wp-media/wp-rocket` `wp-rocket.php`, this repo's working tree, and the transports' file-access behavior (verified 2026-07-16 — see §1.4).
+> **Relation to the [modernization plan](e2e-modernization-plan.md):** this designs the artifact source that §4.5's "edition→package install map" and Phase 6's plugin-install hooks consume, and the pre-warm contract Phase 9's orchestrator calls. **Phase 5 here (site staging & transfer) is the mechanism those install hooks use to place a resolved zip onto ssh/docker targets, so it must land before modernization Phase 6.**
 
 ## TL;DR
 
-Every run unit `(product × cell)` needs one or two plugin zips: the **plugin under test** and (for some tests) its **previous version to test against** (e.g. testing an update path). A new per-cell dependency project resolves both **per execution** — from `E2E_*` env overrides (a git ref **or** a local zip path, never both) or per-product defaults (`develop` / `tag:latest-stable`) — building refs with **`apvm-napi` 3.0.0** (git dependency; prebuilt binaries, no Rust) into a wiped `.artifacts/<product>/<cell>/<role>/` dir, APVM owning its cache (`~/.apvm/cache`, never overridden). BackWPup builds are version-required; the two roles get **distinct defaults** (`9.99.99` tested / `9.99.98` previous) so an update-path test always sees the previous artifact as *older*, without anyone having to pass a version by hand. A **static identity preflight** then unzips headers and asserts each zip is the exact expected plugin **and edition** (`wp-rocket/` ≠ `backwpup/` ≠ `backwpup-pro/`), checking every artifact before failing with one aggregated, actionable report. Steps consume paths via a registry/fixture; an orchestrator can pre-build everything with `apvm.warmCache()` using the **same request builder** (cache-key parity). Serial (cell-less) runs always use defaults, warning (never failing) if `E2E_*` overrides are set. Three phases: ① request model + deps, ② resolution + preflight + wiring, ③ consumption + pre-warm.
+Every run unit `(product × cell)` needs one or two plugin zips: the **plugin under test** and (for some tests) its **previous version to test against** (e.g. testing an update path). A new per-cell dependency project resolves both **per execution** — from `E2E_*` env overrides (a git ref **or** a local zip path, never both) or per-product defaults (`develop` / `tag:latest-stable`) — building refs with **`apvm-napi` 3.0.0** (git dependency; prebuilt binaries, no Rust) into a wiped `.artifacts/<product>/<cell>/<role>/` dir, APVM owning its cache (`~/.apvm/cache`, never overridden). BackWPup builds are version-required; the two roles get **distinct defaults** (`9.99.99` tested / `9.99.98` previous) so an update-path test always sees the previous artifact as *older*, without anyone having to pass a version by hand. A **static identity preflight** then unzips headers and asserts each zip is the exact expected plugin **and edition** (`wp-rocket/` ≠ `backwpup/` ≠ `backwpup-pro/`), checking every artifact before failing with one aggregated, actionable report. Steps consume paths via a registry/fixture; an orchestrator can pre-build everything with `apvm.warmCache()` using the **same request builder** (cache-key parity). Serial (cell-less) runs always use defaults, warning (never failing) if `E2E_*` overrides are set. The fixture yields a **local** path, but `wp` installs only from the *target's* filesystem, so a later phase adds a per-site **`.e2e_temp` staging area** and transport-agnostic **transfer helpers** (`common/wp`) that copy a resolved zip — or any test artifact — onto ssh/docker targets. Phases: ① request model + deps, ② resolution + preflight + wiring, ③ consumption + pre-warm, ④ documentation, ⑤ site staging + transfer.
 
 ---
 
@@ -48,6 +48,17 @@ Sources: APVM `crates/core/src/build/plugins/{wpr,bwu}.rs` (filenames, variants,
 - **Preflight idiom** ([preflight.ts](../../src/common/setup/preflight.ts)): per-check `CheckResult`s, check everything, then one formatted, actionable aggregate error. The identity preflight mirrors it.
 - **Run context** ([run-context.ts](../../src/common/config/run-context.ts)): `dirs(product, cell)` namespaces every artifact path; gains an `artifacts` entry (ephemeral family). `selectedCells()` already distinguishes cell runs from serial runs.
 - **Unit tests**: `src/common/**/*.spec.ts` are auto-picked by `playwright.unit.config.ts`.
+
+### 1.4 Transport file-access facts (verified 2026-07-16 — the transfer layer's foundation, Phase 5)
+
+| Fact | Detail | Source |
+| --- | --- | --- |
+| Exec cwd = WP root | The exec layer runs **every** command with cwd = the WP root on all transports: `transport.rootDir` for `local`/`ssh`; the container **WORKDIR** for `docker` (`wordpress:cli-php8.3` & `wordpress:php8.3-*` WORKDIR = `/var/www/html`; `dockerArgv` passes no `-w`). So a **relative** path (`.e2e_temp/plugins/x.zip`) resolves to the WP root uniformly — `mkdir -p`, `rm -rf`, and `wp plugin install <rel>` all work via `exec`/`wpCli` on every transport. | `exec.ts`; `log.ts` already relies on it; `docker image inspect` |
+| No transfer today | `exec.ts` only *runs* commands; nothing places a **local** file on the target. So `wp plugin install <localPath>` fails on ssh/docker — the remote `wp` can't see a runner path (the Phase-3 finding). | Phase 3 verification |
+| Per-transport copy primitive | `local`: same fs → `node:fs` `cp`. `docker`: `docker cp <localAbs> <container>:<absTarget>` (a `docker` sub-command, **not** `docker exec`). `ssh`: node-ssh `putFile(localAbs, remoteAbs)` (verified working; does **not** create parent dirs → `mkdir -p` first). node-ssh also exposes `putDirectory`/`mkdir`/`getFile`. | `node-ssh` `index.d.ts`; Phase 3 |
+| Absolute WP root | Needed only for the copy *target* (docker cp / putFile ignore exec cwd): `transport.rootDir` for local/ssh; docker resolves at runtime via `exec(t,"pwd",[])` (= WORKDIR = `/var/www/html`) — no hardcode, matches `log.ts`'s assumption. | verified |
+| Write access | Staging at the WP root needs the transport's user to have **write** permission there. Verified on the real ssh cell: docroot `drwxrwxrwx` owned by `www-data`, login user `ubuntu` created/removed `.e2e_temp` fine; files land world-readable (`0664`) so a differently-owned `wp` (docker `www-data` 33:33) can still read them. **Not universally guaranteed** on stricter hosts → the staging root must be overridable (§2.9). | ssh probe 2026-07-16 |
+| Web exposure | The WP root **is** the web docroot here (nginx serves the volume; Apache mod_php). So `<WP root>/.e2e_temp/…` is potentially HTTP-reachable — a mild exposure on QA sites, occasionally a *feature* (an artifact a plugin must fetch over HTTP). Mitigate: wipe after the run + optional deny `.htaccess`/`index.html` (Apache); stage outside the docroot via the override when it matters. | docker-compose; verified |
 
 ---
 
@@ -147,7 +158,7 @@ setup:<cell>     ─┴─→ <cell> (BDD)      routing metadata {product, cell,
 - One `Apvm` instance per process via `createWithTokenResolution()`; a missing token on a `backwpup` build is caught early with the fix in the message (`GITHUB_TOKEN` / `gh auth login`).
 - **Placeholder-only cells skip** the artifacts project with the same message pattern as auth — a fresh checkout's `npm run test` smoke must not clone/build anything (and must not demand a token).
 - **Serial (cell-less) runs**: every cell's `artifacts:<cell>` runs serially with defaults (§2.2 rule 3 warns about and ignores any overrides). After the first build per unique request, the rest are cache copies.
-- **Consumption**: a `pluginArtifact(role)` helper + fixture in [fixtures.ts](../../src/common/fixtures.ts) returns `{ zipPath, source, commit?, version?, origin }` from the memo/`resolution.json`. Missing file → actionable error ("the artifacts setup didn't run for this cell in this execution — run via `--project=<cell>` without `--no-deps`"). Requesting `previous` on a product without the role → error pointing at §5 — so a future comparison test **cannot silently run unverified**. Phase 6 (modernization plan) install hooks consume this instead of §4.5's static zip map.
+- **Consumption**: a `pluginArtifact(role)` helper + fixture in [fixtures.ts](../../src/common/fixtures.ts) returns `{ zipPath, source, commit?, version?, origin }` from the memo/`resolution.json`. Missing file → actionable error ("the artifacts setup didn't run for this cell in this execution — run via `--project=<cell>` without `--no-deps`"). Requesting `previous` on a product without the role → error pointing at §5 — so a future comparison test **cannot silently run unverified**. Phase 6 (modernization plan) install hooks consume this instead of §4.5's static zip map. **The fixture yields a *local* path**, which only a `local` transport's `wp` can read directly; for **ssh/docker** targets the install hook first copies the zip onto the site via the Phase 5 transfer layer (§2.9, §1.4).
 
 ### 2.7 Orchestrator pre-warming
 
@@ -178,6 +189,45 @@ Purpose: N cells wanting the same uncached request must not build it N times, an
 | 14 | Relative `E2E_*_ZIP` | Resolved against the repo root (documented; absolute recommended). Must resolve correctly, avoid using process cwd |
 | 15 | Edition missing on an edition-ful product | Sites loader already fails all-or-none; request builder re-asserts (programming error) |
 | 16 | `--no-deps` BDD invocation | Fixture reads whatever the last resolution wrote or errors; documented as unsupported for artifact-consuming scenarios |
+| 17 | ssh/docker install of a locally-resolved zip | Zip staged to `<WP root>/.e2e_temp/plugins/` first, then `wp plugin install <target>` (§2.9); a `local` transport can install the fixture path directly |
+| 18 | Login user can't write the WP root | Actionable error naming the transport + path; set `E2E_SITE_STAGING_DIR` to a writable dir (or one outside the docroot). Verified writable on the current ssh cell (§1.4) |
+| 19 | Docker WP root unknown (no `rootDir` in config) | Resolved at runtime via `exec(t,"pwd",[])` (= container WORKDIR = `/var/www/html`); an optional `stagingDir` override skips the round-trip |
+| 20 | `.e2e_temp` under the web docroot | Documented exposure on QA sites (sometimes a feature — HTTP-fetchable artifacts); wiped in teardown + optional deny `.htaccess`; stage outside the docroot via the override (§1.4) |
+| 21 | Stale `.e2e_temp` from a crashed run | Wipe-before-stage (overwrite) + teardown `cleanSiteStaging` make staging idempotent (§2.9) |
+| 22 | One host shared by concurrently-running bound sites | Unsupported by the shared `.e2e_temp` (worker↔site is 1:1 within an invocation, so it can't happen there); namespace by `RUN_ID` if an orchestrator ever overlaps pools on a host (deferred, §2.9) |
+
+### 2.9 Site staging area & artifact transfer (Phase 5 — the ssh/docker install path)
+
+**Problem.** The `pluginArtifact` fixture (§2.6) yields a **local** path under `.artifacts/…`. But `wp plugin install` — and every other WP-CLI/site step that reads a file (`wp import`, `wp db import`, `wp theme install`, uploading media, dropping an mu-plugin) — runs **on the site**, so for `ssh`/`docker` targets the artifact must first be **copied onto the site** (verified §1.4); only a `local` transport shares the filesystem. This is the Phase-3 finding, made first-class.
+
+**Design: a per-site `.e2e_temp/` staging area.** One directory at the site's WP root holds every artifact a run needs on the target, organized by **category** — general by design (dev's ask), not plugin-specific:
+
+```text
+<WP root>/.e2e_temp/            ← per-site staging area — lives on the SITE, not the repo
+├── plugins/<name>.zip          ← plugin zips  → wp plugin install
+├── imports/<name>.xml          ← future: WXR  → wp import
+├── db/<name>.sql               ← future: dump → wp db import
+└── <category>/<name>           ← any artifact a test needs on the target
+```
+
+- **Location = the WP root** (§1.4: it's the exec cwd, so relative paths just work, and it's where web-reachable artifacts must live). **Dir name `.e2e_temp`** (dev's choice). **Overridable** via `E2E_SITE_STAGING_DIR` (env) or an optional per-transport `stagingDir` — for hosts where the login user can't write the docroot, or to place the area outside the docroot.
+- **First category is `plugins/`**; the area is open-ended so any future artifact type reuses the same transfer + cleanup rather than growing a bespoke path each time.
+
+**Helpers — `src/common/wp/staging.ts` (transport-agnostic, the "setup" helpers dev asked for):**
+
+- `stageArtifact(transport, localPath, { category, as? }) → Promise<string>` — `mkdir -p .e2e_temp/<category>` (via `exec`, so it's uniform across transports), copy the local file in (via the transport copy primitive below), and return the **absolute target path** for the caller to hand to `wp`. Idempotent (overwrites). `as?` renames on the target (default: the source basename).
+- `cleanSiteStaging(transport, category?) → Promise<void>` — `rm -rf` the whole area (or one category) via `exec`.
+- `siteStagingDir(transport) → Promise<string>` (absolute; resolves the WP root per §1.4) and a pure `stagingRelPath(category, filename)` builder (the pure one is unit-tested without any transport).
+
+**Transport copy primitive** lives at the transport boundary (`src/common/wp/exec.ts`, which already owns the cached SSH connection and the per-mode dispatch): `copyIntoTarget(transport, localAbs, targetAbs) → Promise<void>` → `node:fs` `cp` (local) / `docker cp` (docker) / node-ssh `putFile` reusing the cached connection (ssh). Placing it there avoids a second SSH connection and keeps `staging.ts` to pure-ish path/category/lifecycle logic. (Alternative: a standalone `transfer.ts` importing an exported `sshConnection` — rejected as leakier.)
+
+**Plugin integration (thin):** `stageAndInstallPlugin(transport, localZip, opts)` = `stageArtifact(category:"plugins")` → `installPlugin(target, opts)`. The modernization plan's **Phase 6 install hooks** call this (or `stageArtifact` directly for non-plugin artifacts). On `local`, staging is a cheap same-fs copy for a uniform on-site layout (callers may instead install the fixture path directly).
+
+**Lifecycle & safety:**
+
+- **Idempotent** — wipe-before-stage per file (overwrite); `cleanSiteStaging` wipes the whole area in **worker teardown** (wired by modernization Phase 6, beside `disposeConnections`), so a run leaves the site clean. Wipe-before-use also neutralizes stale residue from a crashed prior run.
+- **Concurrency** — worker↔site is 1:1 within an invocation (`boundSite = pool[parallelIndex]`, one cell per invocation), so no two workers write one site's `.e2e_temp` at once. A shared `.e2e_temp` is unsafe only if an orchestrator overlaps pools on one physical host; namespace by `RUN_ID` then (deferred).
+- **Best-effort cleanup** never masks a test result (same rule as report attachments); **transfer failures throw** with the transport, path, and the override to set.
 
 ---
 
@@ -200,13 +250,19 @@ src/common/artifacts/                   ← NEW: the whole capability, product-a
 warm-artifacts.ts                       ← NEW root tsx entry (npm run artifacts:warm), like healthcheck.ts
 .artifacts/                             ← NEW gitignored output tree (§2.4)
 
-Modified: src/common/config/types.ts    (+ ProductConfig.artifacts manifest)
+src/common/wp/                          ← Phase 5: transport-agnostic site staging & transfer
+├── staging.ts                          # .e2e_temp staging area: stageArtifact / cleanSiteStaging / siteStagingDir / pure path builder / stageAndInstallPlugin
+└── staging.spec.ts                     # pure path/category logic + local-transport copy (docker/ssh integration-verified)
+<WP root>/.e2e_temp/                     ← Phase 5: per-site staging area, on the TARGET (not the repo); wiped in teardown (§2.9)
+
+Modified: src/common/config/types.ts    (+ ProductConfig.artifacts manifest; Phase 5: optional DockerTransport.rootDir / per-transport stagingDir)
           src/projects/*/config/*.config.ts (+ per-product manifests incl. §1.2 expectations)
           src/common/config/project.ts  (+ artifacts:<cell> project & dependencies)
           src/common/config/run-context.ts (+ artifacts dir / ARTIFACTS_ROOT)
           src/common/fixtures.ts        (+ pluginArtifact fixture)
-          .gitignore  .env.example  package.json (deps + script)
-          CLAUDE.md  docs/guides/configuration.md  docs/architecture/execution-model.md
+          src/common/wp/exec.ts         (Phase 5: + copyIntoTarget transport copy primitive — fs.cp / docker cp / node-ssh putFile)
+          .gitignore  .env.example  package.json (deps + script; Phase 5: E2E_SITE_STAGING_DIR in .env.example)
+          CLAUDE.md  docs/guides/configuration.md  docs/architecture/{execution-model,wordpress-automation}.md
 ```
 
 ## 4. Implementation phases
@@ -224,6 +280,7 @@ Land `apvm.ts`, `resolve.ts`, `verify.ts` (+spec), `artifacts.setup.ts`; factory
 **Phase 3 — Consumption & pre-warm.**
 `pluginArtifact` fixture/helper; `warm.ts` (+spec) + `warm-artifacts.ts` + `artifacts:warm` script; finalize docs (CLAUDE.md section + §5 note, configuration.md env table, execution-model.md: artifacts dir row, third per-cell project, updated mental-model diagram).
 *Acceptance:* `artifacts:warm` then a cell run → resolution logs show `fromCache`/copy (no rebuild); a smoke step installs via `pluginArtifact("plugin").zipPath`; requesting `previous` on backwpup throws the §5 error; docs cross-linked and current.
+*Implemented:* `pluginArtifact` fixture (`fixtures.ts`) backed by **`consume.ts`** (+spec; **added beyond the §3 sketch** — the memo→`resolution.json` reader with a pure `parseResolution` parser, the §5 role guard, and the missing-file error, split out so the on-disk contract is unit-testable and `fixtures.ts` stays thin glue); **`peekArtifacts`** (non-throwing registry probe) reused as the single per-process memo (a disk read is memoized back through `registerArtifacts`). `warm.ts` (+spec): pure `warmArtifacts` — dedupe by `{project,gitRef,version,variants}`, skip provided zips, collect per-unit plan failures + per-request warm failures + deduped warnings; plans `serial:false` so it matches a real `--project=<cell>` run (the parity invariant) — plus `createApvmWarmer` (real `warmCache` glue). `warm-artifacts.ts` root CLI + `artifacts:warm` script (`--product`/`--cell` filters; placeholder-only cells skipped so a fresh checkout warms nothing token-free; unknown `--product` → exit 1). Docs: execution-model (trio of per-cell projects, artifacts-dir row, diagram + pre-warm note), configuration (`ARTIFACTS_ROOT`), authoring-tests (fixture row), CLAUDE.md (new *Plugin artifacts* section incl. the `apvm-napi` pin, identity matrix, six vars, `artifacts:warm`, §5 MUST — **not** linking this design doc, per Phase 4), `.env.example` (`ARTIFACTS_ROOT`). **Verified end-to-end 2026-07-16:** 120 unit tests green (18 new), typecheck/lint/format clean; `artifacts:warm --product=backwpup` built `develop`→`78f6306` `[pro-en]`@`9.99.99` into cache, then the real `artifacts:pro@nginx` project resolved it **origin=cache** (no rebuild — parity confirmed) and wrote `resolution.json`; the consumer reader returned that verified zip and `previous` correctly threw the §5 error; `pluginArtifact('plugin').zipPath` installed **and activated** backwpup-pro on the real `pro@nginx` site, then cleanup restored it to absent. **Finding for Phase 6:** `installPlugin` over **ssh/docker** needs the artifact transferred to the target first — the remote `wp` cannot see a local path (a `local` transport shares the fs); the proof uploaded the zip manually to bridge this. The install-hooks phase (modernization Phase 6) must own that transfer. **Phase 4 still remains** (the design write-up, the modernization-plan §4.5/Phase 9 cross-links, and the free/pro shared-ref `variants:["free","pro"]` optimization note).
 
 **Phase 4 — Documentation.**
 Document the design, the identity matrix, the six env vars, link to it from the modernization plan §4.5 and Phase 9.
@@ -232,15 +289,22 @@ Also, update CLAUDE.md with anything that is relevant to the artifact management
 
 Document in the orchestrator part of the modernization plan that we should find a way to identify the refs used to build the artifacts (free and pro), so if they are the same ref AND version, we can pass variants ["free", "pro"] to APVM and build both zips in one shot. This is a future optimization, not a requirement for the initial implementation (unless dev says so).
 
+**Phase 5 — Site staging area & artifact transfer (the ssh/docker install path).**
+Land `src/common/wp/staging.ts` (+spec): the per-site **`.e2e_temp`** staging area and transport-agnostic `stageArtifact` / `cleanSiteStaging` / `siteStagingDir` / pure `stagingRelPath` (§2.9), plus the `copyIntoTarget` copy primitive on the transport boundary (`exec.ts`: `node:fs` `cp` / `docker cp` / node-ssh `putFile`), the WP-root resolution (rootDir for local/ssh; `pwd` for docker), and the staging-root override (`E2E_SITE_STAGING_DIR` / optional per-transport `stagingDir`). Provide the thin `stageAndInstallPlugin` wrapper. **General by design** — `plugins/` is the first category; any artifact type reuses the same path. Update `exec.ts`'s module doc (now "command execution **and file transfer**") and `docs/architecture/wordpress-automation.md`. **Depends on** Phases 1–3 (needs a resolved local `zipPath`); **blocks** the modernization plan's **Phase 6** (plugin-install hooks stage through this layer). Independent of Phase 4 — either order.
+*Acceptance:* against a real cell of each reachable transport — `stageArtifact(site.transport, pluginArtifact("plugin").zipPath, { category: "plugins" })` copies the zip under `<WP root>/.e2e_temp/plugins/` and returns its absolute path; `installPlugin(transport, thatPath, { activate: true })` then installs **and activates** over **ssh** (the Phase-3 gap, now first-class) and, where the env is up, **docker** and **local**; a non-writable staging root yields the actionable `E2E_SITE_STAGING_DIR` error; `cleanSiteStaging` removes `.e2e_temp` and leaves the site clean; unit tests cover the pure path/category logic and the local-transport copy; `typecheck`/`lint`/`format`/`test:unit` green. (The ssh install path was already dry-run-verified end-to-end in Phase 3 by manually uploading the zip — Phase 5 makes that a first-class, tested helper.)
+
 ## 5. Deferred work — explicit obligations
 
 - **BackWPup `previous` role (MUST, when its comparison tests arrive):** add `previous: "release:latest-stable"` to the backwpup manifest (dev-confirmed choice). Releases carry free + pro assets, and the variant filter applies to release downloads too — **confirmed 2026-07-16**: `release:latest-stable` resolves to v5.7.4 with `free`/`pro-en`/`pro-de` assets, so `pro-en` is selectable. Add a `defaultVersion.previous` too (e.g. `9.99.98`): a release ref derives its version from the tag (so the default is unused for it), but it is needed if `E2E_PREVIOUS_REF` is ever overridden with a *build* ref. Because resolution *and* the identity preflight are **manifest-driven**, defining the role automatically enables both — the preflight for the second artifact **must not be skipped** at that point; the only exemption is a test that builds inside its own scenario, which then owns its verification. Until then the fixture hard-errors (§2.6) — a comparison test cannot silently consume an unverified zip. This note is mirrored as the code comment on the manifest (Phase 1) and a CLAUDE.md bullet (Phase 3).
 - **Imagify:** add a manifest (+ §1.2 row verified from its build definition) when the product is wired; everything else is data-driven.
 - **Version-aware tests:** `E2E_PLUGIN_VERSION` is plumbing-only today; `resolution.json` already exposes the effective version/commit for future assertions (migrations, version-gated notices).
 - **Deeper zip validation** (full CRC pass / trial install) — only if a real failure class appears; slots behind the same aggregated report.
+- **Worker-teardown staging cleanup:** `cleanSiteStaging` (Phase 5) exists, but wiring it into a worker-scoped teardown (beside `disposeConnections`) is the modernization plan's **Phase 6**; until then a staged artifact may persist between runs — harmless (wipe-before-stage overwrites it before reuse).
+- **`.e2e_temp` web-serving hardening:** if a QA site's exposure ever matters, drop a deny `.htaccess`/`index.html` on `mkdir` (Apache-only) or default the staging root outside the docroot (§1.4, §2.9). Deferred — QA sites, and the area is wiped in teardown.
 
 ## 6. References
 
 - APVM: [repo](https://github.com/wp-media/automation-plugin-version-manager) · [napi README](https://github.com/wp-media/automation-plugin-version-manager/blob/develop/crates/napi/README.md) · [`index.d.ts`](https://github.com/wp-media/automation-plugin-version-manager/blob/develop/index.d.ts) (types are the source of truth) · builders `crates/core/src/build/plugins/`
 - Identity ground truth: `wp-media/backwpup-pro` `gulpfile.ts` (`compressPackage`, `free`/`pro` tasks); `wp-media/wp-rocket` `wp-rocket.php`
-- This repo: [execution-model.md](../architecture/execution-model.md) · [configuration.md](../guides/configuration.md) · [modernization plan](e2e-modernization-plan.md) §3.4/§4.5/Phase 6/Phase 9
+- Transport transfer (Phase 5, §1.4): [exec.ts](../../src/common/wp/exec.ts) & [log.ts](../../src/common/wp/log.ts) (exec-cwd = WP root); `node-ssh` `putFile`/`mkdir` (`index.d.ts`); `docker cp` + `wordpress:cli` WORKDIR (`docker image inspect`)
+- This repo: [execution-model.md](../architecture/execution-model.md) · [configuration.md](../guides/configuration.md) · [wordpress-automation.md](../architecture/wordpress-automation.md) · [modernization plan](e2e-modernization-plan.md) §3.4/§4.5/Phase 6/Phase 9

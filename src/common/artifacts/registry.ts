@@ -1,11 +1,11 @@
 /**
  * Per-process registry of resolved artifacts, keyed by `(product, cell)`.
  *
- * Mirrors the pool registry in `config/metadata.ts`: the artifacts setup project (Phase 2)
+ * Mirrors the pool registry in `config/metadata.ts`: the artifacts setup project
  * resolves + verifies a cell's zips once and registers the result here, and fixtures in the
  * **same** process read it back without re-resolving. Cross-**process** handoff (the setup
  * project resolves; separate worker processes consume) goes through `resolution.json` on
- * disk, not this map (plan §2.4) — this registry is only the in-process memo.
+ * disk, not this map — this registry is only the in-process memo.
  *
  * The stored {@link CellArtifacts} is non-secret (paths + build metadata), so unlike the
  * credential-bearing pool registry it could ride in Playwright metadata; it does not only
@@ -22,7 +22,7 @@ import type { CellArtifacts, ProductArtifacts } from "./types";
  * registry in `config/metadata.ts`. The artifacts setup project reads it by product name
  * (its only routing input), avoiding a `common → projects` import that would break the
  * product-agnostic layering. The manifest is non-secret but stays out of project metadata
- * to keep that channel to bare routing (plan §1.3).
+ * to keep that channel to bare routing.
  */
 const manifests = new Map<string, ProductArtifacts>();
 
@@ -64,7 +64,9 @@ function key(product: string, cell: string): string {
 /**
  * Registers a cell's resolved artifacts. Called by the artifacts setup project after it
  * resolves and verifies them; a later call for the same `(product, cell)` overwrites the
- * prior entry (each execution resolves afresh).
+ * prior entry (each execution resolves afresh). Also used by the consumer reader
+ * (`consume.ts`) to memoize a `resolution.json` it read from disk, so this doubles as the
+ * single per-process memo whether the source was resolution or a worker-side file read.
  */
 export function registerArtifacts(
   product: string,
@@ -75,10 +77,22 @@ export function registerArtifacts(
 }
 
 /**
+ * Returns a cell's registered artifacts, or `undefined` if none are registered in this
+ * process. The non-throwing sibling of {@link getArtifacts}: the consumer reader uses it as
+ * a memo probe before falling back to reading `resolution.json` from disk.
+ */
+export function peekArtifacts(
+  product: string,
+  cell: string,
+): CellArtifacts | undefined {
+  return registry.get(key(product, cell));
+}
+
+/**
  * Returns a cell's registered artifacts.
  *
  * @throws Error if nothing was registered for `(product, cell)` in this process — meaning
- * the artifacts setup did not run here (e.g. a `--no-deps` invocation, plan §2.8 case 16),
+ * the artifacts setup did not run here (e.g. a `--no-deps` invocation),
  * a programming/usage error rather than bad input.
  */
 export function getArtifacts(product: string, cell: string): CellArtifacts {

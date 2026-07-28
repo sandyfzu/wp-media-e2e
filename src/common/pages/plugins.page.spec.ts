@@ -8,7 +8,7 @@ import {
 
 // Fixtures mirroring wp-admin's per-row action-link ids. `active-demo` shows only Deactivate
 // (installed + active); `inactive-demo` shows Activate + Delete. The links are inert, so the
-// full delete() AJAX flow is covered live (Phase 3d) — these specs cover detection and the
+// full delete() AJAX flow is covered by live tests — these specs cover detection and the
 // guard branches that run BEFORE any AJAX, with no browser environment.
 const FIXTURE = `<!doctype html><html><body>
 <table class="plugins">

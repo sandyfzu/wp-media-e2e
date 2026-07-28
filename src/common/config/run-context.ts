@@ -10,7 +10,7 @@ import { env } from "./env";
  * (`…/src/common/config/run-context.ts` → three levels up), so callers can absolutize the
  * repo-root-relative paths {@link dirs} returns **without depending on `process.cwd()`** —
  * which the artifacts resolver needs (APVM requires an absolute `outputDir`, and a
- * relative `E2E_*_ZIP` must resolve against the repo, not the process cwd — plan §2.8).
+ * relative `E2E_*_ZIP` must resolve against the repo, not the process cwd).
  */
 export const REPO_ROOT: string = fileURLToPath(
   new URL("../../../", import.meta.url),
@@ -23,7 +23,7 @@ export const REPO_ROOT: string = fileURLToPath(
 
 /**
  * Run context: resolves the namespaced artifact directories for a (product, cell) and
- * the per-run report token. Artifacts split into two lifecycles (plan §3.5):
+ * the per-run report token. Artifacts split into two lifecycles:
  *
  *  - report  → ACCUMULATES under `<REPORT_ROOT>/<product>/<cell>/<RUN_ID>` (one per
  *              run; pruned to the newest N by a later `report:prune` utility).
@@ -59,7 +59,7 @@ export const RUN_ID: string = resolveRunId();
  * (`--project=x`, `--project x`, the variadic `--project x y`, and repeats). This is the
  * single source of truth for cell selection — the exact signal Playwright itself uses to
  * filter projects — so the config can never size workers for a cell Playwright is not
- * running (plan §3.2). A correct invocation selects exactly one cell; this returns ALL
+ * running. A correct invocation selects exactly one cell; this returns ALL
  * requested values so the config factory can reject an unsafe multi-cell selection
  * fail-fast. A `*` wildcard is returned verbatim and resolves to no real cell (→ a safe
  * serial run).
@@ -98,7 +98,7 @@ export interface RunDirs {
   /**
    * Ephemeral resolved-plugin-artifacts directory (the zips under test). Repo-root-relative
    * like the rest; the artifacts resolver joins it onto {@link REPO_ROOT} for the absolute
-   * path APVM needs, and wipes it whole on every resolution (plan §2.4).
+   * path APVM needs, and wipes it whole on every resolution.
    */
   readonly artifacts: string;
 }

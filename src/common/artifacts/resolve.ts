@@ -1,13 +1,13 @@
 /**
  * Resolution: turn the pure planner's {@link ArtifactRequest}s into real zips on disk. For each
  * role it either builds a git ref through APVM or copies an operator-provided zip, into a wiped
- * `.artifacts/<product>/<cell>/<role>/` dir (plan §2.4). Every execution wipes and re-resolves —
+ * `.artifacts/<product>/<cell>/<role>/` dir. Every execution wipes and re-resolves —
  * refs re-run (a cache hit is a cheap copy), provided zips are copied in — so the only
  * cross-execution reuse layer is APVM's own cache (`~/.apvm/cache`), which we never touch here.
  *
  * Failures are captured **per role** as {@link RoleOutcome} values, not thrown, so one role's
  * failure never prevents another from resolving; the setup project feeds every outcome to the
- * aggregated preflight (`verify.ts`, plan §2.5). Resolution runs sequentially for readable logs.
+ * aggregated preflight (`verify.ts`). Resolution runs sequentially for readable logs.
  */
 
 import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
@@ -52,7 +52,7 @@ class ResolveError extends Error {
 
 /**
  * Wipes the cell's artifacts dir, then resolves each request into its own role subdir, collecting
- * a {@link RoleOutcome} per role. Sequential by design (plan §2.6). Never rejects for a per-role
+ * a {@link RoleOutcome} per role. Sequential by design. Never rejects for a per-role
  * failure — only for an I/O fault wiping/creating the base dir, which is a genuine environment
  * problem.
  */
@@ -106,8 +106,8 @@ function describe(request: ArtifactRequest): string {
 
 /**
  * Validates an operator-provided zip (exists, is a file, ends in `.zip`) and copies it into the
- * role dir, so the on-disk layout is uniform and immune to the source moving mid-run (plan §2.4).
- * A relative path resolves against {@link REPO_ROOT}, never `process.cwd()` (plan §2.8 case 14).
+ * role dir, so the on-disk layout is uniform and immune to the source moving mid-run.
+ * A relative path resolves against {@link REPO_ROOT}, never `process.cwd()`.
  *
  * @throws {@link ResolveError} naming the env var and path on any validation failure.
  */
@@ -154,7 +154,7 @@ async function resolveZipRequest(
 
 /**
  * Builds a role through APVM into the role dir. Asserts a token first for private-source products
- * (so a missing one fails before any clone — plan §2.8 case 7), then runs the build, enriching a
+ * (so a missing one fails before any clone), then runs the build, enriching a
  * failure with the builder's reason and last output lines.
  *
  * @throws {@link ResolveError} on a missing token or a build failure; a plain `Error` from the
@@ -208,7 +208,7 @@ async function resolveBuildRequest(
  * variant, else the sole artifact when exactly one was produced.
  *
  * @throws {@link ResolveError} when the output is not the expected single artifact (0, or >1 with
- * no variant match) — every role resolves to exactly one zip (plan §2.5).
+ * no variant match) — every role resolves to exactly one zip.
  */
 function pickArtifact(
   artifacts: readonly JsProducedArtifact[],
@@ -239,7 +239,7 @@ function toOrigin(origin: string): ArtifactOrigin {
  * Writes `resolution.json` into the (wiped) cell dir — the execution's role→artifact map that
  * separate Playwright worker processes read (they never resolve). Living inside the wiped dir, it
  * can never describe a previous execution; it also gives version-aware tests their build metadata
- * for free (plan §2.4). Non-secret. Called only after every role resolved and verified.
+ * for free. Non-secret. Called only after every role resolved and verified.
  */
 export async function writeResolutionFile(
   artifactsDir: string,

@@ -130,7 +130,7 @@ export interface ProductConfig {
    * The plugin artifacts (zips under test) this product resolves and verifies per run —
    * default refs, version/edition policy, and per-edition identity expectations. Required,
    * so a new product can never silently ship without a build source. See
-   * {@link ProductArtifacts} and docs/plans/plugin-artifact-management-plan.md.
+   * {@link ProductArtifacts}.
    */
   readonly artifacts: ProductArtifacts;
   readonly services?: ServiceConfig;

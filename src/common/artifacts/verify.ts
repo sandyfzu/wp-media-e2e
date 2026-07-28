@@ -1,6 +1,6 @@
 /**
  * The identity preflight: static, read-only inspection that asserts each resolved zip is the
- * exact plugin **and edition** the cell expects (plan §1.2, §2.5). It runs on both built and
+ * exact plugin **and edition** the cell expects. It runs on both built and
  * operator-provided zips, needs no WordPress, mutates nothing, and takes milliseconds.
  *
  * Aggregation is the user-visible contract: every role is verified even when an earlier one
@@ -35,7 +35,7 @@ export interface RoleReport {
   readonly checks: readonly CheckResult[];
   /** The resolved artifact, when resolution succeeded; absent for a failed resolution. */
   readonly artifact?: ResolvedArtifact;
-  /** Informational (reported, never asserted): version, source, origin, ref, commit (plan §2.5). */
+  /** Informational (reported, never asserted): version, source, origin, ref, commit. */
   readonly info: Readonly<Record<string, string>>;
 }
 

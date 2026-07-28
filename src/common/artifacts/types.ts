@@ -2,7 +2,7 @@
  * Types for the plugin-artifact capability: how a product declares the zips it needs,
  * what an execution resolves them into, and the requests that drive APVM.
  *
- * The domain has two **roles** per product (plan §2.1): `plugin` (the artifact under
+ * The domain has two **roles** per product: `plugin` (the artifact under
  * test, always present) and `previous` (the older artifact some tests compare against —
  * e.g. an update path — present only when the product's manifest declares a default for
  * it). Everything downstream — env vars, on-disk dirs, fixtures — is keyed by these two
@@ -25,7 +25,7 @@ import type { Edition } from "../config/types";
  * - `plugin` — the artifact under test; every product has it.
  * - `previous` — the older artifact to compare against; a product opts in by declaring a
  *   `previous` default ref in its manifest (see {@link RoleMap}). Absent ⇒ the role is
- *   unsupported and its `E2E_PREVIOUS_*` env vars are ignored (plan §2.2 rule 5, §5).
+ *   unsupported and its `E2E_PREVIOUS_*` env vars are ignored.
  */
 export type ArtifactRole = "plugin" | "previous";
 
@@ -40,7 +40,7 @@ export interface RoleMap<T> {
   readonly previous?: T;
 }
 
-// ── Provenance & origin (for the resolution report, plan §2.5) ─────────────────
+// ── Provenance & origin (for the resolution report) ─────────────────
 
 /**
  * Where a resolved artifact's input came from — surfaced in the resolution report so a
@@ -69,7 +69,7 @@ export type ArtifactOrigin = "built" | "cache" | "downloaded" | "copied";
  * `outputDir`/`noCache` (which do not affect what is produced).
  *
  * Keeping this subset as the single computed value is what guarantees the pre-warm
- * parity invariant (plan §2.7): the warmer and the resolver build the same object, so a
+ * parity invariant: the warmer and the resolver build the same object, so a
  * warmed cache entry is always the one a later build looks up.
  */
 export interface ApvmBuildParams {
@@ -80,7 +80,7 @@ export interface ApvmBuildParams {
   /**
    * Version to build. Present for BackWPup (required by its builder) and for any product
    * when an operator pins one; omitted when the version is embedded in source and no
-   * override was given, and always omitted for `release:*` refs (plan §2.2 rule 4).
+   * override was given, and always omitted for `release:*` refs.
    */
   readonly version?: string;
   /**
@@ -108,8 +108,8 @@ export interface ZipRequest {
   readonly source: "env-zip";
   /**
    * The path exactly as the env var gave it — **not** yet absolutized or checked. Existence,
-   * file-ness, and the `.zip` suffix are validated at resolution start against the repo root
-   * (plan §2.2 rule 6, §2.8 case 14), which is a Phase 2 concern; the pure planner never
+   * file-ness, and the `.zip` suffix are validated at resolution start against the repo root,
+   * which is a resolution-time concern; the pure planner never
    * touches the filesystem.
    */
   readonly rawPath: string;
@@ -120,8 +120,8 @@ export type ArtifactRequest = BuildRequest | ZipRequest;
 
 /**
  * The full result of planning a `(product × cell)`'s artifacts: one request per supported
- * role, plus any non-fatal warnings (ignored/inapplicable env vars — plan §2.2 rules 3–5,
- * §2.8, including overrides dropped on a serial run). The planner is pure, so it returns
+ * role, plus any non-fatal warnings (ignored/inapplicable env vars, including
+ * overrides dropped on a serial run). The planner is pure, so it returns
  * warnings rather than logging them; the impure caller prints them. Only a genuine
  * misconfiguration (a ref+zip conflict in a cell run) throws instead of warning.
  */
@@ -138,7 +138,7 @@ export interface ArtifactPlan {
  * decision logic stays pure and unit-testable (no `process.env` reads inside it).
  *
  * Per-role rule: `ref` and `zip` are mutually exclusive; `version` applies only to a build
- * (plan §2.2). See `request.ts` `readArtifactEnv` for the reader and `ARTIFACT_ENV_VARS`
+ *. See `request.ts` `readArtifactEnv` for the reader and `ARTIFACT_ENV_VARS`
  * for the exact variable names.
  */
 export interface ArtifactEnv {
@@ -153,8 +153,7 @@ export interface ArtifactEnv {
 // ── Manifest (a product's `artifacts` config) ──────────────────────────────────
 
 /**
- * The identity a resolved zip must match, asserted by the Phase 2 preflight (plan §1.2,
- * §2.5). The slug alone pins both product and edition (`wp-rocket` ≠ `backwpup` ≠
+ * The identity a resolved zip must match, asserted by the preflight. The slug alone pins both product and edition (`wp-rocket` ≠ `backwpup` ≠
  * `backwpup-pro`); the plugin-name header is a cheap second witness, compared for exact
  * equality so `"BackWPup"` can never satisfy a `"BackWPup Pro"` expectation.
  */
@@ -168,7 +167,7 @@ export interface ArtifactIdentity {
 }
 
 /**
- * How a product's version is handled when building (plan §2.2 rule 4).
+ * How a product's version is handled when building.
  *
  * - `embedded` — the version lives in source (WP Rocket, Imagify). No default is sent; an
  *   operator override, if given, is passed through and APVM rewrites the source version.
@@ -189,16 +188,16 @@ export interface EditionData {
    * *different namespace* from our behavioral {@link Edition}. The mapping is a projection,
    * not identity: edition `pro` builds variant `"pro-en"` (English; APVM's separate `"pro-de"`
    * we don't test, since pro-en and pro-de are the same except for licensing endpoints, so, pro-en e2e tests cover pro-de), while edition `free` → variant `"free"` merely coincides. Exactly one
-   * variant per edition, because each role resolves to exactly one zip (plan §2.5); the request
+   * variant per edition, because each role resolves to exactly one zip; the request
    * builder wraps it in APVM's `variants` array.
    */
   readonly variant: string;
-  /** The identity a zip of this edition must match (plan §1.2). */
+  /** The identity a zip of this edition must match. */
   readonly identity: ArtifactIdentity;
 }
 
 /**
- * How a product's edition axis is configured (plan §2.3). The cell supplies the edition;
+ * How a product's edition axis is configured. The cell supplies the edition;
  * the manifest supplies the per-edition data.
  *
  * - `editionless` — one identity, no variants (WP Rocket, Imagify).
@@ -217,7 +216,7 @@ export type EditionPolicy =
  * A product's artifact manifest — the declarative source of truth the planner reads to
  * turn `(edition, env)` into {@link ArtifactRequest}s, and the preflight reads for its
  * identity expectations. Lives on `ProductConfig.artifacts` and is authored in each
- * product's `*.config.ts` (plan §2.3).
+ * product's `*.config.ts`.
  */
 export interface ProductArtifacts {
   /** APVM project id passed to `build()`/`warmCache()`: `"wp-rocket"`, `"backwpup"`, `"imagify"`. */
@@ -225,22 +224,22 @@ export interface ProductArtifacts {
   /**
    * Default git ref per role. `plugin` is mandatory; a `previous` entry both supplies its
    * default ref and marks the previous-version role as supported (its absence makes the
-   * `E2E_PREVIOUS_*` vars inapplicable — plan §2.2 rule 5, §5).
+   * `E2E_PREVIOUS_*` vars inapplicable).
    */
   readonly defaultRef: RoleMap<string>;
-  /** Version handling for builds (plan §2.2 rule 4). */
+  /** Version handling for builds. */
   readonly version: VersionPolicy;
-  /** Edition axis: identity/variants, keyed by edition for edition-ful products (plan §2.3). */
+  /** Edition axis: identity/variants, keyed by edition for edition-ful products. */
   readonly edition: EditionPolicy;
 }
 
-// ── Resolution (populated in Phase 2; the shape is fixed by plan §2.4) ──────────
+// ── Resolution ──────────
 
 /**
  * One role's resolved artifact for the current execution — the in-memory record the
- * Phase 2 resolver produces and the Phase 3 fixture hands to tests. A non-secret subset
+ * resolver produces and the fixture hands to tests. A non-secret subset
  * is persisted to `resolution.json` so worker processes (which never resolve) can read it
- * (plan §2.4).
+ *.
  */
 export interface ResolvedArtifact {
   readonly role: ArtifactRole;
@@ -270,10 +269,10 @@ export type CellArtifacts = Readonly<
 >;
 
 /**
- * One role's resolution outcome (Phase 2, produced by `resolve.ts`, consumed by `verify.ts`):
+ * One role's resolution outcome (produced by `resolve.ts`, consumed by `verify.ts`):
  * either the built/copied {@link ResolvedArtifact}, or a captured failure. Failures are values,
  * not thrown, so a `plugin` failure never prevents `previous` from being resolved and verified —
- * every role reaches the single aggregated report (plan §2.5).
+ * every role reaches the single aggregated report.
  */
 export type RoleOutcome =
   | {

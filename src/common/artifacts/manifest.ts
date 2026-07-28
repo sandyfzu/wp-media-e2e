@@ -3,7 +3,7 @@
  *
  * These answer the two edition-dependent questions the rest of the capability asks —
  * "which roles does this product support?", "which variants / identity apply for this
- * cell's edition?" — in one place, so the request planner (`request.ts`) and the Phase 2
+ * cell's edition?" — in one place, so the request planner (`request.ts`) and the identity
  * preflight (`verify.ts`) never re-derive them and can never disagree. All functions are
  * pure and total or throw an actionable error; none read the environment or filesystem.
  */
@@ -14,7 +14,7 @@ import type { ArtifactIdentity, ArtifactRole, ProductArtifacts } from "./types";
 /**
  * Whether the product supports the `previous` role — i.e. its manifest declares a default
  * ref for it. Drives both which requests are planned and whether `E2E_PREVIOUS_*` env vars
- * are applicable (plan §2.2 rule 5, §5).
+ * are applicable.
  */
 export function hasPreviousRole(manifest: ProductArtifacts): boolean {
   return manifest.defaultRef.previous !== undefined;
@@ -52,8 +52,8 @@ export function defaultRefFor(
 
 /**
  * The APVM variant to build for a cell's edition, or `undefined` for an editionless product
- * (whose builder takes no variant). A single id — each role resolves to exactly one zip
- * (plan §2.5); the caller wraps it in APVM's `variants` array.
+ * (whose builder takes no variant). A single id — each role resolves to exactly one zip;
+ * the caller wraps it in APVM's `variants` array.
  *
  * @param edition - the cell's edition; required for edition-ful products, ignored otherwise.
  * @throws Error if the product is edition-ful but `edition` is absent or not in the manifest
@@ -68,7 +68,7 @@ export function resolveVariant(
 }
 
 /**
- * The identity a resolved zip must match for a cell's edition (plan §1.2). For an
+ * The identity a resolved zip must match for a cell's edition. For an
  * editionless product this is the single declared identity; for an edition-ful one it is
  * the edition's identity.
  *
@@ -102,7 +102,7 @@ function editionData(
   if (edition === undefined) {
     throw new Error(
       `[artifacts] project "${manifest.project}" is edition-ful, but no edition was supplied for this cell. ` +
-        "Edition-ful cells must declare an edition (see docs/plans §4.5).",
+        "Edition-ful cells must declare an edition.",
     );
   }
   // `byEdition` is a `Record<Edition, …>` with literal keys, so a valid edition always

@@ -26,7 +26,7 @@ import type { Transport } from "../config/types";
  * plugin is already inactive, so passing it would just draw a WP-CLI warning) starts a fresh PHP
  * process that never loads the plugin at all, so its guard passes and cleanup actually runs.
  *
- * Two removal intents are deliberately separated (plan §7.3): idempotent CLEANUP for Before/After
+ * Two removal intents are deliberately separated: idempotent CLEANUP for Before/After
  * hooks (`ensurePluginAbsent` — already-absent ⇒ no-op) vs. asserted REMOVAL-UNDER-TEST
  * (`uninstallPlugin` — absent-when-expected ⇒ failure). `wp plugin uninstall` exits non-zero for
  * both "not found" and a real failure, so its exit code is not trusted; removal is always

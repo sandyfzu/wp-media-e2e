@@ -16,8 +16,8 @@ import type {
 import type { Edition } from "../config/types";
 
 /**
- * The core of Phase 1: the pure `buildArtifactPlan` precedence/validation matrix (plan
- * §2.2–§2.3) plus the `readArtifactEnv` boundary. Manifests mirror the real products:
+ * The pure `buildArtifactPlan` precedence/validation matrix, plus
+ * the `readArtifactEnv` boundary. Manifests mirror the real products:
  * WP Rocket (editionless, embedded version, `previous` role) and BackWPup (edition-ful,
  * required version, no `previous` role). A third, `BWU_PREV`, models the *future*
  * edition-ful + `previous` shape so the per-role required-version default is proven now.
@@ -110,7 +110,7 @@ function build(req: ArtifactRequest): BuildRequest {
   return req;
 }
 
-// ── Defaults & request shape (§2.3) ────────────────────────────────────────────
+// ── Defaults & request shape ────────────────────────────────────────────
 
 test.describe("defaults and request shape", () => {
   test("WP Rocket emits plugin + previous builds from defaults, no version/variants", () => {
@@ -152,7 +152,7 @@ test.describe("defaults and request shape", () => {
   });
 });
 
-// ── Precedence: env ref > default (§2.2 rule 2) ─────────────────────────────────
+// ── Precedence: env ref > default ─────────────────────────────────
 
 test.describe("env ref overrides the default", () => {
   test("plugin env ref replaces the default and is marked env-ref", () => {
@@ -175,7 +175,7 @@ test.describe("env ref overrides the default", () => {
   });
 });
 
-// ── Env zip (§2.2 rules 1–2) ────────────────────────────────────────────────────
+// ── Env zip ────────────────────────────────────────────────────
 
 test.describe("env zip", () => {
   test("produces a zip request carrying the raw path, unvalidated", () => {
@@ -203,7 +203,7 @@ test.describe("env zip", () => {
   });
 });
 
-// ── Version policy (§2.2 rule 4) ────────────────────────────────────────────────
+// ── Version policy ────────────────────────────────────────────────
 
 test.describe("version policy", () => {
   test("embedded product sends no version by default, passes an override through", () => {
@@ -266,7 +266,7 @@ test.describe("version policy", () => {
   });
 });
 
-// ── Inapplicable previous vars (§2.2 rule 5, §5) ────────────────────────────────
+// ── Inapplicable previous vars ────────────────────────────────
 
 test.describe("previous vars on a product without the role", () => {
   test("are warned and ignored, leaving only the plugin request", () => {
@@ -281,7 +281,7 @@ test.describe("previous vars on a product without the role", () => {
   });
 });
 
-// ── Serial (cell-less) runs: warn + defaults, never fatal (§2.2 rule 3) ─────────
+// ── Serial (cell-less) runs: warn + defaults, never fatal ─────────
 
 test.describe("serial (cell-less) runs", () => {
   test("succeed on defaults with no env, no warnings", () => {
@@ -340,7 +340,7 @@ test.describe("serial (cell-less) runs", () => {
   });
 });
 
-// ── Degenerate comparison: identical plugin/previous requests (§2.8 case 12) ────
+// ── Degenerate comparison: identical plugin/previous requests ────
 
 test.describe("degenerate comparison warning", () => {
   test("distinct default requests (develop vs tag) do not warn", () => {

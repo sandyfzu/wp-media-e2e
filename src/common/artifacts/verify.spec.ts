@@ -23,12 +23,12 @@ import type {
 /**
  * Exercises the identity preflight against **real zips built in-test** with adm-zip — the only
  * way to prove the central-directory/header inspection end to end. Covers the correct case, each
- * failure mode from plan §1.2 (wrong product, wrong edition, wrong name, missing main file,
- * malformed/structurally-wrong archives), and the §2.5 aggregation (a failed resolution never
- * stops another role from being verified).
+ * failure mode (wrong product, wrong edition, wrong name, missing main file,
+ * malformed/structurally-wrong archives), and the aggregation (a failed resolution never stops
+ * another role from being verified).
  */
 
-// ── Expected identities (the plan §1.2 matrix) ─────────────────────────────────
+// ── Expected identities ────────────────────────────────────────────────────────
 
 const WPR: ArtifactIdentity = {
   slug: "wp-rocket",
@@ -107,7 +107,7 @@ test.describe("verifyArtifact — a correct zip", () => {
   });
 });
 
-// ── verifyArtifact: identity mismatches (plan §1.2) ─────────────────────────────
+// ── verifyArtifact: identity mismatches ─────────────────────────────────────────
 
 test.describe("verifyArtifact — identity mismatches", () => {
   test("wrong product: slug and main file fail, name check is gated off", () => {
@@ -201,7 +201,7 @@ test.describe("verifyArtifact — malformed archives", () => {
   });
 });
 
-// ── verifyResolved: aggregation across roles (plan §2.5) ────────────────────────
+// ── verifyResolved: aggregation across roles ────────────────────────────────────
 
 const WPR_MANIFEST: ProductArtifacts = {
   project: "wp-rocket",

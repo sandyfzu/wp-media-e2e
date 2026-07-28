@@ -16,7 +16,7 @@ const isCI = process.env.CI !== undefined && process.env.CI !== "";
 
 /**
  * Default desktop viewport for every project (the suite's baseline desktop size). Mobile
- * emulation is applied per-scenario via the `@mobile` tag — a later phase (plan §7.7).
+ * emulation is applied per-scenario via the `@mobile` tag — a later phase.
  */
 const DESKTOP_VIEWPORT = { width: 1600, height: 700 };
 
@@ -44,8 +44,8 @@ function editionFilter(edition: Edition | undefined): string | undefined {
 /**
  * Builds the config for one product. Each `cell` becomes three projects: two sibling setup
  * projects — one authenticates the cell's site pool, one resolves & verifies its plugin
- * artifacts — and the BDD project that depends on both (either failing skips the scenarios,
- * plan §2.6). A run targets exactly one cell via `--project=<cell>` (plan §3.2), which keeps
+ * artifacts — and the BDD project that depends on both (either failing skips the
+ * scenarios). A run targets exactly one cell via `--project=<cell>`, which keeps
  * the global `parallelIndex` in range for the worker→site binding; selecting more than
  * one cell at once is rejected fail-fast below.
  */
@@ -64,7 +64,7 @@ export function createProductConfig(
   if (requested.length > 1) {
     throw new Error(
       `Multiple cells selected (${requested.join(", ")}). Run one cell per ` +
-        "invocation, e.g. --project=<cell>, so parallelIndex stays in range (plan §3.2).",
+        "invocation, e.g. --project=<cell>, so parallelIndex stays in range.",
     );
   }
   const selected = requested[0];
@@ -135,7 +135,7 @@ export function createProductConfig(
     forbidOnly: isCI,
     fullyParallel: true,
     // Global workers = the SELECTED cell's pool size, so parallelIndex ∈ 0…N-1 and
-    // `pool[parallelIndex]` is always in range for a single-cell invocation (plan §3.2).
+    // `pool[parallelIndex]` is always in range for a single-cell invocation.
     workers:
       selectedCellConfig && selectedCellConfig.sites.length > 0
         ? selectedCellConfig.sites.length
@@ -143,7 +143,7 @@ export function createProductConfig(
     reporter: reporters(dirs(product.name, reportCell).report),
     // Committed-baseline visual checks (`toHaveScreenshot`): comparison tolerance + where the
     // per-product/cell baselines live. WP Rocket's A/B check (visual/ab.ts) diffs live renders and
-    // does NOT use this — it is the wiring for the general committed-baseline capability (plan §7.6).
+    // does NOT use this — it is the wiring for the general committed-baseline capability.
     expect: VISUAL_EXPECT,
     snapshotPathTemplate: snapshotPathTemplateFor(product.name),
     use: {

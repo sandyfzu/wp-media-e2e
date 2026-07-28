@@ -3,10 +3,9 @@
  * a cell's edition + those vars into one {@link ArtifactRequest} per supported role.
  *
  * {@link buildArtifactPlan} is **pure** — no `process.env`, no filesystem — so the whole
- * precedence/validation matrix (plan §2.2–§2.3) is unit-testable with plain inputs. It is
- * also the single source of truth shared by the Phase 2 resolver and the Phase 3 warmer,
- * which is what makes their APVM requests byte-identical (the pre-warm parity invariant,
- * plan §2.7). The only impurity lives in {@link readArtifactEnv}, a thin reader.
+ * precedence/validation matrix is unit-testable with plain inputs. It is
+ * also the single source of truth shared by the resolver and the warmer,
+ * which is what makes their APVM requests byte-identical (the pre-warm parity invariant). The only impurity lives in {@link readArtifactEnv}, a thin reader.
  *
  * Failure model: a genuine misconfiguration that would otherwise silently do the wrong
  * thing **throws** — a role's ref and zip both set in a cell run. Vars that are set but
@@ -32,7 +31,7 @@ import type {
 
 // ── Env variable names ─────────────────────────────────────────────────────────
 
-/** The env var names for one role — the exact, project-scoped names operators set (plan §2.2). */
+/** The env var names for one role — the exact, project-scoped names operators set. */
 interface RoleVars {
   readonly ref: string;
   readonly zip: string;
@@ -90,7 +89,7 @@ export interface PlanInput {
   /**
    * Whether this is a serial (cell-less) run — no `--project=<cell>` selected. Serial runs
    * always use defaults; any applicable override is **warned and ignored**, never fatal
-   * (plan §2.2 rule 3) — so the operator sees it had no effect without the run aborting.
+   * — so the operator sees it had no effect without the run aborting.
    */
   readonly serial: boolean;
   /** The already-read env vars (see {@link readArtifactEnv}). */
@@ -101,13 +100,13 @@ export interface PlanInput {
  * Builds the per-role {@link ArtifactRequest}s for one `(product × cell)`.
  *
  * Precedence per role: an env zip wins over an env ref, which wins over the manifest
- * default; a role's ref and zip are mutually exclusive (plan §2.2 rules 1–2). Version
- * handling follows the product's policy (plan §2.2 rule 4). Inapplicable/inert vars are
+ * default; a role's ref and zip are mutually exclusive. Version
+ * handling follows the product's policy. Inapplicable/inert vars are
  * collected as warnings; a ref+zip conflict in a cell run throws.
  *
  * A serial (cell-less) run always plans from defaults: env overrides cannot apply without a
  * selected cell, so they are dropped from an empty env and any that were set are warned
- * about (plan §2.2 rule 3) — never fatal.
+ * about — never fatal.
  *
  * @returns the requests (one per supported role) plus any warnings to surface.
  * @throws Error on a role's ref+zip conflict (cell run only), or on an edition-ful product
@@ -176,7 +175,7 @@ function requestForRole(
   }
 
   // Operator-provided zip: taken as-is (validated at resolution start). A version has
-  // nowhere to go when nothing is built, so warn and ignore it (plan §2.2 rule 4).
+  // nowhere to go when nothing is built, so warn and ignore it.
   if (zip !== undefined) {
     if (version !== undefined) {
       warnings.push(
@@ -205,7 +204,7 @@ function buildParams(
   envVersion: string | undefined,
   warnings: string[],
 ): ApvmBuildParams {
-  // One variant per edition (plan §2.5), wrapped into APVM's `variants` array here.
+  // One variant per edition, wrapped into APVM's `variants` array here.
   const variant = resolveVariant(product, edition);
   const version = resolveVersion(product, role, gitRef, envVersion, warnings);
   return {
@@ -217,7 +216,7 @@ function buildParams(
 }
 
 /**
- * Resolves the version to send to APVM for a build, per the product's policy (plan §2.2 rule 4):
+ * Resolves the version to send to APVM for a build, per the product's policy:
  * a `release:*` ref never carries a version (the release tag supplies it — an override is
  * warned and dropped); a `required`-version product falls back to its per-role default; an
  * `embedded`-version product sends only an explicit override (else lets the source version stand).
@@ -276,7 +275,7 @@ function requiredDefaultVersion(
 /**
  * Whether a ref downloads a GitHub release (so its version is fixed by the tag). Matches the
  * explicit `release:` prefix only; a bare numeric ref (e.g. `"5.6.8"`) is left to APVM's own
- * detection and is treated here as a normal build ref (plan §1.1, §2.2 rule 4).
+ * detection and is treated here as a normal build ref.
  */
 function isReleaseRef(gitRef: string): boolean {
   return gitRef.startsWith("release:");
@@ -287,7 +286,7 @@ function isReleaseRef(gitRef: string): boolean {
 /**
  * Warns (and lets the caller ignore) `E2E_PREVIOUS_*` vars set for a product that has no
  * `previous` role — several products may share one CI environment, so this must not block
- * a run (plan §2.2 rule 5, §5).
+ * a run.
  */
 function warnInapplicablePreviousVars(
   product: ProductArtifacts,
@@ -299,13 +298,13 @@ function warnInapplicablePreviousVars(
   if (set.length === 0) return;
   warnings.push(
     `[artifacts] ${set.join(", ")} ${set.length === 1 ? "is" : "are"} set but ignored: project ` +
-      `"${product.project}" has no "previous" role yet (see docs/plans/plugin-artifact-management-plan.md §5).`,
+      `"${product.project}" has no "previous" role yet.`,
   );
 }
 
 /**
  * Warns that any **applicable** override is ignored on a serial (cell-less) run, which always
- * uses defaults (plan §2.2 rule 3). Applicable = the `plugin` vars always, plus the `previous`
+ * uses defaults. Applicable = the `plugin` vars always, plus the `previous`
  * vars when the product supports that role; inapplicable `previous` vars are already covered
  * by {@link warnInapplicablePreviousVars} and are not repeated here. Not an error — an override
  * simply cannot apply without a selected cell, and must never abort a broad serial run.
@@ -345,7 +344,7 @@ function previousVarsSet(vars: ArtifactEnv): string[] {
 /**
  * Warns when the `plugin` and `previous` roles resolve to the **identical** request — same zip
  * path, or same build params — so a comparison/update-path test would pit an artifact against
- * itself (plan §2.8 case 12). Allowed (not fatal): the config is valid, just degenerate.
+ * itself. Allowed (not fatal): the config is valid, just degenerate.
  */
 function warnDegenerateComparison(
   requests: readonly ArtifactRequest[],

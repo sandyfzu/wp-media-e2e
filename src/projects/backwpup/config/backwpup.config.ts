@@ -15,7 +15,7 @@ const configDir = dirname(fileURLToPath(import.meta.url));
  * Global BackWPup storage credentials, read from the environment (tolerant: blank
  * when unset). Presence is asserted at the point of use by the service layer (a
  * later phase). A site may override any of these via its `overrides` block in
- * sites.json (plan §4.3). This config is product-private — WP Rocket never sees it.
+ * sites.json. This config is product-private — WP Rocket never sees it.
  */
 const services: ServiceConfig = {
   storage: {
@@ -36,18 +36,18 @@ const services: ServiceConfig = {
 };
 
 /**
- * BackWPup's artifact manifest (plan §2.3). BackWPup is edition-ful (Free/Pro are separate
+ * BackWPup's artifact manifest. BackWPup is edition-ful (Free/Pro are separate
  * packages) and its builder **requires** a version, so each role carries a default version;
  * the edition (from the cell) selects the APVM variant and the identity to expect. The
  * identity blocks are verified from `wp-media/backwpup-pro` `gulpfile.ts` — the `free` task
  * rewrites the header to `BackWPup` and packages under `backwpup/`, `pro-en` keeps
- * `BackWPup Pro` under `backwpup-pro/` (plan §1.2).
+ * `BackWPup Pro` under `backwpup-pro/`.
  *
- * MUST (plan §5): there is deliberately **no `previous` role yet** — BackWPup has no
+ * MUST: there is deliberately **no `previous` role yet** — BackWPup has no
  * comparison tests, so `defaultRef`/`defaultVersion` declare `plugin` only, and any
  * `E2E_PREVIOUS_*` var is warned-and-ignored. When comparison tests arrive, add a
  * `previous` default ref (e.g. `"release:latest-stable"`) AND a `previous` default version
- * here. Because resolution and the Phase 2 identity preflight are manifest-driven, doing so
+ * here. Because resolution and the identity preflight are manifest-driven, doing so
  * automatically enables the second artifact's verification — which MUST NOT be skipped
  * (the only exemption is a test that builds its own artifact in-scenario and owns its
  * verification). Until then the consuming fixture hard-errors, so no comparison test can
@@ -70,7 +70,7 @@ const artifacts: ProductArtifacts = {
       },
       pro: {
         // Edition `pro` → APVM variant `pro-en` (English); `pro-de` is a separate APVM
-        // variant we don't test. Edition and variant are distinct namespaces (plan §2.3).
+        // variant we don't test. Edition and variant are distinct namespaces.
         variant: "pro-en",
         identity: {
           slug: "backwpup-pro",
