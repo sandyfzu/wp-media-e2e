@@ -1,16 +1,17 @@
 import { isNonEmptyString, isObject } from "../guards";
+import type { ScanDebugLogOptions } from "../wp/log";
 import type { Edition, SiteConfig } from "./types";
 
 /**
- * Owns the project-metadata contract and the per-process site-pool registry.
+ * Owns the project-metadata contract and the per-process registries that back it.
  *
  * Playwright serializes a project's `metadata` verbatim into its reports, so it must
- * never carry secrets. We put only non-secret routing (`product`, `cell`) in metadata
- * and hand the credential-bearing pool to workers through this in-memory registry
- * instead. The registry is populated as a side effect of building the config
- * (`createProductConfig`), which Playwright re-executes in every worker process, so
- * each worker resolves its pool locally from sites.json — never from a report-bound
- * channel.
+ * never carry secrets — and it can only carry JSON. We put only non-secret routing
+ * (`product`, `cell`, `edition`) in metadata and hand everything else to workers through
+ * in-memory registries: the credential-bearing site pool (secrets) and the product's
+ * debug-log preset (RegExps, which JSON cannot express). Both are populated as a side effect
+ * of building the config (`createProductConfig`), which Playwright re-executes in every worker
+ * process, so each worker resolves them locally — never from a report-bound channel.
  */
 
 /** Non-secret routing carried in a project's `metadata`. */
@@ -86,4 +87,31 @@ export function getPool(product: string, cell: string): readonly SiteConfig[] {
     );
   }
   return pool;
+}
+
+// Per-process registry: product -> its debug-log scan preset (RegExp-bearing, so not JSON).
+const debugLogOptions = new Map<string, ScanDebugLogOptions>();
+
+/**
+ * Registers a product's debug-log scan preset (its verified-benign `ignore` patterns and any
+ * `source` restriction). Called while building the config, in each process. A product that
+ * declares none is simply not registered — see {@link getDebugLogOptions} for what that means.
+ */
+export function registerDebugLogOptions(
+  product: string,
+  options: ScanDebugLogOptions | undefined,
+): void {
+  if (options === undefined) return;
+  debugLogOptions.set(product, options);
+}
+
+/**
+ * The debug-log preset for a product, or `{}` when it declares none.
+ *
+ * Unlike {@link getPool} this never throws: `{}` means "categorise every line, ignore nothing",
+ * which is the **strictest** reading of the log. A product that forgot to declare a preset
+ * therefore gets a gate that is too strict rather than one that silently passes.
+ */
+export function getDebugLogOptions(product: string): ScanDebugLogOptions {
+  return debugLogOptions.get(product) ?? {};
 }

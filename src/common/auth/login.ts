@@ -49,20 +49,63 @@ function isAdminEmailInterstitial(url: string): boolean {
 }
 
 /**
+ * Types the credentials into the login form and confirms both fields actually kept them.
+ *
+ * `fill()` inserts its text into whatever element holds focus **at that moment**, not into the
+ * element it resolved. WordPress's own login page re-focuses the username field from an inline
+ * script (and login-hardening plugins re-focus later still), so a re-focus landing mid-fill
+ * silently diverts the password into the username box: the form then submits with an empty
+ * password and the run fails as "login never settled", pointing nowhere near the cause.
+ *
+ * Retrying the pair until both fields read back correctly absorbs that race, and turns a page that
+ * genuinely never settles into an explicit "did not keep its value" failure.
+ *
+ * The password is compared in code rather than with `toHaveValue`, because a failed matcher prints
+ * the value it expected, and a failure message is the one place that is easy to keep clean. It is
+ * **not** a claim that the password stays out of artifacts generally: Playwright records every
+ * `fill()` argument in the trace, so a retained trace carries the site's credentials and must be
+ * treated as sensitive — the same as the sites file they come from.
+ */
+async function enterCredentials(
+  page: Page,
+  credentials: { readonly username: string; readonly password: string },
+  timeout: number,
+): Promise<void> {
+  const usernameField = page.getByLabel("Username or Email Address");
+  const passwordField = page.getByLabel("Password", { exact: true });
+
+  await expect(async () => {
+    await usernameField.fill(credentials.username);
+    await passwordField.fill(credentials.password);
+    expect(
+      await usernameField.inputValue(),
+      "the username field did not keep its value; the login page moved focus mid-fill",
+    ).toBe(credentials.username);
+    expect(
+      (await passwordField.inputValue()) === credentials.password,
+      "the password field did not keep its value; the login page moved focus mid-fill",
+    ).toBe(true);
+  }).toPass({ timeout });
+}
+
+/**
  * Logs a WordPress user into wp-admin through the UI, then returns once the dashboard is reached.
  *
- * Robust against the two things that made this flaky:
- *  1. It waits for the submit's POST → redirect chain to actually SETTLE before inspecting the
+ * Robust against the three things that made this flaky:
+ *  1. It confirms the credentials actually landed in their own fields before submitting — see
+ *     {@link enterCredentials} for the focus race that otherwise loses the password.
+ *  2. It waits for the submit's POST → redirect chain to actually SETTLE before inspecting the
  *     URL. Reading `page.url()` immediately after the click is racy — the click's auto-wait does
  *     not guarantee the final redirect has landed — which intermittently skipped the interstitial
  *     handling and then failed the URL assertion on a still-`wp-login.php` page.
- *  2. It fast-fails with WordPress's own reason when the credentials are rejected, instead of
+ *  3. It fast-fails with WordPress's own reason when the credentials are rejected, instead of
  *     silently waiting out the timeout on a URL that will never become wp-admin.
  *
  * @param page - a page in a context whose `baseURL` is the target site.
  * @param credentials - the WordPress username/password to submit.
  * @param options - see {@link LoginOptions}.
- * @throws {@link Error} when the credentials are rejected or wp-admin is never reached.
+ * @throws {@link Error} when a field will not hold its value, the credentials are rejected, or
+ * wp-admin is never reached.
  */
 export async function loginViaUi(
   page: Page,
@@ -72,8 +115,7 @@ export async function loginViaUi(
   const timeout = options.timeoutMs ?? DEFAULT_LOGIN_TIMEOUT_MS;
 
   await page.goto("/wp-login.php");
-  await page.getByLabel("Username or Email Address").fill(credentials.username);
-  await page.getByLabel("Password", { exact: true }).fill(credentials.password);
+  await enterCredentials(page, credentials, timeout);
   await page.getByRole("button", { name: "Log In" }).click();
 
   const loginError = page.locator("#login_error");

@@ -2,6 +2,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadSites } from "../../../common/config/sites";
+import { WP_ROCKET_LOG_OPTIONS } from "../support/debug-log";
 import type {
   ProductArtifacts,
   ProductConfig,
@@ -41,9 +42,14 @@ export const wpRocket: ProductConfig = {
   features: "src/projects/wp-rocket/features/**/*.feature",
   steps: [
     "src/common/fixtures.ts",
+    // Shared scenario hooks (e.g. the plugin lifecycle). Hooks only register when their file is
+    // imported, and this glob is the only thing that imports them — omit it and the hooks are
+    // silently absent rather than failing.
+    "src/common/hooks/**/*.hooks.ts",
     "src/common/steps/**/*.ts",
     "src/projects/wp-rocket/steps/**/*.ts",
   ],
   sites: loadSites(configDir),
   artifacts,
+  debugLog: WP_ROCKET_LOG_OPTIONS,
 };

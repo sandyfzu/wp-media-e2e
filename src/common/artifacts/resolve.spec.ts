@@ -1,10 +1,12 @@
 import { test, expect } from "@playwright/test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,6 +31,12 @@ test.beforeEach(() => {
 test.afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
+
+/**
+ * The plugin slug this cell expects, as the identity preflight supplies it. The resolver stamps
+ * it onto every role it produces; here it only has to arrive intact and round-trip on disk.
+ */
+const SLUG = "wp-rocket";
 
 /** The cell's ephemeral artifacts dir for a test — the directory the resolver wipes. */
 function artifactsDir(): string {
@@ -76,13 +84,33 @@ test.describe("resolveArtifacts — provided zips", () => {
     const outcomes = await resolveArtifacts({
       requests: [zipRequest(sourceZip("wp-rocket-3.17.4.zip"))],
       artifactsDir: dir,
+      slug: SLUG,
     });
 
     const artifact = resolvedOf(outcomes[0]);
     expect(artifact.zipPath).toBe(join(dir, "plugin", "wp-rocket-3.17.4.zip"));
     expect(artifact.source).toBe("env-zip");
     expect(artifact.origin).toBe("copied");
+    // Every role carries the cell's expected slug, whatever the zip is called.
+    expect(artifact.slug).toBe(SLUG);
     expect(existsSync(artifact.zipPath)).toBe(true);
+  });
+
+  test("normalises the zip's mode so any user on the site can read it", async () => {
+    // A source only its owner can read reaches a site unreadable: `docker cp` preserves the host
+    // mode and numeric owner, so WP-CLI (a different uid in the container) then fails to open the
+    // archive. Regression guard for that, checked on a deliberately owner-only source.
+    const source = sourceZip("owner-only.zip");
+    chmodSync(source, 0o600);
+
+    const outcomes = await resolveArtifacts({
+      requests: [zipRequest(source)],
+      artifactsDir: artifactsDir(),
+      slug: SLUG,
+    });
+
+    const mode = statSync(resolvedOf(outcomes[0]).zipPath).mode & 0o777;
+    expect(mode).toBe(0o644);
   });
 
   test("wipes the cell dir first, so a previous execution's files never survive", async () => {
@@ -95,6 +123,7 @@ test.describe("resolveArtifacts — provided zips", () => {
     await resolveArtifacts({
       requests: [zipRequest(sourceZip("fresh.zip"))],
       artifactsDir: dir,
+      slug: SLUG,
     });
 
     expect(existsSync(stale)).toBe(false);
@@ -111,6 +140,7 @@ test.describe("resolveArtifacts — provided zips", () => {
       resolveArtifacts({
         requests: [zipRequest(inside)],
         artifactsDir: dir,
+        slug: SLUG,
       }),
     ).rejects.toThrow(
       /inside this cell's ephemeral artifacts directory[\s\S]*wiped whole/,
@@ -126,6 +156,7 @@ test.describe("resolveArtifacts — provided zips", () => {
     const outcomes = await resolveArtifacts({
       requests: [zipRequest(sibling)],
       artifactsDir: dir,
+      slug: SLUG,
     });
     expect(resolvedOf(outcomes[0]).zipFilename).toBe("beside.zip");
   });
@@ -136,6 +167,7 @@ test.describe("resolveArtifacts — provided zips", () => {
     const outcomes = await resolveArtifacts({
       requests: [zipRequest(join(tmp, "absent.zip"))],
       artifactsDir: dir,
+      slug: SLUG,
     });
     expect(failureOf(outcomes[0])).toMatch(/does not exist/);
 
@@ -145,6 +177,7 @@ test.describe("resolveArtifacts — provided zips", () => {
           await resolveArtifacts({
             requests: [zipRequest(sourceZip("plugin.tar.gz"))],
             artifactsDir: dir,
+            slug: SLUG,
           })
         )[0],
       ),
@@ -156,6 +189,7 @@ test.describe("resolveArtifacts — provided zips", () => {
           await resolveArtifacts({
             requests: [zipRequest(join(tmp, "a-directory.zip"))],
             artifactsDir: dir,
+            slug: SLUG,
           })
         )[0],
       ),
@@ -171,6 +205,7 @@ test.describe("resolveArtifacts — provided zips", () => {
     const outcomes = await resolveArtifacts({
       requests: [zipRequest(join(tmp, token, "missing.zip"))],
       artifactsDir: artifactsDir(),
+      slug: SLUG,
     });
     const failure = failureOf(outcomes[0]);
     expect(failure).not.toContain(token);
@@ -184,9 +219,13 @@ test.describe("resolveArtifacts — provided zips", () => {
         { ...zipRequest(sourceZip("prev.zip")), role: "previous" },
       ],
       artifactsDir: artifactsDir(),
+      slug: SLUG,
     });
     expect(outcomes.map((o) => o.kind)).toEqual(["failed", "resolved"]);
-    expect(resolvedOf(outcomes[1]).zipFilename).toBe("prev.zip");
+    const previous = resolvedOf(outcomes[1]);
+    expect(previous.zipFilename).toBe("prev.zip");
+    // One slug per cell: a cell is a single edition, so both roles resolve to the same plugin.
+    expect(previous.slug).toBe(SLUG);
   });
 });
 
@@ -195,13 +234,16 @@ test("writeResolutionFile round-trips through the consumer's parser", async () =
   const outcomes = await resolveArtifacts({
     requests: [zipRequest(sourceZip("wp-rocket-3.17.4.zip"))],
     artifactsDir: dir,
+    slug: SLUG,
   });
   const artifact = resolvedOf(outcomes[0]);
   await writeResolutionFile(dir, [artifact]);
 
   const path = join(dir, "resolution.json");
   const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+  // Field-for-field equality, so the slug a worker reads back is the one that was verified.
   expect(parseResolution(raw, path).plugin).toEqual(artifact);
+  expect(parseResolution(raw, path).plugin?.slug).toBe(SLUG);
   // The run stamp is what lets a consumer notice a resolution from a previous invocation.
   expect(raw).toHaveProperty("runId");
 });

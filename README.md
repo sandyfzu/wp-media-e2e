@@ -15,7 +15,8 @@ npm run test:wp-rocket -- --project=apache
 
 A fresh checkout has no `sites.json` or `sites.*.json`, so the example placeholder data is
 used: the auth setup is skipped and the `@noauth` smoke scenarios pass, proving the harness
-is wired up.
+is wired up. Add `--grep @noauth` to run **only** those — anything else needs a real
+WordPress (this is exactly what CI does).
 
 ## Concepts
 

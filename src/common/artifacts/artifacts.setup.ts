@@ -6,6 +6,7 @@ import type { TestInfo } from "@playwright/test";
 import { getPool, readRouting } from "../config/metadata";
 import { isPlaceholderSite } from "../config/sites";
 import { REPO_ROOT, dirs, isCellTargeted } from "../config/run-context";
+import { resolveIdentity } from "./manifest";
 import { getManifest, registerArtifacts } from "./registry";
 import { buildArtifactPlan, readArtifactEnv } from "./request";
 import { resolveArtifacts, writeResolutionFile } from "./resolve";
@@ -72,6 +73,10 @@ setup(
     const outcomes = await resolveArtifacts({
       requests: plan.requests,
       artifactsDir,
+      // The expected slug for this cell's edition. Stamped on every resolved artifact so tests
+      // address the plugin without branching on edition; the verification below is what turns it
+      // from an expectation into a fact, and nothing is persisted unless it passes.
+      slug: resolveIdentity(manifest, edition).slug,
     });
     const report = verifyResolved(outcomes, manifest, edition);
 

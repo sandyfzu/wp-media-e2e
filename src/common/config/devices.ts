@@ -1,0 +1,86 @@
+import { devices } from "@playwright/test";
+
+/**
+ * The device profiles scenarios run under, and the tag that selects a non-default one.
+ *
+ * Device is a **per-scenario client** concern, orthogonal to cells and editions: it never
+ * multiplies the project matrix and never touches the worker→site binding. So there is one
+ * default — desktop, applied by the config factory to every project — and a tag that swaps in
+ * a mobile profile for the scenarios that need it, applied through `use` overrides at context
+ * creation (see `../fixtures.ts`).
+ *
+ * Both profiles are a Playwright `devices[…]` preset with the viewport pinned to the size the
+ * suite standardises on. Taking the preset rather than a bare viewport is what makes a mobile
+ * scenario genuinely mobile — `isMobile`, `hasTouch`, a mobile `userAgent` and the right
+ * `deviceScaleFactor` all come with it, so responsive CSS, touch handlers and any server-side
+ * `wp_is_mobile()` branch behave as they do for a real visitor. Pinning the viewport keeps
+ * viewport-sensitive expectations (above-the-fold image sets, LCP candidates) stable even if a
+ * Playwright upgrade changes a preset's default size.
+ */
+
+/** Desktop viewport: the suite's baseline size for every untagged scenario. */
+export const DESKTOP_VIEWPORT = { width: 1600, height: 700 } as const;
+
+/** Mobile viewport applied to {@link MOBILE_TAG} scenarios. */
+export const MOBILE_VIEWPORT = { width: 389, height: 829 } as const;
+
+/**
+ * Tag that switches a scenario onto {@link MOBILE}. Untagged scenarios stay on {@link DESKTOP},
+ * so mobile coverage is opt-in per scenario rather than a second project.
+ */
+export const MOBILE_TAG = "@mobile";
+
+/**
+ * A device profile: a `devices[…]` preset with a pinned viewport. Only the five context options
+ * below are read — Playwright exposes each as its own overridable option fixture, which is what
+ * lets a scenario's tags select a profile.
+ */
+export interface DeviceProfile {
+  readonly viewport: { readonly width: number; readonly height: number };
+  readonly userAgent: string;
+  readonly deviceScaleFactor: number;
+  readonly isMobile: boolean;
+  readonly hasTouch: boolean;
+}
+
+/** The default profile every project runs under: Desktop Chrome at {@link DESKTOP_VIEWPORT}. */
+export const DESKTOP = {
+  ...devices["Desktop Chrome"],
+  viewport: DESKTOP_VIEWPORT,
+};
+
+/**
+ * The {@link MOBILE_TAG} profile: Pixel 5 at {@link MOBILE_VIEWPORT}. Pixel 5 is chosen because
+ * it is a **Chromium** preset — the only browser this suite runs — so its emulation matches the
+ * browser actually under test rather than asking Chromium to impersonate Safari.
+ */
+export const MOBILE: DeviceProfile = {
+  ...devices["Pixel 5"],
+  viewport: MOBILE_VIEWPORT,
+};
+
+// Deliberately not applied: the preset's `screen` (what `window.screen` reports). Playwright
+// exposes it only through `contextOptions`, not as its own option fixture, so a tag-driven
+// override would have to rewrite that whole object. Nothing we assert on reads `window.screen`;
+// add it the same way if a scenario ever does.
+
+/**
+ * The device profile a scenario's tags select, or `undefined` to keep the project default
+ * (desktop). Pure, so the tag→profile decision is unit-tested once instead of re-derived in each
+ * of the five `use` overrides that consume it.
+ *
+ * @param tags - the scenario's Gherkin tags, as playwright-bdd's `$tags` supplies them
+ * (`["@smoke", "@mobile"]`).
+ *
+ * @example
+ * ```ts
+ * viewport: async ({ $tags, viewport }, use) => {
+ *   await use(deviceForTags($tags)?.viewport ?? viewport);
+ * },
+ * ```
+ */
+export function deviceForTags(
+  tags: readonly string[],
+): DeviceProfile | undefined {
+  return tags.includes(MOBILE_TAG) ? MOBILE : undefined;
+}

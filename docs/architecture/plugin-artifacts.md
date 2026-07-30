@@ -134,6 +134,12 @@ override to cells they never named).
 
 - The root is overridable with `ARTIFACTS_ROOT`; `<product>/<cell>` is always
   appended, so concurrent cells never share a directory.
+- **Every resolved zip is normalised to mode `0644`.** A build lands `0600`, and getting it
+  onto a site copies it verbatim: `docker cp` preserves the host mode _and_ numeric owner
+  (meaningless inside a container), so WP-CLI there cannot open the archive and
+  `wp plugin install` fails with an opaque `PCLZIP_ERR_READ_OPEN_FAIL`. The same applies to a
+  `local` site whose `wp` runs as another user. Normalising once at resolution fixes every
+  transport at no per-scenario cost — an artifact only its creator can read is not yet usable.
 - **Every execution wipes and re-resolves.** Refs are rebuilt (a cache hit is a
   ~15 MB copy — acceptable), provided zips are copied in (uniform layout, immune
   to the source file moving mid-run). We make no cross-execution reuse decision:
@@ -223,7 +229,17 @@ await installPlugin(site.transport, pluginArtifact("plugin").zipPath, { activate
 
 The `pluginArtifact` fixture returns the role's
 [`ResolvedArtifact`](../../src/common/artifacts/types.ts)
-(`{ zipPath, zipFilename, source, ref?, commit?, version?, origin, resolvedAt }`).
+(`{ slug, zipPath, zipFilename, source, ref?, commit?, version?, origin, resolvedAt }`).
+
+**`slug`** is the WordPress plugin directory the artifact installs as
+(`backwpup` vs `backwpup-pro`), so a test or hook can address the plugin —
+`ensurePluginAbsent(site.transport, pluginArtifact("plugin").slug)` — without branching
+on edition. It is the cell's expected identity slug, stamped on at resolution; the
+preflight then proves the archive's actual top-level directory matches it, and
+`resolution.json` is written **only** after every role passed. A slug read back through
+the fixture is therefore always a verified one, and `parseResolution` requires the field,
+so a resolution predating it is rejected rather than yielding an undefined slug.
+
 Because Playwright workers are separate processes that never resolve, the channel
 is `resolution.json`, read lazily and memoized per process. Four guards keep the
 failure modes visible:

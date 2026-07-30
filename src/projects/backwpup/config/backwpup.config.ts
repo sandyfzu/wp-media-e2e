@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { boolEnv, env, intEnv } from "../../../common/config/env";
 import { loadSites } from "../../../common/config/sites";
+import { BACKWPUP_LOG_OPTIONS } from "../support/debug-log";
 import type {
   ProductArtifacts,
   ProductConfig,
@@ -87,10 +88,15 @@ export const backwpup: ProductConfig = {
   features: "src/projects/backwpup/features/**/*.feature",
   steps: [
     "src/common/fixtures.ts",
+    // Shared scenario hooks (e.g. the plugin lifecycle). Hooks only register when their file is
+    // imported, and this glob is the only thing that imports them — omit it and the hooks are
+    // silently absent rather than failing.
+    "src/common/hooks/**/*.hooks.ts",
     "src/common/steps/**/*.ts",
     "src/projects/backwpup/steps/**/*.ts",
   ],
   sites: loadSites(configDir),
   artifacts,
+  debugLog: BACKWPUP_LOG_OPTIONS,
   services,
 };

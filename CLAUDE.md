@@ -34,14 +34,15 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 ```text
 src/
 ├── common/                 # product-agnostic, shared by every product
-│   ├── config/             # env, sites loading, run-context, metadata, the config factory
+│   ├── config/             # env, sites loading, run-context, metadata, devices, the config factory
 │   ├── auth/               # auth.setup.ts (login → storageState)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── steps/              # generic step definitions
+│   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
 │   ├── pages/              # Page Object Model (e.g. plugins.page.ts)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, verify, consume, pre-warm)
-│   └── wp/                 # WordPress automation over WP-CLI (exec, staging, plugin, log, db, errors)
+│   └── wp/                 # WordPress automation over WP-CLI (exec, staging, plugin, log, db, teardown, errors)
 └── projects/<product>/
     ├── config/             # <product>.config.ts + sites.json / sites.*.json / sites.example.json
     ├── features/           # *.feature (Gherkin)
@@ -79,7 +80,7 @@ npm run test:backwpup  -- --project=<cell>
 npm run test:wp-rocket -- --project=apache --grep @smoke   # filter by tag
 npm run test:ui                    # Playwright UI mode
 npm run test:headed                # headed browser
-npm run test:unit                  # unit/integration specs (src/common/**/*.spec.ts)
+npm run test:unit                  # unit/integration specs (src/**/*.spec.ts)
 npm run test:unit:ui
 
 # Fleet health check
@@ -137,14 +138,66 @@ Two surfaces — schema reference in
 Import step builders and fixtures from [`src/common/fixtures.ts`](src/common/fixtures.ts),
 **not** from `playwright-bdd` directly. Available fixtures:
 
-| Fixture                   | Scope  | Purpose                                                                                                                |
-| ------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `site`                    | test   | The `SiteConfig` bound to this worker; throws if no pool (tag `@noauth` instead).                                      |
-| `edition`                 | test   | The cell's `free`/`pro` edition; throws in editionless cells.                                                          |
-| `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                                                       |
-| `pluginArtifact`          | test   | `pluginArtifact(role)` → the resolved zip under test; `.zipPath` feeds `stageAndInstallPlugin` (see Plugin artifacts). |
-| `baseURL` (override)      | —      | Points navigation at the bound site.                                                                                   |
-| `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                       |
+| Fixture                   | Scope  | Purpose                                                                                                                       |
+| ------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `site`                    | test   | The `SiteConfig` bound to this worker; throws if no pool (tag `@noauth` instead).                                             |
+| `edition`                 | test   | The cell's `free`/`pro` edition; throws in editionless cells.                                                                 |
+| `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                                                              |
+| `pluginArtifact`          | test   | `pluginArtifact(role)` → the resolved zip under test; `.slug` addresses the plugin, `.zipPath` feeds `stageAndInstallPlugin`. |
+| `releaseBoundSite`        | worker | Automatic teardown: removes the site's staging area, closes SSH connections. Best-effort — never fails a passing run.         |
+| `baseURL` (override)      | —      | Points navigation at the bound site.                                                                                          |
+| `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                              |
+| device options (override) | —      | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else the desktop default.    |
+
+## Shared scenario hooks
+
+[`src/common/hooks/`](src/common/hooks/) holds product-agnostic scenario hooks. Each
+`*.hooks.ts` file is a thin binding to the BDD runtime; its policy lives in a sibling
+module so it is unit-testable without the runtime.
+
+**`@plugin`** ([`plugin.hooks.ts`](src/common/hooks/plugin.hooks.ts)) — tag a scenario
+`@plugin` and it gets:
+
+- **Before** — `debug.log` cleared, any existing copy of the plugin uninstalled (so the
+  install is genuinely fresh, DB footprint included), then the cell's own resolved
+  artifact staged and installed with `--activate` — and the plugin's **active state
+  re-asserted**, never inferred from the install's exit code. The edition is never named:
+  the slug comes from `pluginArtifact("plugin").slug`.
+- **After** — `debug.log` scanned with the product's preset: a **PHP fatal fails the
+  scenario** (`DebugLogFatalError`) with the log attached; warnings/notices are logged.
+  Then the plugin is removed. Both duties always run; the log verdict wins when both fail,
+  and the cleanup failure is still logged.
+- The scenario timeout is extended **additively** to cover both hooks (remote WP-CLI plus
+  an SFTP upload is slow), so a scenario keeps any budget it asked for.
+
+**MUST — `src/common/hooks/**/*.hooks.ts` belongs in every product's `steps` globs.**
+Hooks register only when their file is imported, and that glob is the only importer: omit
+it and the lifecycle is _silently absent_ rather than failing.
+
+A product declares its `debug.log` scan preset as `ProductConfig.debugLog` (from its
+`support/debug-log.ts`); the config factory registers it per process, so the shared hooks
+never import product code — and RegExp patterns cannot ride project metadata anyway.
+
+## Device profiles (desktop & `@mobile`)
+
+Device is a **per-scenario client** concern, so it is tag-driven and never multiplies the
+project matrix ([`config/devices.ts`](src/common/config/devices.ts)):
+
+- **Default: desktop** — Desktop Chrome at `1600×700`, applied by the config factory.
+- **`@mobile`** — Pixel 5 (a **Chromium** preset, matching the only browser we run) at
+  `389×829`, applied via the `use` overrides above. Taking a real device preset rather
+  than just a narrow viewport is what makes responsive CSS, touch handlers and any
+  server-side `wp_is_mobile()` branch behave as they do for a real visitor. Both viewports
+  are pinned, so a Playwright upgrade cannot shift viewport-sensitive expectations.
+
+## Improvement gate (lint)
+
+`eslint.config.js` bans four flaky-by-construction waits across `src/projects/**`,
+`src/common/pages/**`, `src/common/steps/**` and `src/common/hooks/**`: `waitForTimeout`,
+`waitForLoadState("networkidle")`, `waitForSelector`, and `.type()`. Each message names
+the replacement. The single deliberate exception is out of scope by design —
+[`visual/stabilize.ts`](src/common/visual/stabilize.ts) uses one timeboxed, already-caught
+`networkidle` attempt to settle lazy media before a screenshot.
 
 **Auth fixture / setup:** [`src/common/auth/auth.setup.ts`](src/common/auth/auth.setup.ts)
 is a dependency project that runs before any BDD scenarios. It does two things in order:
@@ -159,6 +212,18 @@ is a dependency project that runs before any BDD scenarios. It does two things i
    formatted, actionable report and skips the whole BDD project.
 2. **Authentication** — logs into each real site once through the WordPress UI and
    saves the session to that site's `storageState`, which the BDD project reuses.
+
+The shared login ([`auth/login.ts`](src/common/auth/login.ts)) confirms each credential
+field actually kept its value before submitting. `fill()` writes into whatever element has
+focus at that instant, and WordPress's login page re-focuses the username field, so a
+re-focus landing mid-fill otherwise diverts the password into the username box and the run
+fails much later as "login never settled".
+
+> **Traces carry site credentials.** Playwright records every `fill()` argument, so a
+> retained trace (`trace: "retain-on-failure"`) contains the site password. Treat
+> `test-results/` and report artifacts as sensitive, exactly like the sites file. Login
+> failures are asserted in code rather than with `toHaveValue` so at least the failure
+> _message_ never quotes the password.
 
 The entire setup is skipped when only placeholder sites exist. Details:
 [authoring-tests.md](docs/guides/authoring-tests.md#fixtures-srccommonfixturests).
@@ -251,7 +316,9 @@ ssh). Highlights — full reference in
   `.e2e_temp/<category>/` staging area on top: `stageArtifact` (any artifact),
   `stageAndInstallPlugin` (stage + install a zip), `cleanSiteStaging` (teardown,
   best-effort). Overridable per site (`transport.stagingDir`) or globally
-  (`E2E_SITE_STAGING_DIR`).
+  (`E2E_SITE_STAGING_DIR`). [`wp/teardown.ts`](src/common/wp/teardown.ts)
+  (`releaseSite`) composes that removal with closing pooled SSH connections, and runs
+  once per worker via the `releaseBoundSite` fixture.
 - Plugin lifecycle separates idempotent **cleanup** (`ensurePluginAbsent`) from
   asserted **removal under test** (`uninstallPlugin`); both **deactivate as their own
   WP-CLI call**, then run plain `wp plugin uninstall` (files + DB footprint) — never
@@ -392,10 +459,10 @@ Update it when you:
 - **Change technologies** — add, remove, or swap a key dependency, or bump the Node
   / TypeScript baseline.
 - **Add or rename an NPM script**, or change what an existing one does.
-- **Add or change a fixture**, the auth flow, or the configuration mechanism
-  (`.env` vars, `sites.json` schema, transports, editions).
-- **Add a testing capability** — e.g. when the committed-baseline visual model or
-  `@mobile` viewport support becomes active, or a new `wp/` module lands.
+- **Add or change a fixture**, a shared scenario hook, or the configuration mechanism
+  (`.env` vars, `sites.json` schema, transports, editions, `ProductConfig` fields).
+- **Add a testing capability** — e.g. when the committed-baseline visual model becomes
+  active, a new device profile or tag lands, or a new `wp/` module appears.
 - **Change a convention** stated here (error handling, typing, TSDoc, workflow).
 
 When a change is too detailed for CLAUDE.md, put it in the relevant `docs/` file
@@ -420,7 +487,7 @@ Update it when you change anything about:
   area (`staging.ts`, `E2E_SITE_STAGING_DIR`, `transport.stagingDir`).
 - The plugin lifecycle functions or their error types.
 - The debug-log API (`readDebugLog`, `clearDebugLog`, `scanDebugLog`, `ScanDebugLogOptions`).
-- Any other `wp/` module (`db.ts`, `errors.ts`, `guards.ts`).
+- Any other `wp/` module (`db.ts`, `errors.ts`, `teardown.ts`, `guards.ts`).
 
 ### docs/architecture/plugin-artifacts.md
 

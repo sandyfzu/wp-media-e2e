@@ -1,9 +1,14 @@
-import { defineConfig, devices } from "@playwright/test";
+import { defineConfig } from "@playwright/test";
 import type { PlaywrightTestConfig, Project } from "@playwright/test";
 import { defineBddConfig } from "playwright-bdd";
 
 import { registerManifest } from "../artifacts/registry";
-import { registerPool, routingMetadata } from "./metadata";
+import { DESKTOP } from "./devices";
+import {
+  registerDebugLogOptions,
+  registerPool,
+  routingMetadata,
+} from "./metadata";
 import { reporters } from "./reporting";
 import { dirs, seedSelectedCells, selectedCells } from "./run-context";
 import { VISUAL_EXPECT, snapshotPathTemplateFor } from "./visual";
@@ -13,15 +18,6 @@ import type { Edition, ProductConfig, SiteConfig, SitePool } from "./types";
 
 // True when running under CI (the `CI` env var is present and non-empty).
 const isCI = process.env.CI !== undefined && process.env.CI !== "";
-
-/**
- * Default desktop viewport for every project (the suite's baseline desktop size). Mobile
- * emulation is applied per-scenario via the `@mobile` tag — a later phase.
- */
-const DESKTOP_VIEWPORT = { width: 1600, height: 700 };
-
-/** The desktop device profile every project runs under: Desktop Chrome at {@link DESKTOP_VIEWPORT}. */
-const DESKTOP = { ...devices["Desktop Chrome"], viewport: DESKTOP_VIEWPORT };
 
 /** Assigns each pooled site its per-run `storageState` path under the cell's auth dir. */
 function withState(pool: SitePool, authDir: string): SiteConfig[] {
@@ -62,6 +58,11 @@ export function createProductConfig(
   // Publish the product's artifact manifest to the per-process registry the artifacts setup
   // reads by product name (it never imports product configs — see artifacts/registry.ts).
   registerManifest(product.name, product.artifacts);
+
+  // Same channel for the product's debug-log preset: its `ignore`/`source` patterns are RegExps,
+  // which cannot ride project metadata (Playwright serializes that into reports), and the shared
+  // scenario hooks must not import product code.
+  registerDebugLogOptions(product.name, product.debugLog);
 
   // Resolve the targeted cell. Selecting multiple cells in one invocation is unsafe
   // (parallelIndex is global), so fail fast instead of silently mis-sizing workers.

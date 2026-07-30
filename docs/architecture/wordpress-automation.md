@@ -159,6 +159,9 @@ activation/deactivation cases:
 - `PluginActivationFailedError` / `PluginDeactivationFailedError` — UI action failed.
 - `PluginUninstallFailedError` — plugin still installed after a WP-CLI `plugin uninstall`.
 - `PluginDeletionFailedError` — plugin still installed after the admin-UI Delete action.
+- `DebugLogFatalError` — PHP wrote a fatal to `debug.log` during a scenario. Not a plugin
+  action at all: it carries every matched fatal and quotes the first few in its message,
+  so the failure is diagnosable from the reporter alone.
 
 ## Debug-log scanning ([`wp/log.ts`](../../src/common/wp/log.ts))
 
@@ -192,18 +195,35 @@ Per-product presets live in `src/projects/<product>/support/debug-log.ts`:
 - `*_OWN_LOG_OPTIONS` — restricted to that plugin's own entries (BackWPup matches
   both Free and Pro paths, since only the installed edition's path appears).
 
-Typical use:
+**Most scenarios need none of this directly.** A product declares its preset as
+`ProductConfig.debugLog`, and the shared `@plugin` hooks clear the log before a scenario
+and judge it afterwards — a fatal fails the scenario with the log attached (see
+[CLAUDE.md → Shared scenario hooks](../../CLAUDE.md#shared-scenario-hooks)). Call
+`scanDebugLog` yourself only when a **step** must assert about the log, e.g. with
+`*_OWN_LOG_OPTIONS` to disregard unrelated core/plugin noise:
 
 ```ts
-import { clearDebugLog, scanDebugLog } from "../../../common/wp/log";
-import { WP_ROCKET_LOG_OPTIONS } from "../support/debug-log";
+import { scanDebugLog } from "../../../common/wp/log";
+import { WP_ROCKET_OWN_LOG_OPTIONS } from "../support/debug-log";
 
-// Before hook:
-await clearDebugLog(site.transport);
-// After hook:
-const scan = await scanDebugLog(site.transport, WP_ROCKET_LOG_OPTIONS);
-if (scan.fatals.length > 0) throw new Error(scan.fatals.join("\n"));
+const scan = await scanDebugLog(site.transport, WP_ROCKET_OWN_LOG_OPTIONS);
+expect(scan.warnings).toEqual([]);
 ```
+
+## Worker teardown ([`wp/teardown.ts`](../../src/common/wp/teardown.ts))
+
+`releaseSite(site)` releases everything a worker acquired on its bound site: it removes the
+staging area, then closes pooled SSH connections. It runs automatically once per worker via
+the `releaseBoundSite` fixture, so no scenario has to remember it.
+
+- **Best-effort by design.** Every assertion is already made by the time it runs, so a
+  staging-removal failure is warned about, never thrown — cleanup must not turn a passing
+  run red. Connections are closed either way (a leaked SSH client keeps the worker process
+  alive after the run).
+- **Unconditional, not tracked**, so residue a *crashed* run left behind is removed too —
+  that is what makes "a re-run leaves nothing on the site" true even after a kill.
+- **Placeholder sites are skipped**: they have no reachable transport, so cleaning one
+  would only warn on every fresh-checkout run.
 
 ## Database ([`wp/db.ts`](../../src/common/wp/db.ts))
 

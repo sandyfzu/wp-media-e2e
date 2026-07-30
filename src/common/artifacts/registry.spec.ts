@@ -21,6 +21,7 @@ import type {
 /** A minimal valid resolved artifact for the `plugin` role. */
 const PLUGIN: ResolvedArtifact = {
   role: "plugin",
+  slug: "wp-rocket",
   zipPath: "/tmp/.artifacts/wp-rocket/nginx/plugin/wp-rocket-3.17.4.zip",
   zipFilename: "wp-rocket-3.17.4.zip",
   source: "default-ref",

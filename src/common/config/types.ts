@@ -8,11 +8,15 @@
  * edition (Free/Pro) for edition-ful products.
  */
 
-// Type-only import (erased at runtime under `verbatimModuleSyntax`), so the config↔artifacts
-// type reference introduces no runtime module cycle. The artifacts manifest schema lives with
-// the rest of that domain in `../artifacts/types`; it is re-exported here so product-config
-// authors get it and `ProductConfig` from one place.
+// Both imports are type-only, so they are erased at runtime under `verbatimModuleSyntax` and the
+// config↔artifacts and config↔wp type references introduce no runtime module cycles. Each schema
+// lives with its own domain: the artifacts manifest in `../artifacts/types`, the debug-log scan
+// options in `../wp/log` (whose presets products author in `support/debug-log.ts`).
 import type { ProductArtifacts } from "../artifacts/types";
+import type { ScanDebugLogOptions } from "../wp/log";
+
+// Re-exported so a product-config author gets the manifest schema and `ProductConfig` from one
+// place.
 export type { ProductArtifacts };
 
 /** WordPress hosting mode — decides how WP-CLI is dispatched (see the exec layer, a later phase). */
@@ -160,5 +164,13 @@ export interface ProductConfig {
    * {@link ProductArtifacts}.
    */
   readonly artifacts: ProductArtifacts;
+  /**
+   * How this product's `debug.log` is scanned by the shared scenario hooks: its verified-benign
+   * `ignore` patterns, and optionally a `source` restriction. Declared here (rather than
+   * imported by the hooks) so the shared hooks stay product-agnostic. Omit to scan every line
+   * and ignore nothing — the strictest reading, so a missing preset can only make the gate
+   * stricter, never quieter.
+   */
+  readonly debugLog?: ScanDebugLogOptions;
   readonly services?: ServiceConfig;
 }

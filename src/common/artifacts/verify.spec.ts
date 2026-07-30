@@ -282,6 +282,7 @@ function resolved(
 ): RoleOutcome {
   const artifact: ResolvedArtifact = {
     role,
+    slug: "wp-rocket",
     zipPath,
     zipFilename: basename(zipPath),
     source: "default-ref",

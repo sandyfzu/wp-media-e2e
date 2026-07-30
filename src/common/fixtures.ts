@@ -2,8 +2,10 @@ import { test as base, createBdd } from "playwright-bdd";
 
 import { readResolvedArtifact } from "./artifacts/consume";
 import type { ArtifactRole, ResolvedArtifact } from "./artifacts/types";
+import { deviceForTags } from "./config/devices";
 import { getPool, readRouting } from "./config/metadata";
 import { isPlaceholderSite } from "./config/sites";
+import { releaseSite } from "./wp/teardown";
 import type { Edition, SiteConfig } from "./config/types";
 
 /**
@@ -11,6 +13,11 @@ import type { Edition, SiteConfig } from "./config/types";
  * (by `parallelIndex`) and reuses that site's `storageState`, so scenarios run
  * authenticated against an isolated WordPress instance. Scenarios tagged `@noauth`
  * start unauthenticated (e.g. login/logout flows).
+ *
+ * Two things are driven by a scenario's tags rather than by its project, because they are
+ * per-scenario client concerns that must not multiply the project matrix: the session
+ * (`@noauth`) and the device profile (`@mobile`). Both are applied as `use` overrides, so they
+ * take effect at browser-context creation.
  */
 
 interface TestFixtures {
@@ -30,6 +37,13 @@ interface TestFixtures {
 interface WorkerFixtures {
   /** The site this worker is pinned to (by parallelIndex), or `undefined` when the project has no pool. */
   boundSite: SiteConfig | undefined;
+  /**
+   * Automatic worker teardown: after this worker's last scenario, removes the staging area it
+   * copied artifacts into and closes its pooled SSH connections. `auto` so no scenario has to
+   * remember it, and best-effort so it can never fail a passing run (see `wp/teardown.ts`).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- Playwright's type for a fixture that produces no value; the work is entirely in its teardown.
+  releaseBoundSite: void;
 }
 
 export const test = base.extend<TestFixtures, WorkerFixtures>({
@@ -53,6 +67,15 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       await use(site);
     },
     { scope: "worker" },
+  ],
+
+  releaseBoundSite: [
+    // Worker-scoped and automatic: the body is pure teardown, which runs after `use()` returns.
+    async ({ boundSite }, use) => {
+      await use();
+      await releaseSite(boundSite);
+    },
+    { scope: "worker", auto: true, box: true },
   ],
 
   // Scenario-facing handle to the bound site; fails loudly when the project has no pool.
@@ -110,6 +133,26 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       );
     }
     await use(boundSite?.storageState ?? storageState);
+  },
+
+  // Overrides: `@mobile` scenarios run under a mobile device profile; everything else keeps the
+  // project's desktop default. Playwright exposes each context option as its own option fixture,
+  // so the profile is applied one option at a time — and each override falls back to the value the
+  // project already resolved, never to a hard-coded desktop value.
+  viewport: async ({ $tags, viewport }, use) => {
+    await use(deviceForTags($tags)?.viewport ?? viewport);
+  },
+  userAgent: async ({ $tags, userAgent }, use) => {
+    await use(deviceForTags($tags)?.userAgent ?? userAgent);
+  },
+  deviceScaleFactor: async ({ $tags, deviceScaleFactor }, use) => {
+    await use(deviceForTags($tags)?.deviceScaleFactor ?? deviceScaleFactor);
+  },
+  isMobile: async ({ $tags, isMobile }, use) => {
+    await use(deviceForTags($tags)?.isMobile ?? isMobile);
+  },
+  hasTouch: async ({ $tags, hasTouch }, use) => {
+    await use(deviceForTags($tags)?.hasTouch ?? hasTouch);
   },
 });
 

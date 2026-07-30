@@ -208,6 +208,7 @@ function parseRole(
     );
   };
 
+  const slug = requireString(entry.slug, "slug", fail);
   const zipPath = requireString(entry.zipPath, "zipPath", fail);
   const zipFilename = requireString(entry.zipFilename, "zipFilename", fail);
   const resolvedAt = requireString(entry.resolvedAt, "resolvedAt", fail);
@@ -218,6 +219,7 @@ function parseRole(
 
   return {
     role,
+    slug,
     zipPath,
     zipFilename,
     source: source_ as ArtifactSource,

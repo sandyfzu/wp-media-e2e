@@ -30,6 +30,12 @@ export const VISUAL_EXPECT: PlaywrightTestConfig["expect"] = {
  * editions that render differently (e.g. BackWPup Free vs Pro, which run as distinct cells) never
  * share a baseline. Relative to the repo root. The ephemeral generated-spec directory
  * (`.features-gen`) is deliberately NOT part of the path, so baselines survive its regeneration.
+ *
+ * The path has no **device** dimension, because the device profile is a per-scenario tag
+ * (`@mobile`) and a path template is resolved per project. Playwright's default snapshot name is
+ * derived from the scenario title, so a desktop and a mobile scenario are already distinct. But an
+ * **explicitly named** snapshot (`toHaveScreenshot("dashboard.png")`) reused by both would collide
+ * on one baseline — name such snapshots per device, or let the default naming do it.
  */
 export function snapshotPathTemplateFor(product: string): string {
   return `src/projects/${product}/__snapshots__{/projectName}/{arg}{ext}`;

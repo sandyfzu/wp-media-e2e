@@ -243,6 +243,15 @@ export interface ProductArtifacts {
  */
 export interface ResolvedArtifact {
   readonly role: ArtifactRole;
+  /**
+   * The WordPress plugin slug this artifact installs as (`"backwpup"` vs `"backwpup-pro"`) —
+   * the cell's expected {@link ArtifactIdentity.slug}, which the identity preflight proves the
+   * archive's single top-level directory actually matches. A resolution is persisted only after
+   * **every** role passed, so a slug read back through {@link ResolvedArtifact} is always a
+   * verified one. It travels with the artifact so a test or hook can address the plugin
+   * (`ensurePluginAbsent(transport, slug)`) without branching on edition.
+   */
+  readonly slug: string;
   /** Absolute path to the resolved zip on disk (inside the role's ephemeral dir). */
   readonly zipPath: string;
   /** The zip's filename (basename of {@link ResolvedArtifact.zipPath}). */

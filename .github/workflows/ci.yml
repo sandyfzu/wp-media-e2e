@@ -81,10 +81,13 @@ jobs:
           restore-keys: |
             playwright-${{ runner.os }}-
       - run: npx playwright install --with-deps chromium
-      # No sites.json in CI → the example placeholders are used: auth setup is skipped and the
-      # @noauth smoke runs, exercising config + bddgen + step wiring + a real Chromium launch.
-      - run: npm run test:wp-rocket
-      - run: npm run test:backwpup
+      # No sites.json in CI → the example placeholders are used, so only scenarios that need no
+      # WordPress can run. `--grep @noauth` states that explicitly instead of relying on every
+      # scenario in the repo happening to be tagged that way: scenarios that drive a real site
+      # (`@plugin`, storage, restore) are skipped here and run against a real cell. What remains
+      # still exercises config loading + bddgen + step/hook wiring + a real Chromium launch.
+      - run: npm run test:wp-rocket -- --grep @noauth
+      - run: npm run test:backwpup -- --grep @noauth
       - name: Upload report on failure
         if: ${{ failure() }}
         uses: actions/upload-artifact@v7

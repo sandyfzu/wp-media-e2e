@@ -1,6 +1,7 @@
 # Phase 6 — Feature porting: BackWPup first
 
-> **Status:** planned. **Date:** 2026-07-28.
+> **Status:** in progress — **6A is done** (2026-07-28, verified on `pro@nginx`); 6B–6I planned.
+> **Date:** 2026-07-28.
 > **Parent:** [e2e-modernization-plan.md](e2e-modernization-plan.md) §9, Phase 6 — this doc supersedes
 > that phase's summary. Phases 0–5 are done; Phase 6 is **feature content on finished rails**.
 > **Baseline (reference only):** `wp-rocket-e2e/src/backwpup/` — 12 feature files, 28 scenarios, ~1.6k LoC.
@@ -144,6 +145,11 @@ is English, so a locale mismatch fails once with a clear message rather than as 
 really do take minutes — lets CI split fast from slow). The `@bwpup*` family is dropped: the product
 is the config file, not a tag.
 
+6A added one more: **`@plugin`**, which opts a scenario into the shared plugin lifecycle (fresh
+install + activate, a scoped `debug.log` that fails the scenario on a fatal, removal afterwards).
+Nearly every ported scenario carries it; the exceptions are scenarios that assert on a site
+*without* the plugin, and `@noauth` ones that need no site at all.
+
 ---
 
 ## 4. Sub-phases
@@ -152,7 +158,66 @@ Each is independently shippable and ends with the standard gates (typecheck / li
 `test:unit`) plus a green real-cell run. 6A is a prerequisite for everything; 6C–6H are otherwise
 independent of each other and can be reordered by need.
 
-### 6A — Shared rails *(product-agnostic; unblocks BackWPup **and** WP Rocket)*
+### 6A — Shared rails *(product-agnostic; unblocks BackWPup **and** WP Rocket)* — **DONE**
+
+**Shipped as planned**, with these decisions worth carrying forward:
+
+- The lifecycle is scoped to a new **`@plugin`** tag; its policy lives in
+  `hooks/plugin-lifecycle.ts` (unit-tested against a stateful stub `wp`) while
+  `hooks/plugin.hooks.ts` is a thin binding. Hooks load via `src/common/hooks/**/*.hooks.ts`
+  — narrower than `**/*.ts` so specs and policy modules are not imported as hooks.
+- The After hook runs **both** duties and prefers the debug-log verdict over a cleanup
+  failure, logging the latter rather than dropping it. A fatal raises the new typed
+  `DebugLogFatalError`.
+- The Before hook **re-asserts that the plugin is active** instead of trusting
+  `wp plugin install --activate` to exit non-zero — the same "WP-CLI exit codes are not
+  trusted, re-check the state" discipline `wp/plugin.ts` already applies to removal. It
+  doubles as the check that the archive really installed under the promised slug.
+- The scenario timeout is extended **additively** in the Before hook (`extendedTimeout`),
+  because Playwright times a scenario and its hooks on one clock and remote WP-CLI + an
+  SFTP upload do not fit a 30 s budget. `0` (no timeout) is left alone.
+- Debug-log presets reach the shared hooks via `ProductConfig.debugLog` + a per-process
+  registry in `config/metadata.ts` — RegExps cannot ride Playwright's project metadata,
+  and shared hooks must not import product code.
+- Device profiles moved to `config/devices.ts`: `@mobile` = **Pixel 5** (a Chromium
+  preset — the only browser we run) with the viewport pinned to the baseline's `389×829`,
+  exactly as `DESKTOP` pins `1600×700`.
+- **CI's smoke job now greps `@noauth`** explicitly. It previously ran *every* scenario
+  against placeholder sites, which happened to work only because every scenario was
+  `@noauth` — the first real 6C scenario would have broken it.
+- Not in 6A: the **English-locale pre-flight assertion** (§3.2). It belongs with the
+  locator policy it protects, so it lands in 6B.
+- **Fixed outside 6A's scope, because it blocked it:** the shared UI login failed ~35% of
+  real-cell runs (4 of 11). Root cause, reproduced 8/8 locally: `fill()` inserts text into
+  whatever element holds focus *at that instant*, and WordPress's login page re-focuses the
+  username field — so a re-focus landing mid-fill diverted the password into the username
+  box and the run failed later as "login never settled". `login.ts` now confirms both fields
+  kept their values before submitting (compared in code, so a failure never prints the
+  password), with two regression tests. Real-cell logins: **8/8**.
+
+**Measured cost of the lifecycle** (ssh staging box, 9.2 MB / 5822-file plugin), so 6C–6I can
+budget run time without re-measuring: **~25 s per `@plugin` scenario** — Before ≈ 13 s (clear 1.5,
+remove-when-absent 1.5, upload 4.5, install+activate 3.5, re-assert 2.0) and After ≈ 12 s (scan 2.0,
+remove-when-present 10.0). Plus a one-off ~4 s SSH connect per worker. The uninstall dominates, not
+the upload — so staging the zip once per worker instead of per scenario would save only ~4.5 s of
+25 s, which is why it was **not** done: `stageArtifact`'s unconditional overwrite is a safety
+property (a crashed run's residue is replaced before it can be used).
+
+**Verified on `backwpup/pro@nginx` (ssh) and on a throwaway `pro@docker` cell over the local
+Docker environment:** the artifact installs and activates, the site is left with no plugin, no
+`.e2e_temp` and **zero** `backwpup*` options, a seeded PHP fatal fails the scenario with
+`debug.log` attached *and still removes the plugin*, warnings/notices are reported without
+gating, and the lint gate rejects all four re-introduced patterns while `visual/stabilize.ts`
+stays legal. `@mobile` is proven end-to-end by two `@noauth` smoke scenarios that assert the
+emulated client from **inside the page**.
+
+Exercising `docker` was not ceremony — it caught a **real bug that made the plugin
+uninstallable on that transport**. A build lands mode `0600`, and `docker cp` preserves the host
+mode *and* numeric owner, neither meaningful in a container, so WP-CLI there (uid 33) could not
+open the archive: `PCLZIP_ERR_READ_OPEN_FAIL`. SSH had hidden it, because SFTP applies the
+remote user's umask instead. The resolver now normalises every resolved zip to `0644` in one
+place, which fixes `docker` and the analogous `local` case (a site whose `wp` runs as another
+user), with a regression test on a deliberately owner-only source.
 
 **Deliverables**
 

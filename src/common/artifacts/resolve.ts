@@ -10,7 +10,7 @@
  * aggregated preflight (`verify.ts`). Resolution runs sequentially for readable logs.
  */
 
-import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, rm, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -40,6 +40,14 @@ export interface ResolveParams {
   readonly requests: readonly ArtifactRequest[];
   /** Absolute path to the cell's artifacts dir (`REPO_ROOT` + `dirs().artifacts`); wiped here. */
   readonly artifactsDir: string;
+  /**
+   * The WordPress plugin slug every role of this cell must carry — the expected identity's slug
+   * for the cell's edition. Stamped onto each {@link ResolvedArtifact} so consumers can address
+   * the plugin without knowing the edition; the identity preflight then proves each archive
+   * actually matches it, and nothing is persisted unless it does. One value per cell, because a
+   * cell is a single edition.
+   */
+  readonly slug: string;
 }
 
 /**
@@ -65,7 +73,7 @@ class ResolveError extends Error {
 export async function resolveArtifacts(
   params: ResolveParams,
 ): Promise<RoleOutcome[]> {
-  const { requests, artifactsDir } = params;
+  const { requests, artifactsDir, slug } = params;
   const zipRequests = requests.filter(
     (request): request is ZipRequest => request.kind === "zip",
   );
@@ -89,27 +97,57 @@ export async function resolveArtifacts(
   const outcomes: RoleOutcome[] = [];
   for (const request of requests) {
     outcomes.push(
-      await resolveRole(request, artifactsDir, sources.get(request.role)),
+      await resolveRole(request, artifactsDir, slug, sources.get(request.role)),
     );
   }
   return outcomes;
 }
 
+/**
+ * What producing a role yields on its own: everything about the delivered zip except the cell's
+ * expected {@link ResolvedArtifact.slug}, which {@link resolveRole} stamps on. Keeping the two
+ * apart means neither producer has to know about identity.
+ */
+type ProducedArtifact = Omit<ResolvedArtifact, "slug">;
+
+/**
+ * Mode every resolved zip is normalised to: readable by anyone, writable only by its owner.
+ *
+ * A build lands `0600`, and getting it onto a site copies it verbatim — `docker cp` preserves the
+ * host mode **and** the numeric owner, neither of which means anything inside the container, so
+ * WP-CLI there (a different uid) cannot open the archive and `wp plugin install` fails with an
+ * opaque `PCLZIP_ERR_READ_OPEN_FAIL`. The same applies to a `local` site whose `wp` runs as another
+ * user. Normalising the artifact once, here, fixes every transport at no per-scenario cost, and is
+ * the honest place for it: an artifact nothing but its creator can read is not yet usable.
+ *
+ * Safe to apply because what lands in the role dir is always a **copy** — a cache hit is copied,
+ * not hard-linked — so this never reaches through to APVM's shared cache.
+ */
+const ARTIFACT_MODE = 0o644;
+
 /** Resolves one role into its subdir, converting any thrown error into a failed outcome. */
 async function resolveRole(
   request: ArtifactRequest,
   artifactsDir: string,
+  slug: string,
   zipSource: string | ResolveError | undefined,
 ): Promise<RoleOutcome> {
   const roleDir = join(artifactsDir, request.role);
   console.log(`[artifacts] resolving "${request.role}" — ${describe(request)}`);
   try {
     await mkdir(roleDir, { recursive: true });
-    const artifact =
+    const produced =
       request.kind === "zip"
         ? await resolveZipRequest(request, roleDir, zipSource)
         : await resolveBuildRequest(request, roleDir);
-    return { role: request.role, kind: "resolved", artifact };
+    // One funnel for both producers, so a built zip and an operator-provided one are equally
+    // installable on every transport.
+    await chmod(produced.zipPath, ARTIFACT_MODE);
+    return {
+      role: request.role,
+      kind: "resolved",
+      artifact: { ...produced, slug },
+    };
   } catch (error) {
     const hint = error instanceof ResolveError ? error.hint : undefined;
     return {
@@ -214,7 +252,7 @@ async function resolveZipRequest(
   request: ZipRequest,
   roleDir: string,
   source: string | ResolveError | undefined,
-): Promise<ResolvedArtifact> {
+): Promise<ProducedArtifact> {
   if (source === undefined) {
     throw new ResolveError(
       `internal: the "${request.role}" zip was not validated before the wipe.`,
@@ -248,7 +286,7 @@ async function resolveZipRequest(
 async function resolveBuildRequest(
   request: BuildRequest,
   roleDir: string,
-): Promise<ResolvedArtifact> {
+): Promise<ProducedArtifact> {
   const { params } = request;
   const apvm = await getApvm();
   assertToken(apvm, params.project);
@@ -328,7 +366,8 @@ function toOrigin(origin: string): ArtifactOrigin {
  * can never describe a previous execution; it also gives version-aware tests their build metadata
  * for free. The `runId` stamp lets a consumer notice it is reading a *previous* invocation's
  * resolution (a `--no-deps` run), which would otherwise look identical to a fresh one.
- * Non-secret. Called only after every role resolved and verified.
+ * Non-secret. Called only after every role resolved and verified — which is what makes the
+ * persisted {@link ResolvedArtifact.slug} a verified slug rather than a mere expectation.
  */
 export async function writeResolutionFile(
   artifactsDir: string,
@@ -341,6 +380,7 @@ export async function writeResolutionFile(
       resolved.map((a) => [
         a.role,
         {
+          slug: a.slug,
           zipPath: a.zipPath,
           zipFilename: a.zipFilename,
           source: a.source,

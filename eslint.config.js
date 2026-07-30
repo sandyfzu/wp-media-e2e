@@ -55,6 +55,57 @@ export default defineConfig([
     },
   },
 
+  // Test-authoring surfaces: ban the flaky-by-construction waits.
+  //
+  // Every pattern below is a *timing* workaround that Playwright's web-first assertions make
+  // unnecessary, and each one that survives makes a suite slower and less trustworthy: a fixed
+  // sleep is either wasted time or too short, "networkidle" is discouraged by Playwright itself
+  // and never fires on a page with long-polling or analytics, `waitForSelector` predates
+  // auto-retrying `expect()`, and `.type()` is deprecated in favour of `fill()`.
+  //
+  // Scoped to the code that drives a browser — page objects, steps, scenario hooks, the UI login
+  // and everything product-specific — so the rule reads as "authoring policy" rather than a
+  // blanket ban. The one deliberate exception is left outside that scope: the visual helpers make
+  // a single timeboxed, already-caught `networkidle` attempt to settle lazy-loaded media before a
+  // screenshot, where "no more requests" is the actual condition and not reaching it is fine.
+  {
+    files: [
+      "src/projects/**/*.ts",
+      "src/common/pages/**/*.ts",
+      "src/common/steps/**/*.ts",
+      "src/common/hooks/**/*.ts",
+      "src/common/auth/**/*.ts",
+    ],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector:
+            "CallExpression > MemberExpression[property.name='waitForTimeout']",
+          message:
+            "Fixed sleeps are flaky. Assert the condition instead (`await expect(locator).toBeVisible()`), or await the request that completes the action (`page.waitForResponse(...)`).",
+        },
+        {
+          selector:
+            "CallExpression[callee.property.name='waitForLoadState'] > Literal[value='networkidle']",
+          message:
+            'Playwright discourages "networkidle": it never settles on pages with polling or analytics. Await the specific response that completes the action, or assert the resulting UI state.',
+        },
+        {
+          selector:
+            "CallExpression > MemberExpression[property.name='waitForSelector']",
+          message:
+            "waitForSelector predates auto-retrying assertions. Use `await expect(locator).toBeVisible()` / `.toBeHidden()`, which retries and reports what it saw.",
+        },
+        {
+          selector: "CallExpression > MemberExpression[property.name='type']",
+          message:
+            "`type()` is deprecated. Use `locator.fill(value)`, or `locator.pressSequentially(value)` when a field genuinely needs per-key events.",
+        },
+      ],
+    },
+  },
+
   // Plain JavaScript (this config, Prettier config): no type-aware rules.
   {
     files: ["**/*.{js,mjs,cjs}"],

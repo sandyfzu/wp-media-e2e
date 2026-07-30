@@ -202,6 +202,12 @@ function assertSafeStagingRoot(
  * identically on every transport) and overwrites any file already staged under that name, which
  * makes repeated staging — and a crashed run's leftovers — harmless.
  *
+ * **`localPath` must be readable by the user WP-CLI runs as on the target.** The copy is verbatim:
+ * `docker cp` preserves the host mode *and* numeric owner (meaningless inside a container), and a
+ * `local` copy preserves the mode, so an owner-only file reaches the site unreadable and `wp` fails
+ * with an opaque archive error. Callers own the source's mode — the artifacts resolver normalises
+ * the zips it produces for exactly this reason.
+ *
  * @param transport - the target site's transport.
  * @param localPath - absolute path to the file on the runner (e.g. `pluginArtifact("plugin").zipPath`).
  * @param options - the {@link StageArtifactOptions} category and optional target filename.

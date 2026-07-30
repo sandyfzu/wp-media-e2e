@@ -58,6 +58,7 @@ test.beforeAll(() => {
   writeFileSync(zipPath, "not a real zip, but a real file");
   PLUGIN = {
     role: "plugin",
+    slug: "wp-rocket",
     zipPath,
     zipFilename: "wp-rocket-3.17.4.zip",
     source: "default-ref",
@@ -82,6 +83,7 @@ test.describe("parseResolution", () => {
     resolvedAt: "2026-07-14T00:00:00.000Z",
     roles: {
       plugin: {
+        slug: "wp-rocket",
         zipPath: "/a/plugin/wp-rocket-3.17.4.zip",
         zipFilename: "wp-rocket-3.17.4.zip",
         source: "default-ref",
@@ -104,6 +106,7 @@ test.describe("parseResolution", () => {
       roles: {
         plugin: doc.roles.plugin,
         previous: {
+          slug: "wp-rocket",
           zipPath: "/a/previous/wp-rocket-3.16.zip",
           zipFilename: "wp-rocket-3.16.zip",
           source: "default-ref",
@@ -122,6 +125,7 @@ test.describe("parseResolution", () => {
     const zipOnly = {
       roles: {
         plugin: {
+          slug: "wp-rocket",
           zipPath: "/a/plugin/custom.zip",
           zipFilename: "custom.zip",
           source: "env-zip",
@@ -148,10 +152,22 @@ test.describe("parseResolution", () => {
   });
 
   test("throws naming a role with a missing required field", () => {
-    const bad = { roles: { plugin: { zipFilename: "x.zip" } } };
+    const bad = {
+      roles: { plugin: { slug: "wp-rocket", zipFilename: "x.zip" } },
+    };
     expect(() => parseResolution(bad, "f.json")).toThrow(
       /malformed "plugin" entry in "f\.json".*zipPath/s,
     );
+  });
+
+  test("throws when a role entry carries no slug", () => {
+    // The slug is what lets a test address the plugin without knowing the edition, so an entry
+    // without one (e.g. a resolution written before the field existed) must be rejected, not
+    // read back as an artifact with an undefined slug.
+    const { slug: _slug, ...noSlug } = doc.roles.plugin;
+    expect(() =>
+      parseResolution({ roles: { plugin: noSlug } }, "f.json"),
+    ).toThrow(/malformed "plugin" entry in "f\.json".*slug/s);
   });
 
   test("throws on an unknown source/origin enum value", () => {
@@ -233,6 +249,7 @@ test.describe("readResolvedArtifact — from a resolution.json on disk", () => {
         resolvedAt: "2026-07-14T00:00:00.000Z",
         roles: {
           plugin: {
+            slug: "wp-rocket",
             zipPath,
             zipFilename: ZIP_NAME,
             source: "default-ref",
@@ -278,6 +295,7 @@ test.describe("readResolvedArtifact — from a resolution.json on disk", () => {
     const artifact = readResolvedArtifact(PRODUCT, CELL, "plugin");
     expect(artifact).toEqual({
       role: "plugin",
+      slug: "wp-rocket",
       zipPath,
       zipFilename: ZIP_NAME,
       source: "default-ref",
