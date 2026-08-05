@@ -216,6 +216,86 @@ function classifyIsInstalled(name: string, result: ExecResult): CheckResult {
 }
 
 /**
+ * Locales whose admin UI is English, so role- and label-based locators written against English
+ * strings resolve. `en_US` is WordPress's built-in default (reported when no language is installed);
+ * the other English variants ship translations, but leave admin strings in English.
+ */
+const ENGLISH_LOCALES = new Set([
+  "en_US",
+  "en_GB",
+  "en_AU",
+  "en_CA",
+  "en_NZ",
+  "en_ZA",
+]);
+
+/**
+ * Confirms the site's admin UI is in English.
+ *
+ * Every page object locates controls by their **visible English name** (`getByRole`,
+ * `getByLabel`) — the first rule of the locator policy, and the reason the suite is readable. A
+ * translated admin silently invalidates all of them at once, and the symptom is dozens of
+ * indistinguishable locator timeouts spread across unrelated scenarios. Asserting the locale once,
+ * here, converts that into a single failure that names the cause.
+ *
+ * The verdict comes from **`determine_locale()`**, which is the function WordPress itself calls to
+ * choose the language of an admin request. That matters: the locale can come from the user's own
+ * profile, the site option, a `WPLANG` constant in `wp-config.php`, or a filter, and only
+ * `determine_locale()` accounts for all of them — `get_option('WPLANG')` alone reports an empty
+ * string on a perfectly English site *and* misses a per-user override. It is evaluated as the
+ * configured admin user (`--user`), because a user-profile language beats the site default.
+ *
+ * The PHP is a fixed, read-only literal; the only interpolated value is the username, passed as a
+ * separate argument that the exec layer escapes.
+ */
+async function checkAdminLocale(
+  transport: Transport,
+  username: string,
+): Promise<CheckResult> {
+  const name = "Admin locale is English";
+  try {
+    const result = await exec(transport, "wp", [
+      "eval",
+      "echo determine_locale();",
+      `--user=${username}`,
+    ]);
+    if (result.exitCode !== 0) {
+      return {
+        name,
+        ok: false,
+        detail:
+          `Could not read the admin locale (exit ${String(result.exitCode)})` +
+          (result.stderr.trim() ? `: ${result.stderr.trim()}` : "."),
+        hint: `Check that the user "${username}" exists on this site.`,
+      };
+    }
+    const locale = result.stdout.trim();
+    if (ENGLISH_LOCALES.has(locale)) {
+      return { name, ok: true, detail: `${locale}.` };
+    }
+    return {
+      name,
+      ok: false,
+      detail: `The admin UI for "${username}" renders in "${locale}", not English.`,
+      hint: [
+        "Page objects locate controls by their visible English names, so a translated admin would",
+        "fail as many unrelated locator timeouts instead of once here. Set the site language to",
+        "English (Settings → General → Site Language), or clear this user's own language override",
+        `(Users → ${username} → Language).`,
+      ].join("\n"),
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      name,
+      ok: false,
+      detail: `Could not read the admin locale: ${msg}`,
+      hint: "Verify the transport reaches the target and `wp` is available there.",
+    };
+  }
+}
+
+/**
  * Confirms a real, installed WordPress answers through the transport via `wp core is-installed`.
  *
  * Exit 0 proves the core files load, the database connects, AND the install is complete. A
@@ -507,6 +587,14 @@ export async function verifySite(
       checks = await verifyLocal(site.transport);
       break;
   }
+
+  // The locale check needs a WordPress that boots, so it only runs once every transport-level check
+  // has passed — otherwise a site with no database would report two failures for one cause, and the
+  // second would be the less useful one.
+  if (checks.every((check) => check.ok)) {
+    checks.push(await checkAdminLocale(site.transport, site.username));
+  }
+
   return { index, baseURL: site.baseURL, transport: site.transport, checks };
 }
 

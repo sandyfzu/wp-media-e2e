@@ -6,3 +6,6 @@ Feature: BackWPup test runner scaffolding
     Then the page title is "BackWPup"
     And the heading mentions "BackWPup"
     And the BackWPup project marker is present
+
+  Scenario: The BackWPup page objects are available as fixtures
+    Then the BackWPup page objects are wired up

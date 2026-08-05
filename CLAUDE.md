@@ -39,15 +39,17 @@ src/
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── steps/              # generic step definitions
 │   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
-│   ├── pages/              # Page Object Model (e.g. plugins.page.ts)
+│   ├── pages/              # cross-product Page Object Model (e.g. plugins.page.ts)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, verify, consume, pre-warm)
 │   └── wp/                 # WordPress automation over WP-CLI (exec, staging, plugin, log, db, teardown, errors)
 └── projects/<product>/
     ├── config/             # <product>.config.ts + sites.json / sites.*.json / sites.example.json
+    ├── fixtures.ts         # this product's test instance: common's + its page objects
     ├── features/           # *.feature (Gherkin)
+    ├── pages/              # this product's page objects (+ locator-contract specs)
     ├── steps/              # product-specific steps
-    └── support/            # e.g. debug-log.ts presets
+    └── support/            # debug-log presets, REST barriers, WP-CLI readers
 
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)
@@ -135,8 +137,13 @@ Two surfaces — schema reference in
 
 ## Fixtures
 
-Import step builders and fixtures from [`src/common/fixtures.ts`](src/common/fixtures.ts),
-**not** from `playwright-bdd` directly. Available fixtures:
+Import step builders and fixtures from a `fixtures.ts`, **not** from `playwright-bdd`
+directly. Product steps import from **their product's** `fixtures.ts` (which extends the
+shared one with that product's page objects); product-agnostic steps and hooks import from
+[`src/common/fixtures.ts`](src/common/fixtures.ts). playwright-bdd resolves each scenario to
+the most-extended instance its steps use, so the two mix freely — but the product's
+`fixtures.ts` must appear in its `steps` config, or generation fails outright. Available
+shared fixtures:
 
 | Fixture                   | Scope  | Purpose                                                                                                                       |
 | ------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------- |
@@ -148,6 +155,11 @@ Import step builders and fixtures from [`src/common/fixtures.ts`](src/common/fix
 | `baseURL` (override)      | —      | Points navigation at the bound site.                                                                                          |
 | `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                              |
 | device options (override) | —      | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else the desktop default.    |
+
+BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds `onboarding`, `dashboard`,
+`dataSelection`, `frequency`, `storages`, `jobRun`, `backupHistory`, `restore` (edition-aware)
+and `plugins`. See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
+the pattern, the locator policy, and the locator-contract spec every page object carries.
 
 ## Shared scenario hooks
 
@@ -208,8 +220,13 @@ is a dependency project that runs before any BDD scenarios. It does two things i
    that a real, installed WordPress answers (`wp core is-installed` — so core files load,
    the database connects, and the install is complete). A non-zero exit is classified so a
    WordPress that cannot boot (PHP too old, DB down, a fatal — errors it prints to stdout or
-   stderr) is reported as such and never mislabeled as "not installed". A failure throws a
-   formatted, actionable report and skips the whole BDD project.
+   stderr) is reported as such and never mislabeled as "not installed". Once those pass, it
+   also asserts the **admin UI is English** (`determine_locale()` for the configured user —
+   the same function WordPress uses to pick an admin request's language, so it accounts for a
+   per-user override, the site option, a `WPLANG` constant and filters alike). Page objects
+   locate controls by their visible English names, so a translated site would otherwise fail
+   as many unrelated locator timeouts instead of once, here. A failure throws a formatted,
+   actionable report and skips the whole BDD project.
 2. **Authentication** — logs into each real site once through the WordPress UI and
    saves the session to that site's `storageState`, which the BDD project reuses.
 

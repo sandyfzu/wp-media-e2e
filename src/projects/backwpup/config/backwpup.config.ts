@@ -88,6 +88,11 @@ export const backwpup: ProductConfig = {
   features: "src/projects/backwpup/features/**/*.feature",
   steps: [
     "src/common/fixtures.ts",
+    // This product's test instance: the shared one extended with BackWPup's page-object fixtures.
+    // It MUST be listed — playwright-bdd discovers the `test` a generated spec imports from the
+    // files in this array, and picks the most-extended instance among those the scenario's steps
+    // use. Omit this and generation fails with "Can't guess test instance".
+    "src/projects/backwpup/fixtures.ts",
     // Shared scenario hooks (e.g. the plugin lifecycle). Hooks only register when their file is
     // imported, and this glob is the only thing that imports them — omit it and the hooks are
     // silently absent rather than failing.

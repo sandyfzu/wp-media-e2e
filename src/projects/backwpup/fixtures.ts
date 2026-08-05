@@ -1,0 +1,93 @@
+import { createBdd } from "playwright-bdd";
+
+import { test as base } from "../../common/fixtures";
+import { PluginsPage } from "../../common/pages/plugins.page";
+import { BackupHistoryTable } from "./pages/backup-history.table";
+import { DashboardPage } from "./pages/dashboard.page";
+import { DataSelectionSidebar } from "./pages/data-selection.sidebar";
+import { FrequencySidebar } from "./pages/frequency.sidebar";
+import { JobRunPanel } from "./pages/job-run.panel";
+import { OnboardingPage } from "./pages/onboarding.page";
+import { StorageSidebar } from "./pages/storage.sidebar";
+import { restorePage } from "./pages/restore.page";
+import type { RestorePage } from "./pages/restore.page";
+
+/**
+ * BackWPup's test instance — the shared one from `common/fixtures.ts` plus this product's page
+ * objects, registered as fixtures (see the parent plan §7.5: POM-as-fixture, no decorators).
+ *
+ * **Why this lives here and not in `common/fixtures.ts`.** The parent plan says POMs are registered
+ * "in `common/fixtures.ts`", but doing that for a *product's* POMs would make the shared layer import
+ * product code — the same inversion the 6A debug-log registry exists to avoid — and would load
+ * BackWPup's page objects into every WP Rocket run. Extending the shared instance here keeps the
+ * dependency pointing the right way (product → common) and each product's surface to itself.
+ *
+ * **This is supported, not a workaround.** playwright-bdd resolves which `test` a generated spec
+ * imports by collecting the instances the scenario's steps were registered against and picking the
+ * most-extended one (`ImportTestGuesser.findTopmostTest`); it only fails when two instances are
+ * *unrelated*. Because this instance extends the shared one, a scenario mixing common steps (bound to
+ * the base) with BackWPup steps (bound to this) resolves to this instance and gets both sets of
+ * fixtures. The one hard requirement is that this file is listed in the product's `steps` config —
+ * omit it and generation fails with "Can't guess test instance", which is at least loud.
+ *
+ * All POM fixtures are **lazy**: Playwright only constructs the ones a step actually destructures, so
+ * a scenario touching one page pays for one object.
+ */
+
+interface BackWPupFixtures {
+  /** The onboarding wizard at `page=backwpuponboarding` (only while `backwpup_onboarding` is set). */
+  onboarding: OnboardingPage;
+  /** The post-onboarding dashboard at `page=backwpup`. */
+  dashboard: DashboardPage;
+  /** The Select Files / Select Tables sidebars. */
+  dataSelection: DataSelectionSidebar;
+  /** The Job Scheduled Settings sidebar. */
+  frequency: FrequencySidebar;
+  /** The storage picker and each provider's settings panel. */
+  storages: StorageSidebar;
+  /** A running backup's in-page progress region (`#runningjob`). */
+  jobRun: JobRunPanel;
+  /** The Backups History table, as rendered on either screen that shows it. */
+  backupHistory: BackupHistoryTable;
+  /**
+   * The restore screen for **this cell's edition** — Pro's in-place deep link or Free's forced
+   * upload (V13). Depends on the `edition` fixture, so requesting it in an editionless cell throws
+   * there, with that fixture's message.
+   */
+  restore: RestorePage;
+  /** The wp-admin Plugins screen (shared POM), for install/activate/delete flows. */
+  plugins: PluginsPage;
+}
+
+export const test = base.extend<BackWPupFixtures>({
+  onboarding: async ({ page }, use) => {
+    await use(new OnboardingPage(page));
+  },
+  dashboard: async ({ page }, use) => {
+    await use(new DashboardPage(page));
+  },
+  dataSelection: async ({ page }, use) => {
+    await use(new DataSelectionSidebar(page));
+  },
+  frequency: async ({ page }, use) => {
+    await use(new FrequencySidebar(page));
+  },
+  storages: async ({ page }, use) => {
+    await use(new StorageSidebar(page));
+  },
+  jobRun: async ({ page }, use) => {
+    await use(new JobRunPanel(page));
+  },
+  backupHistory: async ({ page }, use) => {
+    await use(new BackupHistoryTable(page));
+  },
+  restore: async ({ page, edition }, use) => {
+    await use(restorePage(page, edition));
+  },
+  plugins: async ({ page }, use) => {
+    await use(new PluginsPage(page));
+  },
+});
+
+export const { Given, When, Then, Step, Before, After, BeforeAll, AfterAll } =
+  createBdd(test);

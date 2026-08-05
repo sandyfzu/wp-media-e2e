@@ -19,33 +19,39 @@ Playwright specs from the pair.
 ```
 src/
 ├── common/                       # product-agnostic, shared by every product
-│   ├── fixtures.ts               # the test instance + Given/When/Then exports
+│   ├── fixtures.ts               # the base test instance + Given/When/Then exports
 │   ├── steps/                    # generic steps (e.g. world.steps.ts)
 │   ├── hooks/                    # shared scenario hooks (*.hooks.ts) + their policy modules
-│   ├── pages/                    # page objects (e.g. plugins.page.ts)
+│   ├── pages/                    # cross-product page objects (e.g. plugins.page.ts)
 │   ├── visual/                   # visual helpers (ab.ts, screenshot.ts, …)
 │   ├── config/devices.ts         # desktop & @mobile device profiles
 │   ├── artifacts/                # the plugin zips under test (see ../architecture/plugin-artifacts.md)
 │   └── wp/                       # WordPress automation (see ../architecture/wordpress-automation.md)
 └── projects/<product>/
     ├── config/<product>.config.ts   # ProductConfig + sites.json/sites.*.json/sites.example.json
+    ├── fixtures.ts                  # this product's test instance: common's + its page objects
     ├── features/**/*.feature        # this product's scenarios
+    ├── pages/**/*.ts                # this product's page objects (+ their locator specs)
     ├── steps/**/*.ts                # this product's steps
-    └── support/debug-log.ts         # debug-log presets
+    └── support/                     # debug-log presets, REST barriers, WP-CLI readers
 ```
 
 A product's `steps` array (in its config) is the exact set of files loaded at runtime:
-`fixtures.ts` + `common/hooks/**/*.hooks.ts` + `common/steps/**` + that product's own
-`steps/**`. So a product-specific step is only available to that product — and a **hook
-file missing from that array never registers**, leaving its lifecycle silently absent
-rather than failing. Add new shared hooks as `src/common/hooks/<name>.hooks.ts` so the
-existing glob picks them up.
+`common/fixtures.ts` + that product's `fixtures.ts` + `common/hooks/**/*.hooks.ts` +
+`common/steps/**` + that product's own `steps/**`. So a product-specific step is only
+available to that product — and a **hook file missing from that array never registers**,
+leaving its lifecycle silently absent rather than failing. Add new shared hooks as
+`src/common/hooks/<name>.hooks.ts` so the existing glob picks them up.
 
 ## Fixtures ([`src/common/fixtures.ts`](../../src/common/fixtures.ts))
 
-Import `Given`, `When`, `Then`, `Before`, `After`, etc. from `fixtures.ts`
+Import `Given`, `When`, `Then`, `Before`, `After`, etc. from a `fixtures.ts`
 (**not** from `playwright-bdd` directly) — this binds them to the extended test
-instance with these fixtures:
+instance. Import from **your product's** `fixtures.ts` if it has one (BackWPup does), so
+your steps can also destructure its page objects; import from `common/fixtures.ts` only
+for genuinely product-agnostic steps and hooks.
+
+The shared instance provides:
 
 | Fixture     | Scope    | What it gives you                                                                                              |
 | ----------- | -------- | -------------------------------------------------------------------------------------------------------------- |
@@ -57,6 +63,11 @@ instance with these fixtures:
 | `baseURL`   | (override) | Points at the bound site, so relative navigations target it.                                                  |
 | `storageState` | (override) | The bound site's saved login, **or** an empty session for `@noauth` scenarios.                            |
 | device options | (override) | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else the project's desktop default. |
+
+BackWPup's [`src/projects/backwpup/fixtures.ts`](../../src/projects/backwpup/fixtures.ts) adds its
+page objects on top: `onboarding`, `dashboard`, `dataSelection`, `frequency`, `storages`, `jobRun`,
+`backupHistory`, `restore` (edition-aware — Pro's in-place restore vs Free's forced upload) and the
+shared `plugins`. They are constructed lazily, so a scenario pays only for what it destructures.
 
 Use `site.transport` to drive the WordPress automation layer, and `page` (the
 standard Playwright fixture) for browser interaction. To install the zip under test,
@@ -99,12 +110,60 @@ Scenario: A backup lands in the history
 
 ## Page Object Model
 
-UI interactions belong in page objects under `src/common/pages/`, not inline in
-steps. [`PluginsPage`](../../src/common/pages/plugins.page.ts) is the reference:
-it owns the wp-admin Plugins screen and exposes `goto`, `isInstalled`, `isActive`,
-`activate`, `deactivate`, `delete` (the asserted UI flow), and `ensureAbsent`
-(idempotent cleanup). Methods throw the typed errors from
-[`wp/errors.ts`](../../src/common/wp/errors.ts) on failure.
+UI interactions belong in page objects, not inline in steps: cross-product ones under
+`src/common/pages/`, a product's own under `src/projects/<product>/pages/`.
+[`PluginsPage`](../../src/common/pages/plugins.page.ts) is the shared reference: it owns the
+wp-admin Plugins screen and exposes `goto`, `isInstalled`, `isActive`, `activate`,
+`deactivate`, `delete` (the asserted UI flow), and `ensureAbsent` (idempotent cleanup).
+Methods throw the typed errors from [`wp/errors.ts`](../../src/common/wp/errors.ts) on failure.
+
+### Registering a product's page objects as fixtures
+
+A product extends the shared test instance in its own `fixtures.ts`, so steps receive page
+objects by destructuring — and `common/` never imports product code:
+
+```ts
+// src/projects/<product>/fixtures.ts
+import { createBdd } from "playwright-bdd";
+import { test as base } from "../../common/fixtures";
+import { DashboardPage } from "./pages/dashboard.page";
+
+export const test = base.extend<{ dashboard: DashboardPage }>({
+  dashboard: async ({ page }, use) => { await use(new DashboardPage(page)); },
+});
+export const { Given, When, Then, Before, After } = createBdd(test);
+```
+
+Then list that file in the product's `steps` array and import `Given`/`When`/`Then` from it:
+
+```ts
+When("I start a backup", async ({ dashboard }) => { await dashboard.openBackupNow(); });
+```
+
+playwright-bdd picks, per scenario, the **most-extended** test instance among those its steps
+were registered against — so product steps and common steps mix freely. If the product's
+`fixtures.ts` is missing from `steps`, generation fails with "Can't guess test instance"
+rather than silently dropping the page objects.
+
+### Locator policy
+
+1. `getByRole` / `getByLabel` with the visible name — the default.
+2. The application's own **JS contract hooks** (for BackWPup: `js-backwpup-<trigger>`,
+   `data-content`, `data-backup-id`, `data-job-id`, `data-storage`) when there is genuinely no
+   accessible name — e.g. an icon-only button, or a visually-hidden `aria-hidden` checkbox. These
+   are stable by construction: the application's own JavaScript binds to them.
+3. **Never** structural CSS (`td:nth-child`, `header:has(h1) button.…`) or text matching on a
+   whole subtree. The lint gate below and code review enforce this.
+
+Rule 1 assumes an English admin, which the auth pre-flight asserts once per site
+(`determine_locale()`), so a translated site fails with one clear message instead of many
+locator timeouts.
+
+Every non-trivial page object gets a **locator-contract spec**: capture the real rendered markup,
+replay it through `page.setContent()`, and assert each locator resolves. See
+[`locator-contract.spec.ts`](../../src/projects/backwpup/pages/locator-contract.spec.ts). Capture
+the fixture — never hand-write it — or the fixture drifts along with the page object and the two
+agree with each other while the real page fails.
 
 ## Adding a scenario — checklist
 

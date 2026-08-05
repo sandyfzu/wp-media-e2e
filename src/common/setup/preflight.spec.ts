@@ -15,6 +15,10 @@ import type { SiteConfig } from "../config/types";
 //        phpold → exit 1, stdout PHP error  (installed, but PHP too old to boot — core printf()s
 //                                            to STDOUT and exit(1); the historical false negative)
 //        *      → exit 0                     (installed)
+//   $WP_STUB_LOCALE     <locale> | fail | *  → `wp eval 'echo determine_locale();'`:
+//        fail   → exit 1                    (could not be evaluated)
+//        unset  → en_US                     (the English default)
+//        other  → that locale               (e.g. fr_FR, to exercise the failure path)
 const STUB_WP = `#!/usr/bin/env bash
 if [ "$1" = "--info" ]; then
   [ "$WP_STUB_INFO" = "fail" ] && { echo "wp: not found" >&2; exit 1; }
@@ -28,6 +32,11 @@ if [ "$1 $2" = "core is-installed" ]; then
     phpold) echo "Your server is running PHP version 7.3.33 but WordPress 7.0 requires at least 7.4."; exit 1 ;;
     *)      exit 0 ;;
   esac
+fi
+if [ "$1" = "eval" ]; then
+  [ "$WP_STUB_LOCALE" = "fail" ] && exit 1
+  printf '%s' "\${WP_STUB_LOCALE:-en_US}"
+  exit 0
 fi
 exit 0
 `;
@@ -61,8 +70,74 @@ test.afterAll(() => {
   process.env.PATH = originalPath;
   delete process.env.WP_STUB_INFO;
   delete process.env.WP_STUB_INSTALLED;
+  delete process.env.WP_STUB_LOCALE;
   rmSync(stubDir, { recursive: true, force: true });
   rmSync(wpRoot, { recursive: true, force: true });
+});
+
+// The locale gate protects every role/label locator in the suite: a translated admin would otherwise
+// surface as dozens of indistinguishable locator timeouts instead of one named failure here.
+test.describe("verifyPool — admin locale gate", () => {
+  test.beforeEach(() => {
+    delete process.env.WP_STUB_INFO;
+    process.env.WP_STUB_INSTALLED = "yes";
+  });
+
+  // Cleared after every test in this block: the other describes share the process and know nothing
+  // about this variable, so a leaked non-English locale would fail them for the wrong reason.
+  test.afterEach(() => {
+    delete process.env.WP_STUB_LOCALE;
+  });
+
+  test("passes on the English default", async () => {
+    delete process.env.WP_STUB_LOCALE;
+    await expect(
+      verifyPool([localSite()], "backwpup", "local"),
+    ).resolves.toBeUndefined();
+  });
+
+  test("passes on other English variants", async () => {
+    process.env.WP_STUB_LOCALE = "en_GB";
+    await expect(
+      verifyPool([localSite()], "backwpup", "local"),
+    ).resolves.toBeUndefined();
+  });
+
+  test("fails with an actionable report on a translated admin", async () => {
+    process.env.WP_STUB_LOCALE = "fr_FR";
+    const error = await verifyPool([localSite()], "backwpup", "local").catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("Admin locale is English");
+    expect(message).toContain("fr_FR");
+    // The hint must name the fix, since the cause is a site setting and not a code problem.
+    expect(message).toContain("Site Language");
+  });
+
+  test("reports a locale it cannot read, rather than assuming English", async () => {
+    process.env.WP_STUB_LOCALE = "fail";
+    const error = await verifyPool([localSite()], "backwpup", "local").catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(
+      "Could not read the admin locale",
+    );
+  });
+
+  // A site whose WordPress does not boot must report that, not a second failure about its locale —
+  // the locale check only runs once every transport-level check has passed.
+  test("is not run when an earlier check already failed", async () => {
+    process.env.WP_STUB_INSTALLED = "no";
+    process.env.WP_STUB_LOCALE = "fr_FR";
+    const error = await verifyPool([localSite()], "backwpup", "local").catch(
+      (e: unknown) => e,
+    );
+    expect((error as Error).message).toContain("WordPress is not installed");
+    expect((error as Error).message).not.toContain("Admin locale");
+  });
 });
 
 test.describe("verifyPool — local transport over a stub wp", () => {

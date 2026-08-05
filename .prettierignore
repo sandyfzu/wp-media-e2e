@@ -28,5 +28,10 @@ package-lock.json
 # Curated design docs (manually formatted; not Prettier's to reflow)
 docs/
 
+# Captured page markup used as locator-contract fixtures. These are verbatim captures from a real
+# rendered site, and their whole value is that nobody edited them: reflowing the HTML would break the
+# guarantee, make re-capture produce noisy diffs, and let a Prettier upgrade masquerade as plugin drift.
+src/projects/*/pages/__fixtures__/*.html
+
 # Husky hook scripts (shell; Prettier has no parser for them)
 .husky/

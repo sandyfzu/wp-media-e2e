@@ -36,7 +36,8 @@
     "src/**/*",
     "playwright*.config.ts",
     "healthcheck.ts",
-    "warm-artifacts.ts"
+    "warm-artifacts.ts",
+    "capture-backwpup-fixtures.ts"
   ],
   "exclude": [
     "node_modules",
