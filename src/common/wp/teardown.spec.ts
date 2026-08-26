@@ -115,12 +115,18 @@ test("warns instead of throwing when the removal genuinely fails", async () => {
   const staging = await stageSomething(site);
   // A file cannot be unlinked from a read-only parent, so `rm -rf` exits non-zero.
   chmodSync(staging, 0o500);
+  // Unprivileged on purpose: cleanup escalates when it can, so allowing it here would make the
+  // result depend on whether this machine has passwordless sudo (CI does).
+  const unprivileged: SiteConfig = {
+    ...site,
+    transport: { ...site.transport, elevate: false },
+  };
   try {
-    await expect(releaseSite(site)).resolves.toBeUndefined();
+    await expect(releaseSite(unprivileged)).resolves.toBeUndefined();
     expect(warnings.join("\n")).toMatch(
       /could not clean the staging area on https:\/\/real\.example\.com \(continuing\)/,
     );
   } finally {
-    chmodSync(staging, 0o700);
+    if (existsSync(staging)) chmodSync(staging, 0o700);
   }
 });

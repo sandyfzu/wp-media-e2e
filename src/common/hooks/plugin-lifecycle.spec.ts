@@ -479,8 +479,10 @@ test.describe("teardownPluginUnderTest", () => {
     const report = reportSink();
     try {
       await expect(
+        // Unprivileged on purpose: the sweep escalates when it can, so allowing it here would make
+        // the outcome depend on whether this machine has passwordless sudo (CI does).
         teardownPluginUnderTest(
-          local,
+          { ...local, elevate: false },
           "backwpup-pro",
           {},
           ["wp-content/uploads/backwpup"],
@@ -492,7 +494,7 @@ test.describe("teardownPluginUnderTest", () => {
       expect(warnings.join("\n")).toContain(leftovers);
       expect(report.attached.get("uncleared-site-data")).toContain(leftovers);
     } finally {
-      chmodSync(leftovers, 0o700);
+      if (existsSync(leftovers)) chmodSync(leftovers, 0o700);
     }
   });
 
