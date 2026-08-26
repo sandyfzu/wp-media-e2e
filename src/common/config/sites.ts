@@ -179,7 +179,11 @@ function validateTransport(value: unknown, path: string): Transport {
   // Shared across all three modes; omitted from the result when absent so the optional
   // property is genuinely missing rather than present-and-undefined.
   const stagingDir = optionalString(value.stagingDir, `${path}.stagingDir`);
-  const base = stagingDir !== undefined ? { stagingDir } : {};
+  const elevate = optionalBoolean(value.elevate, `${path}.elevate`);
+  const base = {
+    ...(stagingDir !== undefined ? { stagingDir } : {}),
+    ...(elevate !== undefined ? { elevate } : {}),
+  };
   switch (value.mode) {
     case "ssh":
       return {

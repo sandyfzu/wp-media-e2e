@@ -9,11 +9,11 @@ works whether the site is local, in Docker, or behind SSH.
 A [`Transport`](../../src/common/config/types.ts) describes how WP-CLI reaches a
 site, discriminated on `mode`:
 
-| Mode     | Fields                                                          | Dispatch                                        |
-| -------- | --------------------------------------------------------------- | ----------------------------------------------- |
-| `local`  | `rootDir`, `stagingDir?`                                        | `execa`, run in `rootDir`.                      |
-| `docker` | `container`, `rootDir?`, `stagingDir?`                          | `docker exec <container> …` (see `dockerArgv`). |
-| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`   | `node-ssh` (its `exec` shell-escapes the args). |
+| Mode     | Fields                                                                      | Dispatch                                        |
+| -------- | --------------------------------------------------------------------------- | ----------------------------------------------- |
+| `local`  | `rootDir`, `stagingDir?`, `elevate?`                                        | `execa`, run in `rootDir`.                      |
+| `docker` | `container`, `rootDir?`, `stagingDir?`, `elevate?`                          | `docker exec <container> …` (see `dockerArgv`). |
+| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`, `elevate?`   | `node-ssh` (its `exec` shell-escapes the args). |
 
 Key design points:
 
@@ -33,6 +33,39 @@ Key design points:
 - SSH connections are cached per endpoint and reused. Call `disposeConnections()`
   from a worker-teardown fixture to close them.
 
+### Elevated housekeeping
+
+Some cleanup genuinely cannot be done as the transport's user. A plugin writes files as the
+**web-server** user, and when it also creates a directory only that user can write — BackWPup's
+restore area is `0755 www-data`, from Monolog's `mkdir` under the default umask — nothing else can
+unlink inside it. An unprivileged `rm -rf` exits 1, the directory survives, and the site keeps a
+copy of its own database dump from every scenario that ever ran.
+
+So the layer offers `execElevated(transport, file, args, opts?)`, plus
+`elevationSupport(transport)` so a caller can ask before relying on it
+(`available` / `unavailable` / `disabled`). Per mode:
+
+| Mode            | How                                                                                       |
+| --------------- | ----------------------------------------------------------------------------------------- |
+| `local`, `ssh`  | `sudo -n -- <file> <args…>` (see `sudoArgv`).                                              |
+| `docker`        | `docker exec -u 0:0 …` — the `wordpress:cli` image ships no `sudo`, and the daemon is root. |
+
+The limits are what make a test suite holding root uninteresting:
+
+- **Housekeeping only** — removing leftover files, clearing `debug.log`. **Never `wp`**: WP-CLI
+  refuses to run as root without `--allow-root`, and files it created as root would afterwards be
+  unwritable by the web server, so the suite would break the site it is testing. `wpCli` has no way
+  to request elevation, which makes that rule structural rather than a convention.
+- **Never on a path a scenario asserts against.** Elevation cannot make a product behaviour pass; it
+  only removes what the product left behind, after the verdict is in.
+- **Second, never first.** Callers try as themselves and escalate only what demonstrably failed, so a
+  correctly-permissioned host never runs a privileged command — not even the capability probe.
+- **Never interactive.** `sudo -n` fails immediately instead of waiting on a password nobody will
+  type, and `--` stops sudo parsing the target command's own flags.
+- **Refusable per site** (`transport.elevate: false`), which `execElevated` enforces by throwing
+  rather than trusting each caller to have checked. The probe result is cached per target, and the
+  first actual use is announced once so a privileged run is never silent.
+
 The module also owns the **file-transfer** primitives, because they need the same
 per-mode dispatch and the same cached SSH connection:
 
@@ -43,6 +76,33 @@ per-mode dispatch and the same cached SSH connection:
   target, overwriting: `node:fs` copy (`local`), `docker cp` (`docker`, a top-level
   sub-command — see `dockerCpArgv`), SFTP `putFile` (`ssh`). It does **not** create
   the parent directory; the staging layer below does that first.
+
+## Watched runs (`--headed`, `--ui`, `--debug`)
+
+**A headed browser can go permanently blank, and the tests still pass.** Completing BackWPup's
+onboarding navigates POST → redirect → first-backup screen → dashboard; from the moment that chain
+starts the tab stops rendering, and it never recovers — not on the next navigation, not on a reload.
+Assertions keep passing because they read the DOM over CDP, so only a person watching notices.
+
+Measured, not guessed: `requestAnimationFrame` goes from 84 frames/0.7s before the submit to **0**
+after, the main thread stays responsive throughout, a *new* page in the same context renders fine, and
+raw CDP `Page.captureScreenshot` hangs exactly as `page.screenshot()` does — so it is the tab's
+rendering pipeline, not Playwright. Bisecting Playwright's `--disable-features` list one feature at a
+time identified **`RenderDocument`**: disabled (Playwright's default) the tab wedges, enabled it
+renders. No compositor flag avoids it.
+
+Playwright disables `RenderDocument` for a reason — it breaks Playwright's isolated worlds
+(microsoft/playwright#37714) — so the suite re-enables it **only for watched runs**, never for CI:
+
+- The `:headed` and `:ui` npm scripts export `E2E_VISIBLE_BROWSER=1`; `--debug` needs nothing because
+  Playwright exports `PWDEBUG` itself. `E2E_VISIBLE_BROWSER=0` forces it off again.
+- **A direct `npx playwright test --headed` does not trigger it** — export the variable too. Playwright
+  re-evaluates the config in each *worker*, and a worker's `process.argv` has none of the CLI's flags,
+  so sniffing `--headed` silently does nothing.
+- Unattended runs get no extra argument at all, so their command line is exactly Playwright's.
+
+For a failed CI run there is nothing to configure: **traces are DOM snapshots, not pixels**, so the
+trace viewer replays a wedged tab correctly even when its video is blank.
 
 ## Site staging & file transfer ([`wp/staging.ts`](../../src/common/wp/staging.ts))
 
@@ -173,6 +233,18 @@ would miss. Transport-agnostic, with a resilient fallback:
   — and the log matters most when a fatal has broken that boot. So on a non-zero
   `wp eval` exit it logs and **falls back** to a direct file read/removal that does
   not load WordPress.
+- **`wp eval` exits 0 even when its PHP failed**, so the exit code alone is not a
+  verdict. `debug.log` belongs to the web-server user and WP-CLI usually runs as
+  someone else, so a denied write is just a warning and the command still "succeeds".
+  Each snippet therefore reports its **own** outcome and `log.ts` trusts that: the
+  clear prints `cleared`/`kept`, and a read that cannot open an existing log exits
+  non-zero instead of returning `""`. Both matter — a log that never clears makes one
+  scenario's fatal fail every later scenario, and a read that quietly yields `""`
+  turns the fatal gate into a no-op.
+- Clearing **removes** the file rather than truncating it: emptying needs write
+  permission on the file (the web-server user's), unlinking needs it on the directory
+  (usually the transport user's). WordPress recreates it on its next write. If it
+  survives both routes, `clearDebugLog` throws rather than leave the gate unscoped.
 
 API:
 
@@ -225,10 +297,83 @@ the `releaseBoundSite` fixture, so no scenario has to remember it.
 - **Placeholder sites are skipped**: they have no reachable transport, so cleaning one
   would only warn on every fresh-checkout run.
 
+## Left-over plugin data ([`wp/residue.ts`](../../src/common/wp/residue.ts))
+
+Uninstalling a plugin removes its code and — if it implements `uninstall.php` properly — its
+database footprint. It does **not** remove the files the plugin wrote while running, and generally
+should not: those are the user's data. For a suite that installs the plugin afresh every scenario
+that is a leak. BackWPup is the extreme case: its uninstall touches no files at all and each
+install writes under a new randomly-named directory, so the site collects a complete archive of
+itself per scenario (measured on the QA cell before this existed: **6.8 GB across 28 directories**).
+
+- A product declares what it leaves as `ProductConfig.siteResidue` — paths relative to the
+  WordPress root — and the shared `@plugin` teardown clears them after every tagged scenario. The
+  hooks read the list from the per-process registry, so they never import product code.
+- `removeSiteResidue(transport, paths)` validates every path **before** removing any (so a typo
+  cannot leave the site half-cleaned), then removes each and **confirms it is gone** rather than
+  trusting `rm -rf`'s exit code. Every path is attempted even if an earlier one fails, and the
+  error names all the survivors.
+- It runs in **two passes**: everything as the transport's own user, then whatever survived
+  [with privileges](#elevated-housekeeping). That order is the point — a host whose permissions are
+  already right never runs a privileged command, while a host where the web-server user owns the
+  data still ends up clean. Before a privileged `rm -rf`, the site's `rootDir` must itself be
+  plausible (absolute, not a top-level directory, and the target must resolve inside it): the
+  relative half is already constrained by `normaliseResiduePath`, and this is the half it cannot see.
+- `normaliseResiduePath` rejects anything that is not a path below the root — absolute, escaping,
+  or naming a directory WordPress itself owns (`wp-content/uploads` and friends). It guards against
+  a typo in a config file, not against a hostile one.
+- `prepareSiteDataDirs(transport, paths)` is the other half, run by the **Before** hook over the same
+  declared list: it creates each directory and opens it to every user sharing the docroot (`0777`).
+  On a real cell **WP-CLI and the web server are different users** — `ubuntu` over SSH, `www-data`
+  under PHP-FPM — and the plugin creates these directories under whichever umask it happens to be
+  running with, so the first writer locks the other one out of a directory they must both write.
+  Observed on the QA cell the day removal started working: `uploads/backwpup-restore` created
+  `drwxrwxr-x ubuntu:ubuntu` by a WP-CLI call at 15:38:49, and the plugin's next admin request dead at
+  15:38:50 on `Folder "…/backwpup-restore" is not writable` (`BackWPup_File::check_folder`). It had
+  been invisible for as long as removal was failing, because the copy the web server made months
+  earlier never went away. `0777` is what the plugin asks for itself (`mkdir($dir, 0777, true)`,
+  narrowed only by the umask) and what `wp_mkdir_p` would produce, since it inherits the mode of
+  `wp-content/uploads` — already `0777` on these cells for the same reason.
+
+**Removal is best-effort against permissions, and strict about everything else.** Reaching a
+survivor now means privileges did not close the gap either — the site cannot escalate (no
+passwordless `sudo`, or `elevate: false`), or something other than permissions is holding the path.
+The error says which, because "make it writable" is useless advice once the delete has already run as
+root. That is a fact about the cell, it breaks no later scenario, and it is reported (console warning
+plus an `uncleared-site-data` report attachment) rather than failing the run. A path that is not a
+usable declaration, an implausible `rootDir` for a privileged delete, or a transport that cannot run
+a command, still throws.
+
+## Options ([`wp/options.ts`](../../src/common/wp/options.ts))
+
+Reads WordPress options over WP-CLI, so a scenario can check what a plugin actually
+persisted instead of re-reading the screen that rendered it.
+
+- `getOption(transport, name)` → the raw value, or `undefined` when the option is not
+  set. An option set to `""` returns `""`, so "present but empty" stays distinct from
+  "absent".
+- `getOptionJson<T>(transport, name)` → the value deserialised from `--format=json`.
+  **A PHP array is not always a JSON array**: WP-CLI emits an object as soon as the keys
+  are not a 0-based sequence, which is what deleting an entry from the middle of a list
+  produces. Callers expecting a list must accept both shapes.
+
+`wp option get` exits non-zero both for a missing option **and** for a WordPress that
+cannot boot, so the two are told apart by WP-CLI's own "Does it exist?" wording: only
+that one is reported as `undefined`, everything else throws. Reporting a broken site as
+"no such option" is the false negative these readers exist to prevent.
+
+Single-site only — a *network* option on multisite lives behind `wp site option`.
+
 ## Database ([`wp/db.ts`](../../src/common/wp/db.ts))
 
 `dbQuery(transport, sql)` runs a SQL statement via `wp db query` and returns
 stdout. Throws on a non-zero exit.
+
+`tablePrefix(transport)` returns this install's table prefix from `wp db prefix` — i.e.
+`$wpdb->prefix`, which on multisite includes the per-blog segment a config file never
+shows. Needed wherever a plugin distinguishes *this* install's tables from other tables
+sharing the database; a hard-coded `wp_` would quietly assert the wrong thing on any site
+not using the default.
 
 ## Type guards ([`guards.ts`](../../src/common/guards.ts))
 

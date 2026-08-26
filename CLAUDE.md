@@ -42,7 +42,7 @@ src/
 │   ├── pages/              # cross-product Page Object Model (e.g. plugins.page.ts)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, verify, consume, pre-warm)
-│   └── wp/                 # WordPress automation over WP-CLI (exec, staging, plugin, log, db, teardown, errors)
+│   └── wp/                 # WordPress automation over WP-CLI (exec, staging, plugin, log, options, residue, db, teardown, errors)
 └── projects/<product>/
     ├── config/             # <product>.config.ts + sites.json / sites.*.json / sites.example.json
     ├── fixtures.ts         # this product's test instance: common's + its page objects
@@ -81,7 +81,7 @@ npm run test:wp-rocket -- --project=<cell>    # one product, one cell
 npm run test:backwpup  -- --project=<cell>
 npm run test:wp-rocket -- --project=apache --grep @smoke   # filter by tag
 npm run test:ui                    # Playwright UI mode
-npm run test:headed                # headed browser
+npm run test:headed                # headed browser (see below before using --headed by hand)
 npm run test:unit                  # unit/integration specs (src/**/*.spec.ts)
 npm run test:unit:ui
 
@@ -156,9 +156,9 @@ shared fixtures:
 | `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                              |
 | device options (override) | —      | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else the desktop default.    |
 
-BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds `onboarding`, `dashboard`,
-`dataSelection`, `frequency`, `storages`, `jobRun`, `backupHistory`, `restore` (edition-aware)
-and `plugins`. See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
+BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds `onboarding`, `firstBackup`,
+`dashboard`, `dataSelection`, `frequency`, `storages`, `jobRun`, `backupHistory`, `restore`
+(edition-aware) and `plugins`. See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
 the pattern, the locator policy, and the locator-contract spec every page object carries.
 
 ## Shared scenario hooks
@@ -174,11 +174,19 @@ module so it is unit-testable without the runtime.
   install is genuinely fresh, DB footprint included), then the cell's own resolved
   artifact staged and installed with `--activate` — and the plugin's **active state
   re-asserted**, never inferred from the install's exit code. The edition is never named:
-  the slug comes from `pluginArtifact("plugin").slug`.
+  the slug comes from `pluginArtifact("plugin").slug`. Finally the product's declared data
+  directories (`ProductConfig.siteResidue`) are created and opened to **both** users sharing the
+  docroot — WP-CLI and the web server are different users on a real cell, and whichever writes
+  first would otherwise lock the other out (`prepareSiteDataDirs`).
 - **After** — `debug.log` scanned with the product's preset: a **PHP fatal fails the
   scenario** (`DebugLogFatalError`) with the log attached; warnings/notices are logged.
-  Then the plugin is removed. Both duties always run; the log verdict wins when both fail,
-  and the cleanup failure is still logged.
+  Then the plugin is removed, and finally the **files it left behind** are cleared
+  (`ProductConfig.siteResidue`) — a plugin's uninstall keeps the data it wrote, so a suite that
+  reinstalls per scenario would fill the cell's disk. All three duties always run, independently:
+  the sweep is not skipped because the uninstall failed. The log verdict wins when more than one
+  fails, and the others are still logged. Left-over data the transport's user is not _permitted_
+  to remove is reported, not failed — see
+  [wordpress-automation.md](docs/architecture/wordpress-automation.md).
 - The scenario timeout is extended **additively** to cover both hooks (remote WP-CLI plus
   an SFTP upload is slow), so a scenario keeps any budget it asked for.
 
@@ -207,7 +215,9 @@ project matrix ([`config/devices.ts`](src/common/config/devices.ts)):
 `eslint.config.js` bans four flaky-by-construction waits across `src/projects/**`,
 `src/common/pages/**`, `src/common/steps/**` and `src/common/hooks/**`: `waitForTimeout`,
 `waitForLoadState("networkidle")`, `waitForSelector`, and `.type()`. Each message names
-the replacement. The single deliberate exception is out of scope by design —
+the replacement. Each selector matches the member expression in the **call's `.callee`
+field**, so passing a property that merely shares one of those names (`describe(job.type)`)
+is not flagged — a gate that fires on innocent code is one people start disabling. The single deliberate exception is out of scope by design —
 [`visual/stabilize.ts`](src/common/visual/stabilize.ts) uses one timeboxed, already-caught
 `networkidle` attempt to settle lazy media before a screenshot.
 
@@ -342,6 +352,19 @@ ssh). Highlights — full reference in
   `uninstall --deactivate`, which makes a plugin's own cleanup skip itself; typed
   errors in `wp/errors.ts`.
 - UI plugin actions live in the [`PluginsPage`](src/common/pages/plugins.page.ts) page object.
+- [`wp/options.ts`](src/common/wp/options.ts) reads WordPress options (`getOption`,
+  `getOptionJson`) so a scenario can assert what a plugin _persisted_, not just what a
+  screen rendered. A missing option reads as `undefined`; a WordPress that cannot boot
+  throws, so the two can never be confused. `wp/db.ts` adds `tablePrefix` for the same
+  reason — never hard-code `wp_`.
+- [`wp/residue.ts`](src/common/wp/residue.ts) removes the files a plugin leaves behind after it
+  is uninstalled, from the paths its product declares as `ProductConfig.siteResidue`. Validated
+  before removal and **verified afterwards**, never inferred from `rm`'s exit code. Removal runs
+  unprivileged first and **escalates only what survived** (`execElevated`), because a plugin writes
+  as the web-server user and leaves directories nobody else can empty; `prepareSiteDataDirs` opens
+  those same directories to both users up front. Refusable per site with `transport.elevate: false`.
+  **`wp` is never elevated** — WP-CLI as root would leave the site's files unwritable by the web
+  server.
 
 ### Debug-log feature
 
@@ -404,6 +427,13 @@ These are requirements, not suggestions:
   the reasoning inline instead. Markdown docs and `.env.example` may cite plans. **UNLESS**
   the user explicitly authorizes an exception, which must then be listed right here —
   _current exceptions: none._
+- **Name every scenario so it stands alone.** A `Scenario:` name is what you `--grep` to run
+  one scenario, what a report row shows and what a CI failure is headlined with — it is read
+  in isolation, never in file order. State the behaviour _and_ its outcome, with no
+  back-reference to a neighbouring scenario (`…just the same`, `…too`, a dangling
+  `them`/`it`). Setup and the reason scenarios resemble each other belong in the `Feature`
+  description or `Background`, not implied by a title. Full rule and examples:
+  [authoring-tests.md → Naming scenarios](docs/guides/authoring-tests.md#naming-scenarios).
 - **Follow best practices.** Keep UI logic in page objects, WP-CLI logic in `wp/`,
   shared logic in `common/`, product specifics under `src/projects/<product>/`.
   Match the style of the surrounding code. Add a `*.spec.ts` unit test for
@@ -522,6 +552,7 @@ Update it when you change anything about:
 Update it when you change anything about:
 
 - The BDD pipeline (bddgen, generated specs, how step files are wired).
+- Gherkin authoring conventions (scenario naming, what belongs in `Feature`/`Background`).
 - Fixtures (add/rename/change scope or semantics).
 - Tags and their effects (`@noauth`, `@smoke`, `@visual`, `@free`/`@pro`, new tags).
 - The Page Object Model conventions or page objects in `common/pages/`.

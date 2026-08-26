@@ -3,10 +3,13 @@ import type { PlaywrightTestConfig, Project } from "@playwright/test";
 import { defineBddConfig } from "playwright-bdd";
 
 import { registerManifest } from "../artifacts/registry";
+import { chromiumLaunchOptions } from "./chromium";
 import { DESKTOP } from "./devices";
+import { intEnv } from "./env";
 import {
   registerDebugLogOptions,
   registerPool,
+  registerSiteResidue,
   routingMetadata,
 } from "./metadata";
 import { reporters } from "./reporting";
@@ -18,6 +21,26 @@ import type { Edition, ProductConfig, SiteConfig, SitePool } from "./types";
 
 // True when running under CI (the `CI` env var is present and non-empty).
 const isCI = process.env.CI !== undefined && process.env.CI !== "";
+
+/**
+ * How many times a failed scenario is retried — **the single place retries are configured.**
+ *
+ * Two by default, so a scenario gets three attempts, everywhere rather than only on CI. These
+ * scenarios drive a real WordPress over a network: an SSH hiccup, a slow first backup, a cell that
+ * was briefly busy. Failing a run on the first such blip taught us to re-run by hand, which is the
+ * same retry with a worse feedback loop and no record of having happened. Playwright marks a
+ * scenario that only passed on a retry **flaky** rather than green, so the noise stays visible
+ * instead of being laundered into a pass.
+ *
+ * A retry is a genuinely fresh attempt, not a resumption: the `@plugin` lifecycle hooks are
+ * per-scenario (`Before`/`After` run as `beforeEach`/`afterEach`), so every attempt reinstalls the
+ * plugin, clears `debug.log`, and sweeps residue before it starts.
+ *
+ * Override with `E2E_RETRIES` — `0` to fail fast while debugging, higher to ride out a sick cell.
+ * Deliberately applied to the scenario projects only: the auth and artifact setups are not tests,
+ * and a setup that cannot succeed should say so at once rather than three times.
+ */
+const RETRIES = intEnv("E2E_RETRIES", 2, 0, 10);
 
 /** Assigns each pooled site its per-run `storageState` path under the cell's auth dir. */
 function withState(pool: SitePool, authDir: string): SiteConfig[] {
@@ -63,6 +86,10 @@ export function createProductConfig(
   // which cannot ride project metadata (Playwright serializes that into reports), and the shared
   // scenario hooks must not import product code.
   registerDebugLogOptions(product.name, product.debugLog);
+
+  // Same channel for the paths this product leaves on a site after it is uninstalled: the shared
+  // scenario hooks clear them, and must not import product code to learn what they are.
+  registerSiteResidue(product.name, product.siteResidue);
 
   // Resolve the targeted cell. Selecting multiple cells in one invocation is unsafe
   // (parallelIndex is global), so fail fast instead of silently mis-sizing workers.
@@ -131,7 +158,7 @@ export function createProductConfig(
         // keep parallelIndex within a smaller pool. Correctness rests on the
         // single-cell global `workers` below.
         workers: pool.length > 0 ? pool.length : 1,
-        retries: isCI ? 2 : 0,
+        retries: RETRIES,
         metadata: routing,
       },
     ];
@@ -156,6 +183,10 @@ export function createProductConfig(
       trace: "retain-on-failure",
       screenshot: "only-on-failure",
       video: "retain-on-failure",
+      // Only ever non-empty for a watched run (the `:headed`/`:ui` scripts, or `--debug`): it
+      // re-enables the one Chromium feature whose absence leaves a tab permanently blank after some
+      // navigations. See `./chromium.ts` — an unattended run keeps Playwright's defaults untouched.
+      launchOptions: chromiumLaunchOptions(process.env),
     },
     projects,
   });

@@ -40,6 +40,22 @@ interface TransportBase {
    * any ancestor of it, and top-level paths are rejected (see `wp/staging.ts`).
    */
   readonly stagingDir?: string;
+
+  /**
+   * Whether housekeeping commands may be re-run with elevated privileges when the transport's own
+   * user is not permitted to complete them. Defaults to **allowed**.
+   *
+   * A plugin writes files as the *web-server* user, and some of them land in directories that user
+   * alone can write (BackWPup's restore area is `0755 www-data`, so nothing else can unlink inside
+   * it). Cleanup then cannot finish, and the site accumulates the site's own backups run after run.
+   * Elevation is what closes that gap — see `wp/exec.ts` for the mechanism and the strict limits on
+   * what is ever elevated (never WP-CLI, never anything a scenario asserts on).
+   *
+   * Set `false` for a host where the transport's user must stay unprivileged; cleanup then reports
+   * what it could not remove instead of escalating, which is the behaviour this suite had before
+   * elevation existed.
+   */
+  readonly elevate?: boolean;
 }
 
 export interface SshTransport extends TransportBase {
@@ -172,5 +188,22 @@ export interface ProductConfig {
    * stricter, never quieter.
    */
   readonly debugLog?: ScanDebugLogOptions;
+  /**
+   * Paths — relative to the WordPress root — that this product **writes while running and does not
+   * remove when uninstalled**, which the shared scenario hooks clear after every `@plugin`
+   * scenario.
+   *
+   * Uninstalling a plugin removes its code and its database footprint; the files it produced are
+   * the user's data and it rightly leaves them. A test suite that installs the plugin once per
+   * scenario therefore accumulates them until the cell runs out of disk, so each product states
+   * what it leaves behind and the shared teardown deals with it. Declared here rather than
+   * imported by the hooks, for the same reason as {@link debugLog}: the hooks stay
+   * product-agnostic.
+   *
+   * Each path must be relative, must not escape the WordPress root, and must not name a directory
+   * WordPress itself owns — validated at removal time, so a typo fails loudly instead of deleting
+   * a site. Omit when a product leaves nothing behind.
+   */
+  readonly siteResidue?: readonly string[];
   readonly services?: ServiceConfig;
 }

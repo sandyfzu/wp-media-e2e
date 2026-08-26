@@ -37,6 +37,12 @@ const STUB_WP = `#!/usr/bin/env bash
 #                  effect via $WP_STUB_ACTIVE_MARKER / $WP_STUB_MARKER
 [ -n "$WP_STUB_LOG" ] && printf '%s\\n' "$*" >> "$WP_STUB_LOG"
 sub="$1 $2"
+# $WP_STUB_CACHE_FAIL makes 'cache flush' refuse, in every mode — the flush is housekeeping that
+# must never fail a removal, so it needs to be failable independently of the plugin's own state.
+if [ "$sub" = "cache flush" ] && [ -n "$WP_STUB_CACHE_FAIL" ]; then
+  echo "Error: The object cache could not be flushed." >&2
+  exit 1
+fi
 case "$WP_STUB_MODE" in
   absent)
     [ "$sub" = "plugin is-installed" ] && exit 1
@@ -96,6 +102,7 @@ test.afterAll(() => {
 
 test.beforeEach(() => {
   delete process.env.WP_STUB_LOG;
+  delete process.env.WP_STUB_CACHE_FAIL;
 });
 
 test.describe("plugin lifecycle over a stub wp", () => {
@@ -180,5 +187,55 @@ test.describe("plugin lifecycle over a stub wp", () => {
     expect(deactivateIndex).toBeGreaterThanOrEqual(0);
     expect(uninstallIndex).toBeGreaterThan(deactivateIndex);
     expect(calls).not.toContain("plugin uninstall x --deactivate");
+  });
+
+  test("ensurePluginAbsent flushes the object cache after removing the plugin", async () => {
+    // "Absent" has to mean absent to WordPress too: a plugin that clears its options with raw SQL
+    // leaves a persistent cache serving rows that no longer exist. See wp/cache.ts.
+    process.env.WP_STUB_MODE = "vanishes";
+    process.env.WP_STUB_MARKER = freshMarker();
+    process.env.WP_STUB_ACTIVE_MARKER = freshMarker();
+    process.env.WP_STUB_LOG = freshMarker();
+    await ensurePluginAbsent(local, "x");
+
+    const calls = readFileSync(process.env.WP_STUB_LOG, "utf8")
+      .split("\n")
+      .filter((line) => line !== "");
+    expect(calls).toContain("cache flush");
+    expect(calls.indexOf("cache flush")).toBeGreaterThan(
+      calls.indexOf("plugin uninstall x"),
+    );
+  });
+
+  test("ensurePluginAbsent flushes even when the plugin was already gone", async () => {
+    // The cheap path must not skip it: state that outlives a removal was not necessarily written by
+    // *this* call's removal — a run killed before teardown leaves exactly that.
+    process.env.WP_STUB_MODE = "absent";
+    process.env.WP_STUB_LOG = freshMarker();
+    await expect(ensurePluginAbsent(local, "x")).resolves.toBeUndefined();
+
+    const calls = readFileSync(process.env.WP_STUB_LOG, "utf8").split("\n");
+    expect(calls).toContain("cache flush");
+    expect(calls).not.toContain("plugin uninstall x");
+  });
+
+  test("ensurePluginAbsent still succeeds when the object cache refuses to flush", async () => {
+    // The whole point of the flush being best-effort: housekeeping must never turn a removal red.
+    process.env.WP_STUB_MODE = "vanishes";
+    process.env.WP_STUB_MARKER = freshMarker();
+    process.env.WP_STUB_ACTIVE_MARKER = freshMarker();
+    process.env.WP_STUB_CACHE_FAIL = "1";
+    const originalWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      await expect(ensurePluginAbsent(local, "x")).resolves.toBeUndefined();
+    } finally {
+      console.warn = originalWarn;
+    }
+    // Stepped over, but never silently: an operator has to be able to see which cell did this.
+    expect(warnings.some((line) => line.includes("[wp/cache]"))).toBe(true);
   });
 });

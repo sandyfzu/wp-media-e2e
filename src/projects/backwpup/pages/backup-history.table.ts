@@ -203,7 +203,7 @@ export class BackupHistoryTable {
    * The row's Restore action is labelled by the plugin from the backup record itself
    * (`dataset-restore['label']`), so its text is data-driven and cannot be hard-coded here; the
    * action is found by the modal it opens instead. Whether it then deep-links at the on-disk archive
-   * or lands on the bare restore page is the V13 edition divergence — `RestorePage` owns that.
+   * or lands on the bare restore page is the edition divergence — `RestorePage` owns that.
    */
   async openRestore(row: Locator): Promise<void> {
     await this.openActions(row);

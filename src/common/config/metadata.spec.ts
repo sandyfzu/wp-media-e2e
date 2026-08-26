@@ -3,24 +3,27 @@ import { test, expect } from "@playwright/test";
 import {
   getDebugLogOptions,
   getPool,
+  getSiteResidue,
   readRouting,
   registerDebugLogOptions,
   registerPool,
+  registerSiteResidue,
   routingMetadata,
 } from "./metadata";
 import type { SiteConfig } from "./types";
 
 /**
- * The project-metadata contract and the two per-process registries behind it.
+ * The project-metadata contract and the three per-process registries behind it.
  *
- * Both registries are module-global and deliberately have no reset (the config factory populates
+ * The registries are module-global and deliberately have no reset (the config factory populates
  * them once per process), so each test uses its own product/cell names for isolation.
  *
  * The properties worth pinning are the ones a silent regression would hide: routing rejects
  * anything it cannot trust rather than yielding a half-valid object; the pool registry throws when
  * a worker reads a pool its process never built; and the debug-log registry defaults to the
  * **strictest** preset, so a product that forgets to declare one gets a gate that is too strict
- * rather than one that quietly passes.
+ * rather than one that quietly passes. The residue registry defaults the other way — to nothing —
+ * because "this product leaves no files behind" is a legitimate state rather than an oversight.
  */
 
 test.describe("routingMetadata / readRouting", () => {
@@ -102,5 +105,29 @@ test.describe("debug-log preset registry", () => {
     registerDebugLogOptions("spec-product-b", b);
     expect(getDebugLogOptions("spec-product-a")).toBe(a);
     expect(getDebugLogOptions("spec-product-b")).toBe(b);
+  });
+});
+
+test.describe("site-residue registry", () => {
+  test("serves back the paths a product declared", () => {
+    const paths = ["wp-content/uploads/thing"];
+    registerSiteResidue("spec-with-residue", paths);
+    expect(getSiteResidue("spec-with-residue")).toBe(paths);
+  });
+
+  // Unlike the debug-log preset, an absent declaration is not an oversight to compensate for: a
+  // product whose plugin cleans up after itself has nothing to sweep, and sweeping "just in case"
+  // would mean guessing at paths on someone else's site.
+  test("is empty for a product that declares none", () => {
+    expect(getSiteResidue("spec-no-residue")).toEqual([]);
+    registerSiteResidue("spec-undefined-residue", undefined);
+    expect(getSiteResidue("spec-undefined-residue")).toEqual([]);
+  });
+
+  test("keeps products isolated from one another", () => {
+    registerSiteResidue("spec-residue-a", ["wp-content/uploads/a"]);
+    registerSiteResidue("spec-residue-b", ["wp-content/uploads/b"]);
+    expect(getSiteResidue("spec-residue-a")).toEqual(["wp-content/uploads/a"]);
+    expect(getSiteResidue("spec-residue-b")).toEqual(["wp-content/uploads/b"]);
   });
 });

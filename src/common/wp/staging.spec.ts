@@ -346,9 +346,11 @@ test.describe("cleanSiteStaging", () => {
     const root = await siteStagingDir(local);
     chmodSync(root, 0o500);
     try {
-      await expect(cleanSiteStaging(local, PLUGINS_CATEGORY)).rejects.toThrow(
-        /could not remove .*plugins/,
-      );
+      // Unprivileged on purpose: cleanup escalates when it can, so allowing it here would make the
+      // result depend on whether this machine has passwordless sudo.
+      await expect(
+        cleanSiteStaging({ ...local, elevate: false }, PLUGINS_CATEGORY),
+      ).rejects.toThrow(/could not remove .*plugins/);
     } finally {
       chmodSync(root, 0o700);
     }
@@ -372,5 +374,68 @@ test.describe("stageAndInstallPlugin", () => {
     const argv = readFileSync(argvFile, "utf8").trim();
     expect(argv).toBe(`plugin install ${staged} --activate`);
     expect(argv).not.toContain(sourceDir);
+  });
+});
+
+/**
+ * Fake `sudo` for the escalation tests: answers the `sudo -n true` capability probe, records every
+ * argv, and otherwise hands back the one privilege these tests remove — write access to the target
+ * (or its parent). Not a stand-in for real root; it exists so the escalation *policy* is provable on
+ * a machine that has no passwordless root, which is most of them.
+ */
+const FAKE_SUDO = `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$FAKE_SUDO_LOG"
+if [ "$FAKE_SUDO_DENY" = "1" ]; then exit 1; fi
+[ "$1" = "-n" ] && shift
+[ "$1" = "--" ] && shift
+if [ "$1" = "true" ]; then exit 0; fi
+for arg in "$@"; do target="$arg"; done
+chmod u+rwx "$(dirname "$target")" 2>/dev/null
+[ -e "$target" ] && chmod -R u+rwX "$target" 2>/dev/null
+exec "$@"
+`;
+
+test.describe("cleanSiteStaging — escalation", () => {
+  let sudoDir: string;
+  let stagingRoot: string;
+  let site: LocalTransport;
+  let pathBefore: string | undefined;
+
+  test.beforeEach(() => {
+    sudoDir = mkdtempSync(join(tmpdir(), "wp-fake-sudo-"));
+    writeFileSync(join(sudoDir, "sudo"), FAKE_SUDO);
+    chmodSync(join(sudoDir, "sudo"), 0o755);
+    // A root per test: elevation support is probed once per target and cached.
+    stagingRoot = mkdtempSync(join(tmpdir(), "wp-elevated-root-"));
+    site = { mode: "local", rootDir: stagingRoot };
+    pathBefore = process.env.PATH;
+    process.env.PATH = `${sudoDir}:${pathBefore ?? ""}`;
+    process.env.FAKE_SUDO_LOG = join(sudoDir, "argv.log");
+  });
+
+  test.afterEach(() => {
+    if (pathBefore === undefined) delete process.env.PATH;
+    else process.env.PATH = pathBefore;
+    delete process.env.FAKE_SUDO_LOG;
+    rmSync(stagingRoot, { recursive: true, force: true });
+    rmSync(sudoDir, { recursive: true, force: true });
+  });
+
+  // The area normally holds only what this suite put there — but a plugin that unpacks into it as
+  // the web-server user would otherwise strand the whole directory on every later run.
+  test("removes an area the transport's user cannot empty", async () => {
+    test.skip(isRoot, "root ignores directory permissions, so rm -rf succeeds");
+    await stageArtifact(site, makeSource("stuck-elevated.zip"), {
+      category: PLUGINS_CATEGORY,
+    });
+    const root = await siteStagingDir(site);
+    const category = join(root, PLUGINS_CATEGORY);
+    chmodSync(category, 0o500);
+    try {
+      await expect(cleanSiteStaging(site)).resolves.toBeUndefined();
+      expect(existsSync(root)).toBe(false);
+    } finally {
+      if (existsSync(category)) chmodSync(category, 0o700);
+    }
   });
 });

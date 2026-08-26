@@ -6,7 +6,7 @@ import type { Edition } from "../../../common/config/types";
 /**
  * Page objects for the restore screen, `admin.php?page=backwpuprestore`.
  *
- * **This is the one genuinely edition-divergent flow in BackWPup (V13), and the only place in the
+ * **This is the one genuinely edition-divergent flow in BackWPup, and the only place in the
  * port that needs per-edition classes.** The restore *screen* is shared and identical; how a user
  * reaches it is not:
  *
@@ -145,8 +145,8 @@ export class ProRestorePage extends BaseRestorePage implements RestorePage {
    * It deliberately does **not** assert that the page offers no upload control. The dropzone lives in
    * the restore flow's step-1 view (`views/restore/steps/step1_action.php`) and the step defaults to
    * `1`, so whether the deep link skips that view is not something this has observed — asserting it
-   * would be a guess. The UI-level "never asks for a file" check belongs to 6G, which drives a real
-   * restore and can see it.
+   * would be a guess. The UI-level "never asks for a file" check belongs with a scenario that drives a
+   * real restore and can see it.
    */
   async expectEntryPath(): Promise<void> {
     // Confirm this really is the restore screen first: a URL check alone would also "pass" on any

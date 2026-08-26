@@ -9,16 +9,22 @@ import { expectPanelClosed, expectPanelOpen } from "./panels";
  *
  * `link` (trigger by URL) is **onboarding-gated, not edition-gated** — `frequency.php:62-64` appends it
  * only when `backwpup_onboarding` is unset, with no `is_pro()` check anywhere, and `parts/` is
- * byte-identical between Free and Pro. Verified live on 5.7.5: the wizard's advanced-frequency sidebar
+ * byte-identical between Free and Pro. Verified live on 5.7.5: onboarding's advanced-frequency sidebar
  * offers `hourly, daily, weekly, monthly`; the same sidebar reached from a job card also offers `link`.
- * So a scenario may select it on the dashboard on either edition, and never inside the wizard.
+ * So a scenario may select it on the dashboard on either edition, and never inside onboarding.
  */
 export type Frequency = "hourly" | "daily" | "weekly" | "monthly" | "link";
 
 /**
+ * The intervals offered wherever a schedule is picked *without* the sidebar — notably onboarding's
+ * two inline dropdowns, which never include `link` (see {@link Frequency} for why).
+ */
+export type BasicFrequency = Exclude<Frequency, "link">;
+
+/**
  * Page object for the **Job Scheduled Settings** sidebar — a job's full schedule.
  *
- * Distinct from the onboarding wizard's inline frequency dropdown, which offers only the four basic
+ * Distinct from the onboarding page's inline frequency dropdown, which offers only the four basic
  * intervals: this sidebar adds the start time, the day-of-week/day-of-month selectors, and (on Pro)
  * link-triggered runs.
  *

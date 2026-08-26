@@ -11,12 +11,13 @@ import { loginViaUi } from "./src/common/auth/login";
 import { boolEnv, env, intEnv } from "./src/common/config/env";
 import type { SiteInput, Transport } from "./src/common/config/types";
 import { disposeConnections, wpCli } from "./src/common/wp/exec";
+import { ensurePluginAbsent } from "./src/common/wp/plugin";
 import { stageAndInstallPlugin } from "./src/common/wp/staging";
 import { backwpup } from "./src/projects/backwpup/config/backwpup.config";
 
 /**
  * Re-captures BackWPup's locator-contract fixtures from a real site, and reports what differs
- * between the **onboarding wizard** and the **dashboard**.
+ * between the **onboarding page** and the **dashboard**.
  *
  * The fixtures under `src/projects/backwpup/pages/__fixtures__/` are only worth anything if nobody
  * hand-wrote them (see the header of `locator-contract.spec.ts`). This script is what makes that
@@ -26,12 +27,14 @@ import { backwpup } from "./src/projects/backwpup/config/backwpup.config";
  *
  * **Why two sidebar captures rather than one.** BackWPup renders the *same* panel templates under
  * different roots depending on the screen — `parts/sidebar/select-files.php` fills its own
- * `#sidebar-select-files` article in the wizard but is embedded inside `#sidebar-settings-data-type`
+ * `#sidebar-select-files` article during onboarding but is embedded inside `#sidebar-settings-data-type`
  * on a job card — so a single "sidebars" fixture can only ever prove one screen's shape. Each screen
  * therefore gets its own capture, and the contract spec asserts both.
  *
  * Usage: `npm run fixtures:capture` (add `--headed` to watch it work). It **mutates the target site**:
- * it installs the plugin, flips `backwpup_onboarding` to re-enter the wizard, and completes onboarding.
+ * it removes any existing BackWPup (files *and* options), installs the plugin fresh, flips
+ * `backwpup_onboarding` to re-enter onboarding, and completes it. The removal is what keeps
+ * the fixtures a description of the plugin rather than of whatever the site was last used for.
  * Point it only at a disposable QA cell — it reads the site from the product's `sites.json`.
  */
 
@@ -54,7 +57,7 @@ const PLUGIN_ZIP = env(
 const SKIP_INSTALL = boolEnv("CAPTURE_SKIP_INSTALL", false);
 
 /**
- * Skip the wizard and re-capture only the dashboard, against whatever state the site is already in.
+ * Skip onboarding and re-capture only the dashboard, against whatever state the site is already in.
  * The onboarding phase is destructive and slow, so this is what makes iterating on the dashboard
  * captures practical; it assumes onboarding has been completed at least once.
  */
@@ -337,13 +340,13 @@ async function captureOnboarding(
   page: Page,
   site: SiteInput,
 ): Promise<OnboardingObservations> {
-  step("Onboarding wizard");
+  step("Onboarding page");
   await page.goto("/wp-admin/admin.php?page=backwpuponboarding");
   await page
     .getByRole("heading", { name: "Ready to set up your first backup?" })
     .waitFor({ timeout: TIMEOUT });
 
-  // Panels the wizard renders server-side need no interaction; this proves which those are.
+  // Panels onboarding renders server-side need no interaction; this proves which those are.
   const selectFiles = await describeContainer(page, "#sidebar-select-files");
   const selectTables = await describeContainer(page, "#sidebar-select-tables");
   const storages = await describeContainer(page, "#sidebar-storages");
@@ -358,7 +361,7 @@ async function captureOnboarding(
   );
 
   // Step 2 holds the advanced-frequency trigger; open it so the capture carries a loaded
-  // #sidebar-frequency, and read back which intervals the wizard offers.
+  // #sidebar-frequency, and read back which intervals onboarding offers.
   const pane2 = page.locator(
     '#backwpup-onboarding-panes article[data-step="2"]',
   );
@@ -383,7 +386,7 @@ async function captureOnboarding(
     .first()
     .click();
 
-  // Step 3's storage tiles. In the wizard these are `onboarding/storage-item.php`, one button that
+  // Step 3's storage tiles. During onboarding these are `onboarding/storage-item.php`, one button that
   // *is* the toggle and contains the checkbox; the dashboard uses a two-button variant.
   await pane2.locator(".js-backwpup-onboarding-step-3").click();
   const pane3 = page.locator(
@@ -429,22 +432,23 @@ async function captureOnboarding(
 }
 
 /**
- * Finishes the wizard for real, rather than just clearing the option behind its back.
+ * Finishes onboarding for real, rather than just clearing the option behind its back.
  *
  * The dashboard will not list the job the installer creates while it is still flagged `tempjob`
  * (`class-install.php:191`) — deleting `backwpup_onboarding` by hand yields a dashboard with **no job
- * cards**, and therefore no "Data"/"Frequency"/"Storage" links to capture. Completing the wizard is
+ * cards**, and therefore no "Data"/"Frequency"/"Storage" links to capture. Completing onboarding is
  * what promotes that job, so the dashboard capture depends on going through it.
  *
  * `FOLDER` (Website Server) is the destination used because it needs no credentials.
  */
 async function completeOnboarding(
   page: Page,
+  site: SiteInput,
   transport: Transport,
 ): Promise<void> {
-  step("Completing the wizard");
+  step("Completing onboarding");
   // Reload first: a provider sub-panel's close control is inert (see StorageSidebar's note), so the
-  // aside can still be covering the wizard after the capture above.
+  // aside can still be covering the onboarding page after the capture above.
   await page.goto("/wp-admin/admin.php?page=backwpuponboarding");
   const pane1 = page.locator(
     '#backwpup-onboarding-panes article[data-step="1"]',
@@ -482,6 +486,28 @@ async function completeOnboarding(
   await expect(page.locator("#backwpup-onboarding-form")).toHaveCount(0, {
     timeout: TIMEOUT,
   });
+
+  // The screen onboarding hands over to, captured at its **first** render — the state a scenario
+  // meets, with the progress region on show and `#first-congratulations` still behind its inline
+  // `display: none`. It has to be grabbed now rather than after a wait: that first render posts
+  // `startbackup` and reloads half a second later, and if the backup has already finished by then
+  // the reloaded page is redirected to the dashboard instead. Best-effort for the same reason — a
+  // capture lost to that race is a note, not a failed run.
+  try {
+    await expect(page.locator("#wpbody-content")).toBeVisible({
+      timeout: TIMEOUT,
+    });
+    await writeFixture(
+      "first-backup.html",
+      await grabContainer(page, "#wpbody-content"),
+      new URL(site.baseURL).host,
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    notes.push(
+      `first-backup.html not captured — the page moved on first (${reason.split("\n", 1).join("")})`,
+    );
+  }
 
   // The plugin deletes the option on save; assert that rather than assuming it.
   const stillOnboarding = await wpMaybe(transport, [
@@ -537,13 +563,21 @@ async function captureDashboard(
   site: SiteInput,
 ): Promise<DashboardObservations> {
   step("Dashboard");
-  await page.goto("/wp-admin/admin.php?page=backwpup");
+  // Retried once, because we arrive here straight off the first-backup screen and that page has a
+  // navigation of its own in flight — it posts `startbackup` and then either reloads or is
+  // redirected to the dashboard. A `goto` that collides with it is aborted (`ERR_ABORTED`) rather
+  // than failing on anything about the destination, so the second attempt simply succeeds.
+  try {
+    await page.goto("/wp-admin/admin.php?page=backwpup");
+  } catch {
+    await page.goto("/wp-admin/admin.php?page=backwpup");
+  }
   await page
     .getByRole("heading", { name: "Next Scheduled Backups" })
     .waitFor({ timeout: TIMEOUT });
 
   /**
-   * Let the backup the wizard kicked off finish before touching anything.
+   * Let the backup onboarding kicked off finish before touching anything.
    *
    * Submitting onboarding starts a run immediately, and while it runs the dashboard polls and
    * re-renders the job cards — so every card link is a moving target and Playwright rightly refuses to
@@ -563,7 +597,7 @@ async function captureDashboard(
 
   // Read the job id off the rendered card rather than from `backwpup_first_backup_job_id`: the cards
   // arrive from a `getjobslist` fetch after load, and which jobs the list contains is exactly what
-  // completing the wizard changes.
+  // completing onboarding changes.
   const firstCard = page
     .locator("#backwup-next-scheduled-backups .backwpup-job-card")
     .first();
@@ -697,7 +731,7 @@ async function captureDashboard(
   console.log(`  ${dashboardStorages}`);
   console.log(`  storage tiles: ${dashboardTiles}`);
 
-  // One provider panel, fetched per job on this screen (unlike the wizard's pre-rendered panels).
+  // One provider panel, fetched per job on this screen (unlike onboarding's pre-rendered panels).
   const ftpTrigger = page
     .locator('#sidebar-storages [data-content="storage-FTP"]')
     .first();
@@ -745,6 +779,13 @@ async function main(): Promise<void> {
 
   if (!SKIP_INSTALL) {
     step(`Installing ${basename(PLUGIN_ZIP)}`);
+    // Remove the DB footprint first, not just the files. A `force` install overwrites the plugin
+    // but leaves every option it wrote, so a site that has been driven before hands the capture a
+    // job carrying *those* settings — and the fixture then records, say, "Plugins unchecked" as if
+    // it were the shape of a new install. The whole value of these fixtures is that they describe
+    // the plugin rather than the site, so the install has to be genuinely fresh.
+    await ensurePluginAbsent(transport, "backwpup-pro");
+    await ensurePluginAbsent(transport, "backwpup");
     await stageAndInstallPlugin(transport, PLUGIN_ZIP, {
       activate: true,
       force: true,
@@ -782,7 +823,7 @@ async function main(): Promise<void> {
   console.log(`  first backup job id: ${jobId}`);
 
   if (!SKIP_ONBOARDING) {
-    step("Re-entering the onboarding wizard");
+    step("Re-entering onboarding");
     await wp(transport, ["option", "update", "backwpup_onboarding", "1"]);
   }
 
@@ -797,7 +838,7 @@ async function main(): Promise<void> {
     const onboarding = SKIP_ONBOARDING
       ? null
       : await captureOnboarding(page, site);
-    if (!SKIP_ONBOARDING) await completeOnboarding(page, transport);
+    if (!SKIP_ONBOARDING) await completeOnboarding(page, site, transport);
 
     const dashboard = await captureDashboard(page, site);
 

@@ -15,7 +15,7 @@ import type { Transport } from "../../../common/config/types";
  * verified at the ref under test). Prefer `sizeBytes`/`timeUnix` over the humanised `size`/`time`:
  * the latter are locale- and timezone-formatted for display and make brittle assertions.
  *
- * Both commands exist in **Free and Pro** (V3), so nothing here is edition-gated.
+ * Both commands exist in **Free and Pro**, so nothing here is edition-gated.
  */
 
 /** WP-CLI's raw `wp backwpup backup --format=json` record, before camel-casing. */

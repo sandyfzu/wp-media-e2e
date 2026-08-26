@@ -3,7 +3,13 @@ import { basename, isAbsolute, posix } from "node:path";
 
 import { env } from "../config/env";
 import { errorMessage } from "../guards";
-import { copyIntoTarget, exec, wpRootDir } from "./exec";
+import {
+  copyIntoTarget,
+  elevationSupport,
+  exec,
+  execElevated,
+  wpRootDir,
+} from "./exec";
 import { installPlugin } from "./plugin";
 import type { InstallPluginOptions } from "./plugin";
 import type { Transport } from "../config/types";
@@ -260,10 +266,14 @@ export async function cleanSiteStaging(
   const root = await siteStagingDir(transport);
   const target = category === undefined ? root : stagingPath(root, category);
 
-  const { exitCode, stderr, stdout } = await exec(transport, "rm", [
-    "-rf",
-    target,
-  ]);
+  const first = await exec(transport, "rm", ["-rf", target]);
+  // The area holds files this suite put there, so the transport's user normally owns them. A plugin
+  // that unpacks into it as the web-server user is the exception, and escalating is what keeps that
+  // from stranding the whole area — the same policy residue removal uses.
+  const { exitCode, stderr, stdout } =
+    first.exitCode === 0 || (await elevationSupport(transport)) !== "available"
+      ? first
+      : await execElevated(transport, "rm", ["-rf", target]);
   if (exitCode !== 0) {
     throw new Error(
       `[wp/staging] could not remove "${target}" on this ${transport.mode} site ` +
@@ -300,6 +310,12 @@ export async function stageAndInstallPlugin(
  * Creates a directory (and parents) on the target. A non-zero exit here is almost always a
  * permission problem at the WordPress root, so the error names the override that fixes it
  * instead of leaving the operator with a bare `mkdir` failure.
+ *
+ * **Deliberately not elevated**, unlike the removal above. A privileged `mkdir` would leave the
+ * directory owned by root, and the copy that follows runs as the transport's user over SFTP — so
+ * escalating here would trade a clear "cannot create it" for an opaque "cannot write into it", and
+ * only chown-ing it back would help. The staging area is this suite's own directory and its location
+ * is configurable, so pointing it somewhere writable is the honest fix.
  */
 async function mkdirOnTarget(transport: Transport, dir: string): Promise<void> {
   const { exitCode, stderr, stdout } = await exec(transport, "mkdir", [

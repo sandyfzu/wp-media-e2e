@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -45,6 +46,9 @@ let warnings: string[];
 let errors: string[];
 let realWarn: typeof console.warn;
 let realError: typeof console.error;
+
+/** Root ignores directory permissions, so the "cannot be removed" cases cannot be provoked. */
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
 /**
  * Stub `wp` that records every invocation and keeps plugin state in marker files, so the
@@ -241,7 +245,9 @@ test.describe("installPluginUnderTest", () => {
     // is pinned by its spec — re-pinning it here would only make this test brittle.
     const calls = wpCalls();
     // Clearing first scopes the log to this scenario yet still records the removal's own output.
-    expect(calls[0]).toContain("eval if (file_exists");
+    // Matched on what the call is *for*, not on the PHP it happens to run — that snippet belongs to
+    // `wp/log.ts` and is pinned by its own spec.
+    expect(calls[0]).toMatch(/^eval .*debug\.log/);
     const removed = calls.findIndex((c) => c.startsWith("plugin uninstall "));
     const installed = calls.findIndex((c) => c.startsWith("plugin install "));
     expect(removed).toBeGreaterThan(0);
@@ -261,6 +267,23 @@ test.describe("installPluginUnderTest", () => {
     expect(calls.slice(installed + 1)).toEqual([
       "plugin is-active backwpup-pro",
     ]);
+  });
+
+  // The hook is what makes the product's data directories usable by *both* users sharing the
+  // docroot; leaving it out let whichever user wrote first lock the other out, which surfaced as a
+  // PHP fatal from the plugin rather than as anything a scenario could explain.
+  test("opens the product's declared data directories after installing", async () => {
+    await installPluginUnderTest(local, artifact(), [
+      "wp-content/uploads/backwpup-restore",
+    ]);
+    const dir = join(wpRoot, "wp-content/uploads/backwpup-restore");
+    expect(existsSync(dir)).toBe(true);
+    expect((statSync(dir).mode & 0o777).toString(8)).toBe("777");
+  });
+
+  test("prepares nothing when the product declares no data paths", async () => {
+    await installPluginUnderTest(local, artifact());
+    expect(existsSync(join(wpRoot, "wp-content/uploads"))).toBe(false);
   });
 
   test("skips the removal entirely when the plugin is absent", async () => {
@@ -304,7 +327,7 @@ test.describe("teardownPluginUnderTest", () => {
     seedInstalled();
     const report = reportSink();
 
-    await teardownPluginUnderTest(local, "backwpup-pro", {}, report);
+    await teardownPluginUnderTest(local, "backwpup-pro", {}, [], report);
 
     expect(isInstalled()).toBe(false);
     expect(report.attached.size).toBe(0);
@@ -320,6 +343,7 @@ test.describe("teardownPluginUnderTest", () => {
       local,
       "backwpup-pro",
       {},
+      [],
       report,
     ).catch((error: unknown) => error);
 
@@ -335,7 +359,7 @@ test.describe("teardownPluginUnderTest", () => {
     process.env.WP_STUB_LOG = "PHP Parse error: syntax error\n";
 
     await expect(
-      teardownPluginUnderTest(local, "backwpup-pro", {}, reportSink()),
+      teardownPluginUnderTest(local, "backwpup-pro", {}, [], reportSink()),
     ).rejects.toThrow(DebugLogFatalError);
 
     // The fatal must not cost the next scenario its clean site.
@@ -348,7 +372,7 @@ test.describe("teardownPluginUnderTest", () => {
     const report = reportSink();
 
     await expect(
-      teardownPluginUnderTest(local, "backwpup-pro", {}, report),
+      teardownPluginUnderTest(local, "backwpup-pro", {}, [], report),
     ).resolves.toBeUndefined();
     // Named, so the line is traceable to its scenario when workers share a terminal.
     expect(warnings.join("\n")).toMatch(
@@ -367,6 +391,7 @@ test.describe("teardownPluginUnderTest", () => {
         local,
         "backwpup-pro",
         { ignore: [/known-benign/] },
+        [],
         reportSink(),
       ),
     ).resolves.toBeUndefined();
@@ -376,7 +401,7 @@ test.describe("teardownPluginUnderTest", () => {
     process.env.WP_STUB_LOG = "PHP Notice:  undefined index\n";
     const report = reportSink(true);
 
-    await teardownPluginUnderTest(local, "backwpup-pro", {}, report);
+    await teardownPluginUnderTest(local, "backwpup-pro", {}, [], report);
 
     // The log is usually where a failing scenario's real cause is.
     expect(report.attached.get("debug.log")).toContain("PHP Notice");
@@ -386,7 +411,7 @@ test.describe("teardownPluginUnderTest", () => {
     seedInstalled();
     process.env.WP_STUB_FAIL = "plugin uninstall";
     await expect(
-      teardownPluginUnderTest(local, "backwpup-pro", {}, reportSink()),
+      teardownPluginUnderTest(local, "backwpup-pro", {}, [], reportSink()),
     ).rejects.toThrow(/still installed after uninstall/);
   });
 
@@ -396,10 +421,109 @@ test.describe("teardownPluginUnderTest", () => {
     process.env.WP_STUB_LOG = "PHP Fatal error:  the real defect\n";
 
     await expect(
-      teardownPluginUnderTest(local, "backwpup-pro", {}, reportSink()),
+      teardownPluginUnderTest(local, "backwpup-pro", {}, [], reportSink()),
     ).rejects.toThrow(DebugLogFatalError);
     // Secondary, but never silent.
-    expect(errors.join("\n")).toMatch(/cleanup also failed/);
+    expect(errors.join("\n")).toMatch(/a cleanup step also failed/);
+  });
+
+  // The third duty. It exists because uninstalling a plugin does not delete what it wrote, so the
+  // site would otherwise collect one copy of the product's output per scenario.
+  test("clears the leftovers the product declared", async () => {
+    seedInstalled();
+    const leftovers = join(wpRoot, "wp-content/uploads/backwpup");
+    mkdirSync(join(leftovers, "abc123/backups"), { recursive: true });
+    writeFileSync(join(leftovers, "abc123/backups/site.tar"), "x");
+
+    await teardownPluginUnderTest(
+      local,
+      "backwpup-pro",
+      {},
+      ["wp-content/uploads/backwpup"],
+      reportSink(),
+    );
+
+    expect(existsSync(leftovers)).toBe(false);
+  });
+
+  // The property this duty is built around: the runs that fail to uninstall are exactly the ones
+  // most likely to have left a mess, so the sweep must not be conditional on the removal.
+  test("clears them even when the plugin removal fails", async () => {
+    seedInstalled();
+    process.env.WP_STUB_FAIL = "plugin uninstall";
+    const leftovers = join(wpRoot, "wp-content/uploads/backwpup");
+    mkdirSync(leftovers, { recursive: true });
+
+    await expect(
+      teardownPluginUnderTest(
+        local,
+        "backwpup-pro",
+        {},
+        ["wp-content/uploads/backwpup"],
+        reportSink(),
+      ),
+    ).rejects.toThrow(/still installed/);
+
+    expect(existsSync(leftovers)).toBe(false);
+  });
+
+  // Leftovers the transport's user is not *permitted* to remove are an ownership fact about the
+  // cell, not something the scenario did — and they break no later scenario, unlike a half-removed
+  // plugin. Failing every run over them would be a poor trade, so they are reported instead.
+  test("reports a leftover it is not allowed to remove, without failing the scenario", async () => {
+    test.skip(isRoot, "root ignores directory permissions, so rm -rf succeeds");
+    seedInstalled();
+    const leftovers = join(wpRoot, "wp-content/uploads/backwpup");
+    mkdirSync(join(leftovers, "abc123"), { recursive: true });
+    chmodSync(leftovers, 0o500);
+    const report = reportSink();
+    try {
+      await expect(
+        teardownPluginUnderTest(
+          local,
+          "backwpup-pro",
+          {},
+          ["wp-content/uploads/backwpup"],
+          report,
+        ),
+      ).resolves.toBeUndefined();
+
+      // Loud enough to act on, in the run output and in the report.
+      expect(warnings.join("\n")).toContain(leftovers);
+      expect(report.attached.get("uncleared-site-data")).toContain(leftovers);
+    } finally {
+      chmodSync(leftovers, 0o700);
+    }
+  });
+
+  // The other half of that split: a path we should never have declared is our own defect, and is
+  // thrown rather than warned about.
+  test("throws when a declared residue path is not a usable one", async () => {
+    seedInstalled();
+    await expect(
+      teardownPluginUnderTest(
+        local,
+        "backwpup-pro",
+        {},
+        ["wp-content/uploads"],
+        reportSink(),
+      ),
+    ).rejects.toThrow(/WordPress itself owns/);
+  });
+
+  test("a fatal still outranks an unusable residue declaration", async () => {
+    seedInstalled();
+    process.env.WP_STUB_LOG = "PHP Fatal error:  the real defect\n";
+    await expect(
+      teardownPluginUnderTest(
+        local,
+        "backwpup-pro",
+        {},
+        ["../escape"],
+        reportSink(),
+      ),
+    ).rejects.toThrow(DebugLogFatalError);
+    expect(errors.join("\n")).toMatch(/a cleanup step also failed/);
   });
 
   test("an attachment fault never replaces the verdict", async () => {
@@ -411,7 +535,7 @@ test.describe("teardownPluginUnderTest", () => {
     };
 
     await expect(
-      teardownPluginUnderTest(local, "backwpup-pro", {}, failing),
+      teardownPluginUnderTest(local, "backwpup-pro", {}, [], failing),
     ).rejects.toThrow(DebugLogFatalError);
     expect(warnings.join("\n")).toMatch(/could not attach debug\.log/);
   });

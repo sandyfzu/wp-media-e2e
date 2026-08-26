@@ -1,4 +1,5 @@
-import { exec, wpCli } from "./exec";
+import { elevationSupport, exec, execElevated, wpCli } from "./exec";
+import type { ExecResult } from "./exec";
 import type { Transport } from "../config/types";
 
 /**
@@ -13,15 +14,43 @@ import type { Transport } from "../config/types";
  * genuinely unreachable transport still throws (the direct call can't run either), so a broken
  * environment is never mistaken for a clean log.
  *
+ * **`wp eval` exits 0 even when the PHP inside it failed**, which makes its exit code useless on
+ * its own: a denied `file_get_contents` returns `false` and a denied write returns `false`, both
+ * with nothing worse than a warning, and the command still reports success. That is not
+ * hypothetical — the log is written by the web-server user, and whoever WP-CLI runs as often
+ * cannot write to it. So each snippet below reports its **own** outcome, and this module trusts
+ * that rather than the exit status. Getting it wrong is silent in the worst way: a log that never
+ * clears makes one scenario's fatal fail every later scenario, and a read that quietly yields ""
+ * turns the fatal gate into a no-op.
+ *
  * Typical use: `clearDebugLog` in a Before hook to scope a scenario, then `scanDebugLog` in a
  * tag-scoped After hook — attaching `raw`, failing on `fatals`, and logging `warnings`/`notices`.
  */
 
 // Run inside WP via `wp eval`; WP_CONTENT_DIR is resolved by WordPress itself.
+
+/** What {@link CLEAR_DEBUG_LOG} prints when the log is genuinely gone. */
+const CLEARED = "cleared";
+
+// An absent log is legitimately empty; an unreadable one exits non-zero so the caller falls back
+// instead of mistaking "cannot read" for "no errors were logged".
 const READ_DEBUG_LOG =
-  'echo (file_exists($f = WP_CONTENT_DIR . "/debug.log") ? file_get_contents($f) : "");';
+  '$f = WP_CONTENT_DIR . "/debug.log";' +
+  "if (file_exists($f)) {" +
+  "$c = @file_get_contents($f);" +
+  'if ($c === false) { fwrite(STDERR, "debug.log exists but could not be read"); exit(1); }' +
+  "echo $c; }";
+
+/**
+ * Cleared by **removing** the file, not by truncating it: emptying it needs write permission on
+ * the file, which belongs to the web-server user, whereas unlinking needs it on the containing
+ * directory — which the transport's user usually does have. WordPress recreates the log on its
+ * next write either way.
+ */
 const CLEAR_DEBUG_LOG =
-  'if (file_exists($f = WP_CONTENT_DIR . "/debug.log")) file_put_contents($f, "");';
+  '$f = WP_CONTENT_DIR . "/debug.log";' +
+  "if (file_exists($f)) { @unlink($f); }" +
+  `echo file_exists($f) ? "kept" : "${CLEARED}";`;
 
 // Fallback target when `wp eval` can't run: the default location, relative to the WP root.
 const DEBUG_LOG_PATH = "wp-content/debug.log";
@@ -61,34 +90,105 @@ function warnFallback(
   );
 }
 
-/** Reads `wp-content/debug.log`. Returns `""` when the log does not exist. */
+/**
+ * Runs `file args…` as the transport's user, retrying with privileges if that failed.
+ *
+ * For commands where a non-zero exit means "denied" rather than a legitimate answer — reading the
+ * log, not testing for it. The log belongs to the web-server user, so being refused is the expected
+ * case on a real host, not an exceptional one.
+ */
+async function execEscalating(
+  transport: Transport,
+  file: string,
+  args: string[],
+): Promise<ExecResult> {
+  const first = await exec(transport, file, args);
+  if (first.exitCode === 0) return first;
+  if ((await elevationSupport(transport)) !== "available") return first;
+  return execElevated(transport, file, args);
+}
+
+/**
+ * Whether the log is still on disk, asked at the **same privilege** as the removal it follows: a
+ * `test -e` the transport's user is not allowed to answer would report a log it cannot see as gone,
+ * which is the one wrong answer that matters here.
+ */
+async function debugLogExists(
+  transport: Transport,
+  elevated: boolean,
+): Promise<boolean> {
+  const run = elevated ? execElevated : exec;
+  const { exitCode } = await run(transport, "test", ["-e", DEBUG_LOG_PATH]);
+  return exitCode === 0;
+}
+
+/**
+ * Reads `wp-content/debug.log`. Returns `""` when the log does not exist — which is a real answer,
+ * distinct from a log that exists and could not be read: that exits non-zero and falls back to
+ * `cat`, because reporting it as empty would quietly turn the fatal gate off.
+ *
+ * The `cat` escalates if the log's own permissions refuse it, since a log nobody can read is exactly
+ * the case where "" is the dangerous answer. If every route is refused, that is said out loud rather
+ * than returned as silence.
+ */
 export async function readDebugLog(transport: Transport): Promise<string> {
   const viaCli = await wpCli(transport, ["eval", READ_DEBUG_LOG]);
   if (viaCli.exitCode === 0) {
     return viaCli.stdout;
   }
   warnFallback("read", viaCli.exitCode, viaCli.stderr);
-  // Direct read — no WordPress bootstrap. A non-zero exit here means the file is absent
-  // (no log yet ⇒ no errors), so degrade to "".
-  const direct = await exec(transport, "cat", [DEBUG_LOG_PATH]);
-  return direct.exitCode === 0 ? direct.stdout : "";
-}
+  // Direct read — no WordPress bootstrap.
+  const direct = await execEscalating(transport, "cat", [DEBUG_LOG_PATH]);
+  if (direct.exitCode === 0) return direct.stdout;
 
-/** Clears `wp-content/debug.log` (use in a Before hook to scope errors to one scenario). */
-export async function clearDebugLog(transport: Transport): Promise<void> {
-  const viaCli = await wpCli(transport, ["eval", CLEAR_DEBUG_LOG]);
-  if (viaCli.exitCode === 0) {
-    return;
-  }
-  warnFallback("clear", viaCli.exitCode, viaCli.stderr);
-  // Direct removal — no WordPress bootstrap; WordPress recreates the log on its next write.
-  // `rm -f` is a no-op when the file is already absent and is portable (Linux, macOS, BusyBox).
-  const direct = await exec(transport, "rm", ["-f", DEBUG_LOG_PATH]);
-  if (direct.exitCode !== 0) {
-    throw new Error(
-      `[wp/log] could not clear debug.log via \`wp eval\` or a direct \`rm\`: ${(direct.stderr || direct.stdout).trim()}`,
+  // Absent ⇒ nothing has been logged, so "" is the truth. Present-but-unreadable is not: it would
+  // turn the fatal gate into a no-op, so it is reported instead of passing silently.
+  if (await debugLogExists(transport, false)) {
+    console.warn(
+      "[wp/log] debug.log exists but could not be read by any route — through WordPress, directly, " +
+        "or with elevated privileges. It is being treated as empty, which means PHP fatals recorded " +
+        "in it CANNOT fail a scenario until the site's permissions are fixed.",
     );
   }
+  return "";
+}
+
+/**
+ * Clears `wp-content/debug.log` (use in a Before hook to scope errors to one scenario).
+ *
+ * Success is the snippet's own verdict, not WP-CLI's exit code — see this module's header. A log
+ * that silently refuses to clear would attribute one scenario's fatal to every scenario after it,
+ * so this fails loudly instead.
+ *
+ * @param transport - the site to clear.
+ * @throws {@link Error} if the log is still there after both attempts.
+ */
+export async function clearDebugLog(transport: Transport): Promise<void> {
+  const viaCli = await wpCli(transport, ["eval", CLEAR_DEBUG_LOG]);
+  if (viaCli.exitCode === 0 && viaCli.stdout.trim().endsWith(CLEARED)) {
+    return;
+  }
+  warnFallback("clear", viaCli.exitCode, viaCli.stderr || viaCli.stdout);
+  // Direct removal — no WordPress bootstrap; WordPress recreates the log on its next write.
+  // `rm -f` is a no-op when the file is already absent and is portable (Linux, macOS, BusyBox).
+  await exec(transport, "rm", ["-f", DEBUG_LOG_PATH]);
+  // Confirmed rather than inferred, for the same reason the exit code above is not trusted.
+  if (!(await debugLogExists(transport, false))) return;
+
+  // Unlinking it needs write access to the *directory*, which the transport's user may not have on
+  // a real host. Escalate rather than let one scenario's fatals be blamed on every scenario after it.
+  const elevation = await elevationSupport(transport);
+  if (elevation === "available") {
+    await execElevated(transport, "rm", ["-f", DEBUG_LOG_PATH]);
+    if (!(await debugLogExists(transport, true))) return;
+  }
+
+  throw new Error(
+    "[wp/log] debug.log could not be cleared, via `wp eval`, a direct `rm`" +
+      `${elevation === "available" ? ", or an elevated one" : ` (elevation: ${elevation})`}. It is ` +
+      "usually owned by the web-server user; removing it needs write access to the directory " +
+      "holding it. Leaving it would make one scenario's fatals fail every later scenario.",
+  );
 }
 
 /** Options for {@link scanDebugLog}. */

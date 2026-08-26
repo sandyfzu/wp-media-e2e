@@ -68,6 +68,11 @@ export default defineConfig([
   // blanket ban. The one deliberate exception is left outside that scope: the visual helpers make
   // a single timeboxed, already-caught `networkidle` attempt to settle lazy-loaded media before a
   // screenshot, where "no more requests" is the actual condition and not reaching it is fine.
+  //
+  // Each selector matches the member expression in the CALL'S `.callee` field, never any member
+  // expression under a call. Without that field, `describe(job.type)` — passing a property that
+  // merely shares the name — is flagged as if it were `page.type(...)`, and a gate that fires on
+  // innocent code is one people start disabling.
   {
     files: [
       "src/projects/**/*.ts",
@@ -81,7 +86,7 @@ export default defineConfig([
         "error",
         {
           selector:
-            "CallExpression > MemberExpression[property.name='waitForTimeout']",
+            "CallExpression > MemberExpression.callee[property.name='waitForTimeout']",
           message:
             "Fixed sleeps are flaky. Assert the condition instead (`await expect(locator).toBeVisible()`), or await the request that completes the action (`page.waitForResponse(...)`).",
         },
@@ -93,12 +98,13 @@ export default defineConfig([
         },
         {
           selector:
-            "CallExpression > MemberExpression[property.name='waitForSelector']",
+            "CallExpression > MemberExpression.callee[property.name='waitForSelector']",
           message:
             "waitForSelector predates auto-retrying assertions. Use `await expect(locator).toBeVisible()` / `.toBeHidden()`, which retries and reports what it saw.",
         },
         {
-          selector: "CallExpression > MemberExpression[property.name='type']",
+          selector:
+            "CallExpression > MemberExpression.callee[property.name='type']",
           message:
             "`type()` is deprecated. Use `locator.fill(value)`, or `locator.pressSequentially(value)` when a field genuinely needs per-key events.",
         },

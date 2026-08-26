@@ -37,7 +37,7 @@ import type { Locator } from "@playwright/test";
  * `transition-transform` from there.
  *
  * Every reveal path funnels through `openSidebar()` — the dashboard's `load_and_open_sidebar`, the
- * storage picker's `load_and_open_storage`, and the wizard's delegated tile handler (`:1892-1895`,
+ * storage picker's `load_and_open_storage`, and onboarding's delegated tile handler (`:1892-1895`,
  * which fires no request but still un-parks the aside) — so this holds on both screens.
  *
  * @param panel - the `#sidebar-<name>` article, or a pane nested inside one.

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { FreeRestorePage, ProRestorePage, restorePage } from "./restore.page";
 
 /**
- * The restore page's locator contract **and** its edition divergence (V13).
+ * The restore page's locator contract **and** its edition divergence.
  *
  * The entry-path assertions read `page.url()`, so these tests serve the captured markup over an
  * intercepted request rather than through `setContent()` — that way a real URL, with the real query

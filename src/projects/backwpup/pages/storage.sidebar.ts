@@ -18,10 +18,10 @@ import { expectPanelOpen } from "./panels";
  *
  * Field names are **provider-specific** (`glacieraccesskey`, `gdrivedir`, `newvault`, …), so this
  * object exposes a typed {@link field} accessor rather than pretending there is a common schema. The
- * per-provider field maps belong with the scenarios that fill them (6H.2), not here.
+ * per-provider field maps belong with the scenarios that fill them, not here.
  *
- * {@link saveAndTestConnection} is written but is only *exercised* once real credentials exist
- * (6H.2): it performs a live round-trip to the provider, so it cannot pass without them.
+ * {@link saveAndTestConnection} is written but is only *exercised* once real credentials exist:
+ * it performs a live round-trip to the provider, so it cannot pass without them.
  */
 export class StorageSidebar {
   constructor(private readonly page: Page) {}
@@ -64,7 +64,7 @@ export class StorageSidebar {
   }
 
   /**
-   * Asserts a destination is shown as a locked Pro upsell (V2) — Free only.
+   * Asserts a destination is shown as a locked Pro upsell — Free only.
    *
    * The locked entry is an `<li>`, deliberately not a toggle, so the absence of the toggle is
    * asserted too: either check alone could pass against the wrong edition.
@@ -131,7 +131,7 @@ export class StorageSidebar {
    *
    * `cloudsaveandtest` is the completion signal, and the response is returned so a caller can assert
    * on the provider's verdict rather than only on the UI. **Requires real credentials** — the call
-   * performs a live round-trip — which is why no scenario exercises this before 6H.2.
+   * performs a live round-trip — which is why no credential-free scenario exercises it.
    */
   async saveAndTestConnection(slug: StorageSlug): Promise<void> {
     await Promise.all([
@@ -148,7 +148,7 @@ export class StorageSidebar {
    * scenario first trusted it.
    *
    * Scenarios that need to leave a provider's settings should navigate away, or reopen the panel they
-   * want. If 6H.2 finds a control that genuinely closes it, add the method then — with the same live
+   * want. If a control that genuinely closes it turns up, add the method then — with the same live
    * verification.
    */
 }

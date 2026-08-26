@@ -65,7 +65,8 @@ The shared instance provides:
 | device options | (override) | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else the project's desktop default. |
 
 BackWPup's [`src/projects/backwpup/fixtures.ts`](../../src/projects/backwpup/fixtures.ts) adds its
-page objects on top: `onboarding`, `dashboard`, `dataSelection`, `frequency`, `storages`, `jobRun`,
+page objects on top: `onboarding`, `firstBackup` (the screen onboarding hands over to, where its
+first backup runs), `dashboard`, `dataSelection`, `frequency`, `storages`, `jobRun`,
 `backupHistory`, `restore` (edition-aware — Pro's in-place restore vs Free's forced upload) and the
 shared `plugins`. They are constructed lazily, so a scenario pays only for what it destructures.
 
@@ -92,7 +93,7 @@ await stageAndInstallPlugin(site.transport, pluginArtifact("plugin").zipPath, {
 | Tag         | Effect                                                                                          |
 | ----------- | ----------------------------------------------------------------------------------------------- |
 | `@noauth`   | Scenario starts unauthenticated with an empty session (login/logout flows). The only tag that runs against placeholder sites, so it is what CI's smoke job greps. |
-| `@plugin`   | The plugin under test is freshly installed + activated before the scenario, `debug.log` is scoped to it and **a PHP fatal fails it**, and the plugin is removed after. Needs a real site. |
+| `@plugin`   | The plugin under test is freshly installed + activated before the scenario, `debug.log` is scoped to it and **a PHP fatal fails it**, and afterwards the plugin *and the files it left on the site* are removed. Needs a real site. |
 | `@mobile`   | Runs under the mobile device profile (viewport + `isMobile` + `hasTouch` + mobile UA + DPR). Untagged scenarios stay desktop. |
 | `@smoke`    | Scaffolding/smoke scenarios; run with `--grep @smoke`.                                           |
 | `@free` / `@pro` | Edition scoping. An edition-ful cell auto-filters: a `pro` cell skips `@free` and vice-versa. |
@@ -165,28 +166,61 @@ replay it through `page.setContent()`, and assert each locator resolves. See
 the fixture — never hand-write it — or the fixture drifts along with the page object and the two
 agree with each other while the real page fails.
 
+## Naming scenarios
+
+A `Scenario:` name is read in isolation far more often than in file order: it is what you
+pass to `--grep` to run one scenario, what a report lists, and the headline of a failure in
+CI. So it must describe its own behaviour and outcome completely, assuming no knowledge of
+the scenarios around it.
+
+- **No back-references.** No `…just the same`, `…too`, `…but with X`, `…same for Y`, and no
+  pronoun (`them`, `it`, `that`) whose antecedent lives in a neighbouring title. If the name
+  only makes sense after reading the scenario above it, rewrite it — a pronoun resolved
+  _inside_ the same sentence is fine.
+- **Name what varies.** When several scenarios cover one rule through different routes, each
+  name states its own route _and_ the outcome, so the set reads as a list rather than a
+  thread.
+- **State the outcome, not the clicks.** The name is the rule being proven
+  (`… splits them into two jobs`), not a summary of the steps.
+- **Shared context goes elsewhere.** Why scenarios resemble each other, and any setup they
+  share, belongs in the `Feature` description or the `Background` — never smuggled into a
+  title as an implied "as above".
+
+```gherkin
+# ✗ meaningless on its own: "them" and "just the same" only resolve against the previous scenario
+Scenario: The advanced schedule settings split them just the same
+
+# ✓ names its own route and its own outcome
+Scenario: Scheduling files and the database differently in the advanced settings splits them into two jobs
+```
+
+Length is not a reason to shorten past self-sufficiency — a long name that stands alone beats
+a short one that needs a neighbour.
+
 ## Adding a scenario — checklist
 
 1. Write the `.feature` file under `src/projects/<product>/features/`. Tag it `@plugin` if
    it needs the plugin under test installed (almost all do), `@noauth` only if it needs no
    WordPress at all — that is the subset CI can run.
-2. Implement any new steps in `src/projects/<product>/steps/` (or `common/steps/`
+2. Name each scenario so it reads standalone — see [Naming scenarios](#naming-scenarios).
+3. Implement any new steps in `src/projects/<product>/steps/` (or `common/steps/`
    if truly generic), importing `Given`/`When`/`Then` from `fixtures.ts`. A `@plugin`
    scenario's `Background` already runs with the plugin installed and active — hooks run
    before it.
-3. Put UI logic in a page object under `common/pages/`; use `wp/` modules for
+4. Put UI logic in a page object under `common/pages/`; use `wp/` modules for
    WP-CLI work via `site.transport`.
-4. Document every new function/method with TSDoc; type everything explicitly.
-5. Run the quality gates (typecheck, lint, format, unit tests) — see
+5. Document every new function/method with TSDoc; type everything explicitly.
+6. Run the quality gates (typecheck, lint, format, unit tests) — see
    [CLAUDE.md](../../CLAUDE.md#required-workflow-after-every-edit).
-6. Verify against a real cell: `npm run test:<product> -- --project=<cell>`.
+7. Verify against a real cell: `npm run test:<product> -- --project=<cell>`.
 
 ## Banned waits (enforced by lint)
 
 `waitForTimeout`, `waitForLoadState("networkidle")`, `waitForSelector` and `.type()` are
 lint errors in features' supporting code (`src/projects/**`, `src/common/{pages,steps,hooks}/**`).
 Each message names the replacement — a web-first `expect()`, a specific
-`page.waitForResponse(…)`, or `fill()`. See
+`page.waitForResponse(…)`, or `fill()`. Only the *called* member matches, so a property that
+happens to share a name (`describe(job.type)`) is fine. See
 [CLAUDE.md → Improvement gate](../../CLAUDE.md#improvement-gate-lint).
 
 ## Unit / integration tests

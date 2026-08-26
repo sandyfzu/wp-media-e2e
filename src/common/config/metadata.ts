@@ -8,10 +8,13 @@ import type { Edition, SiteConfig } from "./types";
  * Playwright serializes a project's `metadata` verbatim into its reports, so it must
  * never carry secrets — and it can only carry JSON. We put only non-secret routing
  * (`product`, `cell`, `edition`) in metadata and hand everything else to workers through
- * in-memory registries: the credential-bearing site pool (secrets) and the product's
- * debug-log preset (RegExps, which JSON cannot express). Both are populated as a side effect
- * of building the config (`createProductConfig`), which Playwright re-executes in every worker
- * process, so each worker resolves them locally — never from a report-bound channel.
+ * in-memory registries: the credential-bearing site pool (secrets), the product's debug-log
+ * preset (RegExps, which JSON cannot express) and its residue paths. That last one *would* fit in
+ * metadata, and still does not go there — the registry is also how **product policy reaches the
+ * shared hooks without those hooks importing product code**, and one channel for that is easier to
+ * follow than two. All are populated as a side effect of building the config
+ * (`createProductConfig`), which Playwright re-executes in every worker process, so each worker
+ * resolves them locally — never from a report-bound channel.
  */
 
 /** Non-secret routing carried in a project's `metadata`. */
@@ -114,4 +117,30 @@ export function registerDebugLogOptions(
  */
 export function getDebugLogOptions(product: string): ScanDebugLogOptions {
   return debugLogOptions.get(product) ?? {};
+}
+
+// Per-process registry: product -> the paths it leaves on the site after being uninstalled.
+const siteResidue = new Map<string, readonly string[]>();
+
+/**
+ * Registers the paths a product leaves on the site's filesystem, for the shared teardown to clear.
+ * Called while building the config, in each process. A product that declares none is not
+ * registered.
+ */
+export function registerSiteResidue(
+  product: string,
+  paths: readonly string[] | undefined,
+): void {
+  if (paths === undefined) return;
+  siteResidue.set(product, paths);
+}
+
+/**
+ * The residue paths for a product, or an empty list when it declares none.
+ *
+ * Never throws: unlike a missing site pool, "this product leaves nothing behind" is a legitimate
+ * state — WP Rocket declares none today — and the teardown then does nothing at all.
+ */
+export function getSiteResidue(product: string): readonly string[] {
+  return siteResidue.get(product) ?? [];
 }

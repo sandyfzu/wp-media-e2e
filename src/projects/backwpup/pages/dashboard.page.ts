@@ -37,9 +37,9 @@ const SIDEBAR_OF: Readonly<
  *  - **Backups History** — delegated to {@link BackupHistoryTable}, which the Backups screen shares.
  *
  * Note this page is reachable *only* when `backwpup_onboarding` is unset; while it is set the
- * request is redirected to the wizard (V10). {@link expectLoaded} therefore asserts on a
+ * request is redirected to onboarding. {@link expectLoaded} therefore asserts on a
  * dashboard-only landmark, so a scenario that forgot to seed the state fails here with a clear
- * message instead of silently driving the wizard.
+ * message instead of silently driving onboarding.
  */
 export class DashboardPage {
   constructor(private readonly page: Page) {}
@@ -50,9 +50,9 @@ export class DashboardPage {
   }
 
   /**
-   * Asserts the dashboard is showing (not the onboarding wizard it redirects to).
+   * Asserts the dashboard is showing (not the onboarding page it redirects to).
    *
-   * Uses the two headings only the dashboard renders. The wizard has neither, so this doubles as
+   * Uses the two headings only the dashboard renders. Onboarding has neither, so this doubles as
    * the "onboarding really is complete" check.
    */
   async expectLoaded(): Promise<void> {
@@ -89,7 +89,7 @@ export class DashboardPage {
    * Opens the site-wide "Advanced settings" sidebar.
    *
    * Two buttons carry this action — a labelled one for wide viewports and an **icon-only** one for
-   * narrow ones, which has no accessible name at all (V7). Addressing them by the plugin's own
+   * narrow ones, which has no accessible name at all. Addressing them by the plugin's own
    * trigger class covers both, and `.first()` picks whichever the current viewport renders visible;
    * a `@mobile` scenario therefore needs no special case.
    */

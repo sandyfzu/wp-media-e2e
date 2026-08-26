@@ -73,11 +73,11 @@ export const STORAGE_PANEL_TITLES: Readonly<Record<StorageSlug, string>> = {
 };
 
 /**
- * The destinations Free renders as locked upsells rather than usable options (V2).
+ * The destinations Free renders as locked upsells rather than usable options.
  *
  * Verified as `$locked_pro_slugs` in `components/storage-list.php:37`, gated on
  * `! BackWPup::is_pro() && $show_locked`. On a Pro build the list is empty and every destination is
- * selectable, which is why the locked markup can only be exercised on a Free cell (6I).
+ * selectable, which is why the locked markup can only be exercised on a Free cell.
  */
 export const PRO_ONLY_STORAGES: readonly StorageSlug[] = [
   "GDRIVE",
@@ -90,7 +90,7 @@ export const PRO_ONLY_STORAGES: readonly StorageSlug[] = [
  * The local "Website Server" destination — the archive is written into
  * `wp-content/uploads/backwpup…` on the site itself.
  *
- * Named because it is the destination every credential-free scenario uses, and the one where V13's
+ * Named because it is the destination every credential-free scenario uses, and the one where the
  * Pro/Free restore divergence is cleanest: Pro deep-links straight at the on-disk archive, Free
  * makes the user re-upload it.
  */
@@ -99,4 +99,20 @@ export const LOCAL_STORAGE: StorageSlug = "FOLDER";
 /** True if `slug` is only usable on a Pro build. */
 export function isProOnlyStorage(slug: StorageSlug): boolean {
   return PRO_ONLY_STORAGES.includes(slug);
+}
+
+/**
+ * The destination offered under `label`, matched the way a reader would — case- and
+ * whitespace-insensitively.
+ *
+ * Lets a scenario name a destination as the user sees it ("website server") while the code keeps
+ * working in the plugin's canonical slugs, with {@link STORAGE_LABELS} as the single translation
+ * table. A misspelt label resolves to `undefined` so the caller can fail with a useful message
+ * instead of silently addressing the wrong destination.
+ */
+export function storageForLabel(label: string): StorageSlug | undefined {
+  const wanted = label.trim().toLowerCase();
+  return (Object.keys(STORAGE_LABELS) as StorageSlug[]).find(
+    (slug) => STORAGE_LABELS[slug].toLowerCase() === wanted,
+  );
 }

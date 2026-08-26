@@ -5,6 +5,7 @@ import { PluginsPage } from "../../common/pages/plugins.page";
 import { BackupHistoryTable } from "./pages/backup-history.table";
 import { DashboardPage } from "./pages/dashboard.page";
 import { DataSelectionSidebar } from "./pages/data-selection.sidebar";
+import { FirstBackupPage } from "./pages/first-backup.page";
 import { FrequencySidebar } from "./pages/frequency.sidebar";
 import { JobRunPanel } from "./pages/job-run.panel";
 import { OnboardingPage } from "./pages/onboarding.page";
@@ -14,11 +15,11 @@ import type { RestorePage } from "./pages/restore.page";
 
 /**
  * BackWPup's test instance — the shared one from `common/fixtures.ts` plus this product's page
- * objects, registered as fixtures (see the parent plan §7.5: POM-as-fixture, no decorators).
+ * objects, registered as fixtures — POM-as-fixture, never decorators.
  *
- * **Why this lives here and not in `common/fixtures.ts`.** The parent plan says POMs are registered
- * "in `common/fixtures.ts`", but doing that for a *product's* POMs would make the shared layer import
- * product code — the same inversion the 6A debug-log registry exists to avoid — and would load
+ * **Why this lives here and not in `common/fixtures.ts`.** The shared layer is where POMs would
+ * normally be registered, but doing that for a *product's* POMs would make it import product code
+ * — the same inversion the shared debug-log registry exists to avoid — and would load
  * BackWPup's page objects into every WP Rocket run. Extending the shared instance here keeps the
  * dependency pointing the right way (product → common) and each product's surface to itself.
  *
@@ -35,8 +36,10 @@ import type { RestorePage } from "./pages/restore.page";
  */
 
 interface BackWPupFixtures {
-  /** The onboarding wizard at `page=backwpuponboarding` (only while `backwpup_onboarding` is set). */
+  /** The onboarding page at `page=backwpuponboarding` (only while `backwpup_onboarding` is set). */
   onboarding: OnboardingPage;
+  /** The screen onboarding hands over to, where its first backup runs. */
+  firstBackup: FirstBackupPage;
   /** The post-onboarding dashboard at `page=backwpup`. */
   dashboard: DashboardPage;
   /** The Select Files / Select Tables sidebars. */
@@ -51,7 +54,7 @@ interface BackWPupFixtures {
   backupHistory: BackupHistoryTable;
   /**
    * The restore screen for **this cell's edition** — Pro's in-place deep link or Free's forced
-   * upload (V13). Depends on the `edition` fixture, so requesting it in an editionless cell throws
+   * upload. Depends on the `edition` fixture, so requesting it in an editionless cell throws
    * there, with that fixture's message.
    */
   restore: RestorePage;
@@ -62,6 +65,9 @@ interface BackWPupFixtures {
 export const test = base.extend<BackWPupFixtures>({
   onboarding: async ({ page }, use) => {
     await use(new OnboardingPage(page));
+  },
+  firstBackup: async ({ page }, use) => {
+    await use(new FirstBackupPage(page));
   },
   dashboard: async ({ page }, use) => {
     await use(new DashboardPage(page));

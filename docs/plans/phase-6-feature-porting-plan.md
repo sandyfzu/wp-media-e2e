@@ -1,9 +1,10 @@
 # Phase 6 — Feature porting: BackWPup first
 
-> **Status:** in progress — **6A and 6B are done** (verified on `pro@nginx`); 6C–6I planned;
+> **Status:** in progress — **6A, 6B and 6C are done** (verified on `pro@nginx`); 6D–6I planned;
 > **6H.2 deferred** (needs storage credentials — see §4.6H.2).
-> **Date:** 2026-07-28; revised 2026-07-30 (§2.3 re-verification at the ref; storage split) and
-> 2026-07-31 (§2.5 — post-implementation audit of 6B; four corrections, all verified live).
+> **Date:** 2026-07-28; revised 2026-07-30 (§2.3 re-verification at the ref; storage split),
+> 2026-07-31 (§2.5 — post-implementation audit of 6B; four corrections, all verified live) and
+> 2026-08-05 (§2.6 — 6C shipped; seven further verified facts, three of them found by failing runs).
 > **Parent:** [e2e-modernization-plan.md](e2e-modernization-plan.md) §9, Phase 6 — this doc supersedes
 > that phase's summary. Phases 0–5 are done; Phase 6 is **feature content on finished rails**.
 > **Baseline (reference only):** `wp-rocket-e2e/src/backwpup/` — 12 feature files, 28 scenarios, ~1.6k LoC.
@@ -17,7 +18,7 @@ WP-CLI → restore → the storage credential surface → Free-edition coverage 
 storage *round-trips* are carved out as **6H.2** and **deferred** until credentials exist, so no
 other sub-phase waits on them. WP Rocket reuses 6A and gets its own breakdown afterwards (§6).
 
-**Execution order:** 6A ✅ → 6B ✅ → **6C** → 6D → 6E → 6F → 6G → 6H → 6I → *(later)* 6H.2.
+**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → **6D** → 6E → 6F → 6G → 6H → 6I → *(later)* 6H.2.
 
 Every artifact follows **Understand → Improve → Adapt → Port** (§1): read the baseline for *intent*,
 verify the plugin's real contract in source, pick the strongest signal Playwright/WP-CLI offers, then
@@ -33,7 +34,7 @@ one is the single place the port needs per-edition scenarios and an edition-awar
 
 Three further claims were **corrected by re-verification** rather than confirmed, each recorded
 inline in §2.2: `wp backwpup jobs` **does** exist (as an `@alias`, proven live — so the baseline was
-not broken there, V3); the onboarding wizard is its **own page** reached by redirect, not a branch of
+not broken there, V3); onboarding is its **own page** reached by redirect, not a branch of
 `page=backwpup` (V10); and the REST surface is **24 routes, not 21** (V8).
 
 ---
@@ -47,7 +48,7 @@ Applied per scenario and per page object, in this order:
    option). The baseline is a **statement of intent, never a specification**.
 2. **Improve** — pick the strongest available signal: a role/label locator over a CSS chain, a REST
    response barrier over `networkidle`, WP-CLI structured output over DOM scraping, a seeded option
-   over re-driving a wizard. Delete every fixed sleep.
+   over re-driving onboarding. Delete every fixed sleep.
 3. **Adapt** — fit the target's rails: fixtures (`site`, `edition`, `pluginArtifact`), POM-as-fixture,
    the transport layer, per-cell editions, tags.
 4. **Port** — write the feature + thin steps, add the POM locator spec, run green on a real cell.
@@ -93,7 +94,9 @@ Each row is a defect present in the baseline BackWPup suite and how the port rem
 | `storages/{ftp,s3,glacier,msazure,rsc,sugarsync}.feature` | 11 | Configure storage in onboarding and from the dashboard; back up to it | **6H.2 (deferred)** |
 
 Not covered by the baseline at all: Free edition (every scenario installs `backwpup-pro`), backup
-deletion, bulk actions, job logs, settings, encryption, job import/export.
+deletion, bulk actions, job logs, settings, encryption, job import/export. Two of its gaps around
+onboarding were closed in 6C: that a data type must be chosen before the schedule step, and that a
+destination must be chosen before onboarding can be completed.
 
 ### 2.2 Verified plugin facts that change the port
 
@@ -110,7 +113,7 @@ Verified by reading **BackWPup 5.7.4 Free and Pro** (`~/.apvm/cache/backwpup/rel
 | V7 | Buttons come from one component: `trigger` → class `js-backwpup-<trigger>`; `label` → `<span>` text = **accessible name**. `icon_position: "alone"` renders **no** label | `components/form/button.php` | Role/label locators work for labelled buttons; **icon-only buttons have no accessible name** and must use the `js-backwpup-*` / `data-content` hook (§3.2). |
 | V8 | **24** REST routes under the single namespace `backwpup/v1`: `addjob`, `authenticate_cloud`, `backups`, `cloud_is_authenticated`, `cloudsaveandtest`, `delete_auth_cloud`, `delete_job`, `getblock`, `getjobslist`, `job-abort-status`, `license_update`, `messages`, `pagination`, `process_bulk_actions`, `save_excluded_tables`, `save_files_exclusions`, `save_job_format`, `save_job_settings`, `save_site_option`, `startbackup`, `storagelistcompact`, `storages`, `update-job-title`, `updatejob` | `register_rest_route` across 10 `src/**/API/Rest.php` files; the **same 24 in 5.7.4 and at the ref under test** (§2.3). *(An earlier revision of this table said 21 — that was an undercount, not a version delta.)* | Precise `waitForResponse` barriers replace `networkidle`. `support/rest.ts` (6B) names all 24 so no route string is inlined in a POM. |
 | V9 | Scheduling uses the WP-Cron hook **`backwpup_cron`** with `['arg' => <job_id>]` | `inc/class-cron.php`, `inc/class-page-onboarding.php:146` | `wp cron event run backwpup_cron` ("runs the next scheduled cron event for the given hook", WP-CLI handbook) fires it deterministically → the 3-minute sleep goes away and the assertion gets *stronger* (schedule registered **and** it produces a backup). |
-| V10 | The site option **`backwpup_onboarding`** gates the wizard — but by **redirect**, not by branching one page. While it is truthy, *every* `page=backwpup*` request except `backwpupabout`, `backwpuponboarding`, `backwpupfirstbackup` and `backwpupsupport` is `wp_safe_redirect`ed to **`admin.php?page=backwpuponboarding`**, its own dedicated page. Onboarding completion deletes the option | `inc/class-admin.php:272-282` (the redirect + its allow-list), `:676` (the page is registered only while the option is set), `class-page-onboarding.php:174` (deletion), `:249` (includes `pages/onboarding.php`), `components/storage-list.php:24` | Scenarios needing a post-onboarding dashboard **seed the state** via WP-CLI instead of re-driving the wizard (single-site: `wp option`; multisite would need `wp site option`). `OnboardingPage` navigates to **`page=backwpuponboarding`**; asserting on `page=backwpup` would silently assert against a redirect. **Correction:** an earlier revision described this as `page=backwpup` rendering either the wizard or the dashboard. |
+| V10 | The site option **`backwpup_onboarding`** gates onboarding — but by **redirect**, not by branching one page. While it is truthy, *every* `page=backwpup*` request except `backwpupabout`, `backwpuponboarding`, `backwpupfirstbackup` and `backwpupsupport` is `wp_safe_redirect`ed to **`admin.php?page=backwpuponboarding`**, its own dedicated page. Onboarding completion deletes the option | `inc/class-admin.php:272-282` (the redirect + its allow-list), `:676` (the page is registered only while the option is set), `class-page-onboarding.php:174` (deletion), `:249` (includes `pages/onboarding.php`), `components/storage-list.php:24` | Scenarios needing a post-onboarding dashboard **seed the state** via WP-CLI instead of re-driving onboarding (single-site: `wp option`; multisite would need `wp site option`). `OnboardingPage` navigates to **`page=backwpuponboarding`**; asserting on `page=backwpup` would silently assert against a redirect. **Correction:** an earlier revision described this as `page=backwpup` rendering either onboarding or the dashboard. |
 | V11 | Restore **UI** exists in both editions (`admin.php?page=backwpuprestore`, `pages/restore.php`); Pro additionally ships `backwpup-restore.zip` and the `restore` CLI | `inc/class-admin.php:766` in both; Pro-only files | The restore *page* is shared, but the journey that reaches it is not (V13). **CLI restore is `@pro`**. |
 | V13 | **The restore entry path diverges by edition, and the gate is doubled.** The history row's Restore action uses `dataset-restore['data-url']`, a deep link (`…&action=restore-destination_<service>&restore_file=<uploads>/…`) **only if the backup record carries `restoreurl`** — otherwise it falls through to a bare `admin.php?page=backwpuprestore`. Nothing in shared code ever stamps `restoreurl`: the shared base `BackWPup_Destinations::file_get_list()` checks `BackWPup::is_pro() && get_service_name() !== 'OneDrive'` and, if so, **delegates** to `BackWPup_Pro_Destinations::file_get_list()` — which is the code that stamps it, and lives in a **Pro-only file**. Pro further overrides the local **Website Server (`FOLDER`)** destination to point `restore_file` at the archive already on disk. | `inc/class-destinations.php:205` — the `is_pro()` delegation, in a file **byte-identical in both editions**; the stamp itself at `inc/Pro/class-destinations.php:49-73`, under a directory **Free does not ship at all** (`inc/Pro/` absent); `inc/Pro/class-destination-folder.php:184`; `inc/Utils/BackWPupHelpers.php:196-214` (the deep-link vs bare-page branch). All re-verified at the ref under test (§2.3). | **Pro restores in place** from `wp-content/uploads/backwpup/…`; **Free forces a manual re-upload of that same file** even though it is already on the server. Two genuinely different user journeys ⇒ separate `@pro`/`@free` scenarios sharing a Background, and the one edition-aware POM branch (§4.6G). Because the divergence is a **missing file** in Free and not a toggle, it cannot be faked from the test side — the `@free` scenario must really drive the upload. **Two exceptions to keep out of the scenarios:** SugarSync stamps `restoreurl` in its own override (`inc/class-destination-sugarsync.php:151`, shipped in **both** editions, so Free *can* deep-link there), and OneDrive is excluded even in Pro. Scenarios use the Website Server destination, where the divergence is clean. |
 | V12 | Admin pages: `backwpup`, `backwpupbackups`, `backwpupjobs`, `backwpupeditjob`, `backwpuplogs`, `backwpupsettings`, `backwpuprestore`, `backwpupabout`, `backwpupfirstbackup`, `backwpupdocs`, **`backwpuponboarding`** (V10), plus Free-only `backwpupbuypro`; Pro adds `backwpupsupport` | `inc/class-admin.php`, `inc/Pro/class-pro.php`. The four pages the 6B POMs own — `backwpup`, `backwpuponboarding`, `backwpupbackups`, `backwpuprestore` — are each verified individually | The URL surface each POM owns. **Correction:** `backwpuponboarding` was missing from an earlier revision of this list. Note the registration code assigns it to the `page_hooks['backwpupbackups']` key (`class-admin.php:679`), so the hook key is not a reliable index of slugs. |
@@ -138,13 +141,13 @@ any future drift into one clear unit-test failure instead of a scattered scenari
 
 ### 2.4 Facts established while building 6B (live, on `pro@nginx`)
 
-Reading the source got the locators close; **driving the real wizard corrected four things the markup
+Reading the source got the locators close; **driving onboarding for real corrected four things the markup
 alone implied wrongly.** Each is now encoded in a page object and pinned by a test.
 
 | # | Fact | How it was found | Consequence |
 | --- | --- | --- | --- |
-| V14 | **A storage tile is not a checkbox.** Clicking `js-backwpup-toggle-storage` opens that provider's *settings form*; the hidden `#destination-<SLUG>` checkbox is ticked afterwards by `refresh_storage_destinations()`, only once the settings save. | Live: clicking the tile opened a "Folder Settings" panel and left the checkbox unchecked, so the wizard's submit stayed disabled. Confirmed in `assets/js/backwpup-admin.js:380` (`load_and_open_storage`) and `:166-168` (the checkbox write). | Choosing a destination is **two steps** — configure, then save. `OnboardingPage` exposes `openStorageSettings` / `saveStorageSettings` (and `selectStorage` for the credential-free local one); the save's completion signal is the checkbox flipping, which is provider-agnostic. |
-| V15 | **The same trigger class is bound to two different handlers.** On the dashboard the tile *fetches* its form via `getblock`; in the wizard every provider panel is pre-rendered, so the click only reveals it and **no request is made**. | Live: a `getblock` barrier around the wizard's tile click timed out even though the panel opened. | No REST barrier in the wizard's storage step — visibility is the honest signal there. Barriers stay where a request really happens. |
+| V14 | **A storage tile is not a checkbox.** Clicking `js-backwpup-toggle-storage` opens that provider's *settings form*; the hidden `#destination-<SLUG>` checkbox is ticked afterwards by `refresh_storage_destinations()`, only once the settings save. | Live: clicking the tile opened a "Folder Settings" panel and left the checkbox unchecked, so onboarding's submit stayed disabled. Confirmed in `assets/js/backwpup-admin.js:380` (`load_and_open_storage`) and `:166-168` (the checkbox write). | Choosing a destination is **two steps** — configure, then save. `OnboardingPage` exposes `openStorageSettings` / `saveStorageSettings` (and `selectStorage` for the credential-free local one); the save's completion signal is the checkbox flipping, which is provider-agnostic. |
+| V15 | **The same trigger class is bound to two different handlers.** On the dashboard the tile *fetches* its form via `getblock`; during onboarding every provider panel is pre-rendered, so the click only reveals it and **no request is made**. | Live: a `getblock` barrier around onboarding's tile click timed out even though the panel opened. | No REST barrier in onboarding's storage step — visibility is the honest signal there. Barriers stay where a request really happens. |
 | V16 | **Every switch in the plugin is an `sr-only`, `aria-hidden` checkbox behind a visible proxy** (`components/form/toggle.php`), and its `<label>` carries no text. | `getByRole("checkbox")` and `getByLabel` resolve to nothing; asserted as such in the contract spec. | The §3.2 policy gains a **second documented exception** beside icon-only buttons: click the proxy, assert the hidden input. One helper, `pages/toggles.ts`, does this everywhere. Also V7 is stricter than recorded — an **empty** label suppresses the name too, not just `icon_position: "alone"`. |
 | V17 | **The running-job UI is an in-page region, not a modal.** It is `div#runningjob`, pre-rendered with `display:none`; the only modal is the *confirmation* dialog `#sidebar-backup-now`, whose "Start" launches the job. All 38 `#sidebar-*` panels are likewise pre-rendered (27, plus one settings panel per storage provider). | Captured markup + live. | The POM is `JobRunPanel`, not `JobRunModal`. And because these elements always exist, **presence proves nothing** — every assertion on them is visibility or content, never `toBeAttached`. |
 
@@ -177,6 +180,46 @@ resolves to exactly one element in the captured markup. It exists because an amb
 runtime failure Playwright only raises at click time — and one had already shipped (the duplicated
 `#js_backwpup_add_new_backup`).
 
+### 2.6 Facts established while building 6C (live, on `pro@nginx`)
+
+Reading `class-page-onboarding.php` end to end — then driving onboarding for real — settled seven
+things the 6B work had no reason to look at. **Three of them the source alone did not give up**: the
+lazily written onboarding flag (V26) surfaced as a one-in-three flake, the first backup's transient
+guard (V27) as a ten-minute timeout on the one scenario whose backup was fast enough to take the
+other branch, and the dashboard's actionability wall (V28) as two reproductions of a click that never
+dispatched. The first two are encoded in a step, a page object or a support reader and pinned by a
+test; the third **cut 6C's scope** rather than being worked around, and is handed to 6D with the
+evidence.
+
+| # | Fact | Evidence | Consequence |
+| --- | --- | --- | --- |
+| V22 | **Whether onboarding produces one job or two is decided by the *cron*, not by the toggles.** Both types active **and** identical cron expressions ⇒ the two are merged into a single `type_job_both` job written at the *files* placeholder id; anything else ⇒ two jobs, with whichever placeholder is inactive deleted afterwards. The inline dropdowns only feed the cron as a **fallback**: `get_onboarding_job_cron()` prefers a cron already stored on the job, which is why saving the *advanced* sidebar (an immediate `save_job_settings` write) also splits them. | `inc/class-page-onboarding.php:29-36` (the fallback), `:91-111` (the merge), `:180-186` (the deletes); `src/Jobs/API/Rest.php:597-658` (`save_job_settings` writes `cron` + `frequency` immediately) | The two "split into two jobs" scenarios are genuinely different paths to the same rule, not duplicates. It also means that after the *advanced* path a job's stored `frequency` can read `monthly` while its `cron` is daily — the form's value wins for one field, the sidebar's for the other — so that scenario asserts **schedules differ**, never an exact frequency. |
+| V23 | **The "First backup" job is a `tempjob`, and every surface hides it.** `wp backwpup job`, the `getjobslist` REST route and `parts/backups/next-scheduled-backup.php` all skip `tempjob` records. | `src/Cli/Commands/Job.php:124`, `src/Jobs/Frontend/API/Rest.php:80`, `parts/backups/next-scheduled-backup.php:37` | "The site has N backup jobs" means the same thing in the UI and in WP-CLI, so the two can be asserted against each other. `support/job-options.ts` exposes `scheduledJobs()` for exactly this. |
+| V24 | **Completing onboarding starts a real backup, on a page of its own.** Submit is a native form POST, `save_post_form()` ends in `wp_safe_redirect(page=backwpupfirstbackup)`, and that page's script posts `startbackup` and reloads into a progress view. `#first-congratulations` is revealed when the run ends — **whether it succeeded or failed**. | `assets/js/backwpup-admin.js:1882` (submit), `inc/class-page-onboarding.php:192`, `assets/js/backwpup-admin.js:2387-2398` (auto-start), `assets/js/backwpup-generate.js:44-56` (the reveal) | Every scenario that finishes onboarding **must** wait for that run: the dashboard re-renders its job cards while a job is in flight, and the `@plugin` teardown uninstalls the plugin the moment the scenario ends. Where that wait lives is settled by V27 — not on this page. |
+| V25 | **The default table selection is prefix-scoped, not "everything".** A new job's `dbdumpexclude` defaults to every table whose name does not carry `$wpdb->prefix`. **Refined by V29** — the screen's rule is `contains`, the job option's is `starts with`. | `parts/sidebar/select-tables.php:30-45`, `inc/class-jobtype-dbdump.php:45-58` | The baseline's "all database tables should be selected" is only true on a database holding nothing else. The port asserts the real rule via `expectDefaultTableSelection(prefix)`, with the prefix read from `wp db prefix` — a hard-coded `wp_` would assert the wrong set on any site not using the default. |
+| V26 | **`backwpup_onboarding` is written lazily, one request *after* the install.** The plugin schedules `BackWPup_Install::activate` on `init`, so a fresh install sets the flag on the first WordPress request that loads the activated plugin — not during `wp plugin install --activate`, where the plugin file is included after `init` has already fired. The redirect that enforces onboarding runs on `admin_init`, i.e. later in that same request. | `src/Plugin/Plugin.php:117-122`, `inc/class-install.php:48` + `inc/class-migrate.php:143`, `inc/class-admin.php:267-282` (+ `:1188`) | **Found as a flake**, not by reading: an early revision asserted the flag straight after the install and failed once in three runs. The Background now navigates first and asserts the flag *after* observing the redirect, which is both race-free and better coverage — it proves the fresh-install → onboarding contract from the browser and from the database at once. |
+| V27 | **The first backup is guarded by a site transient, so a *fast* one never reports itself finished in the UI.** `startbackup` sets `backwpup_first_backup` on the first `first_backup=1` call and answers every later one with `{status: 301, url: page=backwpup}`. The first-backup page posts that call, then reloads half a second later; if the job is still running the reloaded page enqueues the progress script and eventually reveals `#first-congratulations`, but if the job has already finished the script is absent, the page posts `startbackup` **again**, and the browser is redirected to the dashboard having shown nothing. | `src/Backups/API/Rest.php:335-352` (the transient + the 301), `assets/js/backwpup-admin.js:2387-2398` (both branches), `assets/js/backwpup-generate.js:44-56` (the reveal). Reproduced live: the mixed backup showed the panel, the database-only backup was redirected. | **Found by a 10-minute timeout, not by reading.** `#first-congratulations` cannot be the completion signal — waiting on it is a race against how long the site takes to back itself up. The scenarios watch WP-CLI instead: poll until the archive is in the history (the outcome, true on both paths), then a blocking `wp backwpup status` so nothing is still running when the plugin is uninstalled. `FirstBackupPage` deliberately ships **no** wait method, and its `congratulations` locator documents why — the same "a method that cannot do its job is worse than none" rule §2.5 applied to `StorageSidebar.close()`. |
+| V28 | **Nothing on the post-onboarding dashboard can be *clicked* by Playwright's normal rules, and the reason is not the locator.** A click on a job card's "Data" button parks on *"waiting for element to be visible, enabled and stable"* and never dispatches — reproduced 2/2, each time burning the scenario's full budget on a button that is on screen, enabled and demonstrably clickable. Forcing the click gets past it (`getblock` fires, the panel opens — confirmed in the page snapshot), and the **next** frame-dependent step then hangs in turn: `toBeInViewport` on the opened panel never returns an answer, while `toBeVisible` on the same element answers instantly. So it is not one control: anything on this screen that needs the page to settle or to be measured against the viewport stalls, while DOM-level reads are fine. | Traces from two runs (`test-results/.../trace.zip`): the click's call log ends at the stability check; the forced run's log shows `forcing action → click action done` and then the viewport assertion hanging. The fixture-capture tool independently hit the same wall on this screen and has always clicked here with `force: true`, documenting "Playwright's stability check can spin until it times out on a button that is perfectly clickable". | **6C's scope was cut rather than papered over.** The two steps that re-read the data selection from the job card's own panels were removed; the same claim is still asserted — from the stored job configuration, which is the stronger source anyway — so the scenario keeps its meaning. `DashboardPage`/`panels.ts` are left exactly as 6B shipped them, because a fix for this deserves to land with a green scenario behind it, and **6D owns that**: it drives the dashboard throughout (Backup Now, history rows, deletion, bulk actions) and cannot avoid solving it. Two workarounds are already known to work in part — `click({ force: true })` and asserting `#backwpup-sidebar` rather than the panel — but neither is verified end to end, so neither is shipped here. |
+
+Re-verified while doing the above: `components/`, `pages/`, `parts/`, `inc/Utils/` and
+`inc/class-page-onboarding.php` are **identical** between the ref under test (`develop` @ `c0dd22c`,
+which `artifacts:warm` re-resolved to on 2026-08-05) and **5.7.5**, the latest stable — so §2.3's
+"zero drift" still holds, now against the newer stable.
+
+**Two defects found outside the plugin**, both in the suite's own tooling:
+
+- The 6A **lint gate's selectors matched *any* member expression under a call**, so
+  `describeJobContents(job.type)` was reported as a deprecated `page.type()`. Each selector now
+  matches the call's `.callee` field; all four patterns were re-verified to still reject a
+  deliberately re-introduced violation.
+- The **fixture capture installed over whatever was already on the site** (`force: true`, files
+  only), so the options a previous run had left behind came through into the capture. A re-capture
+  taken after a scenario that excludes the Plugins area and the `options` table duly recorded both
+  as *unchecked* — which would have baked one run's state into the contract every later run is
+  measured against. The script now removes the plugin's DB footprint before installing, so a capture
+  always describes a fresh install. This is the same class of problem as §2.5's "captured fixtures
+  must not be reformatted": everything rests on the fixtures describing the **plugin**, not the site.
+
 Two smaller findings worth carrying into later phases:
 
 - **The dashboard emits `id="js_backwpup_add_new_backup"` twice** — once visibly and once inside the
@@ -186,6 +229,38 @@ Two smaller findings worth carrying into later phases:
   different user (`Could not delete backup archive …, check permissions!`), even though the containing
   directory is world-writable — the refusal is the plugin's own check, not the filesystem's. **6F must
   expect this**, and 6D's cleanup cannot rely on that command.
+
+### 2.7 Corrections from the 6C audit (all verified)
+
+A post-implementation audit re-checked every claim 6C encodes against the plugin source and the live
+cell. Four suite claims were wrong — two are assertions that pass today and break on a
+differently-shaped site, one was a gate that had silently stopped working, and one was an
+intermittent that blamed the wrong scenario — and the runs that exposed the last of those also
+surfaced a genuine **product** bug (V33). Only those two announced themselves at all.
+
+| # | Fact | How it was found | Consequence |
+| --- | --- | --- | --- |
+| V29 | **V25 was half right: the screen and the job option use *different* rules.** `select-tables.php` ticks a table whose name **contains** `$wpdb->prefix` (`strstr`), while a new job's `dbdumpexclude` default excludes a table whose name does not **start** with it (`strncmp`). So `legacy_wp_posts` ships ticked on screen but excluded from the job. | Read both call sites while verifying V25's citation. | `expectDefaultTableSelection` asserted starts-with against the **screen**, so a site holding any table that contains but does not start with the prefix would have failed a scenario that is doing nothing wrong. Now matches on `contains`, with a test that renames a captured table to `legacy_wp_options` — the capture's database is all `wp_*`, so nothing else could have caught it. |
+| V30 | **`wp backwpup job` hides more than `tempjob`** (V23): it also skips a record flagged `backup_now` and the one whose id is the site option `backwpup_backup_now_job_id`. | `src/Cli/Commands/Job.php:124`. | `scheduledJobs()` filtered only `tempjob`, so "the site has N backup jobs" would have disagreed with the command the moment a scenario ran a backup on demand — silently, as an off-by-one. It now filters `backup_now` too; the id option needs no second read, since the plugin writes both together (`src/Abilities/Jobs/RunJob.php:408-440`). |
+| V31 | **`wp eval` exits 0 whatever the PHP inside it did.** A denied `file_put_contents` returns `false` with a warning and WP-CLI still reports success. | Reproduced on the cell against a decoy file owned by `www-data`: `bool(false)`, `Permission denied`, `wp-eval-exit=0`. | **`clearDebugLog` had never once cleared the log on this cell.** `debug.log` is `644 www-data` and the transport runs as `ubuntu`, so the truncate always failed and the fallback never fired — the live log held entries spanning three hours and many scenarios. One scenario's fatal would have failed every scenario after it. Fixed without privileges: the snippets now report their own outcome, and clearing **unlinks** (needs write on the directory, `0777`) instead of truncating (needs write on the file). Verified live: a log dating back to 22:15 now clears. |
+
+| V32 | **A fresh install is not a site with no jobs, and cleanup between scenarios cannot make it one.** Activation creates a `tempjob` placeholder of its own, and rendering the onboarding page creates two more — so "no jobs" is only true in the window before the plugin has bootstrapped. And it is not guaranteed *between* scenarios either: `uninstall.php` wraps its **entire** database cleanup in `! class_exists( \BackWPup::class )`, so the footprint is removed only when nothing loaded the class during that request. | `inc/class-install.php:184-200` (the tempjob), `inc/class-page-onboarding.php:225-245` (the two placeholders), `uninstall.php:19`. **Found by an intermittent failure**: one full run failed at the first step of a scenario with two leftover placeholder jobs carrying default monthly crons; the next full run of the same code passed 11/11, and the scenario passed in isolation. | `Given a freshly installed BackWPup` asserted **zero** scheduled jobs — a property the plugin does not have and the teardown cannot promise, so it failed intermittently and blamed whichever scenario happened to run next. It now asserts what the hook genuinely guarantees (the edition under test is installed and active). The claim it was reaching for — that onboarding is still owed — is proved race-free by the two steps after it: ask for the dashboard, get sent to onboarding. A leaked *completed* onboarding still fails there, clearly and in the right place. |
+
+| V33 | **A product bug: BackWPup fatals on activation when the site holds a job that has a `cron` but no `type`.** `Migrate::migrate()` filters `backwpup_jobs` to records with a `cron` key and hands them to `organize_jobs_by_type()`, which does `sort( $job['type'] )` — `sort(): Argument #1 must be of type array, null given` when that key is absent. The activation dies, and every later WP-CLI call that boots WordPress with the plugin active dies the same way. | `inc/class-migrate.php:24-25` (the filter + call), `:174` (the `sort`). Caught live by the `@plugin` hook: `PluginActivationFailedError` plus `DebugLogFatalError` quoting `Uncaught TypeError: sort() ... in inc/class-migrate.php:174`. | Onboarding reserves two placeholder job ids and writes their default settings — `cron` included — but assigns `type` only on submit. So **a scenario that opens onboarding and never finishes it leaves exactly that shape**, and three of this feature's scenarios do. It only bites when those rows survive the uninstall, which is conditional (V32) — hence intermittent, roughly one full run in two, and always blaming the *next* scenario. Worth reporting upstream: a user who abandons onboarding and then updates the plugin hits it with no test suite involved. The suite-side question — whether teardown should guarantee the database footprint is gone rather than trust the plugin's own conditional cleanup — is a design decision, not a bug fix, so it is **not** taken here. |
+
+**Three suite-side defects**, none of which any test could have caught:
+
+- **Assertions that cannot fail.** `expectAllFileAreasIncluded`, `expectDefaultTableSelection` and
+  6B's `expectAllTablesSelected` each asserted `toHaveCount(0)` over a *filtered* set — "nothing is
+  unticked" — which is also true of a pane that rendered nothing at all. A panel that failed to load
+  would have reported every area and every table as included. Each now asserts its population first
+  (an exact five for the file areas), pinned by a test that strips the checkboxes out of the capture.
+- **Code cited the plan in 23 places** (`V2`, `6H.2`, `§3.2`, "the parent plan", …), against an
+  explicit rule with no standing exceptions. One was 6C's; the rest predate it. All are replaced by
+  the reasoning they were shorthand for, and the code is now clean of plan references.
+- **Dead API surface**: `isJobContents`/`JobContents` had no caller and no test. Removed.
+
+Every fix is covered by a test that was **confirmed to fail against the old code** before being kept.
 
 ---
 
@@ -267,6 +342,54 @@ deferred out of the sequence** — nothing downstream waits on it.
   `@noauth` — the first real 6C scenario would have broken it.
 - Not in 6A: the **English-locale pre-flight assertion** (§3.2). It belongs with the
   locator policy it protects, so it lands in 6B.
+- **Added after 6C, because 6C proved it was needed: cleanup escalates.** Every scenario ended
+  with a warning that `uploads/backwpup-restore` could not be removed, and the advice in it
+  ("make it writable by that user") was not a fix anyone can apply — the plugin recreates the
+  directory `0755 www-data` on every install, so the next run is in the same position. Verified
+  on the cell: the parent is `0777`, the directory itself is not, so the transport's `ubuntu`
+  cannot unlink its children; unprivileged `rm -rf` exits 1 and the path survives, `sudo -n rm
+  -rf` removes it. The exec layer therefore gained `execElevated` + `elevationSupport`, and
+  residue removal, `debug.log` clearing/reading and staging cleanup all try unprivileged first
+  and escalate only what survived. **Never `wp`** — WP-CLI as root would leave the site's own
+  files unwritable by the web server, so `wpCli` has no way to ask. The baseline's approach
+  (`sudo` hard-coded into `rm`/`find`/`cat`) is deliberately *not* copied: it would break
+  `docker`, where the image has no sudo binary and `-u 0:0` is the answer, and `local`, where a
+  developer without passwordless sudo has no problem to solve in the first place. Refusable per
+  site with `transport.elevate: false`, which is what the four tests that pin the unprivileged
+  contract now use — with elevation allowed they would have depended on whether the machine
+  running the suite happens to have passwordless sudo. 18 new unit tests, all mutation-checked
+  against the pre-change code.
+- **What fixing cleanup unmasked, and had to be fixed with it.** With the restore area finally
+  being removed after every scenario, the next scenario's *first writer* started creating it —
+  and when that writer was a WP-CLI call it arrived as `drwxrwxr-x ubuntu:ubuntu`, so the
+  plugin's next admin request died on `Folder "…/backwpup-restore" is not writable`
+  (`BackWPup_File::check_folder`, from `create_project_temp_dir`). 5 of 9 scenarios failed on
+  it. Caught by watching the directory on the cell during a single scenario: created by the
+  transport user at 15:38:49, fatal at 15:38:50. The defect was **pre-existing and merely
+  masked** — for as long as removal failed, the copy the web server had made months earlier was
+  always the one in use, so nothing ever created it during a run. Root cause is the two-user
+  docroot: WP-CLI runs as `ubuntu`, PHP-FPM as `www-data`, and the plugin creates its
+  directories under whichever umask it is under. The Before hook now runs
+  `prepareSiteDataDirs` over the same declared paths, creating them `0777` — what the plugin
+  asks for itself (`mkdir($dir, 0777, true)`) and what `wp_mkdir_p` would produce by inheriting
+  `wp-content/uploads`, which is already `0777` on these cells for exactly this reason. The
+  structural alternative — running `wp` as the web-server user, as the docker transport already
+  does with `user: "33:33"` — is a larger change and is not taken here.
+- **A headed browser goes permanently blank after onboarding submits, and the tests still
+  pass.** Reported while watching a run. Measured rather than guessed: `requestAnimationFrame`
+  drops from 84 frames/0.7s to **0** the moment the POST → redirect → first-backup → dashboard
+  chain starts, and never recovers — not on the next navigation, not on a reload, not after
+  `bringToFront`. The main thread stays responsive, a new page in the same context renders, and
+  raw CDP `Page.captureScreenshot` hangs identically, so it is the tab's rendering pipeline and
+  not Playwright. Bisecting Playwright's `--disable-features` list one feature at a time named
+  **`RenderDocument`**: disabled (Playwright's default) it wedges, enabled it renders and
+  screenshots take ~46 ms. No compositor flag avoids it, and
+  `--disable-threaded-compositing` breaks clicks outright. Playwright disables the feature
+  deliberately (it breaks isolated worlds, microsoft/playwright#37714), so it is re-enabled
+  **only for watched runs** and never for CI — `config/chromium.ts`, signalled by
+  `E2E_VISIBLE_BROWSER` because a *worker's* `process.argv` carries none of the CLI's flags, so
+  sniffing `--headed` compiles, tests green, and silently does nothing (caught by checking the
+  real launch command line). Videos have the same blind spot; traces do not, being DOM snapshots.
 - **Fixed outside 6A's scope, because it blocked it:** the shared UI login failed ~35% of
   real-cell runs (4 of 11). Root cause, reproduced 8/8 locally: `fill()` inserts text into
   whatever element holds focus *at that instant*, and WordPress's login page re-focuses the
@@ -342,8 +465,8 @@ fails the scenario with the log attached; the lint gate rejects a deliberately r
   instance as soon as a step destructures a POM fixture.
   - The product's `steps` array must list that file. Omitting it fails generation loudly
     ("Can't guess test instance"), and a `@noauth` smoke scenario now pins the wiring in CI.
-- **Locators were derived from markup captured off the ref under test, then proven by driving the real
-  wizard.** That second step was not ceremony — it corrected four wrong assumptions (§2.4), the largest
+- **Locators were derived from markup captured off the ref under test, then proven by driving
+  onboarding for real.** That second step was not ceremony — it corrected four wrong assumptions (§2.4), the largest
   being that a storage tile is not a checkbox.
 - **The English-locale pre-flight landed here** as planned, using `determine_locale()` — the function
   WordPress itself uses to choose an admin request's language, and the only one that accounts for a
@@ -358,7 +481,7 @@ the `toggles.ts` interaction primitive and the `storages.ts` slug/label registry
 `support/backups.ts`, `fixtures.ts`, and specs: `locator-contract.spec.ts`, `restore.page.spec.ts`,
 `toggles.spec.ts`, `support/rest.spec.ts`, `support/backups.spec.ts`. Unit tests **187 → 319**.
 
-**Verified live** — the wizard was driven end to end through the page objects on `pro@nginx`: every
+**Verified live** — onboarding was driven end to end through the page objects on `pro@nginx`: every
 step and assertion passed, a real database-only job and backup were created, `listBackups`/`listJobs`
 returned the exact V5 fields, the history row rendered with `data-backup-id`, and the site was then
 restored to its prior state (plugin uninstalled, zero `backwpup*` options, no `.e2e_temp`, only the
@@ -382,7 +505,7 @@ Builds the whole UI surface once, so 6C–6H are thin. POMs are plain classes un
 
 | Page object | Owns |
 | --- | --- |
-| `OnboardingPage` | The 3-step wizard at `page=backwpup` while `backwpup_onboarding` is set (V10): data selection, frequency, storage, submit. |
+| `OnboardingPage` | The 3-step onboarding page at `page=backwpuponboarding` while `backwpup_onboarding` is set (V10): data selection, frequency, storage, submit. |
 | `DashboardPage` | Post-onboarding `page=backwpup`: job cards (`mixed`/`files`/`database`), next scheduled backup, "Backup now". |
 | `DataSelectionSidebar` | Select-files / select-tables exclusion sidebars (`save_files_exclusions`, `save_excluded_tables`). |
 | `FrequencySidebar` | Simple + advanced frequency, start time (`save_job_settings`). |
@@ -416,17 +539,54 @@ verified it leaves zero `backwpup*` options).
 chain, a fixed sleep, or a `networkidle` wait; each method's completion signal is an assertion or a
 named REST barrier.
 
-### 6C — Onboarding & job configuration
+### 6C — Onboarding & job configuration — **DONE**
 
-Ports `onboarding.feature` (6) + the shared onboarding spine of every other baseline feature.
-Scenarios: mixed / files-only / database-only data selection; simple frequency per type; advanced
-frequency; exclusions are respected after save. Improvements: intent-level steps; `setChecked`;
-`save_*` REST barriers; one retrying assertion for "all tables selected" instead of an N-iteration
-loop; each scenario starts from a deterministic onboarding state seeded by WP-CLI (V10).
+**Shipped 2026-08-05, verified live on `pro@nginx`.** All six baseline intents are ported, plus three
+scenarios the baseline never had. Decisions worth carrying forward:
 
-**Acceptance** — the 6 baseline scenarios pass on `pro@nginx` with no sleep and no `networkidle`;
-each asserts the resulting job configuration through both the UI **and** `wp backwpup job
---format=json`.
+- **The starting state is asserted, not seeded.** §4.6C originally said each scenario would seed the
+  onboarding state by WP-CLI. It does not: installing the plugin *is* what puts a site into
+  onboarding (V26), so writing that flag from the test side would work **and** would hide the day the
+  plugin stops setting it. The Background instead asks for the dashboard and asserts it is redirected
+  to onboarding — which also removes a race (V26) and makes the V10 redirect rule coverage every
+  scenario re-proves. Seeding remains the right answer for 6D–6G, which need a site that is *past*
+  onboarding.
+- **Every scenario that finishes onboarding runs a real backup, and waits for it** (V24). Not
+  politeness: mid-run the dashboard re-renders its job cards, and the `@plugin` teardown uninstalls
+  the plugin at scenario end. The wait is on **WP-CLI, not on the page** — the first-backup screen
+  only congratulates the user when the run was still going as the page reloaded (V27), so a fast
+  backup would wait forever. The scenarios poll until the archive is in the history, then block on
+  `wp backwpup status` so no job outlives the scenario.
+- **Assertions are made twice, from independent sources.** The UI comes from the page objects;
+  ground truth comes from `wp backwpup job --format=json` (contents, storage) and from the
+  `backwpup_jobs` option itself for the settings that command does not expose (file areas, excluded
+  tables). The two must agree. The one exception is the exclusions scenario, which asserts against
+  the stored job only — re-reading those choices from the job card's panels needs dashboard
+  interaction, which V28 shows is blocked; the scenario keeps its meaning because the stored
+  configuration is the stronger of the two sources.
+- **Job contents are compared as a set, in product language** — `describeJobContents()` maps
+  `FILE, DBDUMP, WPPLUGIN` to "files and database", so a scenario reads in English and a harmless
+  reordering of the plugin's own array cannot fail a test.
+- Three scenarios were **added** beyond the baseline, all cheap because they never submit onboarding:
+  a data type must be chosen before the schedule step, a destination must be chosen before onboarding
+  can be completed, and stepping back through onboarding keeps the choices already made. All three are
+  real product rules that had no coverage.
+- The baseline's standalone "the dashboard redirects to onboarding" idea is **folded into the
+  Background** rather than duplicated as a scenario of its own.
+
+**Deliverables** — `features/onboarding.feature` (9 scenarios), `steps/onboarding.steps.ts`,
+`pages/first-backup.page.ts` (+ its fixture and locator contract), `support/onboarding.ts`
+(the onboarding flag: raw read + pure predicate) and `support/job-options.ts` (the `backwpup_jobs`
+reader, the file-area vocabulary, and the job-contents naming). Shared additions:
+`common/wp/options.ts` (`getOption`, `getOptionJson`) and `tablePrefix` in `common/wp/db.ts`, both
+product-agnostic and unit-tested. Page objects gained `expectAtOnboardingPage`,
+`expectCanContinueToSchedule`, `expectCanSubmit`, `expectAllFileAreasIncluded`,
+`expectDefaultTableSelection`, `setTableIncluded`/`expectTableIncluded`, and
+`close`/`expectClosed` on the data-selection panes. Unit tests **319 → 402**.
+
+**Acceptance met** — the six baseline scenarios (plus three new ones) pass on `pro@nginx`; no sleep,
+no `networkidle`, no CSS in Gherkin; each asserts the resulting job configuration through the UI
+**and** through WP-CLI, with the single V28 exception noted above.
 
 ### 6D — Backup lifecycle & history
 
@@ -440,6 +600,15 @@ baseline only ever performed as *cleanup*.
   `outputDir` (not a repo-root `temp/`).
 - **New:** delete a single backup; bulk-delete via `process_bulk_actions`. Cleanup stops being the
   only exercise of a user-facing destructive flow.
+
+**Two things 6C hands over, both already evidenced there:**
+
+- **V28 — the dashboard cannot be clicked** under Playwright's normal actionability rules, and every
+  scenario here drives it. Solve this first; 6C deliberately left `DashboardPage` and `panels.ts` as
+  6B shipped them so the fix lands with a green scenario behind it rather than on inference.
+- **The archives no longer pile up** (§7) — the `@plugin` teardown sweeps them. This phase still adds
+  the deletion coverage that exercises the product's *own* controls, which is a different claim: that
+  a user can delete a backup, not merely that the suite can.
 
 **Acceptance** — history assertions agree between the DOM and `wp backwpup backup --format=json`; a
 deliberately failed backup is detected via the failed-row branch, not a substring scan.
@@ -605,6 +774,7 @@ is done — deliberately **not** guessed here.
 | Storage credentials missing / rate-limited | **Realised, and handled by deferral:** no credentials exist yet, so the round-trips are 6H.2 and out of the critical path. 6H still ships the surface — scenarios **skip** (never fail) without credentials, per-site `overrides` exist for rate-limited hosts, `testInfo`-derived paths keep workers isolated. |
 | Restore rewrites the site under test | `@slow`, worker-bound site, re-auth after restore, run last in its cell. |
 | Backup jobs are genuinely slow | `@slow` for CI splitting; real barriers (`startbackup`, `job-abort-status`) instead of long fixed timeouts, so the wait is as short as the job allows. |
+| **Archives accumulate on the site under test** | **Realised, then fixed in the shared rails (2026-08-05).** BackWPup's uninstall keeps every archive it made, and a full backup of the `pro@nginx` site is ~340 MB, so each scenario left one behind — the cell reached **6.8 GB across 28 per-install directories**. The `@plugin` teardown now clears what a product declares it leaves (`ProductConfig.siteResidue` → `wp/residue.ts`), independently of whether the uninstall succeeded. Verified live: one scenario reclaimed **7 GB**, and a scenario that runs a real backup now leaves no archive behind. **One caveat, reported not failed:** the plugin creates `uploads/backwpup-restore` as `755 www-data`, which the ssh transport's user cannot unlink inside — it is ~24 KB and does not accumulate, so the sweep warns (with the fix in the message) rather than failing the run. Making it removable on a cell is an ownership change there, not a code change here. |
 | Scope creep from "improve" | The improvement budget is §1.1 plus the V-facts. Anything else is a follow-up issue, not this phase. |
 
 ---

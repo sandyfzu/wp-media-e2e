@@ -80,11 +80,11 @@ Discriminated on `mode` — see
 [wordpress-automation.md](../architecture/wordpress-automation.md) for dispatch
 detail.
 
-| `mode`   | Required fields                                  | Optional fields          |
-| -------- | ------------------------------------------------ | ------------------------ |
-| `local`  | `rootDir`                                        | `stagingDir`             |
-| `docker` | `container`                                      | `rootDir`, `stagingDir`  |
-| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`  | `stagingDir`             |
+| `mode`   | Required fields                                  | Optional fields                     |
+| -------- | ------------------------------------------------ | ----------------------------------- |
+| `local`  | `rootDir`                                        | `stagingDir`, `elevate`             |
+| `docker` | `container`                                      | `rootDir`, `stagingDir`, `elevate`  |
+| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`  | `stagingDir`, `elevate`             |
 
 - `rootDir` is the WordPress root (the directory holding `wp-load.php`), and the
   working directory every WP-CLI command runs in. It is **optional for `docker`**
@@ -96,6 +96,15 @@ detail.
   must be a **dedicated** directory (cleanup removes it whole), so the WordPress root
   itself, any ancestor of it, and top-level paths like `/var` are rejected. See
   [wordpress-automation.md](../architecture/wordpress-automation.md#site-staging--file-transfer-wpstagingts).
+- `elevate` (default: allowed) controls whether **cleanup** may re-run a command with
+  privileges when the transport's user is not permitted to finish it. A plugin writes
+  files as the web-server user, and some land in directories only that user can write —
+  so without this, the site keeps them and grows every run. Cleanup always tries
+  unprivileged first and escalates only what survived; `wp` is never elevated. Needs
+  passwordless `sudo` for the transport's user on `local`/`ssh` (nothing at all on
+  `docker`). Set `false` on a host where that user must stay unprivileged; cleanup then
+  reports what it could not remove. See
+  [wordpress-automation.md](../architecture/wordpress-automation.md#elevated-housekeeping).
 
 ## Editions (Free / Pro)
 
@@ -184,6 +193,7 @@ Rules (enforced in
 | `HEALTHCHECK_CONCURRENCY`     | `4`     | Max sites checked at once within a product (1–32).                             |
 | `HEALTHCHECK_LOGIN_TIMEOUT_MS`| `30000` | Per-site UI-login settle budget in ms (1000–300000); raise for slow remotes.  |
 | `HEALTHCHECK_HEADED`          | `false` | Run the browser headed (visible). `npm run healthcheck:ui` sets this.          |
+| `E2E_VISIBLE_BROWSER`         | unset   | Marks a run as **watched**, which re-enables one Chromium feature so the tab keeps painting after certain navigations — without it a headed browser can go permanently blank. The `:headed` / `:ui` scripts set it; export it by hand for a direct `playwright test --headed`, or set `0` to force it off. See [wordpress-automation.md](../architecture/wordpress-automation.md#watched-runs-headed-ui-debug). |
 
 ### BackWPup storage credentials
 

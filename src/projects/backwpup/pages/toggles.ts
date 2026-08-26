@@ -21,7 +21,7 @@ import type { Locator } from "@playwright/test";
  * actually holds the value, so a click that landed on the wrong element or fired no handler fails
  * here rather than three steps later.
  *
- * This is the §3.2 locator policy's documented second exception (alongside icon-only buttons):
+ * This is the locator policy's documented second exception (alongside icon-only buttons):
  * where the accessible name genuinely does not exist, the plugin's own stable hooks and ids are used
  * instead — never structural CSS.
  */

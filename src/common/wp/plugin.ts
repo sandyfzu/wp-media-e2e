@@ -3,6 +3,7 @@ import {
   PluginNotInstalledError,
   PluginUninstallFailedError,
 } from "./errors";
+import { flushObjectCache } from "./cache";
 import { wpCli } from "./exec";
 import type { Transport } from "../config/types";
 
@@ -70,23 +71,34 @@ export async function ensurePluginDeactivated(
 
 /**
  * CLEANUP (idempotent). For Before/After hooks: uninstalls the plugin so both its files and its
- * database footprint are gone, leaving a clean baseline. Already-absent is success (no-op); a
- * genuine failure to uninstall throws {@link PluginUninstallFailedError}.
+ * database footprint are gone, leaving a clean baseline. Already-absent is success; a genuine
+ * failure to uninstall throws {@link PluginUninstallFailedError}.
+ *
+ * **The object-cache flush runs even when there was nothing to uninstall**, which is the one place
+ * this function is not a no-op on an already-absent plugin. The point of the flush is that "absent"
+ * should mean absent *to WordPress*, and the state that can outlive a removal was not necessarily
+ * written by the removal this call performed — a run that was killed between uninstall and teardown
+ * leaves exactly that. Skipping it on the cheap path would make the baseline depend on which
+ * previous run happened to end tidily. It is best-effort and cannot fail this call — see
+ * {@link flushObjectCache}, which also explains why it is a no-op on a cell with no persistent
+ * cache, as ours are expected to be.
  */
 export async function ensurePluginAbsent(
   transport: Transport,
   slug: string,
 ): Promise<void> {
-  if (!(await isPluginInstalled(transport, slug))) return;
-  // Deactivate first, as its own WP-CLI call — see the module doc for why `uninstall
-  // --deactivate` can't be trusted to run the plugin's cleanup.
-  await ensurePluginDeactivated(transport, slug);
-  // Fires the uninstall procedure (DB cleanup) and deletes the files; exit code is ambiguous,
-  // so re-assert removal below.
-  await wpCli(transport, ["plugin", "uninstall", slug]);
   if (await isPluginInstalled(transport, slug)) {
-    throw new PluginUninstallFailedError(slug);
+    // Deactivate first, as its own WP-CLI call — see the module doc for why `uninstall
+    // --deactivate` can't be trusted to run the plugin's cleanup.
+    await ensurePluginDeactivated(transport, slug);
+    // Fires the uninstall procedure (DB cleanup) and deletes the files; exit code is ambiguous,
+    // so re-assert removal below.
+    await wpCli(transport, ["plugin", "uninstall", slug]);
+    if (await isPluginInstalled(transport, slug)) {
+      throw new PluginUninstallFailedError(slug);
+    }
   }
+  await flushObjectCache(transport);
 }
 
 /**

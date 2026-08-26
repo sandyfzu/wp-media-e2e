@@ -3,10 +3,9 @@ import type { Locator, Page } from "@playwright/test";
 
 import { setToggle } from "./toggles";
 import { waitForRest } from "../support/rest";
-import { expectPanelOpen } from "./panels";
-
-/** A top-level file area the plugin can include in a files backup. */
-export type FileArea = "root" | "content" | "plugins" | "themes" | "uploads";
+import { expectPanelClosed, expectPanelOpen } from "./panels";
+import { FILE_AREAS, fileAreaOption } from "../support/job-options";
+import type { FileArea } from "../support/job-options";
 
 /**
  * Page object for the two data-selection panes: **Select Files** and **Select Tables**.
@@ -111,10 +110,10 @@ export class DataSelectionSidebar {
    * The include-checkbox for one file area.
    *
    * Field names are the plugin's own long-standing option keys (`backuproot`, `backupcontent`, …),
-   * which is why the {@link FileArea} union maps onto them here rather than exposing raw names.
+   * shared with the job-option reader so the UI and the stored state cannot name them differently.
    */
   private fileAreaInput(area: FileArea): Locator {
-    return this.filesContainer.locator(`[name="backup${area}"]`);
+    return this.filesContainer.locator(`[name="${fileAreaOption(area)}"]`);
   }
 
   /** Includes or excludes a whole file area from the backup. Idempotent. */
@@ -123,7 +122,7 @@ export class DataSelectionSidebar {
     // The plugin renders these as sr-only checkboxes with a styled sibling; the enclosing label is
     // the visible proxy (see toggles.ts).
     const proxy = this.filesContainer
-      .locator(`label:has([name="backup${area}"])`)
+      .locator(`label:has([name="${fileAreaOption(area)}"])`)
       .first();
     await setToggle(proxy, input, included);
   }
@@ -134,6 +133,38 @@ export class DataSelectionSidebar {
     included: boolean,
   ): Promise<void> {
     await expect(this.fileAreaInput(area)).toBeChecked({ checked: included });
+  }
+
+  /**
+   * Asserts every file area is included — as **one** retrying assertion.
+   *
+   * Filters the five areas' checkboxes to the unchecked ones and requires that set to be empty, so
+   * a failure reports how many areas were left out instead of stopping at the first. The mirror of
+   * {@link expectAllTablesSelected}, and the same reason: five sequential assertions cost five
+   * round-trips and hide the second failure behind the first.
+   *
+   * **The count of areas is asserted first, and that half is not decoration.** "No unchecked box"
+   * is also true of a pane holding no boxes at all, so on its own it would pass against a panel
+   * that failed to render — the one outcome this assertion most needs to catch.
+   *
+   * @param options.timeout - budget for each assertion, in ms.
+   */
+  async expectAllFileAreasIncluded(
+    options: { timeout?: number } = {},
+  ): Promise<void> {
+    const budget =
+      options.timeout === undefined ? {} : { timeout: options.timeout };
+    const areas = (suffix: string): string =>
+      FILE_AREAS.map(
+        (area) => `[name="${fileAreaOption(area)}"]${suffix}`,
+      ).join(", ");
+    await expect(this.filesContainer.locator(areas(""))).toHaveCount(
+      FILE_AREAS.length,
+      budget,
+    );
+    await expect(
+      this.filesContainer.locator(areas(":not(:checked)")),
+    ).toHaveCount(0, budget);
   }
 
   /**
@@ -220,6 +251,61 @@ export class DataSelectionSidebar {
     return this.tableList.locator(`[name="tabledb[]"][value="${table}"]`);
   }
 
+  /** Includes or excludes one table from the database dump. Idempotent. */
+  async setTableIncluded(table: string, included: boolean): Promise<void> {
+    // Same shape as every other switch here: an sr-only input inside a visible label (toggles.ts).
+    const proxy = this.tableList
+      .locator(`label:has([name="tabledb[]"][value="${table}"])`)
+      .first();
+    await setToggle(proxy, this.tableCheckbox(table), included);
+  }
+
+  /** Asserts whether one table is included in the dump. */
+  async expectTableIncluded(table: string, included: boolean): Promise<void> {
+    await expect(this.tableCheckbox(table)).toBeChecked({ checked: included });
+  }
+
+  /**
+   * Asserts the selection a **new** job starts with: every table of this WordPress install is in,
+   * and any other table sharing the database is out.
+   *
+   * That is the plugin's actual rule, not "everything is ticked" — `select-tables.php` ticks a
+   * table only if its name *contains* `$wpdb->prefix`, so a database shared with another
+   * application legitimately starts with the foreign tables unticked. Asserting the blunt version
+   * would pass only by accident on a database that happens to hold nothing else.
+   *
+   * **Contains, not starts-with, and the difference is the plugin's own.** `select-tables.php`
+   * decides with `strstr()`, so `legacy_wp_posts` counts as this install's table and ships ticked;
+   * a starts-with test would call that a failure. (The *job option* disagrees:
+   * `class-jobtype-dbdump.php` builds its default exclusion list with `strncmp()`, a true prefix
+   * test. This method asserts the screen, so it follows the screen's rule.)
+   *
+   * The population is asserted first for the same reason as
+   * {@link expectAllFileAreasIncluded}: "nothing unticked" is trivially true of an empty list.
+   *
+   * @param prefix - this install's table prefix, from `wp db prefix`. Never hard-code it: a site
+   * not using the default would otherwise be asserted against the wrong set entirely.
+   * @param options.timeout - budget for each assertion, in ms.
+   */
+  async expectDefaultTableSelection(
+    prefix: string,
+    options: { timeout?: number } = {},
+  ): Promise<void> {
+    const budget =
+      options.timeout === undefined ? {} : { timeout: options.timeout };
+    const ours = `[name="tabledb[]"][value*="${prefix}"]`;
+    await expect(this.tableList.locator(ours)).not.toHaveCount(0, budget);
+    await expect(this.tableList.locator(`${ours}:not(:checked)`)).toHaveCount(
+      0,
+      budget,
+    );
+    await expect(
+      this.tableList.locator(
+        `[name="tabledb[]"]:not([value*="${prefix}"]):checked`,
+      ),
+    ).toHaveCount(0, budget);
+  }
+
   /** Filters the table list by name. */
   async filterTables(query: string): Promise<void> {
     const search = this.tablesContainer.locator('[name="filter_tables"]');
@@ -266,8 +352,12 @@ export class DataSelectionSidebar {
    * Filters to the unchecked checkboxes and requires that set to be empty, so a failure reports how
    * many tables were left out. The baseline's N-iteration loop instead asserted each box in turn,
    * which cost N round-trips and reported only the first mismatch.
+   *
+   * The list is required to be non-empty first — an empty one satisfies "nothing is unticked"
+   * without a single table having been checked.
    */
   async expectAllTablesSelected(): Promise<void> {
+    await expect(this.tableCheckboxes).not.toHaveCount(0);
     // `:not(:checked)` is part of the selector, NOT a nested `.locator()` call: nesting it would
     // search the checkboxes' *descendants*, which inputs never have — so the count would be 0 for any
     // input at all and the assertion could never fail.
@@ -287,5 +377,41 @@ export class DataSelectionSidebar {
       waitForRest(this.page, "save_excluded_tables"),
       this.tablesContainer.locator("#save-excluded-tables").click(),
     ]);
+  }
+
+  // ── Dismissing ───────────────────────────────────────────────────────────────
+
+  /** One of the two panes, by name. */
+  private pane(pane: "files" | "tables"): Locator {
+    return pane === "files" ? this.filesContainer : this.tablesContainer;
+  }
+
+  /**
+   * Dismisses a pane without saving, via its header's ✕.
+   *
+   * Needed because these panes are read as often as they are edited: a scenario checking what a
+   * job *currently* covers must leave the screen as it found it, and "save" is not a neutral way
+   * to close something. The control works on both screens — it is bound at page load for the
+   * onboarding's pre-rendered panes and re-bound by the fetch handler for a job screen's.
+   *
+   * @param pane - which pane's header to close from.
+   */
+  async close(pane: "files" | "tables"): Promise<void> {
+    await this.pane(pane).locator(".js-backwpup-close-sidebar").first().click();
+    await this.expectClosed(pane);
+  }
+
+  /**
+   * Asserts a pane has been dismissed.
+   *
+   * Also the completion signal after a **save**: both save handlers close the sidebar themselves on
+   * success, so a caller that saves and then acts on the page underneath needs to know the aside
+   * has moved out of the way rather than assume it.
+   *
+   * The signal is the panel leaving the viewport, **not** it being hidden: closing parks the whole
+   * aside off-screen and leaves the panes visible (see {@link expectPanelClosed}).
+   */
+  async expectClosed(pane: "files" | "tables"): Promise<void> {
+    await expectPanelClosed(this.pane(pane));
   }
 }

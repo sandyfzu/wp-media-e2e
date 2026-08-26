@@ -23,6 +23,29 @@ import type {
  * to *run* the command at all — missing binary, unreachable SSH host, killed by a signal —
  * throws, because that is an environment fault, not a command outcome.
  *
+ * **Some housekeeping cannot be done as the transport's user at all**, and that is not a
+ * misconfiguration to work around. A plugin writes files as the *web-server* user; when it also
+ * creates a directory only that user can write (BackWPup's restore area is `0755 www-data`), nothing
+ * else can unlink inside it, and the site keeps that data for every scenario that ever ran. So this
+ * layer offers {@link execElevated} — the same file+args dispatch, run with privileges — plus
+ * {@link elevationSupport} so a caller can ask before relying on it.
+ *
+ * Elevation is deliberately **narrow**, because a test suite holding root is only safe while what it
+ * does with it is boring:
+ *
+ *  - **Only ever housekeeping.** Removing leftover files, clearing `debug.log`. Never `wp`: WP-CLI
+ *    refuses to run as root without `--allow-root`, and files it created as root would be unwritable
+ *    by the web server afterwards — the suite would break the site it is testing. {@link wpCli} has
+ *    no way to request it, which is what makes that rule structural rather than a convention.
+ *  - **Never on the path a scenario asserts against.** Elevation cannot make a product behaviour
+ *    pass; it only removes what the product left behind after the verdict is in.
+ *  - **Attempted second, never first.** Callers try as themselves and escalate only when the
+ *    unprivileged attempt demonstrably failed, so a correctly-permissioned host never runs anything
+ *    as root.
+ *  - **Never interactive.** `sudo -n` fails immediately rather than waiting on a password prompt, so
+ *    a host without passwordless sudo reports that instead of hanging a run.
+ *  - **Refusable per site** (`transport.elevate: false`), and reported once per target when used.
+ *
  * Running a command is not enough on its own: WP-CLI reads files from the **site's**
  * filesystem, so anything a test hands to `wp` (a plugin zip, a WXR import, a DB dump) must
  * exist there first. {@link copyIntoTarget} is that missing primitive, per transport
@@ -80,31 +103,57 @@ async function runLocal(
   file: string,
   args: string[],
   options: ExecOptions,
+  elevate: boolean,
 ): Promise<ExecResult> {
-  const result = await execa(file, args, {
+  const [command, commandArgs] = elevate
+    ? ["sudo", sudoArgv(file, args)]
+    : [file, args];
+  const result = await execa(command, commandArgs, {
     reject: false,
     cwd: options.cwd ?? transport.rootDir,
   });
-  return fromExeca(file, result);
+  return fromExeca(command, result);
 }
 
-/** The `docker` argv (after the `docker` binary) to run `file args…` inside a running container. */
+/**
+ * The `docker` argv (after the `docker` binary) to run `file args…` inside a running container.
+ *
+ * `asRoot` is how elevation works for this transport: the wp-cli containers run as `www-data`
+ * (`user: "33:33"` in the compose file) so that files WP-CLI creates match the web server's
+ * ownership, which leaves the same gap an SSH user has. `-u 0:0` is the answer rather than `sudo`,
+ * because the official `wordpress:cli` image has no sudo binary — and there is nothing to escalate
+ * *to*: the daemon already runs as root, so this only chooses which user it hands the process.
+ */
 export function dockerArgv(
   container: string,
   file: string,
   args: string[],
+  options: { readonly asRoot?: boolean } = {},
 ): string[] {
-  return ["exec", container, file, ...args];
+  const asRoot = options.asRoot === true ? ["-u", "0:0"] : [];
+  return ["exec", ...asRoot, container, file, ...args];
+}
+
+/**
+ * The `sudo` argv (after the `sudo` binary) that runs `file args…` with privileges.
+ *
+ * `-n` never prompts — a host without passwordless sudo fails the call instead of blocking a run on
+ * a password nobody will type. `--` ends sudo's own option parsing, so a target command or argument
+ * beginning with `-` can never be read as a flag to sudo itself.
+ */
+export function sudoArgv(file: string, args: string[]): string[] {
+  return ["-n", "--", file, ...args];
 }
 
 async function runDocker(
   transport: DockerTransport,
   file: string,
   args: string[],
+  elevate: boolean,
 ): Promise<ExecResult> {
   const result = await execa(
     "docker",
-    dockerArgv(transport.container, file, args),
+    dockerArgv(transport.container, file, args, { asRoot: elevate }),
     { reject: false },
   );
   return fromExeca(`docker exec ${transport.container} ${file}`, result);
@@ -140,10 +189,14 @@ async function runSsh(
   file: string,
   args: string[],
   options: ExecOptions,
+  elevate: boolean,
 ): Promise<ExecResult> {
   const ssh = await connection(transport);
+  const [command, commandArgs] = elevate
+    ? ["sudo", sudoArgv(file, args)]
+    : [file, args];
   // node-ssh `exec` shell-escapes `args`, so this is injection-safe.
-  const result = await ssh.exec(file, args, {
+  const result = await ssh.exec(command, commandArgs, {
     cwd: options.cwd ?? transport.rootDir,
     stream: "both",
   });
@@ -159,20 +212,20 @@ async function runSsh(
   };
 }
 
-/** Runs `file args…` through the transport and returns its {@link ExecResult}. */
-export function exec(
+function dispatch(
   transport: Transport,
   file: string,
   args: string[],
-  options: ExecOptions = {},
+  options: ExecOptions,
+  elevate: boolean,
 ): Promise<ExecResult> {
   switch (transport.mode) {
     case "local":
-      return runLocal(transport, file, args, options);
+      return runLocal(transport, file, args, options, elevate);
     case "docker":
-      return runDocker(transport, file, args);
+      return runDocker(transport, file, args, elevate);
     case "ssh":
-      return runSsh(transport, file, args, options);
+      return runSsh(transport, file, args, options, elevate);
     default: {
       // Exhaustiveness: assigning to `never` makes an unhandled transport mode a compile error.
       const exhaustive: never = transport;
@@ -183,13 +236,158 @@ export function exec(
   }
 }
 
-/** Runs WP-CLI (`wp args…`) through the transport. The primary entry point for the WP layer. */
+/** Runs `file args…` through the transport, as the transport's own user. */
+export function exec(
+  transport: Transport,
+  file: string,
+  args: string[],
+  options: ExecOptions = {},
+): Promise<ExecResult> {
+  return dispatch(transport, file, args, options, false);
+}
+
+/**
+ * Runs WP-CLI (`wp args…`) through the transport. The primary entry point for the WP layer.
+ *
+ * Never elevated, and deliberately unable to be: see this module's header for why running WP-CLI as
+ * root would damage the site under test.
+ */
 export function wpCli(
   transport: Transport,
   args: string[],
   options?: ExecOptions,
 ): Promise<ExecResult> {
   return exec(transport, "wp", args, options);
+}
+
+// ── Elevation ────────────────────────────────────────────────────────────────
+
+/**
+ * Whether this target can run a privileged housekeeping command.
+ *
+ *  - `available` — it can, and {@link execElevated} will work.
+ *  - `unavailable` — the host has no passwordless `sudo` for the transport's user (or no `sudo` at
+ *    all). Cleanup reports what it could not remove instead of escalating.
+ *  - `disabled` — the site declared `transport.elevate: false`.
+ */
+export type ElevationSupport = "available" | "unavailable" | "disabled";
+
+/**
+ * Probe results, keyed per target so a runner talking to several sites asks each one once.
+ *
+ * Cached because the answer is a property of the host, not of the call — and one wasted `sudo -n
+ * true` per cleanup, on every scenario, is a round-trip nobody gets anything for.
+ */
+const elevationProbes = new Map<string, ElevationSupport>();
+
+/** Targets already reported as escalating, so the notice below is printed once each. */
+const elevationNotices = new Set<string>();
+
+/**
+ * Identity of a target for the caches above. `local` is keyed by its WordPress root rather than
+ * globally: passwordless sudo is really a property of the machine and user, so this asks at most one
+ * extra time per site, and in exchange one site's answer is never attributed to another's.
+ */
+function elevationKey(transport: Transport): string {
+  switch (transport.mode) {
+    case "ssh":
+      return `ssh:${connectionKey(transport)}`;
+    case "docker":
+      return `docker:${transport.container}`;
+    case "local":
+      return `local:${transport.rootDir}`;
+    default: {
+      const exhaustive: never = transport;
+      throw new Error(
+        `[wp/exec] unsupported transport: ${JSON.stringify(exhaustive)}`,
+      );
+    }
+  }
+}
+
+/** How a target is described in elevation messages — enough to identify it, no secrets. */
+function describeTarget(transport: Transport): string {
+  switch (transport.mode) {
+    case "ssh":
+      return `${transport.username}@${transport.host}`;
+    case "docker":
+      return `container ${transport.container}`;
+    case "local":
+      return transport.rootDir;
+    default: {
+      const exhaustive: never = transport;
+      throw new Error(
+        `[wp/exec] unsupported transport: ${JSON.stringify(exhaustive)}`,
+      );
+    }
+  }
+}
+
+/**
+ * Whether {@link execElevated} can be used against this target — asked before escalating, so a
+ * caller can report the *reason* cleanup is stuck rather than a bare permission error.
+ *
+ * `docker` needs no probe: the daemon runs as root, so `-u 0:0` is a choice of user rather than an
+ * escalation, and it cannot be refused by the container. Otherwise this runs `sudo -n true` once per
+ * target. A missing `sudo` binary makes the probe *throw* on `local` (execa cannot start it) and
+ * exit non-zero over `ssh`; both mean the same thing here, so both answer `unavailable`.
+ */
+export async function elevationSupport(
+  transport: Transport,
+): Promise<ElevationSupport> {
+  if (transport.elevate === false) return "disabled";
+  if (transport.mode === "docker") return "available";
+
+  const key = elevationKey(transport);
+  const cached = elevationProbes.get(key);
+  if (cached !== undefined) return cached;
+
+  const support = await exec(transport, "sudo", ["-n", "true"])
+    .then(({ exitCode }): ElevationSupport =>
+      exitCode === 0 ? "available" : "unavailable",
+    )
+    .catch((): ElevationSupport => "unavailable");
+  elevationProbes.set(key, support);
+  return support;
+}
+
+/**
+ * Runs `file args…` with privileges — for housekeeping only, under the limits in this module's
+ * header.
+ *
+ * Callers are expected to have tried unprivileged first and to have checked
+ * {@link elevationSupport}; this does not probe, so a target without sudo simply returns sudo's own
+ * non-zero result. The first use against a target is announced once, because a suite quietly running
+ * commands as root would be the wrong kind of surprise.
+ *
+ * @throws Error if the site declared `transport.elevate: false` — the opt-out is authoritative, so
+ * it fails loudly here rather than being silently ignored by a caller that forgot to check.
+ * `async` so that refusal arrives as a rejection like every other failure from this layer, rather
+ * than as a synchronous throw a caller would have to guard differently.
+ */
+export async function execElevated(
+  transport: Transport,
+  file: string,
+  args: string[],
+  options: ExecOptions = {},
+): Promise<ExecResult> {
+  if (transport.elevate === false) {
+    throw new Error(
+      `[wp/exec] refusing to run "${file}" with elevated privileges: this site declares ` +
+        "`transport.elevate: false`. Remove that to allow privileged cleanup, or make the paths " +
+        "in question writable by the transport's user.",
+    );
+  }
+  const key = elevationKey(transport);
+  if (!elevationNotices.has(key)) {
+    elevationNotices.add(key);
+    console.info(
+      `[wp/exec] using elevated privileges on ${describeTarget(transport)} for housekeeping the ` +
+        "transport's user is not permitted to do — removing files the web server owns, or reading " +
+        "its debug.log. Only housekeeping is ever elevated; WP-CLI never is.",
+    );
+  }
+  return dispatch(transport, file, args, options, true);
 }
 
 /** Closes all cached SSH connections. Call from a worker-teardown fixture. */

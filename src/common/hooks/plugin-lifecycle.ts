@@ -1,6 +1,11 @@
-import { DebugLogFatalError, PluginActivationFailedError } from "../wp/errors";
+import {
+  DebugLogFatalError,
+  PluginActivationFailedError,
+  SiteResidueRemovalFailedError,
+} from "../wp/errors";
 import { clearDebugLog, scanDebugLog } from "../wp/log";
 import { ensurePluginAbsent, isPluginActive } from "../wp/plugin";
+import { prepareSiteDataDirs, removeSiteResidue } from "../wp/residue";
 import { stageAndInstallPlugin } from "../wp/staging";
 import { errorMessage } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
@@ -14,7 +19,8 @@ import type { Transport } from "../config/types";
  *
  * Two operations, mirroring the hook pair:
  *  - {@link installPluginUnderTest} — scope the log, guarantee a clean baseline, install.
- *  - {@link teardownPluginUnderTest} — judge what PHP wrote, then restore the baseline.
+ *  - {@link teardownPluginUnderTest} — judge what PHP wrote, then restore the baseline: remove the
+ *    plugin *and* the data it left on disk, which its uninstall deliberately keeps.
  */
 
 /**
@@ -96,16 +102,24 @@ export function extendedTimeout(current: number): number {
  * scenario assumes an *active* plugin at that slug, and without this check a silent
  * non-activation would surface much later as a baffling UI failure.
  *
+ * Last, the plugin's own **data directories are opened to both users** that share this site's
+ * docroot. On a real cell WP-CLI and the web server are different users, and whichever of them
+ * creates one of those directories first would otherwise lock the other out of it — see
+ * {@link prepareSiteDataDirs} for the fatal that caused.
+ *
  * @param transport - the target site's transport.
  * @param artifact - the resolved artifact under test. Its `slug` addresses the plugin without
  * knowing the edition, and its `zipPath` is staged onto the site first — a runner path means
  * nothing to a remote `wp`.
- * @throws Error if the removal or the install fails, or
+ * @param residue - the product's declared data paths (`ProductConfig.siteResidue`), the same list the
+ * teardown clears. Defaults to none, so a product that declares nothing pays nothing.
+ * @throws Error if the removal, the install or the directory preparation fails, or
  * {@link PluginActivationFailedError} if the plugin is not active afterwards.
  */
 export async function installPluginUnderTest(
   transport: Transport,
   artifact: ResolvedArtifact,
+  residue: readonly string[] = [],
 ): Promise<void> {
   await clearDebugLog(transport);
   await ensurePluginAbsent(transport, artifact.slug);
@@ -113,6 +127,10 @@ export async function installPluginUnderTest(
   if (!(await isPluginActive(transport, artifact.slug))) {
     throw new PluginActivationFailedError(artifact.slug);
   }
+  // After the install, because a fresh install is what removes the previous scenario's copy of these
+  // directories; before any scenario step, because the first writer is otherwise whoever gets there
+  // first. See `prepareSiteDataDirs` for the failure this prevents.
+  await prepareSiteDataDirs(transport, residue);
 }
 
 /**
@@ -130,29 +148,40 @@ export interface ScenarioReport {
 }
 
 /**
- * Closes out a plugin scenario: judge what PHP wrote to `debug.log`, then remove the plugin.
+ * Closes out a plugin scenario: judge what PHP wrote to `debug.log`, remove the plugin, then clear
+ * the data it left on disk.
  *
- * Both duties always run, and the **debug-log verdict wins** when both fail — it is a statement
- * about the product under test, whereas a cleanup failure is about the environment. A cleanup
- * failure is never merely swallowed though: it is thrown when it is the only failure (a site left
- * with a half-removed plugin would break every later scenario on this worker for a reason none of
- * them can explain), and logged when a fatal already claimed the verdict.
+ * **All three duties always run, whatever the ones before them did.** That independence is the
+ * point of the third: uninstalling a plugin does not delete the files it wrote — nor should it, for
+ * a real user — so a suite that reinstalls per scenario accumulates them until the cell runs out of
+ * disk. Skipping the sweep because the uninstall failed would lose exactly the runs most likely to
+ * have left a mess behind.
  *
- * The log is judged **as the scenario left it**, before cleanup, so the verdict is about the
- * scenario and not about this hook's own uninstall. A removal the scenario itself performs is a
- * step, so it falls inside that window and is judged normally.
+ * When more than one fails, the **debug-log verdict wins**: it is a statement about the product
+ * under test, whereas a cleanup failure is about the environment. Cleanup failures are never merely
+ * swallowed though — the first is thrown when no fatal claimed the verdict (a site left with a
+ * half-removed plugin breaks later scenarios for a reason none of them can explain), and logged when
+ * one did. The exception is leftover data the transport's user is not *permitted* to remove, which
+ * is reported rather than thrown — see {@link sweepResidue}.
+ *
+ * The log is judged **as the scenario left it**, before any cleanup, so the verdict is about the
+ * scenario and not about this hook's own work. A removal the scenario itself performs is a step, so
+ * it falls inside that window and is judged normally.
  *
  * @param transport - the target site's transport.
  * @param slug - the plugin slug to remove; from the resolved artifact, so no edition branching.
  * @param options - the product's `debug.log` scan preset (`ignore` / `source` patterns).
+ * @param residue - the product's declared leftover paths, relative to the WordPress root. Empty
+ * for a product that leaves nothing behind, which then costs nothing.
  * @param report - the scenario's result and attachment sink.
- * @throws {@link DebugLogFatalError} when PHP logged a fatal, else whatever
- * {@link ensurePluginAbsent} threw when cleanup was the only failure.
+ * @throws {@link DebugLogFatalError} when PHP logged a fatal, else the first cleanup failure —
+ * from {@link ensurePluginAbsent}, or from a residue path that is not a usable declaration.
  */
 export async function teardownPluginUnderTest(
   transport: Transport,
   slug: string,
   options: ScanDebugLogOptions,
+  residue: readonly string[],
   report: ScenarioReport,
 ): Promise<void> {
   let failure: Error | undefined;
@@ -163,19 +192,68 @@ export async function teardownPluginUnderTest(
     failure = toError(error);
   }
 
-  try {
-    await ensurePluginAbsent(transport, slug);
-  } catch (error) {
-    if (failure === undefined) {
-      failure = toError(error);
-    } else {
-      console.error(
-        `[hooks] cleanup also failed while reporting the debug.log fatal above: ${errorMessage(error)}`,
-      );
+  /** Runs one cleanup duty, keeping the first failure and logging any that a verdict outranks. */
+  const cleanUp = async (duty: () => Promise<void>): Promise<void> => {
+    try {
+      await duty();
+    } catch (error) {
+      if (failure === undefined) {
+        failure = toError(error);
+      } else {
+        console.error(
+          `[hooks] a cleanup step also failed, after the failure reported above: ${errorMessage(error)}`,
+        );
+      }
     }
-  }
+  };
+
+  await cleanUp(() => ensurePluginAbsent(transport, slug));
+  await cleanUp(() => sweepResidue(transport, residue, report));
 
   if (failure !== undefined) throw failure;
+}
+
+/**
+ * Clears the product's leftovers, treating "the transport user is not allowed to" as a fact about
+ * the environment rather than a failure of the scenario.
+ *
+ * The split matters, and it is between two different kinds of wrong:
+ *
+ *  - **A path that survives removal** is almost always ownership: plugins write as the web-server
+ *    user, and a directory that user created without group/other write cannot have its contents
+ *    unlinked by whoever WP-CLI runs as. Removal escalates for exactly that reason, so reaching here
+ *    means privileges did not close the gap either — the site cannot escalate, or something other
+ *    than permissions is holding the paths. Nothing the scenario did caused it and nothing it does
+ *    can fix it, and unlike a half-removed plugin it breaks no later scenario. Failing every run over
+ *    it would be a poor trade, so it is warned about, with the next step in the message.
+ *  - **Anything else** — a path that is not a usable residue declaration, a transport that cannot
+ *    run a command — is a defect in our own configuration or environment setup, and is thrown so it
+ *    is dealt with.
+ *
+ * The warning still reaches the report: a passing scenario prints it, a failing one carries it as an
+ * attachment, so a cell quietly accumulating data cannot go unnoticed for long.
+ */
+async function sweepResidue(
+  transport: Transport,
+  residue: readonly string[],
+  report: ScenarioReport,
+): Promise<void> {
+  try {
+    await removeSiteResidue(transport, residue);
+  } catch (error) {
+    if (!(error instanceof SiteResidueRemovalFailedError)) throw error;
+    // The error already names every survivor and the next step for this site's elevation state, so
+    // this adds only what it cannot know: which scenario left them behind.
+    const message = `[hooks] after "${report.title}": ${error.message}`;
+    console.warn(message);
+    await report
+      .attach("uncleared-site-data", message)
+      .catch((attachError: unknown) => {
+        console.warn(
+          `[hooks] could not attach the uncleared-data report: ${errorMessage(attachError)}`,
+        );
+      });
+  }
 }
 
 /**

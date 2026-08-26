@@ -6,15 +6,16 @@ import { waitForRest } from "../support/rest";
 import { STORAGE_LABELS } from "./storages";
 import type { StorageSlug } from "./storages";
 import { expectPanelOpen } from "./panels";
+import type { BasicFrequency } from "./frequency.sidebar";
 
 /**
- * Page object for BackWPup's onboarding wizard.
+ * Page object for BackWPup's onboarding.
  *
- * **The wizard is its own admin page, `admin.php?page=backwpuponboarding`.** While the site option
+ * **Onboarding is its own admin page, `admin.php?page=backwpuponboarding`.** While the site option
  * `backwpup_onboarding` is set, every other `page=backwpup*` request is redirected here
  * (`inc/class-admin.php:272-282`), and the page is only registered at all while that option is set
- * (`:676`). So {@link goto} targets the wizard directly: navigating to `page=backwpup` and asserting
- * on what appears would be asserting against a redirect, and would break silently the moment
+ * (`:676`). So {@link goto} targets the onboarding page directly: navigating to `page=backwpup` and
+ * asserting on what appears would be asserting against a redirect, and would break silently the moment
  * onboarding is already complete.
  *
  * The three steps live in **one form** (`#backwpup-onboarding-form`) as sibling panes; moving
@@ -28,15 +29,26 @@ import { expectPanelOpen } from "./panels";
 export class OnboardingPage {
   constructor(private readonly page: Page) {}
 
-  /** Navigate to the wizard. Only reachable while `backwpup_onboarding` is set. */
+  /** Navigate to the onboarding page. Only reachable while `backwpup_onboarding` is set. */
   async goto(): Promise<void> {
     await this.page.goto("/wp-admin/admin.php?page=backwpuponboarding");
   }
 
   /**
-   * Asserts the wizard is showing, rather than the dashboard or a redirect target.
+   * Asserts the browser is on onboarding's **own** admin page.
    *
-   * Checks the wizard's own heading *and* that the form is present, so a page that merely happens
+   * Separate from {@link expectLoaded} because it answers a different question: not "is onboarding
+   * rendered?" but "is this the page we ended up on?" — which is what proves the plugin redirected
+   * a request for another BackWPup screen here while onboarding is pending.
+   */
+  async expectAtOnboardingPage(): Promise<void> {
+    await expect(this.page).toHaveURL(/[?&]page=backwpuponboarding(?:&|$)/);
+  }
+
+  /**
+   * Asserts the onboarding page is showing, rather than the dashboard or a redirect target.
+   *
+   * Checks onboarding's own heading *and* that the form is present, so a page that merely happens
    * to contain the words cannot satisfy it.
    */
   async expectLoaded(): Promise<void> {
@@ -50,7 +62,7 @@ export class OnboardingPage {
 
   // ── Step navigation ──────────────────────────────────────────────────────────
 
-  /** The wizard's form — the shared container for all three steps. */
+  /** The onboarding form — the shared container for all three steps. */
   private get form(): Locator {
     return this.page.locator("#backwpup-onboarding-form");
   }
@@ -74,8 +86,25 @@ export class OnboardingPage {
    * not a network call, because this transition is purely client-side.
    */
   async continueToSchedule(): Promise<void> {
-    await this.pane(1).locator(".js-backwpup-onboarding-step-2").click();
+    await this.continueButton.click();
     await this.expectOnStep(2);
+  }
+
+  /** Step 1's "Save & Continue". */
+  private get continueButton(): Locator {
+    return this.pane(1).locator(".js-backwpup-onboarding-step-2");
+  }
+
+  /**
+   * Asserts whether onboarding will let the user leave the data step.
+   *
+   * A real product rule, not a styling detail: turning both Files and Database off leaves nothing
+   * to back up, so the plugin disables "Save & Continue" until at least one is on again.
+   */
+  async expectCanContinueToSchedule(allowed: boolean): Promise<void> {
+    await (allowed
+      ? expect(this.continueButton).toBeEnabled()
+      : expect(this.continueButton).toBeDisabled());
   }
 
   /** Advances step 2 → step 3 ("Save & Continue") and waits for step 3 to be showing. */
@@ -143,7 +172,7 @@ export class OnboardingPage {
    *
    * `getblock` is the completion signal: `load_and_open_sidebar` fetches the panel body and only
    * reveals the sidebar in that call's success handler, so the request is what proves the panel is on
-   * its way. This differs from the storage tiles in the same wizard, which fire no request at all —
+   * its way. This differs from the storage tiles on the same page, which fire no request at all —
    * see {@link openStorageSettings}.
    */
   async openDataSelection(kind: "files" | "database"): Promise<void> {
@@ -176,7 +205,7 @@ export class OnboardingPage {
   /** Sets how often files / the database are backed up, and asserts the choice stuck. */
   async setFrequency(
     kind: "files" | "database",
-    frequency: "hourly" | "daily" | "weekly" | "monthly",
+    frequency: BasicFrequency,
   ): Promise<void> {
     const select = this.frequencySelect(kind);
     await select.selectOption(frequency);
@@ -184,24 +213,64 @@ export class OnboardingPage {
   }
 
   /**
+   * Asserts what the onboarding form currently shows for files / the database.
+   *
+   * About the *form*, not about the site: nothing is saved until onboarding is submitted, so this is
+   * how a scenario checks that stepping back and forth did not lose a choice.
+   */
+  async expectFrequency(
+    kind: "files" | "database",
+    frequency: BasicFrequency,
+  ): Promise<void> {
+    await expect(this.frequencySelect(kind)).toHaveValue(frequency);
+  }
+
+  /**
+   * The job id step 2 allocated for `kind`, read from that kind's own frequency field.
+   *
+   * Step 2 renders its two halves from `$first_job_id` / `$second_job_id`, ids allocated per site
+   * (`class-page-onboarding.php` reserves `first_backup_job_id + 1` and `+ 2`), so they cannot be
+   * hard-coded. But the pair is discoverable: the frequency `<select>` names itself
+   * `job_<id>_frequency`, and the "Advanced settings" button beside it carries the same id in
+   * `data-job-id`. Reading the id off the select — which {@link frequencySelect} already reaches by
+   * the plugin's own semantic class — is therefore what ties the two controls to one job.
+   */
+  private async frequencyJobId(kind: "files" | "database"): Promise<string> {
+    const field = await this.frequencySelect(kind).getAttribute("name");
+    const jobId = /^job_(\d+)_frequency$/.exec(field ?? "")?.[1];
+    if (jobId === undefined) {
+      throw new Error(
+        `[backwpup/onboarding] the ${kind} frequency field is named "${field ?? "(absent)"}", ` +
+          "which does not carry a job id. Step 2 is expected to render it as " +
+          "`job_<id>_frequency`; re-capture the onboarding fixture if the plugin changed it.",
+      );
+    }
+    return jobId;
+  }
+
+  /**
    * Opens the advanced frequency sidebar for files or the database (step 2's "Advanced settings").
    *
-   * Both step-2 buttons share `data-content="frequency"` and differ only by the job id they carry, so
-   * they are addressed positionally within the pane — files first, database second, the order the
-   * plugin renders them and the only distinction available. Measured against the captured markup:
-   * exactly two exist.
+   * **Addressed by job id, not by position.** Both step-2 buttons share `data-content="frequency"`
+   * and differ only by `data-job-id`, so picking the first or the second would leave the
+   * files-versus-database mapping resting on render order — and nothing downstream re-checks it: the
+   * scenario that uses this sidebar asserts each job's own schedule, which is exactly the assertion
+   * that would be meaningless if this method opened the other job's panel. {@link frequencyJobId}
+   * takes the id from the same kind's frequency field, so the button and the dropdown are provably
+   * the same job's.
    *
    * `getblock` is the completion signal, and the sidebar's body genuinely arrives that way — its
    * container ships empty (see {@link FrequencySidebar}), so a visibility check alone would pass
    * against an empty shell.
    */
   async openAdvancedFrequency(kind: "files" | "database"): Promise<void> {
-    const index = kind === "files" ? 0 : 1;
+    const jobId = await this.frequencyJobId(kind);
     await Promise.all([
       waitForRest(this.page, "getblock"),
       this.pane(2)
-        .locator('.js-backwpup-load-and-open-sidebar[data-content="frequency"]')
-        .nth(index)
+        .locator(
+          `.js-backwpup-load-and-open-sidebar[data-content="frequency"][data-job-id="${jobId}"]`,
+        )
         .click(),
     ]);
     await expectPanelOpen(this.page.locator("#sidebar-frequency"));
@@ -236,7 +305,7 @@ export class OnboardingPage {
    *
    * **No REST barrier here, deliberately.** The same `js-backwpup-toggle-storage` class is bound to
    * two different handlers: on the dashboard it runs `load_and_open_storage`, which *fetches* the form
-   * over `getblock`; in the wizard every provider's panel is already pre-rendered in the page, so the
+   * over `getblock`; during onboarding every provider's panel is already pre-rendered in the page, so the
    * click merely reveals it and no request is made. Verified live — requiring a `getblock` response
    * here timed out even though the panel opened correctly. Visibility is therefore the honest signal.
    */
@@ -267,7 +336,7 @@ export class OnboardingPage {
    * Suitable for destinations that need no credentials — in practice the local **Website Server**
    * (`FOLDER`), which every credential-free scenario uses. A cloud provider needs its fields filled
    * between the two steps, so those scenarios call {@link openStorageSettings} and
-   * {@link saveStorageSettings} around their own `fill`s (6H.2).
+   * {@link saveStorageSettings} around their own `fill`s.
    */
   async selectStorage(slug: StorageSlug): Promise<void> {
     await this.openStorageSettings(slug);
@@ -283,7 +352,7 @@ export class OnboardingPage {
   }
 
   /**
-   * Asserts a destination is offered as a **locked Pro upsell** rather than a usable option (V2).
+   * Asserts a destination is offered as a **locked Pro upsell** rather than a usable option.
    *
    * Only ever true on a Free build: on Pro `$locked_pro_slugs` is empty and every destination is
    * selectable. The locked entry is a plain `<li>`, not a `<button>`, which is what makes it
@@ -306,26 +375,28 @@ export class OnboardingPage {
 
   // ── Completion ───────────────────────────────────────────────────────────────
 
-  /** The wizard's final submit ("Save & Continue" on step 3). */
+  /** Onboarding's final submit ("Save & Continue" on step 3). */
   private get submitButton(): Locator {
     return this.pane(3).locator(".js-backwpup-onboarding-submit-form");
   }
 
   /**
-   * Asserts the wizard cannot be submitted yet.
+   * Asserts whether onboarding can be submitted.
    *
    * The submit button ships `disabled` and the plugin enables it once at least one destination is
    * chosen, so this is a real product rule worth asserting rather than an implementation detail.
    */
-  async expectCannotSubmit(): Promise<void> {
-    await expect(this.submitButton).toBeDisabled();
+  async expectCanSubmit(allowed: boolean): Promise<void> {
+    await (allowed
+      ? expect(this.submitButton).toBeEnabled()
+      : expect(this.submitButton).toBeDisabled());
   }
 
   /**
-   * Submits the wizard and waits for it to have left the wizard behind.
+   * Submits onboarding and waits for the site to have left it behind.
    *
    * Completion deletes the `backwpup_onboarding` option, after which this page no longer exists —
-   * so the honest signal is that the wizard's own form is gone. The plugin also starts the first
+   * so the honest signal is that onboarding's own form is gone. The plugin also starts the first
    * backup immediately on save (step 2 says so in as many words), which is why callers that care
    * about that backup should wait on it explicitly rather than assuming this returned after it.
    */

@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import {
+  chmodSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -9,7 +10,15 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { copyIntoTarget, dockerCpArgv, wpRootDir } from "./exec";
+import {
+  copyIntoTarget,
+  dockerArgv,
+  dockerCpArgv,
+  elevationSupport,
+  execElevated,
+  sudoArgv,
+  wpRootDir,
+} from "./exec";
 import type { DockerTransport, LocalTransport } from "../config/types";
 
 // The transfer primitive and the WP-root resolution are exercised on the `local` transport
@@ -100,5 +109,157 @@ test.describe("copyIntoTarget — local transport", () => {
     await expect(
       copyIntoTarget(local, join(workDir, "absent.txt"), target),
     ).rejects.toThrow(/could not copy .*absent\.txt.*to .*x\.txt/s);
+  });
+});
+
+/**
+ * Elevation, split the way the code is: the **invocation** is pure argv and checked as such, while
+ * the **capability probe** is exercised against a fake `sudo` on `PATH`.
+ *
+ * The fake is not a security stand-in — it exists so the escalation policy can be observed on a
+ * machine that has no passwordless root, which is most of them. Each test gets its own WordPress
+ * root because probe results are cached per target.
+ */
+
+/** Answers the `sudo -n true` probe, then runs the command; `FAKE_SUDO_DENY=1` refuses everything. */
+const FAKE_SUDO = `#!/usr/bin/env bash
+if [ "$FAKE_SUDO_DENY" = "1" ]; then exit 1; fi
+[ "$1" = "-n" ] && shift
+[ "$1" = "--" ] && shift
+if [ "$1" = "true" ]; then exit 0; fi
+exec "$@"
+`;
+
+let sudoDir: string;
+let sudoPath: string;
+
+test.beforeAll(() => {
+  sudoDir = mkdtempSync(join(tmpdir(), "wp-fake-sudo-"));
+  writeFileSync(join(sudoDir, "sudo"), FAKE_SUDO);
+  chmodSync(join(sudoDir, "sudo"), 0o755);
+  sudoPath = `${sudoDir}:${process.env.PATH ?? ""}`;
+});
+
+test.afterAll(() => {
+  rmSync(sudoDir, { recursive: true, force: true });
+});
+
+/** A fresh `local` transport, so each test probes rather than reading another's cached answer. */
+function freshLocal(elevate?: boolean): LocalTransport {
+  const rootDir = mkdtempSync(join(tmpdir(), "wp-elevate-root-"));
+  return {
+    mode: "local",
+    rootDir,
+    ...(elevate === undefined ? {} : { elevate }),
+  };
+}
+
+test.describe("sudoArgv", () => {
+  test("never prompts, and stops sudo parsing the command's own flags", () => {
+    expect(sudoArgv("rm", ["-rf", "/var/www/html/site/x"])).toEqual([
+      "-n",
+      "--",
+      "rm",
+      "-rf",
+      "/var/www/html/site/x",
+    ]);
+  });
+});
+
+test.describe("dockerArgv", () => {
+  test("runs as the container's own user by default", () => {
+    expect(dockerArgv("wpme-wpcli-nginx", "rm", ["-rf", "/x"])).toEqual([
+      "exec",
+      "wpme-wpcli-nginx",
+      "rm",
+      "-rf",
+      "/x",
+    ]);
+  });
+
+  // `sudo` is not an option here: the official `wordpress:cli` image does not ship it, and the
+  // daemon is already root — so elevation is a choice of user, made by the client.
+  test("asRoot selects uid 0 rather than shelling out to sudo", () => {
+    expect(
+      dockerArgv("wpme-wpcli-nginx", "rm", ["-rf", "/x"], { asRoot: true }),
+    ).toEqual(["exec", "-u", "0:0", "wpme-wpcli-nginx", "rm", "-rf", "/x"]);
+  });
+});
+
+test.describe("elevationSupport", () => {
+  test("docker is always available: `-u 0:0` cannot be refused", async () => {
+    const docker: DockerTransport = { mode: "docker", container: "never-run" };
+    expect(await elevationSupport(docker)).toBe("available");
+  });
+
+  // No command may run for this: a site that opted out must not be probed at all, which is also
+  // what makes the answer safe to trust on an unreachable host.
+  test("a site declaring elevate:false is disabled, without probing", async () => {
+    const original = process.env.PATH;
+    process.env.PATH = "/nonexistent";
+    try {
+      expect(await elevationSupport(freshLocal(false))).toBe("disabled");
+    } finally {
+      process.env.PATH = original;
+    }
+  });
+
+  test("a passwordless sudo answers available", async () => {
+    const original = process.env.PATH;
+    process.env.PATH = sudoPath;
+    try {
+      expect(await elevationSupport(freshLocal())).toBe("available");
+    } finally {
+      process.env.PATH = original;
+    }
+  });
+
+  test("a sudo that refuses answers unavailable", async () => {
+    const original = process.env.PATH;
+    process.env.PATH = sudoPath;
+    process.env.FAKE_SUDO_DENY = "1";
+    try {
+      expect(await elevationSupport(freshLocal())).toBe("unavailable");
+    } finally {
+      process.env.PATH = original;
+      delete process.env.FAKE_SUDO_DENY;
+    }
+  });
+
+  // A host with no sudo binary makes the probe throw rather than exit non-zero (execa cannot start
+  // it). That means the same thing, so it must not escape as an error from a cleanup path.
+  test("a missing sudo binary answers unavailable rather than throwing", async () => {
+    const emptyBin = mkdtempSync(join(tmpdir(), "wp-no-sudo-"));
+    const original = process.env.PATH;
+    process.env.PATH = emptyBin;
+    try {
+      expect(await elevationSupport(freshLocal())).toBe("unavailable");
+    } finally {
+      process.env.PATH = original;
+      rmSync(emptyBin, { recursive: true, force: true });
+    }
+  });
+
+  test("the probe is cached per target", async () => {
+    const original = process.env.PATH;
+    const transport = freshLocal();
+    process.env.PATH = sudoPath;
+    try {
+      expect(await elevationSupport(transport)).toBe("available");
+      // Same transport, no sudo reachable: a second probe would now answer differently.
+      process.env.PATH = "/nonexistent";
+      expect(await elevationSupport(transport)).toBe("available");
+    } finally {
+      process.env.PATH = original;
+    }
+  });
+});
+
+test.describe("execElevated", () => {
+  // The opt-out is authoritative: a caller that forgot to check must fail, not quietly escalate.
+  test("refuses a site that declared elevate:false", async () => {
+    await expect(
+      execElevated(freshLocal(false), "rm", ["-rf", "/tmp/nothing"]),
+    ).rejects.toThrow(/elevate: false/);
   });
 });

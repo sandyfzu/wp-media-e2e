@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { BackupHistoryTable } from "./backup-history.table";
 import { DashboardPage } from "./dashboard.page";
 import { DataSelectionSidebar } from "./data-selection.sidebar";
+import { FirstBackupPage } from "./first-backup.page";
 import { FrequencySidebar } from "./frequency.sidebar";
 import { OnboardingPage } from "./onboarding.page";
 import { StorageSidebar } from "./storage.sidebar";
@@ -30,12 +32,12 @@ import { FIXTURE_STYLES } from "./__fixtures__/styles";
  *
  * **The sidebar fixtures come in pairs, one per screen, and that is not redundancy.** BackWPup loads
  * every panel into one `#backwpup-sidebar` aside, but *which* panels are populated — and under which
- * root — depends on whether `backwpup_onboarding` is set. The wizard fills `#sidebar-select-files` and
+ * root — depends on whether `backwpup_onboarding` is set. Onboarding fills `#sidebar-select-files` and
  * `#sidebar-select-tables` directly and leaves `#sidebar-storages` empty; a job card fills
  * `#sidebar-settings-data-type` (with both data panes nested inside it) and leaves those two articles
  * **permanently empty**. A single fixture can only ever describe one of those worlds, which is exactly
  * how the empty-shell trap in {@link DataSelectionSidebar} went unnoticed. So:
- * `sidebars-onboarding.html` is the wizard's aside, `sidebars-dashboard.html` is a job screen's, and
+ * `sidebars-onboarding.html` is onboarding's aside, `sidebars-dashboard.html` is a job screen's, and
  * the two describes below assert each against the object that has to serve both.
  *
  * **Assertions are count-based, not visibility-based.** The fixtures carry the plugin's markup but
@@ -47,14 +49,16 @@ import { FIXTURE_STYLES } from "./__fixtures__/styles";
  * there — see `frequency.sidebar.ts`'s `close()`.) Resolving to exactly one element is the property
  * that actually matters for a locator and is the one a static fixture can honestly prove.
  *
- * **Re-capturing:** run `npm run fixtures:capture` (`capture-backwpup-fixtures.ts`). It installs the
- * plugin on the configured cell, walks the wizard and then the dashboard, and writes every fixture
- * here from the live DOM — stripping `<svg>`/`<script>`/`<style>` and replacing three classes of
+ * **Re-capturing:** run `npm run fixtures:capture` (`capture-backwpup-fixtures.ts`). It removes any
+ * existing BackWPup **including its options**, installs the plugin fresh on the configured cell,
+ * walks onboarding and then the dashboard, and writes every fixture here from the live DOM — stripping `<svg>`/`<script>`/`<style>` and replacing three classes of
  * per-capture noise: the site's hostname (`wordpress.test`), WordPress's nonces (`0000000000`), and
  * credential-shaped field values (`REDACTED`, because a storage panel renders saved settings — even a
  * decrypted FTP password — straight into `value` attributes). Nothing else is edited, and the script
- * refuses to write a file with an un-sanitised nonce still in it. The directory is in
- * `.prettierignore` precisely so nothing reflows the markup afterwards — a reformat would break the
+ * refuses to write a file with an un-sanitised nonce still in it. The fresh install matters as much
+ * as the sanitising: capturing over a site that has been driven before records *that run's* job
+ * settings — an excluded file area, say — as if they were the shape of a new install. The directory
+ * is in `.prettierignore` precisely so nothing reflows the markup afterwards — a reformat would break the
  * "nobody edited this" guarantee and let a Prettier upgrade masquerade as plugin drift.
  *
  * Current captures: **BackWPup Pro 5.7.5** (latest stable). `parts/` and `components/` are
@@ -72,16 +76,51 @@ const DASHBOARD = fixture("dashboard.html");
 /** The `#backwpup-sidebar` aside + `#backwpup-modal`, once per screen — see the header. */
 const SIDEBARS_ONBOARDING = fixture("sidebars-onboarding.html");
 const SIDEBARS_DASHBOARD = fixture("sidebars-dashboard.html");
+/** The screen onboarding hands over to, captured at its first render — mid-run, panel still hidden. */
+const FIRST_BACKUP = fixture("first-backup.html");
 
 /** Every storage the pickers offer, in the order the plugin renders them. */
 const ALL_STORAGES = Object.keys(STORAGE_LABELS) as StorageSlug[];
+
+/**
+ * Reveals one captured sidebar pane, exactly as the plugin's own `openSidebar()` does.
+ *
+ * The sidebar fixtures were captured with the aside closed, so every article carries an inline
+ * `display: none` — faithful to the page at that moment, and the reason a *click* assertion cannot
+ * run against them untouched. Only that one inline property is cleared; the markup is otherwise the
+ * capture, so the locators still have to earn their match.
+ */
+async function revealPane(page: Page, selector: string): Promise<void> {
+  await page.locator(selector).evaluate((element: HTMLElement) => {
+    element.style.display = "";
+  });
+}
+
+/**
+ * Renames one captured table checkbox, standing in for a table the capture's database cannot hold.
+ *
+ * The `value` **attribute** is what the selectors match, so it is what changes here; `:checked`
+ * keeps reflecting the property the capture set, which is the point — the table stays ticked and
+ * only its name moves.
+ */
+async function renameTable(
+  page: Page,
+  from: string,
+  to: string,
+): Promise<void> {
+  await page
+    .locator(`[name="tabledb[]"][value="${from}"]`)
+    .evaluate((input, name: string) => {
+      input.setAttribute("value", name);
+    }, to);
+}
 
 test.describe("OnboardingPage — locator contract", () => {
   test.beforeEach(async ({ page }) => {
     await page.setContent(ONBOARDING);
   });
 
-  test("the wizard's heading and all three step panes resolve", async ({
+  test("onboarding's heading and all three step panes resolve", async ({
     page,
   }) => {
     const onboarding = new OnboardingPage(page);
@@ -190,9 +229,13 @@ test.describe("OnboardingPage — locator contract", () => {
     await expect(page.getByLabel("Frequency")).toHaveCount(0);
   });
 
-  test("step 2's two advanced-frequency triggers resolve positionally", async ({
+  test("each advanced-frequency trigger pairs with its own frequency select by job id", async ({
     page,
   }) => {
+    // What `openAdvancedFrequency` rests on: the "Advanced settings" button beside a kind's
+    // frequency field carries the same job id that field names itself with. Asserted against
+    // captured markup, so a build that renames either half fails here instead of silently opening
+    // the other job's panel — which no scenario assertion downstream could tell apart.
     const onboarding = new OnboardingPage(page);
     await expect(
       onboarding
@@ -201,6 +244,28 @@ test.describe("OnboardingPage — locator contract", () => {
           '.js-backwpup-load-and-open-sidebar[data-content="frequency"]',
         ),
     ).toHaveCount(2);
+
+    const ids: string[] = [];
+    for (const kind of ["files", "database"] as const) {
+      const field = await onboarding.frequencySelect(kind).getAttribute("name");
+      const jobId = /^job_(\d+)_frequency$/.exec(field ?? "")?.[1];
+      expect(
+        jobId,
+        `the ${kind} frequency field names its job id`,
+      ).toBeDefined();
+      await expect(
+        onboarding
+          .pane(2)
+          .locator(
+            `.js-backwpup-load-and-open-sidebar[data-content="frequency"][data-job-id="${jobId ?? ""}"]`,
+          ),
+        `the ${kind} advanced-settings trigger`,
+      ).toHaveCount(1);
+      ids.push(jobId ?? "");
+    }
+    // Distinct ids: a build that pointed both halves at one job would satisfy every assertion above
+    // while making the two-job scenarios meaningless.
+    expect(new Set(ids).size, "files and database are different jobs").toBe(2);
   });
 
   test("every storage tile resolves, with its hidden checkbox", async ({
@@ -238,8 +303,8 @@ test.describe("OnboardingPage — locator contract", () => {
   test("on a Pro build nothing is locked, so no upsell markup is present", async ({
     page,
   }) => {
-    // The captured fixture is a Pro render. Locked entries are a Free-only rendering (V2), which is
-    // why expectStorageLocked can only be exercised on a Free cell (6I).
+    // The captured fixture is a Pro render. Locked entries are a Free-only rendering, which is
+    // why expectStorageLocked can only be exercised on a Free cell.
     await expect(page.locator("li.js-backwpup-locked-storage")).toHaveCount(0);
     for (const slug of PRO_ONLY_STORAGES) {
       await expect(
@@ -249,12 +314,19 @@ test.describe("OnboardingPage — locator contract", () => {
     }
   });
 
-  test("the wizard's submit ships disabled until a storage is chosen", async ({
+  test("onboarding's submit ships disabled until a storage is chosen", async ({
     page,
   }) => {
     await expect(
       page.locator(".js-backwpup-onboarding-submit-form"),
     ).toBeDisabled();
+  });
+
+  // The other side of the same product rule: with something to back up, step 1 lets the user leave.
+  // The plugin disables this button only once both data types are off, which onboarding never ships.
+  test("step 1 ships able to continue", async ({ page }) => {
+    const onboarding = new OnboardingPage(page);
+    await onboarding.expectCanContinueToSchedule(true);
   });
 });
 
@@ -309,7 +381,7 @@ test.describe("DashboardPage — locator contract", () => {
     ).toHaveCount(1);
   });
 
-  // Two exist in the page header — a labelled one and an icon-only one for narrow viewports (V7).
+  // Two exist in the page header — a labelled one and an icon-only one for narrow viewports.
   // Both must be found by the trigger class, since the icon-only one has no accessible name at all.
   //
   // `:not(#backwpup-sidebar *)` excludes the aside, where five more carry the same `data-content`:
@@ -334,7 +406,7 @@ test.describe("DashboardPage — locator contract", () => {
   test("the icon-only variant genuinely has no accessible name", async ({
     page,
   }) => {
-    // Justifies V7's documented exception: were this to gain a name, the trigger class could go.
+    // Justifies the locator policy's icon-only exception: were this to gain a name, the trigger class could go.
     // Same scoping as above — and `and()` is how a role locator gets constrained to a subtree here.
     const named = page
       .getByRole("button", { name: "Advanced settings" })
@@ -457,7 +529,7 @@ test.describe("BackupHistoryTable — a real captured row", () => {
   test("the row's per-backup actions resolve", async ({ page }) => {
     const row = new BackupHistoryTable(page).newestRow;
     // View log and Delete open modals identified by data-content; Download has its own trigger
-    // class; Restore is located by the modal it opens, because its label is data-driven (V13).
+    // class; Restore is located by the modal it opens, because its label is data-driven.
     await expect(row.locator('[data-content="backup-log"]')).not.toHaveCount(0);
     await expect(row.locator('[data-content="delete-backup"]')).not.toHaveCount(
       0,
@@ -489,7 +561,7 @@ test.describe("BackupHistoryTable — the failure branch", () => {
   // No failed backup exists on the cell to capture, so this reproduces the row template's failure
   // branch (`components/table-row-backups.php`: `.backwpup-failure-icon` plus the
   // "%1$s backup failed – %2$s" message) to prove the POM filters on the plugin's own marker rather
-  // than on row text. 6D provokes a real failure and asserts it end to end.
+  // than on row text. A scenario that provokes a real failure asserts it end to end.
   const MIXED = `<table id="backwpup-backup-history"><tbody>
     <tr data-backup-id="11"><td>ok</td></tr>
     <tr data-backup-id="12"><td><span class="backwpup-failure-icon"></span><span>Website Server backup failed – disk full</span></td></tr>
@@ -517,13 +589,13 @@ test.describe("BackupHistoryTable — the failure branch", () => {
   });
 });
 
-test.describe("Sidebars — the wizard's aside", () => {
+test.describe("Sidebars — onboarding's aside", () => {
   test.beforeEach(async ({ page }) => {
     await page.setContent(SIDEBARS_ONBOARDING);
   });
 
   test("both data panes fill their own top-level article", async ({ page }) => {
-    // The wizard asks for these blocks by name, so each lands in the article named after it. This is
+    // Onboarding asks for these blocks by name, so each lands in the article named after it. This is
     // the shape `DataSelectionSidebar` must handle *in addition to* the job-screen one below.
     const sidebar = new DataSelectionSidebar(page);
     await expect(sidebar.filesContainer).toHaveCount(1);
@@ -609,8 +681,119 @@ test.describe("Sidebars — the wizard's aside", () => {
     expect(await sidebar.tableCheckboxes.count()).toBeGreaterThan(0);
   });
 
-  test("the storage picker ships EMPTY in the wizard", async ({ page }) => {
-    // `storages.php` returns early while `backwpup_onboarding` is set, so the wizard has no picker at
+  // The defaults a new job starts from, which the first three onboarding scenarios assert before
+  // touching anything. Pinning them here means a build that changes them fails as one clear unit
+  // test rather than as three unrelated scenario failures.
+  test("a new job ships with every file area and every table included", async ({
+    page,
+  }) => {
+    const sidebar = new DataSelectionSidebar(page);
+    await sidebar.expectAllFileAreasIncluded();
+    // The capture's site uses the stock prefix and holds nothing else, so both halves of the rule
+    // are exercised: every `wp_` table ticked, nothing outside the prefix ticked.
+    await sidebar.expectDefaultTableSelection("wp_");
+  });
+
+  // A negative check on the same assertions: they must actually be able to fail. A selector that
+  // matched nothing would satisfy `toHaveCount(0)` forever — the exact defect a post-implementation
+  // audit found in an earlier `expectAllTablesSelected`.
+  test("the default-selection assertions fail when a box is unticked", async ({
+    page,
+  }) => {
+    await page.setContent(FIXTURE_STYLES + SIDEBARS_ONBOARDING);
+    await revealPane(page, "#sidebar-select-files");
+    await revealPane(page, "#sidebar-select-tables");
+    const sidebar = new DataSelectionSidebar(page);
+
+    await sidebar.setFileAreaIncluded("plugins", false);
+    await expect(
+      sidebar.expectAllFileAreasIncluded({ timeout: 500 }),
+    ).rejects.toThrow();
+
+    await sidebar.setTableIncluded("wp_options", false);
+    await expect(
+      sidebar.expectDefaultTableSelection("wp_", { timeout: 500 }),
+    ).rejects.toThrow();
+  });
+
+  // The rule is `strstr()`, not a prefix test: `select-tables.php` ticks any table whose name
+  // *contains* the prefix. The capture's database holds only `wp_*` tables, so the distinction is
+  // invisible here until a table is renamed into it — which is exactly how a starts-with selector
+  // passed review and would have failed on a site with, say, a `legacy_wp_*` table.
+  test("a table that merely contains the prefix counts as this install's", async ({
+    page,
+  }) => {
+    await page.setContent(FIXTURE_STYLES + SIDEBARS_ONBOARDING);
+    await revealPane(page, "#sidebar-select-tables");
+    await renameTable(page, "wp_options", "legacy_wp_options");
+    await new DataSelectionSidebar(page).expectDefaultTableSelection("wp_", {
+      timeout: 2000,
+    });
+  });
+
+  // The half the capture cannot exercise on its own: with every table prefixed, "no foreign table
+  // is ticked" is vacuously true. One renamed table is enough to prove the assertion has teeth.
+  test("a foreign table left ticked fails the default-selection check", async ({
+    page,
+  }) => {
+    await page.setContent(FIXTURE_STYLES + SIDEBARS_ONBOARDING);
+    await revealPane(page, "#sidebar-select-tables");
+    await renameTable(page, "wp_options", "other_app_settings");
+    await expect(
+      new DataSelectionSidebar(page).expectDefaultTableSelection("wp_", {
+        timeout: 500,
+      }),
+    ).rejects.toThrow();
+  });
+
+  // `toHaveCount(0)` over a filtered set is satisfied by a pane that rendered nothing at all, so
+  // each of these assertions requires its population first. Without that, a panel that failed to
+  // load would report every area and every table as included.
+  test("the default-selection checks cannot pass against an empty pane", async ({
+    page,
+  }) => {
+    await page.setContent(FIXTURE_STYLES + SIDEBARS_ONBOARDING);
+    await revealPane(page, "#sidebar-select-files");
+    await revealPane(page, "#sidebar-select-tables");
+    const sidebar = new DataSelectionSidebar(page);
+    await page.evaluate(() => {
+      document
+        .querySelectorAll('input[name^="backup"], input[name="tabledb[]"]')
+        .forEach((input) => {
+          input.remove();
+        });
+    });
+
+    await expect(
+      sidebar.expectAllFileAreasIncluded({ timeout: 500 }),
+    ).rejects.toThrow();
+    await expect(
+      sidebar.expectDefaultTableSelection("wp_", { timeout: 500 }),
+    ).rejects.toThrow();
+    await expect(sidebar.expectAllTablesSelected()).rejects.toThrow();
+  });
+
+  test("Select Tables: one table can be addressed and toggled by name", async ({
+    page,
+  }) => {
+    await page.setContent(FIXTURE_STYLES + SIDEBARS_ONBOARDING);
+    await revealPane(page, "#sidebar-select-tables");
+    const sidebar = new DataSelectionSidebar(page);
+    const table = "wp_options";
+    await expect(sidebar.tableCheckbox(table)).toHaveCount(1);
+
+    await sidebar.setTableIncluded(table, false);
+    await sidebar.expectTableIncluded(table, false);
+    // Idempotent, like every other toggle: asking again must not tick it back on.
+    await sidebar.setTableIncluded(table, false);
+    await sidebar.expectTableIncluded(table, false);
+
+    await sidebar.setTableIncluded(table, true);
+    await sidebar.expectTableIncluded(table, true);
+  });
+
+  test("the storage picker ships EMPTY during onboarding", async ({ page }) => {
+    // `storages.php` returns early while `backwpup_onboarding` is set, so onboarding has no picker at
     // all — its destinations are tiles in step 3 instead. A scenario that opened `StorageSidebar` here
     // would find a container that resolves and never fills.
     const sidebar = new StorageSidebar(page);
@@ -621,7 +804,7 @@ test.describe("Sidebars — the wizard's aside", () => {
   test("every provider panel is pre-rendered, with its save-and-test trigger", async ({
     page,
   }) => {
-    // All eleven, not a subset: the wizard renders every provider's form into the page up front, which
+    // All eleven, not a subset: onboarding renders every provider's form into the page up front, which
     // is why `OnboardingPage.openStorageSettings` fires no request.
     const sidebar = new StorageSidebar(page);
     for (const slug of ALL_STORAGES) {
@@ -635,16 +818,16 @@ test.describe("Sidebars — the wizard's aside", () => {
 
   test("no provider panel offers 'Back to Storages' here", async ({ page }) => {
     // The back link is emitted only when a panel is rendered with `is_in_form === false`, which only
-    // happens when the dashboard's picker fetches it. In the wizard `storage-*.php` forces
+    // happens when the dashboard's picker fetches it. During onboarding `storage-*.php` forces
     // `is_in_form = true` (its empty-`job_id` fallback), so the link can never appear — see the
     // job-screen counterpart below.
     await expect(
       page.locator('[data-content="storages"]'),
-      "wizard provider panels must have no route back to a picker that does not exist",
+      "onboarding provider panels must have no route back to a picker that does not exist",
     ).toHaveCount(0);
   });
 
-  test("panels the wizard suppresses are present but empty", async ({
+  test("panels onboarding suppresses are present but empty", async ({
     page,
   }) => {
     // Each of these returns early while onboarding is set. They resolve, so a presence check would
@@ -659,12 +842,12 @@ test.describe("Sidebars — the wizard's aside", () => {
       await expect(page.locator(`#${id}`), `${id} exists`).toHaveCount(1);
       await expect(
         page.locator(`#${id}`).locator("*"),
-        `${id} is empty in the wizard`,
+        `${id} is empty during onboarding`,
       ).toHaveCount(0);
     }
   });
 
-  test("Frequency: the wizard does NOT offer 'Triggered by link'", async ({
+  test("Frequency: onboarding does NOT offer 'Triggered by link'", async ({
     page,
   }) => {
     // `frequency.php:62-64` appends `link` only when `backwpup_onboarding` is unset. This is the
@@ -695,7 +878,7 @@ test.describe("Sidebars — a job screen's aside", () => {
     page,
   }) => {
     // The trap this fixture exists for. Both resolve — a presence or visibility check passes — and
-    // neither is ever filled on this screen, because only the wizard requests those blocks by name.
+    // neither is ever filled on this screen, because only onboarding requests those blocks by name.
     for (const id of ["sidebar-select-files", "sidebar-select-tables"]) {
       await expect(page.locator(`#${id}`), `${id} exists`).toHaveCount(1);
       await expect(
@@ -805,7 +988,7 @@ test.describe("Sidebars — a job screen's aside", () => {
     page,
   }) => {
     // The dashboard uses `storage-item.php`: the checkbox lives in `js-backwpup-select-storage`, and
-    // `js-backwpup-toggle-storage` is the *gear* beside it. The wizard uses `onboarding/storage-item.php`,
+    // `js-backwpup-toggle-storage` is the *gear* beside it. Onboarding uses `onboarding/storage-item.php`,
     // where one button is both. So `StorageSidebar.storageToggle` resolves to the gear here — which is
     // right for `openSettings`, and is why selecting a destination is not the same click on the two screens.
     const sidebar = new StorageSidebar(page);
@@ -857,7 +1040,7 @@ test.describe("Sidebars — a job screen's aside", () => {
   test("Advanced settings and its sub-panels are populated here", async ({
     page,
   }) => {
-    // The mirror image of the wizard: these are the panels onboarding suppresses.
+    // The mirror image of onboarding's aside: these are the panels onboarding suppresses.
     for (const id of [
       "sidebar-advanced-settings",
       "sidebar-settings-jobs",
@@ -914,7 +1097,7 @@ test.describe("Strict-mode guard — every click target resolves to exactly one 
     ],
     [
       "onboarding.html",
-      "wizard submit",
+      "onboarding submit",
       "#backwpup-onboarding-panes .js-backwpup-onboarding-submit-form",
     ],
     [
@@ -948,7 +1131,7 @@ test.describe("Strict-mode guard — every click target resolves to exactly one 
       "Backup Now → Start",
       "#sidebar-backup-now .js-backwpup-start-backup-now",
     ],
-    // Scoped to the wizard capture on purpose: on a job screen these two articles are empty shells and
+    // Scoped to the onboarding capture on purpose: on a job screen these two articles are empty shells and
     // the same submits live inside `#sidebar-settings-data-type` instead.
     [
       "sidebars-onboarding.html",
@@ -1072,5 +1255,59 @@ test.describe("Restore modal — the confirm button's real label", () => {
         .locator("#sidebar-delete-failed-backup")
         .getByRole("button", { name: /^Delete (Backup|Entry)$/ }),
     ).toHaveCount(1);
+  });
+});
+
+test.describe("FirstBackupPage — locator contract", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.setContent(FIRST_BACKUP);
+  });
+
+  // The **only** place these two markers are asserted. The page object deliberately does not check
+  // them on the live page: the plugin may navigate away from this screen on its own the moment the
+  // first backup finishes, so a retrying DOM assertion there races a correct behaviour (see
+  // `FirstBackupPage`). A captured fixture has no clock, so it can hold them honestly.
+  test("the page's heading and its job-id field resolve", async ({ page }) => {
+    await expect(
+      page
+        .getByRole("heading", { name: "We are creating a backup of your site" })
+        .first(),
+    ).toBeVisible();
+    await expect(page.locator("#backwpup_first_backup_job_id")).toBeAttached();
+  });
+
+  // The reason the assertion above takes `.first()`: the progress box titles itself with the page's
+  // own heading, so a running job puts two matching headings on screen. Here the box is still
+  // hidden, so only one is in the accessibility tree — which is exactly how the trap stays invisible
+  // until the day a scenario is a little slower.
+  test("the progress box reuses the page heading, so two exist in the markup", async ({
+    page,
+  }) => {
+    await expect(
+      page.locator("h1", { hasText: "We are creating a backup of your site" }),
+    ).toHaveCount(2);
+    await expect(
+      page.locator("#runningjob #backupgeneration-progress-box-title"),
+    ).toHaveCount(1);
+  });
+
+  test("the congratulations panel is present but hidden while the job runs", async ({
+    page,
+  }) => {
+    const firstBackup = new FirstBackupPage(page);
+    await expect(firstBackup.congratulations).toHaveCount(1);
+    // Presence proves nothing here — the template ships it with an inline `display: none` and the
+    // progress poller reveals it. This is what makes a wait on it a wait on the plugin's JavaScript.
+    await expect(firstBackup.congratulations).toBeHidden();
+  });
+
+  // The other half of that story, and the reason the completion signal moved to WP-CLI: this page
+  // is only reached once, and re-posting `startbackup` for the same first backup is answered with a
+  // redirect to the dashboard — so a fast backup never reveals the panel above at all.
+  test("the progress region ships hidden too, revealed only while a job runs", async ({
+    page,
+  }) => {
+    await expect(page.locator("#runningjob")).toHaveCount(1);
+    await expect(page.locator("#runningjob")).toBeHidden();
   });
 });

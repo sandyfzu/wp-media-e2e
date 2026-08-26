@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { boolEnv, env, intEnv } from "../../../common/config/env";
 import { loadSites } from "../../../common/config/sites";
 import { BACKWPUP_LOG_OPTIONS } from "../support/debug-log";
+import { BACKWPUP_SITE_RESIDUE } from "../support/residue";
 import type {
   ProductArtifacts,
   ProductConfig,
@@ -103,5 +104,6 @@ export const backwpup: ProductConfig = {
   sites: loadSites(configDir),
   artifacts,
   debugLog: BACKWPUP_LOG_OPTIONS,
+  siteResidue: BACKWPUP_SITE_RESIDUE,
   services,
 };
