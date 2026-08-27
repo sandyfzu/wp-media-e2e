@@ -51,7 +51,7 @@
     "apvm-napi": "github:wp-media/automation-plugin-version-manager#cli/v3.0.0",
     "eslint": "^10.6.0",
     "eslint-config-prettier": "^10.1.8",
-    "execa": "^9.6.1",
+    "execa": "^10.0.1",
     "globals": "^17.7.0",
     "husky": "^9.1.7",
     "lint-staged": "^17.0.8",
