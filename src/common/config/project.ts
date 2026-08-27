@@ -3,7 +3,6 @@ import type { PlaywrightTestConfig, Project } from "@playwright/test";
 import { defineBddConfig } from "playwright-bdd";
 
 import { registerManifest } from "../artifacts/registry";
-import { chromiumLaunchOptions } from "./chromium";
 import { DESKTOP } from "./devices";
 import { intEnv } from "./env";
 import {
@@ -183,10 +182,6 @@ export function createProductConfig(
       trace: "retain-on-failure",
       screenshot: "only-on-failure",
       video: "retain-on-failure",
-      // Only ever non-empty for a watched run (the `:headed`/`:ui` scripts, or `--debug`): it
-      // re-enables the one Chromium feature whose absence leaves a tab permanently blank after some
-      // navigations. See `./chromium.ts` — an unattended run keeps Playwright's defaults untouched.
-      launchOptions: chromiumLaunchOptions(process.env),
     },
     projects,
   });

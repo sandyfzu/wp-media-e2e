@@ -18,16 +18,16 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 
 ## Key technologies
 
-| Area               | Tech                                                                                             |
-| ------------------ | ------------------------------------------------------------------------------------------------ |
-| Runtime            | **Node ≥ 24.16** (see `.nvmrc`), **ESM** (`"type": "module"`)                                    |
-| Language           | **TypeScript 6**, strict (`tsc` for type-checking only — Playwright transpiles via esbuild)      |
-| Browser automation | **Playwright** (`@playwright/test`), Chromium only                                               |
-| BDD                | **Cucumber/Gherkin** via **`playwright-bdd`** (`bddgen` generates specs)                         |
-| WP-CLI transport   | **execa** (local/docker), **node-ssh** (ssh)                                                     |
-| Visual diff        | **pixelmatch** + **pngjs**                                                                       |
-| Reporting          | Playwright HTML, Cucumber HTML, **Allure** (`allure`, `allure-playwright`)                       |
-| Quality            | **ESLint** (typescript-eslint, strict + type-checked), **Prettier**, **husky** + **lint-staged** |
+| Area               | Tech                                                                                                                                                            |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime            | **Node ≥ 24.16** (see `.nvmrc`), **ESM** (`"type": "module"`)                                                                                                   |
+| Language           | **TypeScript 6**, strict (`tsc` for type-checking only — Playwright transpiles via esbuild)                                                                     |
+| Browser automation | **Playwright ≥ 1.62** (`@playwright/test`), Chromium only — the floor is load-bearing, see [wordpress-automation.md](docs/architecture/wordpress-automation.md) |
+| BDD                | **Cucumber/Gherkin** via **`playwright-bdd`** (`bddgen` generates specs)                                                                                        |
+| WP-CLI transport   | **execa** (local/docker), **node-ssh** (ssh)                                                                                                                    |
+| Visual diff        | **pixelmatch** + **pngjs**                                                                                                                                      |
+| Reporting          | Playwright HTML, Cucumber HTML, **Allure** (`allure`, `allure-playwright`)                                                                                      |
+| Quality            | **ESLint** (typescript-eslint, strict + type-checked), **Prettier**, **husky** + **lint-staged**                                                                |
 
 ## Repository structure
 
@@ -81,7 +81,7 @@ npm run test:wp-rocket -- --project=<cell>    # one product, one cell
 npm run test:backwpup  -- --project=<cell>
 npm run test:wp-rocket -- --project=apache --grep @smoke   # filter by tag
 npm run test:ui                    # Playwright UI mode
-npm run test:headed                # headed browser (see below before using --headed by hand)
+npm run test:headed                # headed browser
 npm run test:unit                  # unit/integration specs (src/**/*.spec.ts)
 npm run test:unit:ui
 

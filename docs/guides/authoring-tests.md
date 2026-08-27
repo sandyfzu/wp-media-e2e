@@ -161,10 +161,19 @@ Rule 1 assumes an English admin, which the auth pre-flight asserts once per site
 locator timeouts.
 
 Every non-trivial page object gets a **locator-contract spec**: capture the real rendered markup,
-replay it through `page.setContent()`, and assert each locator resolves. See
+replay it, and assert each locator resolves. See
 [`locator-contract.spec.ts`](../../src/projects/backwpup/pages/locator-contract.spec.ts). Capture
 the fixture — never hand-write it — or the fixture drifts along with the page object and the two
 agree with each other while the real page fails.
+
+**Render captured markup through
+[`renderFixture`](../../src/projects/backwpup/pages/__fixtures__/render.ts), not `page.setContent()`
+directly.** A capture is verbatim, so it still references whatever the real page did — WordPress's
+`s.w.org` emoji images, third-party provider links — and `setContent` waits for `load`, meaning _all
+of them_. That makes the spec depend on the public internet and time out when it is slow, which is
+exactly what happened. `renderFixture` aborts every request and waits for `domcontentloaded`, which
+is the honest barrier for a spec asserting on parsed DOM. Hand-written markup with no external
+references can still use `page.setContent()` directly.
 
 ## Naming scenarios
 

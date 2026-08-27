@@ -3,8 +3,10 @@
 > **Status:** in progress — **6A, 6B and 6C are done** (verified on `pro@nginx`); 6D–6I planned;
 > **6H.2 deferred** (needs storage credentials — see §4.6H.2).
 > **Date:** 2026-07-28; revised 2026-07-30 (§2.3 re-verification at the ref; storage split),
-> 2026-07-31 (§2.5 — post-implementation audit of 6B; four corrections, all verified live) and
-> 2026-08-05 (§2.6 — 6C shipped; seven further verified facts, three of them found by failing runs).
+> 2026-07-31 (§2.5 — post-implementation audit of 6B; four corrections, all verified live),
+> 2026-08-05 (§2.6 — 6C shipped; seven further verified facts, three of them found by failing runs)
+> and 2026-08-26 (§2.8 — **V28 refuted and its cause fixed**; Playwright upgraded to 1.62.1, the 6A
+> `chromium.ts` workaround deleted, **6D unblocked**).
 > **Parent:** [e2e-modernization-plan.md](e2e-modernization-plan.md) §9, Phase 6 — this doc supersedes
 > that phase's summary. Phases 0–5 are done; Phase 6 is **feature content on finished rails**.
 > **Baseline (reference only):** `wp-rocket-e2e/src/backwpup/` — 12 feature files, 28 scenarios, ~1.6k LoC.
@@ -199,7 +201,7 @@ evidence.
 | V25 | **The default table selection is prefix-scoped, not "everything".** A new job's `dbdumpexclude` defaults to every table whose name does not carry `$wpdb->prefix`. **Refined by V29** — the screen's rule is `contains`, the job option's is `starts with`. | `parts/sidebar/select-tables.php:30-45`, `inc/class-jobtype-dbdump.php:45-58` | The baseline's "all database tables should be selected" is only true on a database holding nothing else. The port asserts the real rule via `expectDefaultTableSelection(prefix)`, with the prefix read from `wp db prefix` — a hard-coded `wp_` would assert the wrong set on any site not using the default. |
 | V26 | **`backwpup_onboarding` is written lazily, one request *after* the install.** The plugin schedules `BackWPup_Install::activate` on `init`, so a fresh install sets the flag on the first WordPress request that loads the activated plugin — not during `wp plugin install --activate`, where the plugin file is included after `init` has already fired. The redirect that enforces onboarding runs on `admin_init`, i.e. later in that same request. | `src/Plugin/Plugin.php:117-122`, `inc/class-install.php:48` + `inc/class-migrate.php:143`, `inc/class-admin.php:267-282` (+ `:1188`) | **Found as a flake**, not by reading: an early revision asserted the flag straight after the install and failed once in three runs. The Background now navigates first and asserts the flag *after* observing the redirect, which is both race-free and better coverage — it proves the fresh-install → onboarding contract from the browser and from the database at once. |
 | V27 | **The first backup is guarded by a site transient, so a *fast* one never reports itself finished in the UI.** `startbackup` sets `backwpup_first_backup` on the first `first_backup=1` call and answers every later one with `{status: 301, url: page=backwpup}`. The first-backup page posts that call, then reloads half a second later; if the job is still running the reloaded page enqueues the progress script and eventually reveals `#first-congratulations`, but if the job has already finished the script is absent, the page posts `startbackup` **again**, and the browser is redirected to the dashboard having shown nothing. | `src/Backups/API/Rest.php:335-352` (the transient + the 301), `assets/js/backwpup-admin.js:2387-2398` (both branches), `assets/js/backwpup-generate.js:44-56` (the reveal). Reproduced live: the mixed backup showed the panel, the database-only backup was redirected. | **Found by a 10-minute timeout, not by reading.** `#first-congratulations` cannot be the completion signal — waiting on it is a race against how long the site takes to back itself up. The scenarios watch WP-CLI instead: poll until the archive is in the history (the outcome, true on both paths), then a blocking `wp backwpup status` so nothing is still running when the plugin is uninstalled. `FirstBackupPage` deliberately ships **no** wait method, and its `congratulations` locator documents why — the same "a method that cannot do its job is worse than none" rule §2.5 applied to `StorageSidebar.close()`. |
-| V28 | **Nothing on the post-onboarding dashboard can be *clicked* by Playwright's normal rules, and the reason is not the locator.** A click on a job card's "Data" button parks on *"waiting for element to be visible, enabled and stable"* and never dispatches — reproduced 2/2, each time burning the scenario's full budget on a button that is on screen, enabled and demonstrably clickable. Forcing the click gets past it (`getblock` fires, the panel opens — confirmed in the page snapshot), and the **next** frame-dependent step then hangs in turn: `toBeInViewport` on the opened panel never returns an answer, while `toBeVisible` on the same element answers instantly. So it is not one control: anything on this screen that needs the page to settle or to be measured against the viewport stalls, while DOM-level reads are fine. | Traces from two runs (`test-results/.../trace.zip`): the click's call log ends at the stability check; the forced run's log shows `forcing action → click action done` and then the viewport assertion hanging. The fixture-capture tool independently hit the same wall on this screen and has always clicked here with `force: true`, documenting "Playwright's stability check can spin until it times out on a button that is perfectly clickable". | **6C's scope was cut rather than papered over.** The two steps that re-read the data selection from the job card's own panels were removed; the same claim is still asserted — from the stored job configuration, which is the stronger source anyway — so the scenario keeps its meaning. `DashboardPage`/`panels.ts` are left exactly as 6B shipped them, because a fix for this deserves to land with a green scenario behind it, and **6D owns that**: it drives the dashboard throughout (Backup Now, history rows, deletion, bulk actions) and cannot avoid solving it. Two workarounds are already known to work in part — `click({ force: true })` and asserting `#backwpup-sidebar` rather than the panel — but neither is verified end to end, so neither is shipped here. |
+| V28 | ~~**Nothing on the post-onboarding dashboard can be *clicked* by Playwright's normal rules.**~~ **Superseded — see §2.8. The observations were right; the diagnosis was wrong on both counts.** It is not the dashboard (a dashboard reached by seeding is fully clickable) and it is not BackWPup (plain WordPress does it too). The tab had stopped producing animation frames, which disables exactly the three primitives V28 named. | Superseded by §2.8. | 6C's scope cut is **reversible** — see §2.8 and §4.6D. |
 
 Re-verified while doing the above: `components/`, `pages/`, `parts/`, `inc/Utils/` and
 `inc/class-page-onboarding.php` are **identical** between the ref under test (`develop` @ `c0dd22c`,
@@ -261,6 +263,42 @@ surfaced a genuine **product** bug (V33). Only those two announced themselves at
 - **Dead API surface**: `isJobContents`/`JobContents` had no caller and no test. Removed.
 
 Every fix is covered by a test that was **confirmed to fail against the old code** before being kept.
+
+### 2.8 V28 re-investigated — it was never the dashboard, and never BackWPup
+
+V28 blocked 6D and cut two of 6C's steps. Investigated live on `pro@nginx` (2026-08-26): **every
+observation it recorded was accurate; the conclusion drawn from them was wrong on both counts.** The
+cause is a Playwright/Chromium defect that the suite's own 6A notes had already met from the other
+side and filed as cosmetic (§4.6A, "a headed browser goes permanently blank").
+
+| # | Fact | Evidence | Consequence |
+| --- | --- | --- | --- |
+| V34 | **The tab stops producing animation frames, and that is the whole of it.** `requestAnimationFrame` runs at ~61 frames/0.5s through login and all three onboarding steps, then drops to **0** at the submit and never recovers — not over the next 70s, not after navigating away, not after a reload. Timers, `evaluate`, the DOM and the network all keep working. A **new tab in the same context is clean** (61 frames). | Frame timeline through the real chain, sampled at every navigation. `page.screenshot()` hangs (8s timeout) on the wedged tab and takes 34ms on a healthy one. | Explains all three of V28's symptoms at once, because Playwright's own primitives split exactly along "needs a frame": `click()`'s `stable` check is an unbounded `rAF` loop **with no internal timeout** (`injectedScript._checkElementIsStable`), and `toBeInViewport` is an `IntersectionObserver` plus an `rAF` nudge (`viewportRatio`) — while `toBeVisible` is a synchronous layout read. Hence "parks forever", "never returns an answer", and "answers instantly", from one cause. |
+| V35 | **The dashboard is innocent.** Reached by seeding past onboarding (`wp option delete backwpup_onboarding`) in a fresh tab, it runs at 85 frames/0.7s, screenshots in 40ms, and a **real `click()` with full actionability succeeds in 45ms** — on the header control V28 said could not be clicked. | Direct probe on `pro@nginx`. | **6D is not blocked.** It seeds past onboarding anyway (§4.6C already says seeding is the right answer for 6D–6G), so it never enters a wedged tab — and with V37's fix in, nothing else does either. The two steps 6C cut are free to restore. |
+| V36 | **It is not BackWPup.** With the plugin **uninstalled**, saving WordPress's own Settings → General wedges the tab identically, and the *next* save's click then times out — the cascade V28 saw. But `wp-login.php`'s own POST → redirect never wedges, and a synthetic POST → 302 → GET does not reproduce at all: not across added latency (100/300/1000ms), nor with composited, fixed-position, transformed, sticky or 4000-node source documents. | Probes with the plugin absent, plus a local 3-route server used to bisect. | The trigger needs something the real environment supplies that was **not isolated**. Recorded as a bound on the claim, not as an open task — the fix removes the cause regardless. |
+| V37 | **Cause and fix: Playwright 1.61 disabled Chromium's `RenderDocument`; 1.62 does not.** It was added to `--disable-features` purely to unblock Playwright's own CI bots (microsoft/playwright#37715, whose own body says it "should fix `chrome-beta` failures … and unblock `chromium-tip-of-tree` rolls"; tracking issue #37714 is titled *"[internal] re-enable RenderDocument"* and is **closed**). Per the upstream fix linked on that issue, Chromium resolved the defect in **147+**; Playwright removed the line in **1.62**, and Puppeteer removed theirs in puppeteer#14745. | Read at both tags: present at `v1.61.1` `chromiumSwitches.ts:44`, absent at `v1.62.1`, rest of the list intact; absent from the installed `playwright-core` after upgrading. A/B on the real cell: 1.61 wedges at the submit, 1.62.1 holds ~61 frames throughout with **no launch flag**. | **Upgraded to Playwright 1.62.1** (Chromium 151.0.7922.34). The 6A workaround — `config/chromium.ts`, its spec, the `launchOptions` wiring and the `E2E_VISIBLE_BROWSER` exports in seven npm scripts — is **deleted**, along with the hand-copied disable list it had to keep in step with each Playwright bump. Doc floor recorded in [wordpress-automation.md](../architecture/wordpress-automation.md). |
+
+**6A's classification was the costly part, not the miss.** 6A measured the wedge correctly and even
+found the flag, but called it "a cosmetic problem — a bad deal for CI" and gated the fix behind
+`E2E_VISIBLE_BROWSER`. It is not cosmetic: the wedge reproduces **identically headless**, and it
+silently disables `click()`, `toBeInViewport()` and screenshots. 6C then met the same wedge through
+`DashboardPage`, could not connect it to a note about headed rendering, and spent its budget cutting
+scope. The lesson worth keeping: *"assertions still pass"* was never evidence the defect was cosmetic
+— it only meant the surviving assertions were the frame-independent ones.
+
+**One unrelated defect the upgrade exposed**, fixed with it: the locator-contract fixtures are
+verbatim captures, so they carry the emoji `<img>`s WordPress injects from `s.w.org` and links to
+`dropbox.com` and `console.developers.google.com`. `page.setContent()` waits for `load` — i.e. for
+**all** of them — so those 22 specs had been quietly depending on the public internet and began
+timing out under the new Chromium's timing. `__fixtures__/render.ts` now aborts every request and
+waits for `domcontentloaded`, which is the honest barrier for a spec that asserts on parsed DOM —
+none of the seven captures contains a `<script>`, so nothing about execution order changes with it.
+Its abort is swallowed deliberately: Playwright **rethrows** a route callback's error, so an abort
+still in flight when the page closes would fail whichever test is running by then. Covered by
+`render.spec.ts` (6 tests, **482 total**), whose hermeticity case serves the asset from a local
+server that counts hits and never answers — an unresolvable host would have made the test vacuous.
+Both the naive `page.setContent()` and an abort-less variant were confirmed to fail it. Hermetic, and
+the unit suite went from **1.6 min to 22.7s**.
 
 ---
 
@@ -376,7 +414,12 @@ deferred out of the sequence** — nothing downstream waits on it.
   structural alternative — running `wp` as the web-server user, as the docker transport already
   does with `user: "33:33"` — is a larger change and is not taken here.
 - **A headed browser goes permanently blank after onboarding submits, and the tests still
-  pass.** Reported while watching a run. Measured rather than guessed: `requestAnimationFrame`
+  pass.** ⚠️ **Superseded by §2.8 — the measurements below hold, the "cosmetic" verdict does not.**
+  The wedge reproduces headless too and disables `click()`, `toBeInViewport()` and screenshots; it is
+  what V28 later ran into. Fixed by upgrading to Playwright 1.62.1, and everything this bullet
+  describes (`config/chromium.ts`, `E2E_VISIBLE_BROWSER`) has been **deleted** — so read the rest in
+  the past tense; it is kept only for the measurement trail. Reported while watching a run. Measured
+  rather than guessed: `requestAnimationFrame`
   drops from 84 frames/0.7s to **0** the moment the POST → redirect → first-backup → dashboard
   chain starts, and never recovers — not on the next navigation, not on a reload, not after
   `bringToFront`. The main thread stays responsive, a new page in the same context renders, and
@@ -601,14 +644,21 @@ baseline only ever performed as *cleanup*.
 - **New:** delete a single backup; bulk-delete via `process_bulk_actions`. Cleanup stops being the
   only exercise of a user-facing destructive flow.
 
-**Two things 6C hands over, both already evidenced there:**
+**Two things 6C hands over:**
 
-- **V28 — the dashboard cannot be clicked** under Playwright's normal actionability rules, and every
-  scenario here drives it. Solve this first; 6C deliberately left `DashboardPage` and `panels.ts` as
-  6B shipped them so the fix lands with a green scenario behind it rather than on inference.
+- ~~V28 — the dashboard cannot be clicked.~~ **Cleared before this phase starts (§2.8).** The
+  dashboard was never the problem: it is fully clickable, and the wedge that looked like a dashboard
+  defect is gone with the Playwright 1.62.1 upgrade. `DashboardPage` and `panels.ts` are exactly as
+  6B shipped them and need no fix. Two consequences for this phase: it inherits **no** blocker, and
+  the two steps 6C cut (re-reading the data selection from a job card's own panels) can be
+  **restored** here — they are one `openJobSidebar` call each and would close 6C's only
+  single-sourced assertion.
 - **The archives no longer pile up** (§7) — the `@plugin` teardown sweeps them. This phase still adds
   the deletion coverage that exercises the product's *own* controls, which is a different claim: that
   a user can delete a backup, not merely that the suite can.
+
+**Seed past onboarding, don't drive it.** Every scenario here needs a site that is already set up, and
+seeding is both faster and the reason this phase never meets §2.8's wedge in the first place.
 
 **Acceptance** — history assertions agree between the DOM and `wp backwpup backup --format=json`; a
 deliberately failed backup is detected via the failed-row branch, not a substring scan.

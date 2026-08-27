@@ -18,6 +18,7 @@ import {
 } from "./storages";
 import type { StorageSlug } from "./storages";
 import { FIXTURE_STYLES } from "./__fixtures__/styles";
+import { renderFixture } from "./__fixtures__/render";
 
 /**
  * **The locator contract — this suite is the version-drift alarm.**
@@ -117,7 +118,7 @@ async function renameTable(
 
 test.describe("OnboardingPage — locator contract", () => {
   test.beforeEach(async ({ page }) => {
-    await page.setContent(ONBOARDING);
+    await renderFixture(page, ONBOARDING);
   });
 
   test("onboarding's heading and all three step panes resolve", async ({
@@ -337,7 +338,7 @@ test.describe("OnboardingPage — toggle behaviour on captured markup", () => {
   test("setDataIncluded toggles the hidden switch and is idempotent", async ({
     page,
   }) => {
-    await page.setContent(FIXTURE_STYLES + ONBOARDING);
+    await renderFixture(page, FIXTURE_STYLES + ONBOARDING);
     const onboarding = new OnboardingPage(page);
     const files = page.locator("#backup_files");
 
@@ -354,7 +355,7 @@ test.describe("OnboardingPage — toggle behaviour on captured markup", () => {
   });
 
   test("setFrequency selects and verifies the value", async ({ page }) => {
-    await page.setContent(ONBOARDING);
+    await renderFixture(page, ONBOARDING);
     const onboarding = new OnboardingPage(page);
     await onboarding.setFrequency("database", "daily");
     await expect(onboarding.frequencySelect("database")).toHaveValue("daily");
@@ -363,7 +364,7 @@ test.describe("OnboardingPage — toggle behaviour on captured markup", () => {
 
 test.describe("DashboardPage — locator contract", () => {
   test.beforeEach(async ({ page }) => {
-    await page.setContent(DASHBOARD);
+    await renderFixture(page, DASHBOARD);
   });
 
   test("the two dashboard-only headings resolve", async ({ page }) => {
@@ -447,7 +448,7 @@ test.describe("DashboardPage — locator contract", () => {
 
 test.describe("BackupHistoryTable — locator contract", () => {
   test.beforeEach(async ({ page }) => {
-    await page.setContent(DASHBOARD);
+    await renderFixture(page, DASHBOARD);
   });
 
   test("the table and its loading placeholder resolve", async ({ page }) => {
@@ -504,7 +505,7 @@ test.describe("BackupHistoryTable — a real captured row", () => {
   const HISTORY_ROW = fixture("history-row.html");
 
   test.beforeEach(async ({ page }) => {
-    await page.setContent(HISTORY_ROW);
+    await renderFixture(page, HISTORY_ROW);
   });
 
   test("the row is keyed by the plugin's backup id", async ({ page }) => {
@@ -571,7 +572,7 @@ test.describe("BackupHistoryTable — the failure branch", () => {
   test("failedRows finds the failure branch and nothing else", async ({
     page,
   }) => {
-    await page.setContent(MIXED);
+    await renderFixture(page, MIXED);
     const table = new BackupHistoryTable(page);
     await expect(table.rows).toHaveCount(3);
     await expect(table.failedRows).toHaveCount(1);
@@ -581,7 +582,7 @@ test.describe("BackupHistoryTable — the failure branch", () => {
   test("expectNoFailures fails when a failed row is present", async ({
     page,
   }) => {
-    await page.setContent(MIXED);
+    await renderFixture(page, MIXED);
     // The assertion the baseline never had: a failed backup must fail the scenario.
     await expect(
       new BackupHistoryTable(page).expectNoFailures(),
@@ -591,7 +592,7 @@ test.describe("BackupHistoryTable — the failure branch", () => {
 
 test.describe("Sidebars — onboarding's aside", () => {
   test.beforeEach(async ({ page }) => {
-    await page.setContent(SIDEBARS_ONBOARDING);
+    await renderFixture(page, SIDEBARS_ONBOARDING);
   });
 
   test("both data panes fill their own top-level article", async ({ page }) => {
@@ -700,7 +701,7 @@ test.describe("Sidebars — onboarding's aside", () => {
   test("the default-selection assertions fail when a box is unticked", async ({
     page,
   }) => {
-    await page.setContent(FIXTURE_STYLES + SIDEBARS_ONBOARDING);
+    await renderFixture(page, FIXTURE_STYLES + SIDEBARS_ONBOARDING);
     await revealPane(page, "#sidebar-select-files");
     await revealPane(page, "#sidebar-select-tables");
     const sidebar = new DataSelectionSidebar(page);
@@ -723,7 +724,7 @@ test.describe("Sidebars — onboarding's aside", () => {
   test("a table that merely contains the prefix counts as this install's", async ({
     page,
   }) => {
-    await page.setContent(FIXTURE_STYLES + SIDEBARS_ONBOARDING);
+    await renderFixture(page, FIXTURE_STYLES + SIDEBARS_ONBOARDING);
     await revealPane(page, "#sidebar-select-tables");
     await renameTable(page, "wp_options", "legacy_wp_options");
     await new DataSelectionSidebar(page).expectDefaultTableSelection("wp_", {
@@ -736,7 +737,7 @@ test.describe("Sidebars — onboarding's aside", () => {
   test("a foreign table left ticked fails the default-selection check", async ({
     page,
   }) => {
-    await page.setContent(FIXTURE_STYLES + SIDEBARS_ONBOARDING);
+    await renderFixture(page, FIXTURE_STYLES + SIDEBARS_ONBOARDING);
     await revealPane(page, "#sidebar-select-tables");
     await renameTable(page, "wp_options", "other_app_settings");
     await expect(
@@ -752,7 +753,7 @@ test.describe("Sidebars — onboarding's aside", () => {
   test("the default-selection checks cannot pass against an empty pane", async ({
     page,
   }) => {
-    await page.setContent(FIXTURE_STYLES + SIDEBARS_ONBOARDING);
+    await renderFixture(page, FIXTURE_STYLES + SIDEBARS_ONBOARDING);
     await revealPane(page, "#sidebar-select-files");
     await revealPane(page, "#sidebar-select-tables");
     const sidebar = new DataSelectionSidebar(page);
@@ -776,7 +777,7 @@ test.describe("Sidebars — onboarding's aside", () => {
   test("Select Tables: one table can be addressed and toggled by name", async ({
     page,
   }) => {
-    await page.setContent(FIXTURE_STYLES + SIDEBARS_ONBOARDING);
+    await renderFixture(page, FIXTURE_STYLES + SIDEBARS_ONBOARDING);
     await revealPane(page, "#sidebar-select-tables");
     const sidebar = new DataSelectionSidebar(page);
     const table = "wp_options";
@@ -871,7 +872,7 @@ test.describe("Sidebars — onboarding's aside", () => {
 
 test.describe("Sidebars — a job screen's aside", () => {
   test.beforeEach(async ({ page }) => {
-    await page.setContent(SIDEBARS_DASHBOARD);
+    await renderFixture(page, SIDEBARS_DASHBOARD);
   });
 
   test("the top-level data articles are permanently empty shells", async ({
@@ -1163,7 +1164,7 @@ test.describe("Strict-mode guard — every click target resolves to exactly one 
 
   for (const [fixtureName, label, selector] of cases) {
     test(`${label} (${fixtureName})`, async ({ page }) => {
-      await page.setContent(fixture(fixtureName));
+      await renderFixture(page, fixture(fixtureName));
       await expect(page.locator(selector), label).toHaveCount(1);
     });
   }
@@ -1172,7 +1173,7 @@ test.describe("Strict-mode guard — every click target resolves to exactly one 
     page,
   }) => {
     // If this ever drops to 1, the plugin fixed its duplicate id and the scoping could be relaxed.
-    await page.setContent(DASHBOARD);
+    await renderFixture(page, DASHBOARD);
     await expect(page.locator("#js_backwpup_add_new_backup")).toHaveCount(2);
   });
 });
@@ -1181,7 +1182,7 @@ test.describe("Storage panel titles — a verified map, not a derived string", (
   test("each panel's heading matches STORAGE_PANEL_TITLES", async ({
     page,
   }) => {
-    await page.setContent(SIDEBARS_DASHBOARD);
+    await renderFixture(page, SIDEBARS_DASHBOARD);
     const sidebar = new StorageSidebar(page);
     // All eleven, since the capture carries every panel.
     //
@@ -1220,7 +1221,7 @@ test.describe("Storage panel titles — a verified map, not a derived string", (
 
 test.describe("Restore modal — the confirm button's real label", () => {
   test("the modal confirms with 'Start Restoration'", async ({ page }) => {
-    await page.setContent(SIDEBARS_DASHBOARD);
+    await renderFixture(page, SIDEBARS_DASHBOARD);
     const modal = page.locator("#sidebar-restore-backup");
     await expect(modal).toHaveCount(1);
     await expect(
@@ -1233,7 +1234,7 @@ test.describe("Restore modal — the confirm button's real label", () => {
   }) => {
     // "Start Restoration" does not contain the substring "Restore", so the obvious regex silently
     // matched zero elements and the restore flow timed out instead of failing clearly.
-    await page.setContent(SIDEBARS_DASHBOARD);
+    await renderFixture(page, SIDEBARS_DASHBOARD);
     await expect(
       page.locator("#sidebar-restore-backup").getByRole("button", {
         name: /Restore/,
@@ -1244,7 +1245,7 @@ test.describe("Restore modal — the confirm button's real label", () => {
   test("the delete modals confirm with the labels confirmDelete matches", async ({
     page,
   }) => {
-    await page.setContent(SIDEBARS_DASHBOARD);
+    await renderFixture(page, SIDEBARS_DASHBOARD);
     await expect(
       page
         .locator("#sidebar-delete-backup")
@@ -1260,7 +1261,7 @@ test.describe("Restore modal — the confirm button's real label", () => {
 
 test.describe("FirstBackupPage — locator contract", () => {
   test.beforeEach(async ({ page }) => {
-    await page.setContent(FIRST_BACKUP);
+    await renderFixture(page, FIRST_BACKUP);
   });
 
   // The **only** place these two markers are asserted. The page object deliberately does not check

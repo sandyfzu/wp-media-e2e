@@ -77,32 +77,36 @@ per-mode dispatch and the same cached SSH connection:
   sub-command — see `dockerCpArgv`), SFTP `putFile` (`ssh`). It does **not** create
   the parent directory; the staging layer below does that first.
 
-## Watched runs (`--headed`, `--ui`, `--debug`)
+## Playwright ≥ 1.62 is a floor, not a preference
 
-**A headed browser can go permanently blank, and the tests still pass.** Completing BackWPup's
-onboarding navigates POST → redirect → first-backup screen → dashboard; from the moment that chain
-starts the tab stops rendering, and it never recovers — not on the next navigation, not on a reload.
-Assertions keep passing because they read the DOM over CDP, so only a person watching notices.
+**Do not downgrade below 1.62.** On 1.61 a WordPress admin save — the ordinary
+post/redirect/get an options screen does — could leave the tab **permanently unable to produce
+frames**: `requestAnimationFrame` dropped to 0 and never recovered, not on the next navigation and
+not on a reload. Only a new tab was clean.
 
-Measured, not guessed: `requestAnimationFrame` goes from 84 frames/0.7s before the submit to **0**
-after, the main thread stays responsive throughout, a *new* page in the same context renders fine, and
-raw CDP `Page.captureScreenshot` hangs exactly as `page.screenshot()` does — so it is the tab's
-rendering pipeline, not Playwright. Bisecting Playwright's `--disable-features` list one feature at a
-time identified **`RenderDocument`**: disabled (Playwright's default) the tab wedges, enabled it
-renders. No compositor flag avoids it.
+That silently disabled every Playwright primitive that needs a frame, while the ones that read the
+DOM kept working — which is why it masqueraded as a locator problem:
 
-Playwright disables `RenderDocument` for a reason — it breaks Playwright's isolated worlds
-(microsoft/playwright#37714) — so the suite re-enables it **only for watched runs**, never for CI:
+| Primitive                                | Needs a frame | On a wedged tab                     |
+| ---------------------------------------- | ------------- | ----------------------------------- |
+| `click()` (actionability's `stable` step) | yes — an unbounded `rAF` loop with no internal timeout | never dispatches; burns the budget |
+| `toBeInViewport()`                        | yes — `IntersectionObserver` + an `rAF` nudge          | never returns an answer            |
+| `page.screenshot()`, video                | yes                                                     | hangs / records nothing            |
+| `toBeVisible()`, text, counts, `evaluate` | no — synchronous layout reads                           | answer instantly                   |
 
-- The `:headed` and `:ui` npm scripts export `E2E_VISIBLE_BROWSER=1`; `--debug` needs nothing because
-  Playwright exports `PWDEBUG` itself. `E2E_VISIBLE_BROWSER=0` forces it off again.
-- **A direct `npx playwright test --headed` does not trigger it** — export the variable too. Playwright
-  re-evaluates the config in each *worker*, and a worker's `process.argv` has none of the CLI's flags,
-  so sniffing `--headed` silently does nothing.
-- Unattended runs get no extra argument at all, so their command line is exactly Playwright's.
+The cause was Chromium's **`RenderDocument`**, which Playwright 1.61 put in its `--disable-features`
+list as a temporary fix for its own CI bots (microsoft/playwright#37715, tracked by #37714 —
+*"[internal] re-enable RenderDocument"*). Chromium fixed the underlying defect in **147+**, and
+Playwright removed the line again in **1.62**; Puppeteer dropped theirs too. Verified on a real cell:
+on 1.61 the chain wedges at the submit and `page.screenshot()` times out; on 1.62.1 the same chain
+holds ~61 frames/0.5s throughout and screenshots take ~35 ms. No launch flag is involved either way.
 
-For a failed CI run there is nothing to configure: **traces are DOM snapshots, not pixels**, so the
-trace viewer replays a wedged tab correctly even when its video is blank.
+**The trigger is not fully characterised.** It reproduces reliably against a real site, but a
+synthetic POST → 302 → GET does not wedge — not across added latency, nor with composited,
+fixed-position or large source documents — and `wp-login.php`'s own POST → redirect never wedged
+either. So it needs something the real environment supplies that we did not isolate. This is
+recorded because it bounds the claim, not because anything is outstanding: the version floor removes
+the cause regardless.
 
 ## Site staging & file transfer ([`wp/staging.ts`](../../src/common/wp/staging.ts))
 

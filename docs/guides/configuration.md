@@ -193,7 +193,6 @@ Rules (enforced in
 | `HEALTHCHECK_CONCURRENCY`     | `4`     | Max sites checked at once within a product (1–32).                             |
 | `HEALTHCHECK_LOGIN_TIMEOUT_MS`| `30000` | Per-site UI-login settle budget in ms (1000–300000); raise for slow remotes.  |
 | `HEALTHCHECK_HEADED`          | `false` | Run the browser headed (visible). `npm run healthcheck:ui` sets this.          |
-| `E2E_VISIBLE_BROWSER`         | unset   | Marks a run as **watched**, which re-enables one Chromium feature so the tab keeps painting after certain navigations — without it a headed browser can go permanently blank. The `:headed` / `:ui` scripts set it; export it by hand for a direct `playwright test --headed`, or set `0` to force it off. See [wordpress-automation.md](../architecture/wordpress-automation.md#watched-runs-headed-ui-debug). |
 
 ### BackWPup storage credentials
 
