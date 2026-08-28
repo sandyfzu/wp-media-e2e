@@ -1,6 +1,15 @@
 import { posix } from "node:path";
 
-import { elevationSupport, exec, execElevated, wpRootDir } from "./exec";
+import {
+  describeTarget,
+  elevationSupport,
+  exec,
+  execElevated,
+  assertResolvedInsideRoot,
+  wpRootDir,
+} from "./exec";
+import { normalizeOwnership } from "./ownership";
+import { assertSafeElevatedTarget, normaliseSitePath } from "./paths";
 import { SiteResidueRemovalFailedError } from "./errors";
 import type { ExecResult } from "./exec";
 import type { Transport } from "../config/types";
@@ -34,8 +43,9 @@ import type { Transport } from "../config/types";
  *
  * **And the transport's user is not the only user of these directories** — the other half of the
  * story. WP-CLI and the web server are different users on a real cell, so a directory either one
- * creates under its own umask locks the other out. {@link prepareSiteDataDirs} settles that up front
- * instead of leaving it to whichever happened to write first.
+ * creates under its own umask locks the other out, and one created by WP-CLI is additionally owned
+ * by the wrong user entirely. {@link prepareSiteDataDirs} settles both up front — mode *and*
+ * ownership — instead of leaving it to whichever happened to write first.
  *
  * Which paths a product leaves is the product's own knowledge, so it declares them
  * (`ProductConfig.siteResidue`) and the shared scenario hooks read them from the per-process
@@ -43,74 +53,31 @@ import type { Transport } from "../config/types";
  */
 
 /**
- * Directories WordPress itself owns, which a residue declaration must never name.
- *
- * A guard against a typo in a config file — `wp-content/uploads` instead of
- * `wp-content/uploads/backwpup` would delete every media file on the site — not a security
- * boundary: the declarations come from our own code, and anything below these is fair game.
- */
-const PROTECTED_PATHS: readonly string[] = [
-  "wp-admin",
-  "wp-includes",
-  "wp-content",
-  "wp-content/uploads",
-  "wp-content/plugins",
-  "wp-content/mu-plugins",
-  "wp-content/themes",
-  "wp-content/languages",
-  "wp-content/upgrade",
-];
-
-/**
  * Validates one declared residue path and returns it normalised.
  *
- * Deliberately **relative only**: a residue path names something the product created inside the
- * WordPress install, and requiring that shape is what keeps a stray leading `/` from turning a
- * cleanup into a system-wide `rm -rf`.
+ * The rules — relative, inside the root, never a directory WordPress itself owns — are shared with
+ * every other privileged operation and live in {@link normaliseSitePath}; this only supplies the
+ * wording, so a bad declaration is reported in the vocabulary of the thing that would have happened
+ * to it.
  *
  * @param declared - the path as the product declared it, relative to the WordPress root.
  * @returns the normalised path, still relative.
  * @throws Error naming the path and the rule it broke.
  */
 export function normaliseResiduePath(declared: string): string {
-  const trimmed = declared.trim();
-  const reason = residueRejection(trimmed);
-  if (reason !== undefined) {
-    throw new Error(
+  return normaliseSitePath(
+    declared,
+    (reason) =>
       `[wp/residue] "${declared}" cannot be removed as leftover data: ${reason}. Declare a path ` +
-        'relative to the WordPress root that the product itself created, e.g. "wp-content/uploads/<plugin>".',
-    );
-  }
-  return posix.normalize(trimmed).replace(/\/+$/, "");
-}
-
-/** The rule `path` breaks, or `undefined` when it is a usable residue path. */
-function residueRejection(path: string): string | undefined {
-  if (path === "") return "it is empty";
-  if (path.includes("\\")) {
-    return "it contains a backslash; target paths are always POSIX";
-  }
-  if (posix.isAbsolute(path)) {
-    return "it is absolute, and residue paths are resolved against the site's WordPress root";
-  }
-  const normalised = posix.normalize(path).replace(/\/+$/, "");
-  if (normalised === "." || normalised === "..") {
-    return "it resolves to the WordPress root itself";
-  }
-  if (normalised.startsWith("../")) {
-    return "it escapes the WordPress root";
-  }
-  if (PROTECTED_PATHS.includes(normalised)) {
-    return `it resolves to "${normalised}", a directory WordPress itself owns`;
-  }
-  return undefined;
+      'relative to the WordPress root that the product itself created, e.g. "wp-content/uploads/<plugin>".',
+  );
 }
 
 /** Runs one command against the site — either as the transport's user, or with privileges. */
 type Runner = (file: string, args: string[]) => Promise<ExecResult>;
 
 /**
- * Mode the data directories are created with. World-writable, and deliberately so.
+ * Mode the data directories are opened to. World-writable, and deliberately so.
  *
  * On a real cell **WP-CLI and the web server run as different users** — `ubuntu` over SSH, `www-data`
  * under PHP-FPM — sharing one docroot. Whichever of them creates one of these directories first does
@@ -123,6 +90,11 @@ type Runner = (file: string, args: string[]) => Promise<ExecResult>;
  * directory's mode and `wp-content/uploads` on these cells is already `0777` for this very reason.
  * The sites are disposable QA installs, and removal now genuinely clears the sensitive contents
  * after every scenario where before it could not — so the exposure goes down, not up.
+ *
+ * It is a **floor, not the whole answer**: it makes the directory writable by both users but leaves
+ * it owned by whichever created it, and says nothing about a subtree an earlier run left behind.
+ * {@link normalizeOwnership} supplies both, so this stays the one bit that grant cannot infer — the
+ * cheap guarantee that holds even on a site whose ownership cannot be corrected at all.
  */
 const DATA_DIR_MODE = "0777";
 
@@ -142,25 +114,78 @@ const DATA_DIR_MODE = "0777";
  * step escalates only if the transport's user is refused, and the whole thing is idempotent, so a
  * directory an earlier run left behind is simply re-opened to both users.
  *
+ * **Three steps, and each does something the previous one cannot.** `mkdir` settles who creates the
+ * directory; {@link DATA_DIR_MODE} makes it writable by both users whatever happens next; and
+ * {@link normalizeOwnership} hands it to the ownership the *site* uses. The third is not decoration
+ * on the second: this suite writing into a site's docroot as the transport's user is precisely what
+ * that primitive exists for, and its grant is **recursive**, so it also reaches a subtree the mode
+ * above cannot — one an earlier scenario's plugin wrote as the web server, or one the plugin's own
+ * activation created a moment ago as WP-CLI. Ownership correction is best-effort by contract, which
+ * is why the mode is applied independently rather than left to it.
+ *
  * @param transport - the target site's transport.
  * @param paths - the product's declared paths, as {@link removeSiteResidue} takes them. Empty does
  * nothing at all, not even resolving the root.
  * @throws Error if a declared path is not a usable residue path (see {@link normaliseResiduePath}),
- * or if a directory can be neither created nor opened to both users.
+ * if the root is unusable for a privileged step (see {@link assertSafeElevatedTarget}), if a path is
+ * a symbolic link rather than a directory, or if a directory can be neither created nor opened to
+ * both users. Handing over ownership never throws; a host that cannot do it is warned about.
  */
 export async function prepareSiteDataDirs(
   transport: Transport,
   paths: readonly string[],
 ): Promise<void> {
   if (paths.length === 0) return;
+  // Validated before the site is touched at all, so a typo in one declaration cannot leave the
+  // others half-prepared.
   const relative = paths.map(normaliseResiduePath);
   const root = await wpRootDir(transport);
 
   for (const path of relative) {
-    const target = posix.join(root, path);
-    await escalateIfDenied(transport, "mkdir", ["-p", target]);
-    await escalateIfDenied(transport, "chmod", [DATA_DIR_MODE, target]);
+    await prepareOneDataDir(transport, root, path);
   }
+}
+
+/**
+ * The three steps for one declared path: make it exist, open it, hand it over.
+ *
+ * @param transport - the target site's transport.
+ * @param root - the site's resolved WordPress root.
+ * @param path - one already-normalised declared path, relative to that root.
+ * @throws Error if the root is unusable for a privileged step, if the path is a symbolic link, or if
+ * the directory can be neither created nor opened to both users. Handing over ownership never
+ * throws.
+ */
+async function prepareOneDataDir(
+  transport: Transport,
+  root: string,
+  path: string,
+): Promise<void> {
+  const target = posix.join(root, path);
+  // Preparation escalates, so it needs the same root guard removal has: `normaliseResiduePath`
+  // constrains the relative half, and this is the half it cannot see. Without it a site whose
+  // `rootDir` is a top-level directory would have world-writable directories created **as root**
+  // at the filesystem root — and teardown would then refuse to remove what setup created.
+  const describe = (reason: string): string =>
+    `[wp/residue] refusing to prepare the plugin's data directories: this site's WordPress root ` +
+    `("${root}") cannot be used for it — ${reason}. Preparation may need privileges, so it will ` +
+    "not aim one at a path it cannot place inside the site; fix the site's `rootDir`, or declare a " +
+    "data path that stays within it.";
+  assertSafeElevatedTarget(target, root, describe);
+  // The guard above compares strings; this one asks the filesystem. A symlink **anywhere** in the
+  // path — `wp-content/uploads` relocated, not just the last component — would otherwise let a
+  // privileged `chmod 0777` and, later, a privileged `rm -rf` act outside the site while every
+  // lexical check agreed. Measured: content outside the root was removed that way. Checked before
+  // `mkdir`, which happily follows a linked parent and would hide it.
+  await assertResolvedInsideRoot(transport, target, root, describe);
+  // `--` ends option parsing, as the ownership commands do. The guard above already proves
+  // `target` is absolute so it cannot begin with a dash — this keeps that from being the only
+  // thing standing between a future refactor and a flag.
+  await escalateIfDenied(transport, "mkdir", ["-p", "--", target]);
+  await escalateIfDenied(transport, "chmod", ["--", DATA_DIR_MODE, target]);
+  // Last, so the grant is applied while the directory is still ours to change: normalising first
+  // would hand it to the site's user and make the mode above need privileges it did not need.
+  await normalizeOwnership(transport, path);
 }
 
 /**
@@ -170,7 +195,10 @@ export async function prepareSiteDataDirs(
  * legitimate answer. Reports the *unprivileged* failure when escalation is unavailable or also fails,
  * because that is the one an operator can act on.
  *
- * @throws Error naming the command, the path and how far privileges reached.
+ * @param transport - the target site's transport.
+ * @param file - the command to run.
+ * @param args - its arguments, as an array so nothing is shell-interpreted.
+ * @throws Error naming the site, the command, the path and how far privileges reached.
  */
 async function escalateIfDenied(
   transport: Transport,
@@ -186,10 +214,11 @@ async function escalateIfDenied(
     if (elevated.exitCode === 0) return;
   }
   throw new Error(
-    `[wp/residue] could not \`${file} ${args.join(" ")}\` on this ${transport.mode} site ` +
+    `[wp/residue] ${describeTarget(transport)}: could not \`${file} ${args.join(" ")}\` ` +
       `(exit ${String(first.exitCode)}: ${(first.stderr || first.stdout).trim() || "no output"}; ` +
       `elevation: ${elevation}). The plugin's data directories must be writable by both the ` +
-      "transport's user and the web server, which share this site's docroot.",
+      "transport's user and the web server, which share this site's docroot — grant the transport's " +
+      "user passwordless `sudo`, or make the parent directory writable by it.",
   );
 }
 
@@ -203,6 +232,10 @@ async function escalateIfDenied(
  * touch, and this suite's discipline elsewhere is to re-read the state rather than trust an exit
  * code. The check runs at the **same privilege** as the removal, because a `test -e` the transport's
  * user is not allowed to answer would report a path it cannot even see as gone.
+ *
+ * @param targets - absolute paths to remove.
+ * @param run - how to run one command, at the privilege this pass uses.
+ * @returns the targets still present afterwards.
  */
 async function removeEach(
   targets: readonly string[],
@@ -210,7 +243,9 @@ async function removeEach(
 ): Promise<string[]> {
   const survivors: string[] = [];
   for (const target of targets) {
-    await run("rm", ["-rf", target]);
+    await run("rm", ["-rf", "--", target]);
+    // `test` takes no options, so `--` would be read as an operand; the target is absolute
+    // (the guards proved it) and so cannot be mistaken for one either way.
     const { exitCode } = await run("test", ["-e", target]);
     if (exitCode === 0) survivors.push(target);
   }
@@ -218,37 +253,32 @@ async function removeEach(
 }
 
 /**
- * The guard that matters once `rm -rf` runs as **root**: a nonsense `rootDir` would otherwise aim a
- * privileged delete at a real system path.
+ * Refuses a privileged `rm -rf` whose WordPress root is not a plausible site root.
  *
- * {@link normaliseResiduePath} already constrains the *relative* half — inside the root, not a
- * WordPress-owned directory — so this checks the half it cannot see: that the root is a plausible
- * site root, and that joining the two really did stay inside it. Unelevated removal is left alone;
- * there the transport's own permissions are the backstop, and tightening it would break nothing an
- * operator asked for.
+ * The rule is shared with every other elevated operation ({@link assertSafeElevatedTarget}); this
+ * only supplies the wording, so an operator is told which of *this* operation's knobs fixes it.
  *
+ * @param target - the absolute path the privileged `rm -rf` would act on.
+ * @param root - the site's resolved WordPress root.
  * @throws Error naming the value and the rule it broke.
  */
+/** The wording removal uses when a path cannot be placed inside the site, shared by both guards. */
+function describeRemoval(root: string): (reason: string) => string {
+  return (reason) =>
+    `[wp/residue] refusing to remove leftover data: this site's WordPress root ("${root}") cannot ` +
+    `be used for it — ${reason}. Fix the site's \`rootDir\`, or declare a residue path that stays ` +
+    "inside the site.";
+}
+
 function assertSafeElevatedRemoval(target: string, root: string): void {
-  const trimmed = root.replace(/(?!^)\/+$/, "");
-  const depth = trimmed.split("/").filter((segment) => segment !== "").length;
-
-  let reason: string | undefined;
-  if (!posix.isAbsolute(trimmed)) {
-    reason = "it is not an absolute path";
-  } else if (depth < 2) {
-    reason = "it is a filesystem or top-level system directory";
-  } else if (!target.startsWith(`${trimmed}/`)) {
-    reason = `"${target}" does not resolve inside it`;
-  }
-
-  if (reason !== undefined) {
-    throw new Error(
+  assertSafeElevatedTarget(
+    target,
+    root,
+    (reason) =>
       `[wp/residue] refusing to remove leftover data with elevated privileges: this site's ` +
-        `WordPress root ("${root}") cannot be used for it — ${reason}. Fix the site's \`rootDir\`, ` +
-        "or set `transport.elevate: false` to keep cleanup unprivileged.",
-    );
-  }
+      `WordPress root ("${root}") cannot be used for it — ${reason}. Fix the site's \`rootDir\`, ` +
+      "or set `transport.elevate: false` to keep cleanup unprivileged.",
+  );
 }
 
 /**
@@ -278,6 +308,20 @@ export async function removeSiteResidue(
   const relative = paths.map(normaliseResiduePath);
   const root = await wpRootDir(transport);
   const targets = relative.map((path) => posix.join(root, path));
+
+  // Before **either** pass, not just the privileged one. A path that resolves outside the site must
+  // not be removed at any privilege: "unprivileged" is only a bound while the transport's user is
+  // not root, which a `docker` container or a root SSH login does not guarantee — and deleting
+  // another part of the filesystem is wrong either way. Measured before this existed: a symlinked
+  // `wp-content/uploads` let `rm -rf` remove content outside the WordPress root.
+  for (const target of targets) {
+    await assertResolvedInsideRoot(
+      transport,
+      target,
+      root,
+      describeRemoval(root),
+    );
+  }
 
   const survivors = await removeEach(targets, (file, args) =>
     exec(transport, file, args),

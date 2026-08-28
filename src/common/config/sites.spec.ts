@@ -91,3 +91,74 @@ test.describe("transport parsing — the elevation opt-out", () => {
     expect(transport.elevate).toBe(false);
   });
 });
+
+/**
+ * The same contract for `fileOwner`, and for the same reason twice over.
+ *
+ * A declared owner that never arrives makes the suite report that none could be *detected*, which
+ * tells an operator to declare the field they just declared. And `false` is the opt-out from a
+ * privileged `chown -R`: silently dropping it would run as root against a site whose owner
+ * explicitly forbade it — the one failure mode an opt-out exists to prevent.
+ */
+test.describe("transport parsing — the file-ownership override", () => {
+  test('a declared "user:group" reaches the transport', () => {
+    expect(
+      loadTransport({ ...SSH, fileOwner: "www-data:www-data" }).fileOwner,
+    ).toBe("www-data:www-data");
+  });
+
+  test("fileOwner:false reaches the transport, so the opt-out is honoured", () => {
+    expect(loadTransport({ ...SSH, fileOwner: false }).fileOwner).toBe(false);
+  });
+
+  test("an undeclared fileOwner is omitted entirely, not set to undefined", () => {
+    expect("fileOwner" in loadTransport(SSH)).toBe(false);
+  });
+
+  // Coercion is the dangerous default here: `true` or `0` reaching the transport as-is would be
+  // read by the ownership layer as "not the opt-out" and normalise anyway.
+  test("a non-string, non-false fileOwner is rejected, naming the field", () => {
+    for (const bad of [true, 0, 33, {}, [], ""]) {
+      expect(
+        () => loadTransport({ ...SSH, fileOwner: bad }),
+        JSON.stringify(bad),
+      ).toThrow(/transport\.fileOwner must be/);
+    }
+  });
+
+  /**
+   * The **shape** is checked here too, not just the type.
+   *
+   * Leaving it to the ownership layer would fail in the worst way available: normalisation never
+   * fails a run, so a mistyped owner would be warned about once and then silently ignored for the
+   * whole suite — on exactly the site somebody was trying to fix. A config typo is not a host
+   * condition, and it belongs where it was written.
+   */
+  test("a malformed fileOwner is rejected at load, not deferred to run time", () => {
+    for (const bad of [
+      "www-data", // the realistic typo: group omitted
+      "www-data:",
+      ":www-data",
+      "a:b:c",
+      "www data:www-data",
+      "--reference=/etc/hostname:x", // would reach `chown` as a flag
+      "-R:www-data",
+    ]) {
+      expect(() => loadTransport({ ...SSH, fileOwner: bad }), bad).toThrow(
+        /\[sites\].*transport\.fileOwner must be/,
+      );
+    }
+  });
+
+  test("all three site-level knobs survive together", () => {
+    const transport = loadTransport({
+      ...SSH,
+      stagingDir: "/srv/e2e-staging",
+      elevate: false,
+      fileOwner: "sftp_backwpup:www-data",
+    });
+    expect(transport.stagingDir).toBe("/srv/e2e-staging");
+    expect(transport.elevate).toBe(false);
+    expect(transport.fileOwner).toBe("sftp_backwpup:www-data");
+  });
+});

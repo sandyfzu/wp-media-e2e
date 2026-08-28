@@ -256,8 +256,9 @@ failure modes visible:
 
 > **`zipPath` is a path on the runner.** Only a `local` transport's `wp` can read it
 > directly, so for `ssh`/`docker` the artifact is copied onto the site first —
-> `stageAndInstallPlugin(site.transport, pluginArtifact("plugin").zipPath, { activate: true })`
-> does both steps. See
+> `stageAndInstallPlugin(site.transport, a.zipPath, { activate: true, slug: a.slug })`
+> (where `a = pluginArtifact("plugin")`) does both steps — and, given the `slug`, restores
+> the installed plugin's ownership so the web server can write it. See
 > [wordpress-automation.md](wordpress-automation.md#site-staging--file-transfer-wpstagingts).
 
 ## Pre-warming

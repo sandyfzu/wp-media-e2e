@@ -77,8 +77,12 @@ pass `pluginArtifact("plugin").zipPath` to
 (via `site.transport`); the artifacts setup has already built and verified it.
 
 ```ts
-await stageAndInstallPlugin(site.transport, pluginArtifact("plugin").zipPath, {
+const artifact = pluginArtifact("plugin");
+await stageAndInstallPlugin(site.transport, artifact.zipPath, {
   activate: true,
+  // Always pass the slug: it is what lets the install hand the plugin's files back to
+  // the ownership the site uses, so the web server can write them.
+  slug: artifact.slug,
 });
 ```
 

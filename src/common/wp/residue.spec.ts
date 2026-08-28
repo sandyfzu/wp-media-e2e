@@ -7,18 +7,20 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { SiteResidueRemovalFailedError } from "./errors";
+import { resetOwnershipCaches } from "./ownership";
 import {
   normaliseResiduePath,
   prepareSiteDataDirs,
   removeSiteResidue,
 } from "./residue";
-import type { LocalTransport } from "../config/types";
+import type { DockerTransport, LocalTransport } from "../config/types";
 
 /**
  * Residue removal against a **real** WordPress-root-like directory over the `local` transport —
@@ -58,46 +60,28 @@ function unprivileged(): LocalTransport {
   return { ...local, elevate: false };
 }
 
+/**
+ * The rules themselves live in `./paths.spec.ts`, which pins them exhaustively. What matters *here*
+ * is that residue still delegates to them and still reports a rejection in its own vocabulary — a
+ * product author who mistypes a declaration must be told what to declare instead, not merely which
+ * abstract rule was broken.
+ */
 test.describe("normaliseResiduePath", () => {
   test("accepts a path inside the WordPress root and normalises it", () => {
-    expect(normaliseResiduePath("wp-content/uploads/backwpup")).toBe(
-      "wp-content/uploads/backwpup",
-    );
-    expect(normaliseResiduePath("  wp-content/uploads/backwpup/  ")).toBe(
-      "wp-content/uploads/backwpup",
-    );
-    expect(normaliseResiduePath("wp-content/./uploads/x/../backwpup")).toBe(
+    expect(normaliseResiduePath("  wp-content/./uploads/x/../backwpup/ ")).toBe(
       "wp-content/uploads/backwpup",
     );
   });
 
-  // The realistic config typo, and the one worth guarding: dropping the last segment would delete
-  // every media file on the site rather than one plugin's directory.
-  test("rejects a directory WordPress itself owns", () => {
-    for (const path of [
-      "wp-content",
-      "wp-content/uploads",
-      "wp-content/plugins",
-      "wp-admin",
-      "wp-includes",
-      "wp-content/uploads/", // trailing slash must not smuggle it past the check
-    ]) {
-      expect(() => normaliseResiduePath(path), path).toThrow(
-        /WordPress itself owns/,
-      );
-    }
+  test("rejects a directory WordPress itself owns, in residue's own words", () => {
+    expect(() => normaliseResiduePath("wp-content/uploads")).toThrow(
+      /\[wp\/residue\].*cannot be removed as leftover data.*WordPress itself owns/s,
+    );
   });
 
-  test("rejects anything that is not a path below the root", () => {
-    expect(() => normaliseResiduePath("")).toThrow(/is empty/);
-    expect(() => normaliseResiduePath("/etc")).toThrow(/absolute/);
-    expect(() => normaliseResiduePath(".")).toThrow(/WordPress root itself/);
-    expect(() => normaliseResiduePath("../../etc")).toThrow(/escapes/);
-    expect(() => normaliseResiduePath("wp-content/../..")).toThrow(
-      /WordPress root/,
-    );
-    expect(() => normaliseResiduePath("wp-content\\uploads")).toThrow(
-      /backslash/,
+  test("names the remedy a product author can act on", () => {
+    expect(() => normaliseResiduePath("/etc")).toThrow(
+      /Declare a path relative to the WordPress root that the product itself created/,
     );
   });
 });
@@ -140,10 +124,32 @@ test.describe("removeSiteResidue", () => {
     ).resolves.toBeUndefined();
   });
 
+  /**
+   * "Nothing at all" includes **not resolving the root**, and that is the half a `local` transport
+   * cannot prove: its root is the declared string, read without running anything. `docker` resolves
+   * its root with `pwd`, so a stubbed `docker` on `PATH` makes the absence of that lookup
+   * observable — without it, this passes with the early return deleted.
+   */
   test("does nothing at all when the product declares no residue", async () => {
-    // Not even a root lookup: an invalid transport would throw if it touched the site.
-    const broken = { mode: "local", rootDir: "" } as LocalTransport;
-    await expect(removeSiteResidue(broken, [])).resolves.toBeUndefined();
+    const binDir = mkdtempSync(join(tmpdir(), "wp-residue-nores-"));
+    const log = join(binDir, "calls.log");
+    writeFileSync(
+      join(binDir, "docker"),
+      `#!/bin/sh\necho "$*" >> ${log}\nprintf "%s" /var/www/html\n`,
+    );
+    chmodSync(join(binDir, "docker"), 0o755);
+    const pathBefore = process.env.PATH ?? "";
+    process.env.PATH = `${binDir}:${pathBefore}`;
+
+    try {
+      const container: DockerTransport = { mode: "docker", container: "wpcli" };
+      await expect(removeSiteResidue(container, [])).resolves.toBeUndefined();
+      await expect(prepareSiteDataDirs(container, [])).resolves.toBeUndefined();
+      expect(existsSync(log), "no command should have been run").toBe(false);
+    } finally {
+      process.env.PATH = pathBefore;
+      rmSync(binDir, { recursive: true, force: true });
+    }
   });
 
   // A typo must not leave the site half-cleaned, so validation happens before the first `rm`.
@@ -355,6 +361,32 @@ test.describe("removeSiteResidue — escalation", () => {
  * writes must be writable by **every** user sharing the docroot — not merely by whoever created it.
  * Checked as a mode rather than by simulating two users, because the mode is the whole mechanism.
  */
+/**
+ * Removal is guarded before **both** passes, not only the privileged one.
+ *
+ * A symlinked ancestor makes every lexical check agree while `rm -rf` deletes the referent —
+ * measured directly: `rm -rf <root>/wp-content/uploads/backwpup` with `uploads` linked outside
+ * removed the target from the other location. "Unprivileged" is only a bound while the transport's
+ * user is not root, which a container or a root SSH login does not guarantee, and removing another
+ * part of the filesystem is wrong at any privilege.
+ */
+test.describe("removeSiteResidue — a path that resolves out of the root", () => {
+  test("is refused before anything is removed", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "wp-outside-"));
+    mkdirSync(join(outside, "backwpup"), { recursive: true });
+    writeFileSync(join(outside, "backwpup", "keep.txt"), "x");
+    mkdirSync(join(wpRoot, "wp-content"), { recursive: true });
+    symlinkSync(outside, join(wpRoot, "wp-content", "uploads"));
+
+    await expect(
+      removeSiteResidue(local, ["wp-content/uploads/backwpup"]),
+    ).rejects.toThrow(/outside it/);
+    // The measurement that matters: it is still there.
+    expect(existsSync(join(outside, "backwpup", "keep.txt"))).toBe(true);
+    rmSync(outside, { recursive: true, force: true });
+  });
+});
+
 test.describe("prepareSiteDataDirs", () => {
   /** The permission bits of `path`, as an octal string. */
   const mode = (path: string): string =>
@@ -395,14 +427,148 @@ test.describe("prepareSiteDataDirs", () => {
   });
 
   // Same guard as removal: a declaration that is not a path below the root never reaches the site.
+  /**
+   * Preparation escalates too, so it needs the same root guard removal has. Without it a site whose
+   * `rootDir` is a top-level directory would get world-writable directories created **as root** at
+   * the filesystem root — and teardown would then refuse to remove what setup had created.
+   */
+  test("refuses to prepare against a top-level WordPress root", async () => {
+    try {
+      await expect(
+        prepareSiteDataDirs({ mode: "local", rootDir: "/tmp" }, [
+          "wp-content/uploads/backwpup",
+        ]),
+      ).rejects.toThrow(/top-level system directory/);
+      expect(existsSync("/tmp/wp-content")).toBe(false);
+    } finally {
+      // Cleaned unconditionally: `/tmp` is shared with the rest of the machine, so a run where the
+      // guard *did* fail would otherwise leave a directory that makes every later run fail here —
+      // pointing at the guard instead of at the stale state. Observed exactly that during a
+      // mutation test.
+      rmSync("/tmp/wp-content", { recursive: true, force: true });
+    }
+  });
+
   test("rejects a path WordPress itself owns, before touching the site", async () => {
     await expect(
       prepareSiteDataDirs(local, ["wp-content/uploads"]),
     ).rejects.toThrow(/WordPress itself owns/);
   });
 
+  // The "not even a root lookup" half is proven against `docker` in the removal suite above, where
+  // resolving the root is an observable command.
   test("does nothing at all for a product that declares nothing", async () => {
     await expect(prepareSiteDataDirs(local, [])).resolves.toBeUndefined();
+  });
+
+  /**
+   * The root guard is lexical, so it cannot see that a declared path is a **link out of the tree**.
+   * `chmod` here may run as root and follows a symlink given as its operand — measured on GNU
+   * coreutils 9.4 — so a link left where a data directory belongs would redirect a privileged `0777`
+   * at whatever it resolves to. Proven by the mode of the directory it points at, not by the
+   * message: unguarded, this test's own `chmod` reaches it even unprivileged.
+   */
+  test("refuses a path that is a symbolic link, and leaves its target alone", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "wp-residue-outside-"));
+    chmodSync(outside, 0o700);
+    mkdirSync(join(wpRoot, "wp-content/uploads"), { recursive: true });
+    symlinkSync(outside, join(wpRoot, "wp-content/uploads/backwpup"));
+    try {
+      await expect(
+        prepareSiteDataDirs(local, ["wp-content/uploads/backwpup"]),
+      ).rejects.toThrow(/symbolic link/);
+      expect(mode(outside)).toBe("0700");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The mode is a floor; **handing the directory over is the other half**, and it is the half that
+   * reaches a subtree — one the plugin's activation just created as WP-CLI, or one an earlier
+   * scenario wrote as the web server. Nothing else in this file can observe it: on a developer's
+   * machine the transport user already owns the tree, so the correction takes its fast path and runs
+   * no command at all. Stubbing `stat`/`id` forces the mismatch a real cell has, and stubbing `sudo`
+   * makes the privileged half observable without root.
+   */
+  test.describe("hands each prepared directory to the site's ownership", () => {
+    let binDir: string;
+    let logFile: string;
+    let realPath: string;
+
+    /** A stub on `PATH` that records its argv and succeeds. */
+    function stub(name: string, body: string): void {
+      writeFileSync(
+        join(binDir, name),
+        `#!/usr/bin/env bash\nprintf '%s\\n' "${name} $*" >> "$RESIDUE_LOG"\n${body}\n`,
+      );
+      chmodSync(join(binDir, name), 0o755);
+    }
+
+    /** Every stubbed command run so far, one per line. */
+    const ran = (): string[] =>
+      existsSync(logFile)
+        ? readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean)
+        : [];
+
+    test.beforeEach(() => {
+      binDir = mkdtempSync(join(tmpdir(), "wp-residue-bin-"));
+      logFile = join(binDir, "commands.log");
+      process.env.RESIDUE_LOG = logFile;
+      // Ownership the transport user does not already have, so the fast path cannot fire. Only
+      // `stat`, `id` and `sudo` are stubbed — `mkdir` and `chmod` stay real, so the directories this
+      // test asserts on are genuinely created.
+      stub("stat", 'printf "%s" "www-data:www-data:33:33"');
+      stub(
+        "id",
+        'printf "%s" "uid=1000(ubuntu) gid=1000(ubuntu) groups=1000(ubuntu),33(www-data)"',
+      );
+      stub("sudo", "exit 0");
+      resetOwnershipCaches();
+      realPath = process.env.PATH ?? "";
+      process.env.PATH = `${binDir}:${realPath}`;
+    });
+
+    test.afterEach(() => {
+      process.env.PATH = realPath;
+      Reflect.deleteProperty(process.env, "RESIDUE_LOG");
+      rmSync(binDir, { recursive: true, force: true });
+      resetOwnershipCaches();
+    });
+
+    test("recursively, for every declared path", async () => {
+      await prepareSiteDataDirs(local, [
+        "wp-content/uploads/backwpup",
+        "wp-content/uploads/backwpup-restore",
+      ]);
+
+      const elevated = ran().filter((line) => line.startsWith("sudo "));
+      for (const path of ["backwpup", "backwpup-restore"]) {
+        const dir = join(wpRoot, "wp-content/uploads", path);
+        // Recursive, and the grant precedes the chown — the ordering `ownership.ts` depends on.
+        expect(elevated, path).toContain(
+          `sudo -n -- chmod -R -- ug+rwX ${dir}`,
+        );
+        expect(elevated, path).toContain(
+          `sudo -n -- chown -Rh -- www-data:www-data ${dir}`,
+        );
+        // The unprivileged floor is still applied, independently of the correction succeeding.
+        expect(mode(dir), path).toBe("0777");
+      }
+    });
+
+    /**
+     * A host that cannot correct ownership must still get prepared directories: the correction is
+     * best-effort by contract, and preparation is not.
+     */
+    test("without letting a refused correction fail preparation", async () => {
+      stub("sudo", 'case "$*" in *chown*) exit 1 ;; esac; exit 0');
+
+      await expect(
+        prepareSiteDataDirs(local, ["wp-content/uploads/backwpup"]),
+      ).resolves.toBeUndefined();
+      expect(mode(join(wpRoot, "wp-content/uploads/backwpup"))).toBe("0777");
+    });
   });
 
   // Nothing to escalate for on a writable tree: preparation must not reach for privileges it does

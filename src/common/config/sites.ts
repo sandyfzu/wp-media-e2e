@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { OWNER_SPEC_RULE, parseOwnerSpec } from "./file-owner";
 import { isNonEmptyString, isObject } from "../guards";
 import type {
   CellConfig,
@@ -180,9 +181,11 @@ function validateTransport(value: unknown, path: string): Transport {
   // property is genuinely missing rather than present-and-undefined.
   const stagingDir = optionalString(value.stagingDir, `${path}.stagingDir`);
   const elevate = optionalBoolean(value.elevate, `${path}.elevate`);
+  const fileOwner = optionalFileOwner(value.fileOwner, `${path}.fileOwner`);
   const base = {
     ...(stagingDir !== undefined ? { stagingDir } : {}),
     ...(elevate !== undefined ? { elevate } : {}),
+    ...(fileOwner !== undefined ? { fileOwner } : {}),
   };
   switch (value.mode) {
     case "ssh":
@@ -240,6 +243,37 @@ function optionalBoolean(value: unknown, path: string): boolean | undefined {
   if (typeof value !== "boolean") {
     throw new Error(`[sites] ${path} must be a boolean.`);
   }
+  return value;
+}
+
+/**
+ * Validates an optional `fileOwner`: `"user:group"`, or `false` to opt out of ownership
+ * normalisation entirely.
+ *
+ * **Both the type and the shape are checked here**, at the boundary, like every other site field.
+ * The alternative — accepting any string and letting the WordPress layer reject the shape later —
+ * fails in the worst way available: normalisation never fails a run, so a mistyped owner would be
+ * warned about once and then silently ignored for the rest of the suite, on precisely the site
+ * somebody was trying to fix. A config typo is not a host condition, and it is cheapest to fix
+ * where it was written.
+ *
+ * `false` is the opt-out from a **privileged** `chown -R`, so dropping it would run as root on a
+ * site whose owner explicitly forbade that. Anything else (a number, `true`, an object) is rejected
+ * by name rather than coerced, exactly as `elevate` is.
+ */
+function optionalFileOwner(
+  value: unknown,
+  path: string,
+): string | false | undefined {
+  if (value === undefined || value === false) return value;
+  if (!isNonEmptyString(value)) {
+    throw new Error(
+      `[sites] ${path} must be ${OWNER_SPEC_RULE}, or false to opt out — got ` +
+        `${JSON.stringify(value)}.`,
+    );
+  }
+  // Throws with the same rule the ownership layer enforces, so the two can never disagree.
+  parseOwnerSpec(value, `[sites] ${path}`);
   return value;
 }
 

@@ -56,6 +56,23 @@ interface TransportBase {
    * elevation existed.
    */
   readonly elevate?: boolean;
+
+  /**
+   * Who should own the files this suite writes into the site's docroot, as `"user:group"`.
+   *
+   * Leave it unset. WP-CLI runs as the transport's user while PHP runs as the web server, so a
+   * plugin this suite installs lands owned by the wrong user and the web server cannot write inside
+   * it; `wp/ownership.ts` fixes that after each write by **detecting** the ownership the site
+   * already uses (from `wp-content`) rather than assuming `www-data`. Detection is correct wherever
+   * the install is consistently owned — including hosts where the owner is a deployment account
+   * rather than the web-server user — so this override exists only for a site where it is not.
+   *
+   * Both halves are required: the group is load-bearing, because on a host whose docroot owner is
+   * *not* the web-server user, the shared group is the only thing that lets the web server write.
+   * Set `false` to opt out of ownership normalisation entirely, as `elevate: false` opts out of
+   * privileged cleanup.
+   */
+  readonly fileOwner?: string | false;
 }
 
 export interface SshTransport extends TransportBase {

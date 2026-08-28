@@ -1,4 +1,5 @@
 import { statSync } from "node:fs";
+import { posix } from "node:path";
 import { copyFile } from "node:fs/promises";
 
 import { execa } from "execa";
@@ -284,11 +285,17 @@ const elevationProbes = new Map<string, ElevationSupport>();
 const elevationNotices = new Set<string>();
 
 /**
- * Identity of a target for the caches above. `local` is keyed by its WordPress root rather than
- * globally: passwordless sudo is really a property of the machine and user, so this asks at most one
- * extra time per site, and in exchange one site's answer is never attributed to another's.
+ * Identity of a target, for any cache holding a fact about the *host* rather than about a call —
+ * elevation support here, detected file ownership in `./ownership.ts`.
+ *
+ * `local` is keyed by its WordPress root rather than globally: passwordless sudo is really a
+ * property of the machine and user, so this asks at most one extra time per site, and in exchange
+ * one site's answer is never attributed to another's.
+ *
+ * Exported so a sibling module memoises against the *same* notion of "the same target", instead of
+ * inventing a second one that could disagree.
  */
-function elevationKey(transport: Transport): string {
+export function targetKey(transport: Transport): string {
   switch (transport.mode) {
     case "ssh":
       return `ssh:${connectionKey(transport)}`;
@@ -305,8 +312,43 @@ function elevationKey(transport: Transport): string {
   }
 }
 
-/** How a target is described in elevation messages — enough to identify it, no secrets. */
-function describeTarget(transport: Transport): string {
+/**
+ * Identity of one **WordPress install**, for a cache holding a fact about the install rather than
+ * about the machine hosting it.
+ *
+ * {@link targetKey} is deliberately coarser — passwordless sudo is a property of a host and a user,
+ * so asking once per host is right. File ownership is not: one host routinely serves several sites,
+ * and they need not agree. Measured on a live cell, two docroots under the same `ubuntu@host`:
+ * `sftp_backwpup:www-data` and `sftp_wprocket:www-data`. Keyed by host alone, whichever was probed
+ * first would answer for both — misreporting one site in a fleet check, and, in any process that
+ * normalised two sites, aiming a privileged `chown -R` at the wrong owner.
+ *
+ * The `rootDir` is used unresolved, because that is what distinguishes two sites in configuration;
+ * a `docker` transport without one contributes an empty root, so the same container reached with and
+ * without a declared `rootDir` keys separately rather than being assumed identical.
+ */
+export function installKey(transport: Transport): string {
+  switch (transport.mode) {
+    case "ssh":
+      return `ssh:${connectionKey(transport)}#${transport.rootDir}`;
+    case "docker":
+      return `docker:${transport.container}#${transport.rootDir ?? ""}`;
+    case "local":
+      return `local:${transport.rootDir}`;
+    default: {
+      const exhaustive: never = transport;
+      throw new Error(
+        `[wp/exec] unsupported transport: ${JSON.stringify(exhaustive)}`,
+      );
+    }
+  }
+}
+
+/**
+ * How a target is described in operator-facing messages — enough to identify it, no secrets.
+ * Exported so sibling modules name a site the same way this one does.
+ */
+export function describeTarget(transport: Transport): string {
   switch (transport.mode) {
     case "ssh":
       return `${transport.username}@${transport.host}`;
@@ -338,17 +380,32 @@ export async function elevationSupport(
   if (transport.elevate === false) return "disabled";
   if (transport.mode === "docker") return "available";
 
-  const key = elevationKey(transport);
+  const key = targetKey(transport);
   const cached = elevationProbes.get(key);
   if (cached !== undefined) return cached;
 
-  const support = await exec(transport, "sudo", ["-n", "true"])
-    .then(({ exitCode }): ElevationSupport =>
-      exitCode === 0 ? "available" : "unavailable",
-    )
-    .catch((): ElevationSupport => "unavailable");
+  let support: ElevationSupport;
+  try {
+    const { exitCode } = await exec(transport, "sudo", ["-n", "true"]);
+    support = exitCode === 0 ? "available" : "unavailable";
+  } catch {
+    // Answered, but **not remembered**. A throw means the transport failed, not that the host has
+    // no passwordless sudo — and this value gates every escalation for the rest of the process, so
+    // caching one dropped connection would silently stop residue being removed and ownership being
+    // corrected, on a host that is fine. The ownership probes refuse this for the same reason.
+    return "unavailable";
+  }
   elevationProbes.set(key, support);
   return support;
+}
+
+/**
+ * Forgets the memoised elevation answers. For tests, which change a target's `sudo` between cases;
+ * a run has no reason to call it, since the answer is a property of the host.
+ */
+export function resetElevationCaches(): void {
+  elevationProbes.clear();
+  elevationNotices.clear();
 }
 
 /**
@@ -378,7 +435,7 @@ export async function execElevated(
         "in question writable by the transport's user.",
     );
   }
-  const key = elevationKey(transport);
+  const key = targetKey(transport);
   if (!elevationNotices.has(key)) {
     elevationNotices.add(key);
     console.info(
@@ -388,6 +445,107 @@ export async function execElevated(
     );
   }
   return dispatch(transport, file, args, options, true);
+}
+
+/**
+ * What `absolutePath` really is on the target, with every symbolic link along it resolved.
+ *
+ * Exists because the guards in `./paths.ts` are **lexical**: they compare path strings, so a symlink
+ * anywhere in the path — the final component, or any parent — makes them agree that a target is
+ * inside the WordPress root when the kernel will resolve it somewhere else entirely. Measured: with
+ * `wp-content/uploads` replaced by a link, a privileged `rm -rf` of a declared residue path deleted
+ * content outside the root while every guard reported success.
+ *
+ * `readlink -f` is the portable choice — GNU and BusyBox both resolve links and both tolerate the
+ * **last** component being absent, which a path about to be created always is. Neither resolves a
+ * path missing more than that, which is why the caller falls back to the parent.
+ *
+ * @param transport - the target site's transport.
+ * @param absolutePath - the path to resolve, absolute on the target.
+ * @returns the fully resolved path, or `undefined` when it could not be resolved — which a caller
+ * about to run a privileged command must treat as a refusal, never as permission.
+ * @throws Error if the question could not be asked at all (the transport failed).
+ */
+export async function resolveOnTarget(
+  transport: Transport,
+  absolutePath: string,
+): Promise<string | undefined> {
+  const { exitCode, stdout } = await exec(transport, "readlink", [
+    "-f",
+    "--",
+    absolutePath,
+  ]);
+  const resolved = stdout.trim();
+  return exitCode === 0 && resolved !== "" ? resolved : undefined;
+}
+
+/**
+ * Refuses a privileged target whose **resolved** path leaves the site's WordPress root.
+ *
+ * {@link assertSafeElevatedTarget} settles the same question lexically; this settles it against the
+ * filesystem, which is the half a string comparison cannot see. Both run, and they fail for
+ * different reasons, so an operator is told which.
+ *
+ * A path that does not exist yet cannot be a symlink, so what matters is its **deepest existing
+ * ancestor** — this walks up to it rather than relying on `readlink -f` tolerating an absent
+ * component, which GNU and BusyBox do and other implementations do not. If nothing on the path
+ * resolves, nothing is known about where a root command would land, and the only safe reading of
+ * "unknown" is "no".
+ *
+ * @param transport - the target site's transport.
+ * @param target - the absolute path the privileged command would act on.
+ * @param root - the site's WordPress root, as the transport resolved it.
+ * @param describeRejection - builds the message from the rule that was broken.
+ * @throws Error built by `describeRejection`.
+ */
+export async function assertResolvedInsideRoot(
+  transport: Transport,
+  target: string,
+  root: string,
+  describeRejection: (reason: string) => string,
+): Promise<void> {
+  const realRoot = await resolveOnTarget(transport, root);
+  const realTarget = await resolveDeepestExisting(transport, target, root);
+  if (realRoot === undefined || realTarget === undefined) {
+    throw new Error(
+      describeRejection(
+        `"${target}" could not be resolved on this site, so where a privileged command would ` +
+          "land is unknown",
+      ),
+    );
+  }
+  if (realTarget !== realRoot && !realTarget.startsWith(`${realRoot}/`)) {
+    throw new Error(
+      describeRejection(
+        `"${target}" really resolves to "${realTarget}", which is outside it — a symbolic link on ` +
+          "the way there points out of the site",
+      ),
+    );
+  }
+}
+
+/**
+ * Resolves `target`, or its nearest ancestor that exists, without leaving `root`'s depth.
+ *
+ * @param transport - the target site's transport.
+ * @param target - the absolute path to resolve.
+ * @param root - the site's WordPress root; the walk stops once it is shorter than this.
+ * @returns the resolved path of the deepest existing ancestor, or `undefined` if none resolved.
+ */
+async function resolveDeepestExisting(
+  transport: Transport,
+  target: string,
+  root: string,
+): Promise<string | undefined> {
+  let current = target;
+  while (current.length >= root.length) {
+    const resolved = await resolveOnTarget(transport, current);
+    if (resolved !== undefined) return resolved;
+    const parent = posix.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+  return undefined;
 }
 
 /** Closes all cached SSH connections. Call from a worker-teardown fixture. */

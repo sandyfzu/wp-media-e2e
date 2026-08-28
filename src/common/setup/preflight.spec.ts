@@ -3,7 +3,9 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { verifyPool } from "./preflight";
+import { verifyPool, verifySite, warnAboutElevation } from "./preflight";
+import { resetOwnershipCaches } from "../wp/ownership";
+import type { CheckResult } from "./preflight";
 import type { SiteConfig } from "../config/types";
 
 // A stub `wp` on PATH exercises the real exec layer + preflight with deterministic exit codes —
@@ -45,13 +47,20 @@ let stubDir: string;
 let wpRoot: string;
 let originalPath: string;
 
-/** A real, non-placeholder local site pointing `wp` at `wpRoot`. */
+/**
+ * A real, non-placeholder local site pointing `wp` at `wpRoot`.
+ *
+ * `elevate: false` by default, and deliberately: pre-flight now probes privileges, and a unit run
+ * must not shell out to the real `sudo` on whatever machine happens to be running it — that would
+ * make the result depend on the developer's sudoers file and leave failed-auth entries in the
+ * system log. Tests that care about elevation set it explicitly.
+ */
 function localSite(baseURL = "http://localhost:8100"): SiteConfig {
   return {
     baseURL,
     username: "admin",
     password: "admin_password",
-    transport: { mode: "local", rootDir: wpRoot },
+    transport: { mode: "local", rootDir: wpRoot, elevate: false },
     storageState: join(wpRoot, "state.json"),
   };
 }
@@ -77,6 +86,11 @@ test.afterAll(() => {
 
 // The locale gate protects every role/label locator in the suite: a translated admin would otherwise
 // surface as dozens of indistinguishable locator timeouts instead of one named failure here.
+test.beforeEach(() => {
+  // Every describe here shares one `wpRoot`, so they share one ownership cache entry too.
+  resetOwnershipCaches();
+});
+
 test.describe("verifyPool — admin locale gate", () => {
   test.beforeEach(() => {
     delete process.env.WP_STUB_INFO;
@@ -214,5 +228,286 @@ test.describe("verifyPool — local transport over a stub wp", () => {
         "local",
       ),
     ).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * The two informational checks.
+ *
+ * Neither describes a fault: a site whose ownership cannot be corrected, or which may not elevate,
+ * still runs every scenario — it simply cleans up less. So the property under test is that they
+ * *report* without ever changing a verdict, and that they run only once the transport itself is
+ * known good.
+ *
+ * Elevation is pinned via `transport.elevate: false` rather than by probing `sudo`, because whether
+ * the machine running these tests happens to have passwordless sudo is not a property of this code.
+ */
+test.describe("verifySite — ownership & elevation reporting", () => {
+  test.beforeEach(() => {
+    delete process.env.WP_STUB_INFO;
+    delete process.env.WP_STUB_LOCALE;
+    process.env.WP_STUB_INSTALLED = "yes";
+    resetOwnershipCaches();
+  });
+
+  /** The named check from a site's results, or `undefined` if it never ran. */
+  const check = (
+    checks: readonly CheckResult[],
+    name: string,
+  ): CheckResult | undefined => checks.find((entry) => entry.name === name);
+
+  test("reports both, and neither can fail the site", async () => {
+    const result = await verifySite(localSite(), 0);
+
+    expect(check(result.checks, "File ownership")?.ok).toBe(true);
+    expect(check(result.checks, "Elevation")?.ok).toBe(true);
+    expect(result.checks.every((entry) => entry.ok)).toBe(true);
+  });
+
+  test("carries the elevation state as a value, not only as prose", async () => {
+    const result = await verifySite(localSite(), 0);
+
+    // The run-level warning reads this rather than parsing a detail string back apart.
+    expect(result.elevation).toBe("disabled");
+    expect(check(result.checks, "Elevation")?.detail).toMatch(
+      /transport\.elevate: false/,
+    );
+  });
+
+  test("reports an ownership opt-out as the deliberate choice it is", async () => {
+    const site = localSite();
+    const result = await verifySite(
+      { ...site, transport: { ...site.transport, fileOwner: false } },
+      0,
+    );
+
+    const ownership = check(result.checks, "File ownership");
+    expect(ownership?.ok).toBe(true);
+    expect(ownership?.detail).toMatch(/transport\.fileOwner: false/);
+  });
+
+  /**
+   * The one ownership case that **fails** the site, and the exception proves the rule: every other
+   * branch describes a property of the *host*, which the suite adapts to. This one is our own
+   * configuration being unreadable, and a check that renders an error message beside a green tick is
+   * a check nobody acts on. The sites loader rejects the same value, so reaching this at all means
+   * the transport was built in code.
+   */
+  test("fails the site for a fileOwner that cannot be parsed", async () => {
+    const site = localSite();
+    const result = await verifySite(
+      {
+        ...site,
+        transport: { ...site.transport, fileOwner: "not a valid spec" },
+      },
+      0,
+    );
+
+    expect(check(result.checks, "File ownership")?.ok).toBe(false);
+    expect(check(result.checks, "File ownership")?.detail).toMatch(
+      /must be "user:group"/,
+    );
+    // …and it is the only thing wrong: the host itself is fine.
+    expect(
+      result.checks.filter((entry) => !entry.ok).map((entry) => entry.name),
+    ).toEqual(["File ownership"]);
+  });
+
+  /**
+   * A site that needs a handover it may not perform must be told it **cannot** happen.
+   *
+   * `planOwnership` deliberately says nothing about privileges, so without folding the elevation
+   * answer in, this line reads "will be handed to …" on a host that will never hand anything over —
+   * and in the `disabled` case no run-level banner contradicts it, so the report is simply wrong
+   * with nothing to catch it.
+   *
+   * Reaching that branch needs ownership that differs from the runner's, which is what the stubbed
+   * `stat`/`id` provide.
+   */
+  test("says a needed handover cannot happen when privileges are unavailable", async () => {
+    const binDir = mkdtempSync(join(tmpdir(), "wp-pf-stub-"));
+    const shim = (name: string, body: string): void => {
+      writeFileSync(join(binDir, name), `#!/usr/bin/env bash\n${body}\n`);
+      chmodSync(join(binDir, name), 0o755);
+    };
+    shim("stat", 'printf "%s" "www-data:www-data:33:33"');
+    shim(
+      "id",
+      'printf "%s" "uid=1000(ubuntu) gid=1000(ubuntu) groups=1000(ubuntu),33(www-data)"',
+    );
+    const pathBefore = process.env.PATH ?? "";
+    process.env.PATH = `${binDir}:${pathBefore}`;
+    resetOwnershipCaches();
+
+    try {
+      const result = await verifySite(localSite(), 0);
+      const ownership = check(result.checks, "File ownership");
+
+      expect(ownership?.ok).toBe(true);
+      expect(ownership?.detail).toMatch(/cannot be/);
+      expect(ownership?.detail).toMatch(/elevation is disabled/);
+      // …and it must not claim the handover as a future fact.
+      expect(ownership?.detail).not.toMatch(/will be handed/);
+    } finally {
+      process.env.PATH = pathBefore;
+      rmSync(binDir, { recursive: true, force: true });
+      resetOwnershipCaches();
+    }
+  });
+
+  // Both run commands on the site, so asking a transport that has already failed would only produce
+  // a second way of saying the same thing.
+  test("runs neither when the transport itself failed", async () => {
+    process.env.WP_STUB_INSTALLED = "no";
+    const result = await verifySite(localSite(), 0);
+
+    expect(check(result.checks, "File ownership")).toBeUndefined();
+    expect(check(result.checks, "Elevation")).toBeUndefined();
+    expect(result.elevation).toBeUndefined();
+  });
+
+  test("a site that may not elevate still passes pre-flight", async () => {
+    await expect(
+      verifyPool([localSite()], "wp-rocket", "local"),
+    ).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * The only state that produces the run-level banner, end to end.
+ *
+ * Everything else about elevation is pinned against `disabled`, which is silent by design — so
+ * without this, `verifySite` could stop populating `elevation`, or either caller could stop calling
+ * `warnAboutElevation`, and the whole suite would still be green. `sudo` is shimmed rather than
+ * real: the answer must not depend on the sudoers file of whatever machine runs the tests.
+ */
+test.describe("verifySite → warnAboutElevation — the wiring the banner depends on", () => {
+  let binDir: string;
+  let pathBefore: string;
+
+  const shim = (name: string, body: string): void => {
+    writeFileSync(join(binDir, name), `#!/usr/bin/env bash\n${body}\n`);
+    chmodSync(join(binDir, name), 0o755);
+  };
+
+  test.beforeEach(() => {
+    binDir = mkdtempSync(join(tmpdir(), "wp-pf-elev-"));
+    shim("sudo", "exit 1"); // a sudoer who is not passwordless, and never the real binary
+    shim("stat", 'printf "%s" "www-data:www-data:33:33"');
+    shim(
+      "id",
+      'printf "%s" "uid=1000(ubuntu) gid=1000(ubuntu) groups=1000(ubuntu),33(www-data)"',
+    );
+    pathBefore = process.env.PATH ?? "";
+    process.env.PATH = `${binDir}:${pathBefore}`;
+    resetOwnershipCaches();
+  });
+
+  test.afterEach(() => {
+    process.env.PATH = pathBefore;
+    rmSync(binDir, { recursive: true, force: true });
+    resetOwnershipCaches();
+  });
+
+  test("carries the unavailable verdict and the pending handover onto the result", async () => {
+    const site = localSite();
+    const result = await verifySite(
+      { ...site, transport: { ...site.transport, elevate: undefined } },
+      0,
+    );
+
+    const elevation = result.checks.find((entry) => entry.name === "Elevation");
+    expect(result.elevation).toBe("unavailable");
+    expect(result.ownershipPending).toBe(true);
+    // Still not a failure: privileges are a property of the host, not a fault in it.
+    expect(elevation?.ok).toBe(true);
+  });
+
+  /**
+   * The call site, not just the renderer. Deleting `warnAboutElevation(results)` from `verifyPool`
+   * leaves every other test in this file green, so this is the only thing standing between a silent
+   * refactor and a run that never warns about a fleet it cannot clean up.
+   */
+  /**
+   * The two checks describe one site and must not contradict each other. When ownership could not be
+   * read at all, the elevation line may not answer "needs no change here" — the line directly above
+   * it has just said the opposite.
+   */
+  test("does not claim ownership is settled when it could not be read", async () => {
+    shim("stat", "exit 1");
+    const site = localSite();
+    const result = await verifySite(
+      { ...site, transport: { ...site.transport, elevate: undefined } },
+      0,
+    );
+    const ownership = result.checks.find((c) => c.name === "File ownership");
+    const elevation = result.checks.find((c) => c.name === "Elevation");
+
+    expect(ownership?.detail).toMatch(/Could not be read/);
+    expect(elevation?.detail).not.toMatch(/needs no change/);
+    expect(elevation?.detail).toMatch(
+      /ownership normalization will be incomplete/,
+    );
+  });
+
+  test("and pool verification actually prints it", async () => {
+    const printed: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]): void => {
+      printed.push(args.map(String).join(" "));
+    };
+    try {
+      const site = localSite();
+      await verifyPool(
+        [{ ...site, transport: { ...site.transport, elevate: undefined } }],
+        "wp-rocket",
+        "local",
+      );
+    } finally {
+      console.warn = realWarn;
+    }
+
+    expect(printed.join("\n")).toContain("ELEVATION UNAVAILABLE");
+  });
+
+  test("and that result is what makes the banner print", () => {
+    const printed: string[] = [];
+    warnAboutElevation(
+      [
+        {
+          index: 0,
+          baseURL: "http://broken.test",
+          transport: { mode: "local", rootDir: "/var/www/broken" },
+          checks: [],
+          elevation: "unavailable",
+          ownershipPending: true,
+        },
+      ],
+      (message) => printed.push(message),
+    );
+
+    expect(printed).toHaveLength(1);
+    expect(printed[0]).toContain("ELEVATION UNAVAILABLE");
+    expect(printed[0]).toContain("http://broken.test");
+  });
+
+  // The silent case, asserted rather than assumed: a site that opted out must not produce a banner.
+  test("a site that declined privileges produces nothing", () => {
+    const printed: string[] = [];
+    warnAboutElevation(
+      [
+        {
+          index: 0,
+          baseURL: "http://opted-out.test",
+          transport: { mode: "local", rootDir: "/var/www/opted-out" },
+          checks: [],
+          elevation: "disabled",
+          ownershipPending: true,
+        },
+      ],
+      (message) => printed.push(message),
+    );
+
+    expect(printed).toEqual([]);
   });
 });

@@ -11,9 +11,9 @@ site, discriminated on `mode`:
 
 | Mode     | Fields                                                                      | Dispatch                                        |
 | -------- | --------------------------------------------------------------------------- | ----------------------------------------------- |
-| `local`  | `rootDir`, `stagingDir?`, `elevate?`                                        | `execa`, run in `rootDir`.                      |
-| `docker` | `container`, `rootDir?`, `stagingDir?`, `elevate?`                          | `docker exec <container> …` (see `dockerArgv`). |
-| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`, `elevate?`   | `node-ssh` (its `exec` shell-escapes the args). |
+| `local`  | `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?`                                      | `execa`, run in `rootDir`.                      |
+| `docker` | `container`, `rootDir?`, `stagingDir?`, `elevate?`, `fileOwner?`                        | `docker exec <container> …` (see `dockerArgv`). |
+| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`, `stagingDir?`, `elevate?`, `fileOwner?` | `node-ssh` (its `exec` shell-escapes the args). |
 
 Key design points:
 
@@ -59,7 +59,13 @@ The limits are what make a test suite holding root uninteresting:
 - **Never on a path a scenario asserts against.** Elevation cannot make a product behaviour pass; it
   only removes what the product left behind, after the verdict is in.
 - **Second, never first.** Callers try as themselves and escalate only what demonstrably failed, so a
-  correctly-permissioned host never runs a privileged command — not even the capability probe.
+  correctly-permissioned host never runs a privileged command — not even the capability probe. The one
+  exception is ownership normalisation, whose `chmod` **and** `chown` are elevated without an
+  unprivileged attempt: only a file's owner or root may `chown` it, and by then the owner is known
+  not to be us, so trying first would be a round-trip whose answer is already decided. It still asks
+  nothing of a host that does not need it — the decision is made before the capability probe, and a
+  transport user that already owns the install returns without running either (see
+  [File ownership](#file-ownership-wpownershipts)).
 - **Never interactive.** `sudo -n` fails immediately instead of waiting on a password nobody will
   type, and `--` stops sudo parsing the target command's own flags.
 - **Refusable per site** (`transport.elevate: false`), which `execElevated` enforces by throwing
@@ -76,6 +82,10 @@ per-mode dispatch and the same cached SSH connection:
   target, overwriting: `node:fs` copy (`local`), `docker cp` (`docker`, a top-level
   sub-command — see `dockerCpArgv`), SFTP `putFile` (`ssh`). It does **not** create
   the parent directory; the staging layer below does that first.
+- `isSymlink(transport, absolutePath)` — one unprivileged `test -L`. A missing path answers `false`,
+  which is the right answer for one about to be created; a transport that could not be asked throws,
+  so "could not check" is never read as "not a link". Used by the two callers that are about to
+  `chmod` as root — see [Symlinks](#symlinks).
 
 ## Playwright ≥ 1.62 is a floor, not a preference
 
@@ -130,17 +140,19 @@ category, so a future artifact type reuses the same transfer and cleanup.
 | Function                                            | Purpose                                                                      |
 | --------------------------------------------------- | ---------------------------------------------------------------------------- |
 | `stageArtifact(transport, localPath, { category, as? })` | `mkdir -p` the category, copy the file in, return its **absolute target path**. |
-| `stageAndInstallPlugin(transport, localZip, opts?)` | `stageArtifact(category: "plugins")` → `installPlugin` from the staged path.  |
+| `stageAndInstallPlugin(transport, localZip, opts?)` | `stageArtifact(category: "plugins")` → `installPlugin` from the staged path, then **restores the installed plugin's ownership** when `opts.slug` is given (see [File ownership](#file-ownership-wpownershipts) — pass it). |
 | `siteStagingDir(transport)`                         | The absolute staging directory for a site.                                   |
 | `cleanSiteStaging(transport, category?)`            | `rm -rf` the whole area, or one category.                                    |
 | `stagingPath(root, ...segments)`                    | Pure POSIX path builder; validates each segment.                             |
 
 ```ts
-const zip = await stageAndInstallPlugin(
-  site.transport,
-  pluginArtifact("plugin").zipPath,
-  { activate: true },
-);
+const artifact = pluginArtifact("plugin");
+const zip = await stageAndInstallPlugin(site.transport, artifact.zipPath, {
+  activate: true,
+  // Pass it: without the slug there is no way to know which directory was unpacked,
+  // and the plugin stays owned by the transport's user.
+  slug: artifact.slug,
+});
 ```
 
 - **Location override**, for a host whose user cannot write the WordPress root or to
@@ -327,7 +339,20 @@ itself per scenario (measured on the QA cell before this existed: **6.8 GB acros
   or naming a directory WordPress itself owns (`wp-content/uploads` and friends). It guards against
   a typo in a config file, not against a hostile one.
 - `prepareSiteDataDirs(transport, paths)` is the other half, run by the **Before** hook over the same
-  declared list: it creates each directory and opens it to every user sharing the docroot (`0777`).
+  declared list: per path it creates the directory, opens it to every user sharing the docroot
+  (`0777`), then hands it to the site's ownership through `normalizeOwnership` — the same primitive
+  the plugin install uses, because this too writes into the docroot as the transport's user. The mode
+  is a floor that holds even where ownership cannot be corrected; the correction adds the owner and,
+  where it has anything to do, is **recursive**, so it reaches a subtree the mode cannot (one an
+  earlier scenario wrote as the web server, or one the plugin's activation just created as WP-CLI).
+  On a site whose transport user already owns the install — the `docker` case — the correction is
+  `unnecessary` and only the mode applies. Ownership correction is best-effort either way, so a host
+  that refuses it still gets prepared directories.
+  It escalates when the transport's user is refused, so it runs the **same root-plausibility guard**
+  removal does — and refuses a path that is a symlink, since the `chmod` would otherwise follow it
+  out of the tree as root — before doing so — otherwise a site whose `rootDir` was a top-level directory would
+  have world-writable directories created as root at the filesystem root, which teardown would then
+  refuse to remove.
   On a real cell **WP-CLI and the web server are different users** — `ubuntu` over SSH, `www-data`
   under PHP-FPM — and the plugin creates these directories under whichever umask it happens to be
   running with, so the first writer locks the other one out of a directory they must both write.
@@ -347,6 +372,177 @@ root. That is a fact about the cell, it breaks no later scenario, and it is repo
 plus an `uncleared-site-data` report attachment) rather than failing the run. A path that is not a
 usable declaration, an implausible `rootDir` for a privileged delete, or a transport that cannot run
 a command, still throws.
+
+## File ownership ([`wp/ownership.ts`](../../src/common/wp/ownership.ts))
+
+The same two-user problem as the data directories above, one step earlier: **WP-CLI unpacks a
+plugin as the transport's user, so the web server cannot write inside it.** On a real cell `wp`
+runs as for example `ubuntu` under a `0002` umask, and everything `wp plugin install` extracts arrives
+`ubuntu:ubuntu` — `775` directories, `664` files. Let's say `www-data` is the web server user; it is then denied on its very next write:
+a plugin creating a working directory of its own, a plugin update, a delete through wp-admin.
+
+It is **not** the familiar "WordPress wants FTP credentials" symptom. Read from WP 7.1 core on the
+cell, `get_filesystem_method()` compares the owner of a *core* file with a temp file it writes, and
+both are `www-data`, so WordPress still selects its `direct` method correctly — and then fails with a
+plain permission error on the actual call.
+
+**Who the files should belong to is detected, never assumed.** `stat -c '%U:%G:%u:%g'` on
+`wp-content` (falling back to the WordPress root) answers it, and the answer is *not* always the web
+server: on a docroot deployed over SFTP the owner is the deployment account and `www-data` (or whatever the web server user is called) only
+shares the group. Measured on two QA cells:
+
+| Cell | Web/PHP process user | Docroot owner |
+| --- | --- | --- |
+| nginx | `www-data` | `www-data:www-data` |
+| apache | `www-data` | **`sftp_backwpup:www-data`** |
+
+Probing the running web-server process would name `www-data` on both, and would be wrong on the
+second. A site may override the detection with `transport.fileOwner` (see
+[configuration.md](../guides/configuration.md#transport-modes-transport)).
+
+### What it does, and in what order
+
+`normalizeOwnership(transport, sitePath)` takes a path **relative to the WordPress root** and:
+
+1. Decides, via `planOwnership` — the same function pre-flight calls to *report* what will happen, so
+   the two can never describe different things.
+2. **Does nothing at all** when the transport's user already owns the install with the same uid *and*
+   gid. That is the `docker` case (the wp-cli containers run as `33:33`, matching the `wordpress`
+   containers), and it returns before privileges are even probed.
+3. Otherwise applies **the mode grant first**, then the chown (shown as `local`/`ssh` dispatches;
+   on `docker`, `execElevated` uses `docker exec -u 0:0` instead of `sudo`):
+
+   ```
+   sudo -n -- chmod -R -- <mode> <abs>
+   sudo -n -- chown -Rh -- <user>:<group> <abs>
+   ```
+
+   The order is load-bearing. The commands commute in their final effect but not in their
+   intermediate one: chowning first leaves the tree owned by the site's user with **no grant yet** —
+   which is exactly what locks the transport user out of `wp plugin uninstall`. Granting first means
+   a failed chown leaves the tree as it was.
+4. **Verifies** by re-reading the ownership, never inferring it from `chown`'s exit code.
+
+**The grant keeps both users working**, and its scope is measured rather than assumed:
+
+| The transport user is… | Grant |
+| --- | --- |
+| the target owner, or in the target group | `ug+rwX` |
+| neither | `ug+rwX,o+rwX` — world-writable, and it says so |
+
+`ug+rwX` is applied in both branches because after the chown the owner and group are the docroot's
+own pair, and where those are two different accounts the **group half is the web server's only
+access**. `o+rwX` is added only when the transport user is outside both, so it can still remove what
+it installed; that case emits a one-time notice naming the fix (put the transport user in the site's
+group). Every mode is additive (`+`, never `=`) so this can never tighten a host, and uses `X` not
+`x` so directories become traversable without making PHP files executable.
+
+### Symlinks
+
+The guards in [`wp/paths.ts`](../../src/common/wp/paths.ts) are **lexical** — they compare path
+strings. What a path *really* points at is a separate question, and the privileged commands do not
+answer it the same way. Measured on GNU coreutils 9.4 (Ubuntu, kernel 6.8) and on BusyBox 1.37:
+
+| | A link as the **operand** | A link found during **recursion** |
+| --- | --- | --- |
+| `chmod -R` | **followed** — and it recurses into the referent's whole tree | not followed |
+| `chown -Rh` | not followed — `-h` acts on the link | not followed |
+| `rm -rf` | not followed — removes the link | not followed |
+
+Recursion is safe in all three: GNU's `-P` ("do not traverse any symbolic links") is the default
+under `-R`, and `-Rh` is what additionally makes `chown` safe on the operand.
+
+**But the operand is not the only place a link can sit.** A link in any *parent* is resolved by the
+kernel before the command ever sees the path, so `wp-content/uploads` relocated to another volume
+sends every one of these commands elsewhere while each lexical guard agrees the target is inside the
+root. Measured: with `uploads` linked out, `rm -rf <root>/wp-content/uploads/backwpup` deleted
+`/out/backwpup`, and `mkdir -p` created `/out/newdir` — both outside the WordPress root.
+
+So the check is not "is the last component a link?" but **"where does this path really lead?"**
+`assertResolvedInsideRoot` ([`wp/exec.ts`](../../src/common/wp/exec.ts)) resolves the target and the
+root with `readlink -f` and requires the first to be inside the second. A path that does not exist
+yet cannot be a link, so it walks up to the deepest ancestor that does — rather than relying on
+`readlink -f` tolerating one absent component, which GNU and BusyBox do and other implementations do
+not. A path it cannot resolve at all is **refused**: nothing is then known about where a root command
+would land, and the only safe reading of "unknown" is "no".
+
+It runs before every privileged path — ownership normalisation (warns, returns `failed`), data-directory
+preparation and residue removal (both throw). Removal is guarded before **both** of its passes, not
+only the elevated one: "unprivileged" is a bound only while the transport's user is not root, which a
+container or a root SSH login does not guarantee, and deleting another part of the filesystem is wrong
+at any privilege. Verified against a live container: with a linked ancestor in place, preparation and
+removal both refused and the outside directory kept its contents and its `0700` mode.
+
+It is a check-then-act, and not claimed to be more: the path could be replaced between the resolution
+and the command. `chmod` has no "do not follow" flag, so the window cannot be closed here. Winning it
+needs write access to the docroot — which on these cells means the plugin under test — and before this
+check there was no window at all, only an open door.
+
+Relocating a data directory outside the root is therefore refused rather than followed. That is the
+deliberate trade: point the site's `rootDir` at the real location, or declare a residue path that
+stays within it.
+
+`--` ends option parsing in both commands, because `chown` permutes options anywhere in its argv:
+without it, a `fileOwner` of `--reference=/etc/hostname` reaches root as a *flag* and takes ownership
+from that file (measured; with `--` it is an "invalid user" error).
+
+### It never fails a run
+
+The elevation probe follows the same rule as the ownership probes: a `sudo` that **runs and
+refuses** is remembered for the process, a transport that could not be asked at all is not. Caching
+the second would let one dropped connection disable escalation for every later scenario in that
+worker, on a host that is fine.
+
+Ownership is housekeeping — it makes no claim about the product under test — so
+`normalizeOwnership` **never throws**. It returns `normalized` / `unnecessary` / `skipped` /
+`disabled` / `failed`, and warns once per site *per reason* (two different failures never silence
+each other). A host with no passwordless `sudo` cannot do it at all, since `chown` always needs root;
+that is reported by pre-flight and by the run-level warning, not treated as a fault.
+
+Detection, identity and the notices are cached **per install**, not per host: one machine routinely
+serves several sites and they need not agree — measured on the apache cell,
+`sftp_backwpup:www-data` and `sftp_wprocket:www-data` under the same `ubuntu@host`.
+
+> **MUST — any code that writes files into a site's docroot as the transport's user must call
+> `normalizeOwnership` on what it wrote.** Never call `chown`/`chmod` directly, and never elevate
+> `wp`: WP-CLI as root would leave the site unwritable by the web server, which is this module's
+> problem in a more expensive form. `stageAndInstallPlugin` does it for you when given the plugin's
+> `slug` — pass it. The staging area itself is deliberately left alone: only the transport user ever
+> reads it.
+
+**Linux only, deliberately.** `stat -c` and `id` are read in their GNU form; BusyBox (what the
+`wordpress:cli` container provides) implements both compatibly. Both reads are confined to one
+function each, so a future BSD branch stays local.
+
+## Path guards ([`wp/paths.ts`](../../src/common/wp/paths.ts))
+
+The two guards that stand between a typo and a privileged `rm -rf` / `chown -R` on a real system path,
+plus the composer that builds the path they are most often asked about. They live in one module because
+a copied guard is a guard that drifts, and residue removal, data-directory preparation and ownership
+normalisation all validate through them.
+
+- `normaliseSitePath(declared, describeRejection)` constrains the **relative** half: inside the
+  WordPress root, never a directory WordPress itself owns (`PROTECTED_SITE_PATHS`).
+- `assertSafeElevatedTarget(target, root, describeRejection)` constrains the half the first cannot
+  see: that the root is a plausible site root (absolute, at least two segments — `/` and `/tmp` are
+  not) and that joining the two stayed inside it. It is run by the three operations that build a
+  privileged target out of a site's declared `rootDir` — residue removal, data-directory
+  preparation and ownership normalisation. The other elevated callers do not need it because they
+  do not compose such a path: the staging area has its own dedicated-directory guard, and
+  `debug.log` is a fixed relative path. Unprivileged callers have the transport user's own
+  permissions as a backstop.
+- `pluginSitePath(slug)` composes `wp-content/plugins/<slug>` and requires a **single segment**,
+  because `posix.join` would otherwise resolve `..` back out into a directory WordPress owns.
+
+Both **guards** take the caller's own message builder, so a failure reads in the vocabulary of what
+was being attempted and names the remedy that caller can offer; `pluginSitePath` throws its own fixed
+message, having only one thing it can be used for. Neither guard is a boundary against hostile input —
+the declarations are our own — but on a host where the suite can `sudo`, a mistake is the more
+expensive of the two.
+
+Both are **lexical**: they reason about the path string, not about what is on disk. See
+[Symlinks](#symlinks) for the one thing that distinction leaves open,
+and what closes it.
 
 ## Options ([`wp/options.ts`](../../src/common/wp/options.ts))
 

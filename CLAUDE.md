@@ -34,7 +34,7 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 ```text
 src/
 ├── common/                 # product-agnostic, shared by every product
-│   ├── config/             # env, sites loading, run-context, metadata, devices, the config factory
+│   ├── config/             # env, sites loading, run-context, metadata, devices, file-owner rule, the config factory
 │   ├── auth/               # auth.setup.ts (login → storageState)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── steps/              # generic step definitions
@@ -42,7 +42,7 @@ src/
 │   ├── pages/              # cross-product Page Object Model (e.g. plugins.page.ts)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, verify, consume, pre-warm)
-│   └── wp/                 # WordPress automation over WP-CLI (exec, staging, plugin, log, options, residue, db, teardown, errors)
+│   └── wp/                 # WordPress automation over WP-CLI (exec, staging, plugin, log, options, residue, ownership, paths, cache, db, teardown, errors)
 └── projects/<product>/
     ├── config/             # <product>.config.ts + sites.json / sites.*.json / sites.example.json
     ├── fixtures.ts         # this product's test instance: common's + its page objects
@@ -172,12 +172,14 @@ module so it is unit-testable without the runtime.
 
 - **Before** — `debug.log` cleared, any existing copy of the plugin uninstalled (so the
   install is genuinely fresh, DB footprint included), then the cell's own resolved
-  artifact staged and installed with `--activate` — and the plugin's **active state
-  re-asserted**, never inferred from the install's exit code. The edition is never named:
+  artifact staged and installed with `--activate`, its files handed back to the ownership the
+  **site** uses (WP-CLI installs as the transport's user, which the web server is not — see
+  `wp/ownership.ts`) — and the plugin's **active state re-asserted**, never inferred from the
+  install's exit code. The edition is never named:
   the slug comes from `pluginArtifact("plugin").slug`. Finally the product's declared data
-  directories (`ProductConfig.siteResidue`) are created and opened to **both** users sharing the
-  docroot — WP-CLI and the web server are different users on a real cell, and whichever writes
-  first would otherwise lock the other out (`prepareSiteDataDirs`).
+  directories (`ProductConfig.siteResidue`) are created, opened to **both** users sharing the
+  docroot and handed to the site's ownership — WP-CLI and the web server are different users on a
+  real cell, and whichever writes first would otherwise lock the other out (`prepareSiteDataDirs`).
 - **After** — `debug.log` scanned with the product's preset: a **PHP fatal fails the
   scenario** (`DebugLogFatalError`) with the log attached; warnings/notices are logged.
   Then the plugin is removed, and finally the **files it left behind** are cleared
@@ -235,8 +237,17 @@ is a dependency project that runs before any BDD scenarios. It does two things i
    the same function WordPress uses to pick an admin request's language, so it accounts for a
    per-user override, the site option, a `WPLANG` constant and filters alike). Page objects
    locate controls by their visible English names, so a translated site would otherwise fail
-   as many unrelated locator timeouts instead of once, here. A failure throws a formatted,
-   actionable report and skips the whole BDD project.
+   as many unrelated locator timeouts instead of once, here. Two further checks are **reports, not
+   gates**: **File ownership** says what will happen to the files this run installs (the same
+   `planOwnership` decision `normalizeOwnership` acts on, taken once and shared, so the report and
+   the action can never disagree), and **Elevation** says whether passwordless `sudo` is available.
+   Neither fails a site for a property of the _host_ — the single exception is a
+   `transport.fileOwner` that cannot be parsed, which is our own configuration being unreadable and
+   fails like any other config error. A failure of any gating check throws a formatted, actionable
+   report and skips the whole BDD project; the reports instead fold into one run-level warning
+   banner ([`setup/elevation-report.ts`](src/common/setup/elevation-report.ts)), printed once per
+   run, silent when every site can elevate or has opted out, and naming the ownership cost only for
+   the sites that actually needed a handover.
 2. **Authentication** — logs into each real site once through the WordPress UI and
    saves the session to that site's `storageState`, which the BDD project reuses.
 
@@ -261,7 +272,10 @@ Playwright test run) and across **every** product × cell × site instead of one
 selected cell. Output is grouped **per product** (wp-rocket / backwpup / future
 imagify never blur together): products run one section at a time, sites within a
 product run concurrently, and each site — pass or fail — lists every individual check
-it ran (failures add actionable hints). Each site is checked independently — one
+it ran — including the ownership and elevation reports above, and the same shared warning banner
+(the renderer is shared, so the two entry points cannot drift; the healthcheck prints it to
+**stdout**, since its whole output is the report and `healthcheck > fleet.log` must not drop it).
+Failures add actionable hints. Each site is checked independently — one
 site's failure never aborts another's check — and its result prints as soon as it is
 known; a final summary breaks the fleet down per product. A cell with only placeholder
 sites is reported as skipped, not failed. Exits `0` only if every real site passed;
@@ -294,7 +308,8 @@ request model, resolution lifecycle, preflight, pre-warm — is in
   `gh auth login`. WP Rocket / Imagify are public (a token there only raises rate
   limits).
 - **Consumption:** a scenario reads its zip through the `pluginArtifact` fixture —
-  `stageAndInstallPlugin(site.transport, pluginArtifact("plugin").zipPath, { activate: true })`.
+  `stageAndInstallPlugin(site.transport, a.zipPath, { activate: true, slug: a.slug })` (where
+  `a = pluginArtifact("plugin")`; the `slug` is what restores the plugin's file ownership).
   It reads `resolution.json` (or the in-process memo). Requesting a role the product
   does not support throws (see the MUST below). **`zipPath` is a path on the runner**,
   so `installPlugin` alone works only on a `local` transport — `ssh`/`docker` need the
@@ -357,12 +372,35 @@ ssh). Highlights — full reference in
   screen rendered. A missing option reads as `undefined`; a WordPress that cannot boot
   throws, so the two can never be confused. `wp/db.ts` adds `tablePrefix` for the same
   reason — never hard-code `wp_`.
+- [`wp/ownership.ts`](src/common/wp/ownership.ts) gives files back the ownership the **site** uses,
+  after WP-CLI writes them as the transport's user. On a real cell `wp` runs for example as `ubuntu` and PHP for example as
+  `www-data`, so an installed plugin is unwritable by the web server until this runs. The owner is
+  **detected** from `wp-content` — not assumed to be the web-server user, which is wrong on a docroot
+  deployed over SFTP — then applied as `chmod` **then** `chown` (that order: chowning first would lock
+  the transport user out of its own uninstall). Verified by re-reading, never inferred from an exit
+  code, and it **never throws**: a host that cannot do it is warned about, not failed. Overridable per
+  site with `transport.fileOwner` (`"user:group"` — either half may be a bare numeric id — or `false`
+  to opt out).
+  **MUST — any code that writes into a site's docroot as the transport's user calls
+  `normalizeOwnership` on what it wrote; never `chown`/`chmod` directly, and never elevate `wp`.**
+  `stageAndInstallPlugin` does it for you when given the plugin's `slug` — pass it.
+- [`wp/paths.ts`](src/common/wp/paths.ts) holds the guards that stand between a typo and a
+  privileged command on a real system path — `normaliseSitePath`, `assertSafeElevatedTarget`,
+  `pluginSitePath` — in one place, because a copied guard is a guard that drifts. Every operation
+  that builds an elevated target out of a site's `rootDir` (residue removal, data-directory
+  preparation, ownership normalisation) validates through them. Those guards are **lexical**, so
+  where a path really leads is checked separately: `assertResolvedInsideRoot` resolves the target and
+  the root (`readlink -f`, walking up to the deepest existing ancestor) and refuses anything that
+  lands outside — a symlink in _any_ parent, not just the last component, otherwise redirects a root
+  `chmod`/`mkdir`/`rm -rf` out of the docroot while every string comparison agrees. A path that
+  cannot be resolved is refused too.
 - [`wp/residue.ts`](src/common/wp/residue.ts) removes the files a plugin leaves behind after it
   is uninstalled, from the paths its product declares as `ProductConfig.siteResidue`. Validated
   before removal and **verified afterwards**, never inferred from `rm`'s exit code. Removal runs
   unprivileged first and **escalates only what survived** (`execElevated`), because a plugin writes
   as the web-server user and leaves directories nobody else can empty; `prepareSiteDataDirs` opens
-  those same directories to both users up front. Refusable per site with `transport.elevate: false`.
+  those same directories to both users up front — `0777` as a floor, then `normalizeOwnership` for
+  the owner and for the subtree a non-recursive mode cannot reach. Refusable per site with `transport.elevate: false`.
   **`wp` is never elevated** — WP-CLI as root would leave the site's files unwritable by the web
   server.
 
@@ -434,6 +472,11 @@ These are requirements, not suggestions:
   `them`/`it`). Setup and the reason scenarios resemble each other belong in the `Feature`
   description or `Background`, not implied by a title. Full rule and examples:
   [authoring-tests.md → Naming scenarios](docs/guides/authoring-tests.md#naming-scenarios).
+- **Never write to a site's docroot without restoring its ownership.** WP-CLI runs as the
+  transport's user and PHP as the web server, so anything the suite installs is unwritable by the
+  web server until it is handed back. Call `normalizeOwnership` (or pass `slug` to
+  `stageAndInstallPlugin`, which calls it) — never `chown`/`chmod` by hand, and never run `wp`
+  elevated. See [wordpress-automation.md](docs/architecture/wordpress-automation.md#file-ownership-wpownershipts).
 - **Follow best practices.** Keep UI logic in page objects, WP-CLI logic in `wp/`,
   shared logic in `common/`, product specifics under `src/projects/<product>/`.
   Match the style of the surrounding code. Add a `*.spec.ts` unit test for
@@ -483,6 +526,7 @@ these before starting related work — they hold the current plan, not history:
 - [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md) — full design rationale and decisions.
 - [`docs/plans/plugin-artifact-management-plan.md`](docs/plans/plugin-artifact-management-plan.md) — plugin artifact management.
 - [`docs/plans/phase-6-feature-porting-plan.md`](docs/plans/phase-6-feature-porting-plan.md) — feature porting (BackWPup first); supersedes the parent plan's Phase 6.
+- [`docs/plans/site-file-ownership-plan.md`](docs/plans/site-file-ownership-plan.md) — keeping a site's docroot writable by both WP-CLI's user and the web server.
 
 ## When to update these docs
 
@@ -534,7 +578,9 @@ Update it when you change anything about:
   area (`staging.ts`, `E2E_SITE_STAGING_DIR`, `transport.stagingDir`).
 - The plugin lifecycle functions or their error types.
 - The debug-log API (`readDebugLog`, `clearDebugLog`, `scanDebugLog`, `ScanDebugLogOptions`).
-- Any other `wp/` module (`db.ts`, `errors.ts`, `teardown.ts`, `guards.ts`).
+- File ownership (`ownership.ts`: `planOwnership`, `normalizeOwnership`, the grant rule,
+  `transport.fileOwner`) or the shared path guards (`paths.ts`).
+- Any other `wp/` module (`cache.ts`, `db.ts`, `errors.ts`, `teardown.ts`).
 
 ### docs/architecture/plugin-artifacts.md
 

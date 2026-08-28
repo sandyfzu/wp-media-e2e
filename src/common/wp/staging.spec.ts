@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { resetOwnershipCaches } from "./ownership";
 import {
   DEFAULT_STAGING_DIR,
   PLUGINS_CATEGORY,
@@ -357,7 +358,27 @@ test.describe("cleanSiteStaging", () => {
   });
 });
 
+/** Captures `console.warn` for the duration of one call, and hands back what it saw. */
+function captureWarnings(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const real = console.warn;
+  console.warn = (...args: unknown[]): void => {
+    lines.push(args.map(String).join(" "));
+  };
+  return {
+    lines,
+    restore: () => {
+      console.warn = real;
+    },
+  };
+}
+
 test.describe("stageAndInstallPlugin", () => {
+  // Ownership probes are memoised per target, and each test gets a fresh WordPress root.
+  test.beforeEach(() => {
+    resetOwnershipCaches();
+  });
+
   test("installs from the staged path, not the runner path", async () => {
     const argvFile = join(sourceDir, "wp-argv.log");
     rmSync(argvFile, { force: true });
@@ -374,6 +395,132 @@ test.describe("stageAndInstallPlugin", () => {
     const argv = readFileSync(argvFile, "utf8").trim();
     expect(argv).toBe(`plugin install ${staged} --activate`);
     expect(argv).not.toContain(sourceDir);
+  });
+
+  /**
+   * Ownership normalisation is what stops a plugin installed as the transport's user from being
+   * unwritable by the web server. It is opt-in via `slug` because nothing here inspects the zip, so
+   * without one there is no way to know which directory was unpacked.
+   *
+   * Observed through a deliberately unusable `fileOwner`, because that is the one outcome an
+   * unprivileged runner can provoke on any platform: the step reports and returns rather than
+   * throwing, which is the property that matters — an install must never fail over housekeeping.
+   */
+  test("normalises the installed plugin's ownership when given its slug", async () => {
+    const argvFile = join(sourceDir, "wp-argv.log");
+    rmSync(argvFile, { force: true });
+    process.env.WP_STUB_ARGV_FILE = argvFile;
+    const warnings = captureWarnings();
+
+    try {
+      await stageAndInstallPlugin(
+        { ...local, fileOwner: "not a valid spec" },
+        makeSource("bwp.zip"),
+        { activate: true, slug: "backwpup-pro" },
+      );
+    } finally {
+      warnings.restore();
+    }
+
+    expect(warnings.lines.join("\n")).toMatch(/\[wp\/ownership\]/);
+    // The install itself still happened, and happened first.
+    expect(readFileSync(argvFile, "utf8")).toContain("plugin install ");
+  });
+
+  /**
+   * The property the other ownership tests only approach indirectly: the chown is aimed at
+   * **this slug's** directory. Driven with stub `sudo`/`stat`/`id`/`chmod`/`chown` on `PATH`, so the
+   * absolute target is observable without root — a call aimed at the wrong directory would pass
+   * every other assertion in this file.
+   */
+  test("aims the chown at this slug's directory under wp-content/plugins", async () => {
+    process.env.WP_STUB_ARGV_FILE = join(sourceDir, "wp-argv.log");
+    const binDir = mkdtempSync(join(tmpdir(), "wp-own-bin-"));
+    const log = join(binDir, "commands.log");
+    const shim = (name: string, body: string): void => {
+      writeFileSync(
+        join(binDir, name),
+        `#!/usr/bin/env bash\nprintf '%s\\n' "${name} $*" >> "${log}"\n${body}\n`,
+      );
+      chmodSync(join(binDir, name), 0o755);
+    };
+    // Ownership the runner does not already have, so normalisation cannot take the no-op fast path.
+    shim("stat", 'printf "%s" "www-data:www-data:33:33"');
+    shim(
+      "id",
+      'printf "%s" "uid=1000(ubuntu) gid=1000(ubuntu) groups=1000(ubuntu),33(www-data)"',
+    );
+    shim("sudo", "exit 0");
+    const pathBefore = process.env.PATH ?? "";
+    process.env.PATH = `${binDir}:${pathBefore}`;
+    resetOwnershipCaches();
+
+    let commands: string;
+    try {
+      await stageAndInstallPlugin(local, makeSource("bwp.zip"), {
+        activate: true,
+        slug: "backwpup-pro",
+      });
+      // Read before the cleanup below removes the directory the log lives in.
+      commands = existsSync(log) ? readFileSync(log, "utf8") : "";
+    } finally {
+      process.env.PATH = pathBefore;
+      rmSync(binDir, { recursive: true, force: true });
+      resetOwnershipCaches();
+    }
+
+    const plugin = join(wpRoot, "wp-content", "plugins", "backwpup-pro");
+    expect(commands).toContain(`chown -Rh -- www-data:www-data ${plugin}`);
+    // Never the staging area, never the plugins directory itself. The second is checked against the
+    // whole line rather than as a substring: every command line *ends* with its target, so a
+    // substring test that appends a trailing space can never match and would pass even if the
+    // plugins directory were the one being chowned.
+    expect(commands).not.toContain(DEFAULT_STAGING_DIR);
+    const plugins = join(wpRoot, "wp-content", "plugins");
+    expect(
+      commands
+        .split("\n")
+        .filter((line) => line.trimEnd().endsWith(` ${plugins}`)),
+    ).toEqual([]);
+  });
+
+  test("leaves ownership alone when no slug is given", async () => {
+    process.env.WP_STUB_ARGV_FILE = join(sourceDir, "wp-argv.log");
+    const warnings = captureWarnings();
+
+    try {
+      await stageAndInstallPlugin(
+        { ...local, fileOwner: "not a valid spec" },
+        makeSource("bwp.zip"),
+        { activate: true },
+      );
+    } finally {
+      warnings.restore();
+    }
+
+    expect(warnings.lines).toEqual([]);
+  });
+
+  // A bad slug is a mistake in our own code. Failing before anything is copied beats aborting with
+  // the plugin half in place.
+  test("refuses an unusable slug before staging or installing anything", async () => {
+    const argvFile = join(sourceDir, "wp-argv.log");
+    rmSync(argvFile, { force: true });
+    process.env.WP_STUB_ARGV_FILE = argvFile;
+
+    await expect(
+      stageAndInstallPlugin(local, makeSource("bwp.zip"), {
+        activate: true,
+        slug: "../evil",
+      }),
+    ).rejects.toThrow(/not a usable plugin slug/);
+
+    expect(existsSync(argvFile)).toBe(false);
+    expect(
+      existsSync(
+        join(wpRoot, DEFAULT_STAGING_DIR, PLUGINS_CATEGORY, "bwp.zip"),
+      ),
+    ).toBe(false);
   });
 });
 

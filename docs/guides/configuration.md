@@ -80,11 +80,11 @@ Discriminated on `mode` — see
 [wordpress-automation.md](../architecture/wordpress-automation.md) for dispatch
 detail.
 
-| `mode`   | Required fields                                  | Optional fields                     |
-| -------- | ------------------------------------------------ | ----------------------------------- |
-| `local`  | `rootDir`                                        | `stagingDir`, `elevate`             |
-| `docker` | `container`                                      | `rootDir`, `stagingDir`, `elevate`  |
-| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir`  | `stagingDir`, `elevate`             |
+| `mode`   | Required fields                                 | Optional fields                                 |
+| -------- | ----------------------------------------------- | ----------------------------------------------- |
+| `local`  | `rootDir`                                       | `stagingDir`, `elevate`, `fileOwner`            |
+| `docker` | `container`                                     | `rootDir`, `stagingDir`, `elevate`, `fileOwner` |
+| `ssh`    | `host`, `username`, `privateKeyPath`, `rootDir` | `stagingDir`, `elevate`, `fileOwner`            |
 
 - `rootDir` is the WordPress root (the directory holding `wp-load.php`), and the
   working directory every WP-CLI command runs in. It is **optional for `docker`**
@@ -105,6 +105,38 @@ detail.
   `docker`). Set `false` on a host where that user must stay unprivileged; cleanup then
   reports what it could not remove. See
   [wordpress-automation.md](../architecture/wordpress-automation.md#elevated-housekeeping).
+- `fileOwner` (**leave it unset**) overrides who should own the files this suite installs, as
+  `"user:group"` — or `false` to switch ownership normalisation off entirely for that site.
+
+  WP-CLI runs as the transport's user while PHP runs as the web server, so a plugin the suite
+  installs lands owned by someone the web server is not, and its next admin request cannot write
+  it. That is fixed automatically: the ownership the install *already uses* is read from
+  `wp-content` and restored afterwards. Detection is correct wherever a site is consistently
+  owned — including hosts where the owner is a deployment account rather than the web-server
+  user — so this exists only for a site where it is not.
+
+  **Both halves are required**, and both the type and the shape are rejected **at load**, by name,
+  like every other site field: `"www-data"` (group omitted), `"a:b:c"` and a value with spaces all
+  fail immediately with the offending value quoted; a non-string such as `5` or `true` fails naming
+  the field and the rule, since quoting a value that has no readable spelling helps nobody. The
+  group is load-bearing —
+  on a host whose docroot owner is not the web-server user, the shared group is the web server's
+  only write access — so it is never guessed at.
+
+  Validating here rather than later is deliberate: ownership normalisation never fails a run, so a
+  shape checked only at run time would be warned about once and then silently ignored for the whole
+  suite, on exactly the site somebody was trying to fix. The same rule is enforced again before any
+  privileged command is composed, so the two can never disagree.
+
+  Either half may be a **bare numeric id** (`"33:33"`, or a mix such as `"www-data:33"`), for a host
+  whose passwd database cannot map the name. A numeric half is compared as the id it is: `stat`
+  reports the *name* for an id it can map, so treating `33` as a name would make every successful
+  `chown` read back as a failure — and would make the tree world-writable for a reason that is not
+  true, because the transport user would look like a non-member of its own group.
+
+  Normalisation also needs privileges (`chown` always does), so a site with `elevate: false` or
+  no passwordless `sudo` reports that it cannot and carries on. See
+  [wordpress-automation.md](../architecture/wordpress-automation.md#file-ownership-wpownershipts).
 
 ## Editions (Free / Pro)
 

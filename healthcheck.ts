@@ -13,8 +13,13 @@ import type {
   SiteInput,
   Transport,
 } from "./src/common/config/types";
-import { transportLabel, verifySite } from "./src/common/setup/preflight";
+import {
+  transportLabel,
+  verifySite,
+  warnAboutElevation,
+} from "./src/common/setup/preflight";
 import type { CheckResult } from "./src/common/setup/preflight";
+import type { ElevationSupport } from "./src/common/wp/exec";
 import { disposeConnections } from "./src/common/wp/exec";
 import { backwpup } from "./src/projects/backwpup/config/backwpup.config";
 import { wpRocket } from "./src/projects/wp-rocket/config/wp-rocket.config";
@@ -144,6 +149,20 @@ interface SiteResult {
   readonly checks: CheckResult[];
   readonly durationMs: number;
   readonly ok: boolean;
+  /**
+   * What privileges this site's transport reached, when it got far enough to be asked. Carried so
+   * the fleet run can close with the same elevation warning a suite run prints, from the same
+   * renderer — a fleet monitor is exactly where "half the fleet cannot clean up after itself" should
+   * be impossible to miss.
+   */
+  readonly elevation?: ElevationSupport;
+  /**
+   * Whether this site's files actually need handing to another owner. Carried for the same reason
+   * {@link SitePreflightResult} carries it: the run-level banner states the ownership cost only for
+   * the sites where it is true, and a fleet check that dropped it would quietly claim the cost for
+   * none of them.
+   */
+  readonly ownershipPending?: boolean;
 }
 
 /** Logs in through the WordPress UI in a throwaway browser context; never persists state. */
@@ -207,6 +226,12 @@ async function checkSite(
     checks,
     durationMs: Date.now() - start,
     ok: checks.every((c) => c.ok),
+    ...(preflight.elevation !== undefined
+      ? { elevation: preflight.elevation }
+      : {}),
+    ...(preflight.ownershipPending !== undefined
+      ? { ownershipPending: preflight.ownershipPending }
+      : {}),
   };
 }
 
@@ -509,6 +534,14 @@ async function main(): Promise<void> {
       printProductSubSummary(plan, results);
       console.log("");
     }
+
+    // Inside the `try`, so a failure while printing a later product still leaves the operator with
+    // what was learned about the earlier ones. After every product section and before the summary:
+    // a warning buried between two products is one nobody reads, and this is the last thing on
+    // screen that is not a verdict. Rendered by the same function a suite run uses, so a fleet check
+    // and a run can never disagree — but sent to **stdout**, because unlike a suite run this
+    // program's entire output is the report, and `healthcheck > fleet.log` must not drop it.
+    warnAboutElevation(allResults, console.log);
   } finally {
     if (browser !== null) await browser.close();
     disposeConnections();

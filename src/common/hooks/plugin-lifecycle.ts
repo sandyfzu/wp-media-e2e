@@ -6,6 +6,7 @@ import {
 import { clearDebugLog, scanDebugLog } from "../wp/log";
 import { ensurePluginAbsent, isPluginActive } from "../wp/plugin";
 import { prepareSiteDataDirs, removeSiteResidue } from "../wp/residue";
+import { pluginSitePath } from "../wp/paths";
 import { stageAndInstallPlugin } from "../wp/staging";
 import { errorMessage } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
@@ -38,6 +39,14 @@ export const PLUGIN_TAG = "@plugin";
  * re-assert ~2 s ⇒ **Before ≈ 13 s**; scan ~2 s, remove-when-present ~10 s ⇒ **After ≈ 12 s**.
  * A plugin whose uninstall procedure does more, a slower link, or a busier host multiply those, so
  * the budget keeps room for roughly a 4–5× worse environment before it fires.
+ *
+ * Later additions widen that, and no longer marginally. Re-measured against the same box with
+ * BackWPup's two declared data paths: **preparation ≈ 15 s** — per path a symlink probe, `mkdir`,
+ * `chmod`, then the ownership handover's own probe, `chmod -R`, `chown -R` and verifying re-read —
+ * and the plugin's own handover ≈ 1.8 s once the plan is cached. So **Before ≈ 30 s** on that link,
+ * still well inside this budget, but the breakdown above is a floor and not a total. The cost is
+ * round-trips rather than work: a product declaring many data paths would pay linearly, and batching
+ * the paths into single commands is the lever if it ever matters.
  *
  * Applied per hook — so a hang is reported as a hook timeout naming the hook, rather than as an
  * opaque scenario timeout — **and** added to the scenario's own budget by {@link extendedTimeout},
@@ -102,6 +111,12 @@ export function extendedTimeout(current: number): number {
  * scenario assumes an *active* plugin at that slug, and without this check a silent
  * non-activation would surface much later as a baffling UI failure.
  *
+ * The install itself has the same two-user problem, one step earlier: WP-CLI unpacks the zip as
+ * the *transport's* user, so the plugin's own files arrive owned by someone the web server is not,
+ * and its next admin request cannot write them. Passing the artifact's `slug` is what lets the
+ * install hand that directory back to the ownership the site uses — see `wp/ownership.ts`. It is
+ * best-effort, so a host that cannot do it is reported rather than failing the scenario.
+ *
  * Last, the plugin's own **data directories are opened to both users** that share this site's
  * docroot. On a real cell WP-CLI and the web server are different users, and whichever of them
  * creates one of those directories first would otherwise lock the other out of it — see
@@ -113,17 +128,25 @@ export function extendedTimeout(current: number): number {
  * nothing to a remote `wp`.
  * @param residue - the product's declared data paths (`ProductConfig.siteResidue`), the same list the
  * teardown clears. Defaults to none, so a product that declares nothing pays nothing.
- * @throws Error if the removal, the install or the directory preparation fails, or
- * {@link PluginActivationFailedError} if the plugin is not active afterwards.
+ * @throws Error if the artifact's slug is unusable, if the removal, the install or the directory
+ * preparation fails, or {@link PluginActivationFailedError} if the plugin is not active afterwards.
+ * Ownership normalisation is best-effort and never throws.
  */
 export async function installPluginUnderTest(
   transport: Transport,
   artifact: ResolvedArtifact,
   residue: readonly string[] = [],
 ): Promise<void> {
+  // Before the first command: `stageAndInstallPlugin` validates the slug too, but by then the log
+  // has been cleared and an uninstall has been attempted with it. A slug this suite cannot use is
+  // our own mistake, and it should cost the site nothing.
+  pluginSitePath(artifact.slug);
   await clearDebugLog(transport);
   await ensurePluginAbsent(transport, artifact.slug);
-  await stageAndInstallPlugin(transport, artifact.zipPath, { activate: true });
+  await stageAndInstallPlugin(transport, artifact.zipPath, {
+    activate: true,
+    slug: artifact.slug,
+  });
   if (!(await isPluginActive(transport, artifact.slug))) {
     throw new PluginActivationFailedError(artifact.slug);
   }

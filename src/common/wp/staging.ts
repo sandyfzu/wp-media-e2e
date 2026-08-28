@@ -10,6 +10,8 @@ import {
   execElevated,
   wpRootDir,
 } from "./exec";
+import { normalizeOwnership } from "./ownership";
+import { pluginSitePath } from "./paths";
 import { installPlugin } from "./plugin";
 import type { InstallPluginOptions } from "./plugin";
 import type { Transport } from "../config/types";
@@ -40,6 +42,11 @@ import type { Transport } from "../config/types";
  * before it can be used. {@link cleanSiteStaging} removes the area; wire it into worker teardown
  * (beside `disposeConnections`) as best-effort cleanup, so a cleanup failure never fails a
  * passing scenario.
+ *
+ * **Staged files themselves are deliberately left with the transport user's ownership.** Only that
+ * user ever reads them — `wp plugin install` runs as it — so there is nothing for the web server to
+ * be locked out of. What the install *unpacks* is a different matter, and that is what
+ * {@link stageAndInstallPlugin} normalises (see `./ownership.ts`).
  */
 
 /** Staging directory name under the WordPress root, when nothing overrides it. */
@@ -286,23 +293,51 @@ export async function cleanSiteStaging(
  * Stages a plugin zip and installs it from the staged copy — the transport-agnostic way to
  * install a locally-resolved artifact, since only a `local` site's `wp` can read a runner path.
  *
+ * **Pass `slug` whenever you know it.** WP-CLI unpacks the zip as the *transport's* user, so on a
+ * real cell the plugin's files land owned by someone the web server is not, and its very next admin
+ * request cannot write them. With `slug`, the unpacked directory is handed back to the ownership the
+ * site itself uses ({@link normalizeOwnership}); without it, nothing can be — the zip's contents are
+ * not inspected, so this has no other way to learn where the files went. Normalisation is
+ * best-effort by construction and never fails the install.
+ *
  * @param transport - the target site's transport.
  * @param localZip - absolute path to the zip on the runner.
- * @param options - {@link InstallPluginOptions} (`activate`, `force`) plus an optional target filename.
+ * @param options - {@link InstallPluginOptions} (`activate`, `force`), an optional target filename
+ * (`as`), and the installed plugin's `slug` — the directory it unpacks to, which the resolved
+ * artifact already knows.
  * @returns the absolute path of the staged zip on the target (for later assertions or cleanup).
- * @throws Error if staging or the install fails.
+ * @throws Error if `slug` is not a single path segment (checked before anything is copied), or if
+ * staging or the install fails. Ownership normalisation never throws — it reports and returns.
+ *
+ * @example
+ * ```ts
+ * await stageAndInstallPlugin(site.transport, artifact.zipPath, {
+ *   activate: true,
+ *   slug: artifact.slug,
+ * });
+ * ```
  */
 export async function stageAndInstallPlugin(
   transport: Transport,
   localZip: string,
-  options: InstallPluginOptions & { readonly as?: string } = {},
+  options: InstallPluginOptions & {
+    readonly as?: string;
+    readonly slug?: string;
+  } = {},
 ): Promise<string> {
-  const { as, ...installOptions } = options;
+  const { as, slug, ...installOptions } = options;
+  // Resolved up front: an unusable slug is a mistake in our own code, and failing on it before
+  // anything is copied or installed is better than aborting a scenario with the plugin half in place.
+  const pluginPath = slug === undefined ? undefined : pluginSitePath(slug);
+
   const staged = await stageArtifact(transport, localZip, {
     category: PLUGINS_CATEGORY,
     ...(as !== undefined ? { as } : {}),
   });
   await installPlugin(transport, staged, installOptions);
+  if (pluginPath !== undefined) {
+    await normalizeOwnership(transport, pluginPath);
+  }
   return staged;
 }
 

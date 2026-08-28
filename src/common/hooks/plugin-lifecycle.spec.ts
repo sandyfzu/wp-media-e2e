@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { DebugLogFatalError, PluginActivationFailedError } from "../wp/errors";
+import { resetOwnershipCaches } from "../wp/ownership";
 import { DEFAULT_STAGING_DIR, PLUGINS_CATEGORY } from "../wp/staging";
 import {
   HOOK_TIMEOUT_MS,
@@ -106,12 +107,12 @@ function isActive(): boolean {
 }
 
 /** The resolved artifact under test: a real file on the "runner", named like an APVM build. */
-function artifact(): ResolvedArtifact {
+function artifact(slug = "backwpup-pro"): ResolvedArtifact {
   const zipPath = join(sourceDir, "backwpup-pro-en-9.99.99-abc1234.zip");
   writeFileSync(zipPath, "zip bytes");
   return {
     role: "plugin",
-    slug: "backwpup-pro",
+    slug,
     zipPath,
     zipFilename: "backwpup-pro-en-9.99.99-abc1234.zip",
     source: "default-ref",
@@ -164,13 +165,17 @@ test.beforeEach(() => {
   sourceDir = mkdtempSync(join(tmpdir(), "wp-src-"));
   stateDir = join(sourceDir, "state");
   mkdirSync(stateDir, { recursive: true });
-  local = { mode: "local", rootDir: wpRoot };
+  // `elevate: false`, like the pre-flight spec pins: a unit run must never shell out to the real
+  // `sudo` on whatever machine happens to be running it, and no case here needs privileges.
+  local = { mode: "local", rootDir: wpRoot, elevate: false };
   argvFile = join(sourceDir, "wp-argv.log");
   process.env.WP_STUB_ARGV_FILE = argvFile;
   process.env.WP_STUB_STATE_DIR = stateDir;
   delete process.env.WP_STUB_LOG;
   delete process.env.WP_STUB_FAIL;
   delete process.env.WP_STUB_SILENT_ACTIVATE_FAIL;
+  // Ownership probes are memoised per target, and each test gets a fresh WordPress root.
+  resetOwnershipCaches();
   warnings = [];
   errors = [];
   realWarn = console.warn;
@@ -279,6 +284,58 @@ test.describe("installPluginUnderTest", () => {
     const dir = join(wpRoot, "wp-content/uploads/backwpup-restore");
     expect(existsSync(dir)).toBe(true);
     expect((statSync(dir).mode & 0o777).toString(8)).toBe("777");
+  });
+
+  /**
+   * The install unpacks the zip as the *transport's* user, so on a real cell the plugin's files
+   * arrive owned by someone the web server is not, and the hook must hand that directory back.
+   *
+   * Observed through a deliberately unusable `fileOwner`, the one ownership outcome an unprivileged
+   * runner can provoke on any platform. It proves the step runs during the install; that it runs
+   * against *this artifact's* directory is pinned by the next test, which is the only place the slug
+   * itself appears in an observable message.
+   */
+  test("normalises ownership as part of installing the plugin", async () => {
+    await installPluginUnderTest(
+      { ...local, fileOwner: "not a valid spec" },
+      artifact(),
+    );
+
+    expect(warnings.join("\n")).toMatch(/\[wp\/ownership\]/);
+    expect(isActive()).toBe(true);
+  });
+
+  // The artifact's slug is the only thing that knows where the zip unpacked to, so it must be what
+  // the ownership step is aimed at. An unusable one is refused by name, and refused *before*
+  // anything is staged or installed.
+  test("aims ownership at the artifact's own slug", async () => {
+    await expect(
+      installPluginUnderTest(local, artifact("../evil")),
+    ).rejects.toThrow(/"\.\.\/evil" is not a usable plugin slug/);
+
+    expect(isInstalled()).toBe(false);
+    expect(wpCalls().some((c) => c.startsWith("plugin install"))).toBe(false);
+  });
+
+  // Housekeeping must never decide whether a scenario runs: a site that cannot be normalised still
+  // gets its plugin installed and activated.
+  test("installs and activates even when ownership cannot be normalised", async () => {
+    await installPluginUnderTest(
+      { ...local, fileOwner: "not a valid spec" },
+      artifact(),
+      ["wp-content/uploads/backwpup-restore"],
+    );
+
+    // First that ownership was genuinely *attempted* and refused: without this the rest of the test
+    // passes with the whole handover removed, since install and preparation produce it on their own.
+    expect(warnings.join("\n")).toMatch(
+      /\[wp\/ownership\].*must be "user:group"/,
+    );
+    expect(isActive()).toBe(true);
+    // The step after it still ran, so the failure was reported and stepped over, not propagated.
+    expect(
+      existsSync(join(wpRoot, "wp-content/uploads/backwpup-restore")),
+    ).toBe(true);
   });
 
   test("prepares nothing when the product declares no data paths", async () => {

@@ -16,10 +16,17 @@ import {
   dockerCpArgv,
   elevationSupport,
   execElevated,
+  installKey,
+  resetElevationCaches,
   sudoArgv,
+  targetKey,
   wpRootDir,
 } from "./exec";
-import type { DockerTransport, LocalTransport } from "../config/types";
+import type {
+  DockerTransport,
+  LocalTransport,
+  SshTransport,
+} from "../config/types";
 
 // The transfer primitive and the WP-root resolution are exercised on the `local` transport
 // (a real filesystem) and, for `docker`, through the pure argv builder — `docker cp` itself
@@ -261,5 +268,148 @@ test.describe("execElevated", () => {
     await expect(
       execElevated(freshLocal(false), "rm", ["-rf", "/tmp/nothing"]),
     ).rejects.toThrow(/elevate: false/);
+  });
+});
+
+/**
+ * The two target-identity helpers, tested directly and against each other.
+ *
+ * They exist because this layer caches two *different kinds* of fact. Passwordless `sudo` is a
+ * property of a machine and a user, so asking once per host is right. File ownership is a property
+ * of a **site**, and one host routinely serves several that need not agree — measured on a live
+ * cell, two docroots under the same `ubuntu@host` owned `sftp_backwpup:www-data` and
+ * `sftp_wprocket:www-data`. Keyed alike, whichever was probed first would answer for both.
+ *
+ * Pinned here rather than through a caller because for a `local` transport the two return the same
+ * string: a caller-level test over `local` sites cannot tell them apart, and would keep passing with
+ * the distinction removed.
+ */
+test.describe("targetKey vs installKey", () => {
+  const ssh = (rootDir: string): SshTransport => ({
+    mode: "ssh",
+    host: "203.0.113.10",
+    username: "ubuntu",
+    privateKeyPath: "/home/ci/.ssh/id_ed25519",
+    rootDir,
+  });
+
+  test("ssh: one host, two sites — same target, different installs", () => {
+    const a = ssh("/var/www/site-a");
+    const b = ssh("/var/www/site-b");
+    expect(targetKey(a)).toBe(targetKey(b));
+    expect(installKey(a)).not.toBe(installKey(b));
+  });
+
+  test("docker: one container, two roots — same target, different installs", () => {
+    const a: DockerTransport = {
+      mode: "docker",
+      container: "wpcli",
+      rootDir: "/var/www/a",
+    };
+    const b: DockerTransport = {
+      mode: "docker",
+      container: "wpcli",
+      rootDir: "/var/www/b",
+    };
+    expect(targetKey(a)).toBe(targetKey(b));
+    expect(installKey(a)).not.toBe(installKey(b));
+  });
+
+  // An undeclared docker rootDir must not collide with a declared one.
+  test("docker: an undeclared root is its own install", () => {
+    const declared: DockerTransport = {
+      mode: "docker",
+      container: "wpcli",
+      rootDir: "/var/www/a",
+    };
+    const undeclared: DockerTransport = { mode: "docker", container: "wpcli" };
+    expect(installKey(declared)).not.toBe(installKey(undeclared));
+  });
+
+  test("different hosts, users or keys are different targets", () => {
+    const base = ssh("/var/www/site");
+    expect(targetKey({ ...base, host: "203.0.113.11" })).not.toBe(
+      targetKey(base),
+    );
+    expect(targetKey({ ...base, username: "deploy" })).not.toBe(
+      targetKey(base),
+    );
+    expect(targetKey({ ...base, privateKeyPath: "/other/key" })).not.toBe(
+      targetKey(base),
+    );
+  });
+
+  // The same site must answer the same way every time, or nothing would ever cache.
+  test("both are stable for the same transport", () => {
+    expect(targetKey(ssh("/var/www/site"))).toBe(
+      targetKey(ssh("/var/www/site")),
+    );
+    expect(installKey(ssh("/var/www/site"))).toBe(
+      installKey(ssh("/var/www/site")),
+    );
+  });
+
+  // `local` is the case that cannot distinguish them: the root already identifies the machine's one
+  // site. Stated so a future reader does not "fix" it by adding a local case that proves nothing.
+  test("local: the two coincide, because the root already identifies the site", () => {
+    const local: LocalTransport = { mode: "local", rootDir: "/var/www/site" };
+    expect(installKey(local)).toBe(targetKey(local));
+  });
+});
+
+/**
+ * The elevation probe's answer is memoised for the whole process, and it gates every escalation
+ * this suite performs. So the one thing it must never do is remember a **transport** failure: a
+ * dropped connection during the probe would otherwise stop residue being removed and ownership being
+ * corrected for every later scenario in that worker, on a host that can do both — with a single
+ * deduplicated warning as the only trace.
+ *
+ * `PATH` is the stub directory alone, so the first call cannot even start `sudo` (the shape of a
+ * transport that could not run the command), and the second can.
+ */
+test.describe("elevationSupport — a transport failure is not remembered", () => {
+  let binDir: string;
+  let realPath: string;
+  let root: string;
+
+  test.beforeEach(() => {
+    binDir = mkdtempSync(join(tmpdir(), "wp-elev-bin-"));
+    root = mkdtempSync(join(tmpdir(), "wp-elev-root-"));
+    realPath = process.env.PATH ?? "";
+    process.env.PATH = binDir;
+    resetElevationCaches();
+  });
+
+  test.afterEach(() => {
+    process.env.PATH = realPath;
+    rmSync(binDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+    resetElevationCaches();
+  });
+
+  test("so the next call asks again, and gets the real answer", async () => {
+    const site: LocalTransport = { mode: "local", rootDir: root };
+    expect(await elevationSupport(site)).toBe("unavailable");
+
+    // The transport recovers: `sudo` can now be started, and says yes.
+    writeFileSync(join(binDir, "sudo"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(binDir, "sudo"), 0o755);
+    expect(await elevationSupport(site)).toBe("available");
+  });
+
+  // A genuine refusal is still a real answer, and must stay cached — that is what keeps a
+  // correctly-permissioned host from paying a round-trip per scenario.
+  test("but a refusal is remembered, and not re-asked", async () => {
+    const log = join(binDir, "calls.log");
+    writeFileSync(
+      join(binDir, "sudo"),
+      `#!/bin/sh\necho x >> ${log}\nexit 1\n`,
+    );
+    chmodSync(join(binDir, "sudo"), 0o755);
+    const site: LocalTransport = { mode: "local", rootDir: root };
+
+    expect(await elevationSupport(site)).toBe("unavailable");
+    expect(await elevationSupport(site)).toBe("unavailable");
+    expect(readFileSync(log, "utf8").trim().split("\n")).toHaveLength(1);
   });
 });

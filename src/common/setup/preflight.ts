@@ -3,8 +3,12 @@ import { styleText } from "node:util";
 
 import { execa } from "execa";
 
-import { exec } from "../wp/exec";
-import type { ExecResult } from "../wp/exec";
+import { elevationSupport, exec } from "../wp/exec";
+import type { ElevationSupport, ExecResult } from "../wp/exec";
+import { planOwnership } from "../wp/ownership";
+import type { OwnershipPlan } from "../wp/ownership";
+import { renderElevationWarning } from "./elevation-report";
+import type { SiteElevation } from "./elevation-report";
 import { isPlaceholderSite } from "../config/sites";
 import type {
   DockerTransport,
@@ -62,6 +66,20 @@ export interface SitePreflightResult {
   readonly transport: Transport;
   /** Every check run for this site, in execution order. The site is healthy iff every entry is `ok`. */
   readonly checks: CheckResult[];
+  /**
+   * What privileges this site's transport can reach, when it was asked. Carried alongside the checks
+   * rather than parsed back out of one, so the run-level warning
+   * ({@link renderElevationWarning}) reads a typed value. Absent when the site never got far enough
+   * to be asked — a transport that cannot connect has a louder problem.
+   */
+  readonly elevation?: ElevationSupport;
+  /**
+   * Whether this site's files actually need handing to another owner — `planOwnership` returned a
+   * grant. Carried so the run-level warning states the ownership cost only where it is true, rather
+   * than contradicting the ownership check printed one line above it. Absent alongside
+   * {@link elevation}, and for the same reason.
+   */
+  readonly ownershipPending?: boolean;
 }
 
 // ── Transport label (used in error output) ─────────────────────────────────────
@@ -564,6 +582,137 @@ async function verifyLocal(transport: LocalTransport): Promise<CheckResult[]> {
   return checks;
 }
 
+// ── Ownership & elevation (informational) ─────────────────────────────────────
+
+/**
+ * What this site will do about the ownership of the files the suite installs.
+ *
+ * **Never fails.** It reports a property of the host that the suite adapts to rather than depends
+ * on: a site whose ownership cannot be corrected still runs its scenarios, it merely leaves the web
+ * server unable to write the plugin under test. Reported here so that is visible at the start of a
+ * run rather than inferred from a plugin misbehaving in the middle of one.
+ *
+ * The decision comes from `planOwnership`, the same function that later carries it out, so this can
+ * never describe something different from what will happen — but `planOwnership` deliberately says
+ * nothing about *privileges*, and a handover needs them. So the elevation answer is folded in here:
+ * a site that needs a handover it may not perform must be told that, not told the handover will
+ * happen.
+ *
+ * @param plan - the decision `planOwnership` reached for this site, taken by the caller so the
+ * elevation check can be told the same thing.
+ * @param elevation - what the same site's elevation probe answered, already taken by the caller.
+ * @returns a check describing what will and will not happen to this site's files. It fails only for
+ * a `fileOwner` that cannot be parsed, which is a mistake in configuration rather than a property of
+ * the host.
+ */
+function checkFileOwnership(
+  plan: OwnershipPlan,
+  elevation: ElevationSupport,
+): CheckResult {
+  const name = "File ownership";
+  switch (plan.kind) {
+    case "disabled":
+      return {
+        name,
+        ok: true,
+        detail:
+          "Normalization is off for this site (`transport.fileOwner: false`).",
+      };
+    case "bad-owner":
+      // The one failing case: everything else here describes a host, but this is our own
+      // configuration being unreadable, and rendering an error message as a green tick is how it
+      // gets ignored. The sites loader rejects the same value, so reaching this means the transport
+      // was built in code.
+      return { name, ok: false, detail: plan.message };
+    case "unknown-ownership":
+      return {
+        name,
+        ok: true,
+        detail:
+          "Could not be read, so installed files will keep the transport user's ownership. " +
+          'Declare `transport.fileOwner` ("user:group") for this site if the web server cannot write them.',
+      };
+    case "unknown-identity":
+      return {
+        name,
+        ok: true,
+        detail: `Site files are ${plan.target.user}:${plan.target.group}, but which user this site's commands run as could not be read; ownership will be left alone.`,
+      };
+    case "unnecessary":
+      return {
+        name,
+        ok: true,
+        detail: `${plan.target.user}:${plan.target.group} — the transport's user already owns the install, so nothing is changed.`,
+      };
+    case "grant": {
+      const owner = `${plan.target.user}:${plan.target.group}`;
+      if (elevation !== "available") {
+        return {
+          name,
+          ok: true,
+          detail:
+            `Installed files need handing to ${owner}, but cannot be: that requires privileges and ` +
+            `elevation is ${elevation}. The web server may be unable to write the plugin under test.`,
+        };
+      }
+      return {
+        name,
+        ok: true,
+        detail:
+          `Installed files will be handed to ${owner} with \`${plan.mode}\`` +
+          (plan.worldWritable
+            ? ", which includes world-write because this site's commands run as a user outside that " +
+              `group; adding it to "${plan.target.group}" would keep the grant group-scoped.`
+            : "."),
+      };
+    }
+  }
+}
+
+/**
+ * Whether this site can run a privileged housekeeping command.
+ *
+ * **Never fails**, for the same reason as above — but an `unavailable` answer also feeds the
+ * run-level warning ({@link renderElevationWarning}), because a single check line among many is
+ * exactly the thing an operator scrolls past.
+ *
+ * @param support - what this site's elevation probe answered.
+ * @returns an always-passing check naming what housekeeping can and cannot do.
+ */
+function elevationCheck(
+  support: ElevationSupport,
+  plan: OwnershipPlan,
+): CheckResult {
+  const name = "Elevation";
+  switch (support) {
+    case "available":
+      return {
+        name,
+        ok: true,
+        detail: "Passwordless `sudo` is available for housekeeping.",
+      };
+    case "disabled":
+      return {
+        name,
+        ok: true,
+        detail:
+          "Declined by this site (`transport.elevate: false`); cleanup stays unprivileged.",
+      };
+    case "unavailable":
+      return {
+        name,
+        ok: true,
+        // Only the two plans that *know* nothing is pending may say so. `unknown-ownership`,
+        // `unknown-identity` and `bad-owner` know nothing at all, and the ownership check one line
+        // above already says that — claiming "needs no change" beside it is a contradiction.
+        detail:
+          plan.kind === "unnecessary" || plan.kind === "disabled"
+            ? "`sudo -n true` failed — cleanup will be incomplete on this site. Ownership needs no change here."
+            : "`sudo -n true` failed — cleanup and ownership normalization will be incomplete on this site.",
+      };
+  }
+}
+
 // ── Per-site dispatcher ───────────────────────────────────────────────────────
 
 /**
@@ -591,11 +740,29 @@ export async function verifySite(
   // The locale check needs a WordPress that boots, so it only runs once every transport-level check
   // has passed — otherwise a site with no database would report two failures for one cause, and the
   // second would be the less useful one.
-  if (checks.every((check) => check.ok)) {
-    checks.push(await checkAdminLocale(site.transport, site.username));
+  if (!checks.every((check) => check.ok)) {
+    return { index, baseURL: site.baseURL, transport: site.transport, checks };
   }
+  checks.push(await checkAdminLocale(site.transport, site.username));
 
-  return { index, baseURL: site.baseURL, transport: site.transport, checks };
+  // Same gate, and for a stronger reason: both of these run commands on the site, so asking a
+  // transport that has already failed would only produce a second way of saying so. Neither can fail
+  // the site — they describe what housekeeping will and will not be able to do.
+  const elevation = await elevationSupport(site.transport);
+  // Taken once and shared: both checks describe the same decision, and computing it twice is how
+  // two lines about one site come to disagree.
+  const plan = await planOwnership(site.transport);
+  checks.push(checkFileOwnership(plan, elevation));
+  checks.push(elevationCheck(elevation, plan));
+
+  return {
+    index,
+    baseURL: site.baseURL,
+    transport: site.transport,
+    checks,
+    elevation,
+    ownershipPending: plan.kind === "grant",
+  };
 }
 
 // ── Pool verification ─────────────────────────────────────────────────────────
@@ -624,10 +791,52 @@ export async function verifyPool(
     real.map(({ site, i }) => verifySite(site, i)),
   );
 
+  // Printed before the early return below, because a *passing* pool prints nothing otherwise — and a
+  // pool that cannot elevate passes. Never throws and never changes a verdict: it warns.
+  warnAboutElevation(results);
+
   const failed = results.filter((r) => r.checks.some((c) => !c.ok));
   if (failed.length === 0) return;
 
   throw new Error(buildReport(failed, results.length, product, cell));
+}
+
+/**
+ * Prints the run-level elevation warning, if any site needs it.
+ *
+ * Exported and called by the standalone healthcheck too, so a fleet check and a suite run print the
+ * identical banner from the identical mapping — one implementation, not two that agree today.
+ *
+ * `flatMap` rather than filter-then-map: it drops the sites that were never asked *and* narrows the
+ * optional away, so no `?? "unavailable"` fallback is needed — one that would silently relabel a
+ * site as unable to elevate if the two steps were ever reordered.
+ *
+ * @param results - every site verified in this run. Sites that never got far enough to be asked
+ * about privileges are skipped; a transport that cannot connect has a louder problem.
+ * @param print - where to send it. Defaults to `console.warn` (stderr), which is right for a
+ * Playwright setup project, where the banner is an aside to a test run. The fleet healthcheck passes
+ * `console.log` instead: its whole output *is* the report, and a documented `healthcheck > fleet.log`
+ * would otherwise capture every line except this one.
+ */
+export function warnAboutElevation(
+  results: readonly SitePreflightResult[],
+  print: (message: string) => void = console.warn,
+): void {
+  const banner = renderElevationWarning(
+    results.flatMap((result): SiteElevation[] =>
+      result.elevation === undefined
+        ? []
+        : [
+            {
+              baseURL: result.baseURL,
+              transport: transportLabel(result.transport),
+              support: result.elevation,
+              ownershipPending: result.ownershipPending === true,
+            },
+          ],
+    ),
+  );
+  if (banner !== undefined) print(banner);
 }
 
 // ── Error report formatting ───────────────────────────────────────────────────
