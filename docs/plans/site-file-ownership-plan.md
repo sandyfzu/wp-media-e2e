@@ -1,7 +1,8 @@
 # Site File Ownership Plan — keep the docroot writable by both users
 
-**Status:** **Complete** — Phases 0–6.5 done (2026-08-26); re-verified against both real cells,
-both `docker` containers and a live `@plugin` scenario after four audit rounds (2026-08-28, §10).
+**Status:** **Complete** — Phases 0–6.5 done (2026-08-26). After five audit rounds, verified against
+both real cells, both `docker` containers, and the **full BackWPup suite green on both cells**
+(13 passed each, `--retries=0`) on 2026-08-28.
 **Owner:** Sandy Figueroa.
 **Scope:** `src/common/wp/` (a new ownership primitive), the plugin lifecycle, pre-flight
 reporting, and the `sites.json` transport schema. Linux targets only — see §2.7.
@@ -1225,23 +1226,41 @@ byte-identical to `www-data:x:33:sftp_backwpup,sftp_wprocket,ubuntu`.
 `www-data:www-data` on nginx, `Elevation: Passwordless sudo is available` on both, and correctly no
 banner.
 
-**Blocked, and not by this work: a real `@plugin` scenario on `pro@apache`.** It fails on
-`DebugLogFatalError` — BackWPup's `CREATE TABLE wp_bwpup_backups` returns *errno 184 "Tablespace
-already exists"* on every attempt, including both retries. Diagnosed rather than assumed: the table
-is **absent from the InnoDB data dictionary** (`SHOW TABLES LIKE` returns nothing) while
-`/var/lib/mysql/backwpup/wp_bwpup_backups.ibd` is on disk **dated 4 May 2026** — four months before
-this plan started — and `mariadbd` logs the remedy itself: *"the file … already exists though the
-corresponding table did not exist in the InnoDB data dictionary. You can resolve the problem by
-removing the file."* An orphaned tablespace is a database-server condition; nothing in this work
-touches the database. The scenario passes on `pro@nginx`. Fix on the cell with:
+**`pro@apache` scenarios: blocked by the cell's database, then repaired (2026-08-28).** The suite
+failed there on `DebugLogFatalError` — BackWPup's `CREATE TABLE wp_bwpup_backups` returning *errno
+184 "Tablespace already exists"* on every attempt. Nothing in this work touches the database; the
+cause was an **orphaned InnoDB tablespace**, and the debug-log gate catching it is the feature
+working.
+
+Diagnosed rather than assumed, on MariaDB 10.11.14:
+
+- `SHOW TABLES LIKE 'wp_bwpup_backups'` → nothing, and
+  `information_schema.INNODB_SYS_TABLES` (queried as root) → no entry: the table is **absent from
+  the data dictionary**.
+- `/var/lib/mysql/backwpup/wp_bwpup_backups.ibd` was on disk, 114 688 bytes, dated **2026-05-04** —
+  four months before this plan began.
+- `DROP TABLE IF EXISTS` exits 0 and leaves the file, because there is no table to drop.
+- A sweep of **every** `.ibd` in every schema on the host found exactly **one** orphan: this file.
+- `mariadbd` prescribes the remedy itself: *"the file … already exists though the corresponding table
+  did not exist in the InnoDB data dictionary. You can resolve the problem by removing the file."*
+
+Repaired by moving it aside rather than deleting it — reversible, with the checksum recorded
+(`e784c397…`) and the dictionary re-checked immediately before acting so the operation would abort
+if it had stopped being an orphan:
 
 ```sh
-sudo systemctl stop mariadb   # optional; not required for an orphaned file
-sudo mv /var/lib/mysql/backwpup/wp_bwpup_backups.ibd /var/backups/
+sudo mv /var/lib/mysql/backwpup/wp_bwpup_backups.ibd /var/backups/orphaned-innodb-<stamp>/
 ```
 
-then re-run `npm run test:backwpup -- --project=pro@apache`. Worth noting as a positive result too:
-the debug-log gate caught a genuine site fault and failed the scenario rather than letting it pass.
+Safe with the server running: a tablespace absent from the dictionary has no open handle. Verified
+afterwards — the exact `CREATE TABLE` that had been failing succeeds, `DROP` now removes both the
+table *and* its `.ibd` (so the file-per-table lifecycle is healthy again), and `journalctl` shows no
+new InnoDB errors.
+
+**The full BackWPup suite then passed on both cells**, `--retries=0` and no grep filter — all nine
+onboarding scenarios plus the auth and artifact setups: `pro@apache` **13 passed in 10.7 min**,
+`pro@nginx` **13 passed in 11.5 min**. That is the whole product suite green on real hardware with
+this work in place.
 
 ### 10.8 Fixed — BusyBox reports no owner name, and it would have been passed to `chown`
 
