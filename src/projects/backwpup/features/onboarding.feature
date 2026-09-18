@@ -141,9 +141,8 @@ Feature: BackWPup onboarding
 
   # ── What the choices are worth ───────────────────────────────────────────────
 
-  # Asserted against the stored job only. Re-reading the choices from the job card's own panels
-  # would need the dashboard's own controls, and those are not reliably clickable on this screen
-  # yet — so that half belongs with the dashboard's own coverage rather than here.
+  # Asserted from both sources: against the job BackWPup stored, and against what the job card
+  # renders back on the dashboard afterwards.
   Scenario: The data selection made during onboarding survives it
     When I exclude the "plugins" file area from the backup
     And I exclude the "options" database table from the backup
@@ -154,3 +153,6 @@ Feature: BackWPup onboarding
     Then the first backup completes
     And the scheduled backup job excludes the "plugins" file area
     And the scheduled backup job excludes the "options" database table
+    When I open the BackWPup dashboard
+    Then the job card still shows the "plugins" file area excluded
+    And the job card still shows the "options" database table excluded

@@ -11,7 +11,9 @@ import { JobRunPanel } from "./pages/job-run.panel";
 import { OnboardingPage } from "./pages/onboarding.page";
 import { StorageSidebar } from "./pages/storage.sidebar";
 import { restorePage } from "./pages/restore.page";
+import { removeMarkers, seedMarkers } from "./support/markers";
 import type { RestorePage } from "./pages/restore.page";
+import type { SiteMarkers } from "./support/markers";
 
 /**
  * BackWPup's test instance — the shared one from `common/fixtures.ts` plus this product's page
@@ -60,6 +62,15 @@ interface BackWPupFixtures {
   restore: RestorePage;
   /** The wp-admin Plugins screen (shared POM), for install/activate/delete flows. */
   plugins: PluginsPage;
+  /**
+   * Known-unique values planted in this site's files and database, removed again afterwards.
+   *
+   * Requesting it **plants them**, so a scenario that asks for it must do so before the backup it
+   * intends to inspect — a marker added after a run cannot be in that run's archive. Only scenarios
+   * that destructure it pay for it, and its teardown always runs, so a failed scenario still leaves
+   * the site as it found it.
+   */
+  markers: SiteMarkers;
 }
 
 export const test = base.extend<BackWPupFixtures>({
@@ -92,6 +103,11 @@ export const test = base.extend<BackWPupFixtures>({
   },
   plugins: async ({ page }, use) => {
     await use(new PluginsPage(page));
+  },
+  markers: async ({ site }, use) => {
+    const planted = await seedMarkers(site.transport);
+    await use(planted);
+    await removeMarkers(site.transport);
   },
 });
 

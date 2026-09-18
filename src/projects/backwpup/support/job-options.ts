@@ -1,3 +1,5 @@
+import { expect } from "@playwright/test";
+
 import { getOptionJson } from "../../../common/wp/options";
 import { isObject } from "../../../common/guards";
 import type { Transport } from "../../../common/config/types";
@@ -67,6 +69,9 @@ export const JOB_CONTENTS = {
   database: ["DBDUMP"],
   "files and database": ["FILE", "DBDUMP", "WPPLUGIN"],
 } as const satisfies Readonly<Record<string, readonly string[]>>;
+
+/** What a job covers, named the way a scenario says it. */
+export type JobContents = keyof typeof JOB_CONTENTS;
 
 /**
  * Names what a job covers, in the same words a scenario uses.
@@ -204,13 +209,13 @@ export async function readStoredJobs(
 /**
  * The jobs a user would call "their backups" — everything except the placeholders.
  *
- * Mirrors the filter `wp backwpup job` applies before listing (`Cli/Commands/Job.php`), so a count
+ * Mirrors the filter `wp backwpup job` applies before listing (`src/Cli/Commands/Job.php`), so a count
  * taken here and a count taken from the command cannot disagree. That command skips a record with
  * no `jobid` (which {@link readStoredJobs} already drops), one flagged `tempjob`, one flagged
  * `backup_now`, and the one whose id matches the site option `backwpup_backup_now_job_id`.
  *
  * The last of those is not re-checked: the plugin writes that option and the record's own
- * `backup_now` flag in the same breath (`Abilities/Jobs/RunJob.php`, `Backups/API/Rest.php`), so
+ * `backup_now` flag in the same breath (`src/Abilities/Jobs/RunJob.php`, `src/Backups/API/Rest.php`), so
  * the flag already covers every such job — and reading it would cost a second round-trip on every
  * call to answer a question the record has answered.
  */
@@ -218,4 +223,31 @@ export function scheduledJobs(
   jobs: readonly StoredJob[],
 ): readonly StoredJob[] {
   return jobs.filter((job) => !job.tempJob && !job.backupNow);
+}
+
+/**
+ * The one job a completed onboarding left behind, failing clearly if there is not exactly one.
+ *
+ * Every scenario that speaks of "the scheduled backup job" configured a single one, so an
+ * unexpected count means setup produced something else entirely — better said here than as a
+ * confusing assertion about the wrong job's settings several steps later.
+ *
+ * Reading it fresh on each use is deliberate: it is derived from the site, so no step has to carry
+ * a job id to the next one, and no scenario can assert against a value that has since changed.
+ *
+ * @param transport - the site to ask.
+ * @throws {@link Error} if the site does not have exactly one scheduled job.
+ */
+export async function theScheduledJob(
+  transport: Transport,
+): Promise<StoredJob> {
+  const jobs = scheduledJobs(await readStoredJobs(transport));
+  expect(
+    jobs,
+    "expected the site to have exactly one scheduled backup job",
+  ).toHaveLength(1);
+  // Narrowing for the type checker; the assertion above is what actually enforces it.
+  const [job] = jobs;
+  if (job === undefined) throw new Error("unreachable: length asserted above");
+  return job;
 }

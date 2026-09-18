@@ -1,3 +1,7 @@
+import { expect } from "@playwright/test";
+
+import { theScheduledJob } from "./job-options";
+import { evalPhp } from "../../../common/wp/php";
 import { wpCli } from "../../../common/wp/exec";
 import type { Transport } from "../../../common/config/types";
 
@@ -11,8 +15,8 @@ import type { Transport } from "../../../common/config/types";
  * own structured output — so a scenario can assert the UI *and* the underlying state and only pass
  * when the two agree.
  *
- * Fields are typed to exactly what the commands document (`Backup.php:63-75`, `Job.php:89-104`,
- * verified at the ref under test). Prefer `sizeBytes`/`timeUnix` over the humanised `size`/`time`:
+ * Fields are typed to exactly what the commands document (`src/Cli/Commands/Backup.php` and
+ * `src/Cli/Commands/Job.php`, verified at the ref under test). Prefer `sizeBytes`/`timeUnix` over the humanised `size`/`time`:
  * the latter are locale- and timezone-formatted for display and make brittle assertions.
  *
  * Both commands exist in **Free and Pro**, so nothing here is edition-gated.
@@ -25,7 +29,6 @@ interface RawBackupRecord {
   readonly size: string;
   readonly storage: string;
   readonly type: string;
-  readonly folder?: string;
   readonly file?: string;
   readonly job_id?: string | number;
   readonly size_bytes?: string | number;
@@ -62,6 +65,13 @@ export interface BackupRecord {
   readonly sizeBytes?: number;
   /** Unix creation timestamp, when requested. The assertion-grade counterpart of {@link time}. */
   readonly timeUnix?: number;
+  /**
+   * Absolute path to the archive **on the site**, when requested.
+   *
+   * What makes an archive inspectable without downloading it. The plugin only lists an archive it
+   * can read, so a path that appears here is one WP-CLI can open.
+   */
+  readonly path?: string;
 }
 
 /** One configured backup job, as WP-CLI reports it. */
@@ -109,17 +119,20 @@ function parseList(stdout: string, command: string): readonly unknown[] {
 }
 
 /**
- * Coerces WP-CLI's numeric-ish field to a number.
+ * Coerces WP-CLI's numeric-ish field to a number, or `undefined` when there is no number in it.
  *
- * WP-CLI emits numbers as strings in some formats and as numbers in others, so both are accepted;
- * anything absent or non-numeric yields `undefined` rather than `NaN`, which would quietly poison
- * a comparison.
+ * WP-CLI emits numbers as strings in some formats and as numbers in others, so both are accepted.
+ * Everything else — a missing field, a JSON `null`, an empty string, unparseable text — reads as
+ * absent, deliberately: `Number(null)` and `Number("")` are both `0`, and a zero invented that way
+ * is indistinguishable from a measured one. Takes `unknown` because the values arrive from parsed
+ * JSON, where the declared field types are a hope rather than a guarantee.
  */
-function optionalNumber(
-  value: string | number | undefined,
-): number | undefined {
-  if (value === undefined) return undefined;
-  const n = typeof value === "number" ? value : Number(value);
+function optionalNumber(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const n = Number(value);
   return Number.isFinite(n) ? n : undefined;
 }
 
@@ -150,7 +163,7 @@ export async function listBackups(
 ): Promise<readonly BackupRecord[]> {
   const raw = await readList<RawBackupRecord>(transport, [
     "backup",
-    "--fields=name,time,size,storage,type,job_id,size_bytes,time_unix",
+    "--fields=name,time,size,storage,type,job_id,size_bytes,time_unix,file",
   ]);
   return raw.map((r) => ({
     name: r.name,
@@ -167,6 +180,7 @@ export async function listBackups(
     ...(optionalNumber(r.time_unix) === undefined
       ? {}
       : { timeUnix: optionalNumber(r.time_unix) }),
+    ...(typeof r.file === "string" && r.file !== "" ? { path: r.file } : {}),
   }));
 }
 
@@ -214,45 +228,287 @@ export async function countBackups(transport: Transport): Promise<number> {
   return count;
 }
 
-/** How a backup job ended, as reported by `wp backwpup status`. */
-export type JobOutcome = "idle" | "finished" | "warnings" | "errors";
+/**
+ * How a backup job ended, read from the log it left behind.
+ *
+ * Deliberately has no "nothing was running" member: a verdict is a statement about a run that
+ * happened, and "I asked too late" is not one — see {@link readLastRunOutcome}.
+ */
+export type RunOutcome = "finished" | "warnings" | "errors";
 
 /**
- * Blocks until no backup job is running, then reports how the job ended.
+ * `wp backwpup log`'s wording when the log folder holds nothing. It exits **zero** and prints this
+ * instead of JSON, so it is an answer rather than a fault — matched loosely, so a rewording degrades
+ * to a parse error with the output attached rather than to a wrong verdict.
+ */
+const NO_LOGS = /no logs found/i;
+
+/**
+ * Whether a backup job is running right now.
  *
- * **`wp backwpup status` is not a state probe — it is a blocking wait.** Verified in
- * `Cli/Commands/Status.php`: when a job is running it enters a `while (true)` loop that ticks a
- * progress bar until the plugin's `running_file` disappears, and only then prints a verdict. So it
- * must never be used to poll ("is it running?") — such a call would hang for the whole job — but it
- * is exactly the right primitive for "wait for the backup to finish", replacing the baseline's
- * 3-minute fixed sleep with a wait as short as the job actually takes.
+ * The plugin's own liveness marker is a file it writes while a job is in flight and removes when it
+ * ends (`BackWPup::get_plugin_data('running_file')`), which is exactly what its own
+ * `wp backwpup status` loops on. Reading it directly gives a **cheap, non-blocking** probe, where
+ * that command is a blocking wait that cannot be polled and cannot be bounded.
  *
- * The four outcomes come from the command's own terminal lines:
- *   - `Success: No job running.`          → nothing was running when asked (`idle`)
- *   - `Success: Job finished.`            → completed clean (`finished`)
- *   - `Warning: Job finished with warnings.` → completed, non-fatal problems (`warnings`)
- *   - `Error: Job finished with errors!`  → failed; WP-CLI exits non-zero (`errors`)
- *
- * The caller decides which outcomes are acceptable — this reports, it does not judge, so a
- * scenario asserting "the backup succeeded" and one deliberately provoking a failure can share it.
+ * Guarded on the class existing so a site whose plugin is not loaded answers "nothing is running"
+ * instead of fataling — which is the truth, and keeps this usable in teardown.
  *
  * @param transport - the site to ask.
- * @throws {@link Error} if the command fails for any reason other than a job ending in errors,
- * since that means the state could not be determined at all.
+ * @throws {@link Error} if WordPress could not be asked at all.
  */
-export async function waitForJobToFinish(
-  transport: Transport,
-): Promise<JobOutcome> {
-  const result = await wpCli(transport, ["backwpup", "status"]);
-  const output = `${result.stdout}\n${result.stderr}`;
-
-  if (/Job finished with errors/i.test(output)) return "errors";
-  if (/Job finished with warnings/i.test(output)) return "warnings";
-  if (/No job running/i.test(output)) return "idle";
-  if (/Job finished/i.test(output)) return "finished";
-
-  throw new Error(
-    `[backwpup/backups] \`wp backwpup status\` exited ${String(result.exitCode)} with no ` +
-      `recognisable verdict. Output was: ${output.trim().slice(0, 500)}`,
+export async function isJobRunning(transport: Transport): Promise<boolean> {
+  const php =
+    "echo ( class_exists( 'BackWPup' ) && " +
+    "file_exists( BackWPup::get_plugin_data( 'running_file' ) ) ) ? '1' : '0';";
+  const answer = await evalPhp(
+    transport,
+    php,
+    "asking whether a backup job is running",
+    "backwpup/backups",
   );
+  if (answer !== "0" && answer !== "1") {
+    throw new Error(
+      `[backwpup/backups] could not tell whether a job is running — expected "0" or "1", got ${JSON.stringify(answer)}.`,
+    );
+  }
+  return answer === "1";
+}
+
+/**
+ * How the most recent job run ended, from the log entry it wrote.
+ *
+ * **The log is the only verdict that survives the run.** `wp backwpup status` reports one too, but
+ * only when it is called *while the job is still running*: asked afterwards it prints
+ * "No job running." and returns without ever reading a log (`src/Cli/Commands/Status.php` — the
+ * verdict lives past its `while` loop). A short backup can therefore finish between two probes and
+ * leave that command with nothing to say, which is precisely when a caller most needs an answer.
+ *
+ * Judged on the **counts**, never on the `status` column: that column is assembled from translated
+ * strings ("O.K.", "%d ERRORS"), while `errors` and `warnings` are integers the plugin reads out of
+ * the log's own header (`src/Cli/Helpers/CommandsLogHelpersTrait::read_log_header`).
+ *
+ * `--limit=1` is the newest run and not the oldest: the command defaults to `--orderby=time`
+ * `--order=desc` and sorts before it slices. The newest entry is the run in question because a
+ * scenario runs one job at a time — the plugin itself refuses to start a second
+ * (`src/Cli/Commands/Run.php`, "A job is already running.").
+ *
+ * @param transport - the site to ask.
+ * @returns the outcome of the newest logged run.
+ * @throws {@link Error} if no run has been logged, if its error/warning counts are absent, or if
+ * the log could not be read — each means the question cannot be answered, and answering it wrongly
+ * would pass a failed backup.
+ */
+export async function readLastRunOutcome(
+  transport: Transport,
+): Promise<RunOutcome> {
+  const argv = [
+    "backwpup",
+    "log",
+    "--limit=1",
+    "--fields=name,errors,warnings",
+    "--format=json",
+  ];
+  const result = await wpCli(transport, argv);
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `[backwpup/backups] \`wp ${argv.join(" ")}\` exited ${String(result.exitCode)}: ` +
+        ((result.stderr || result.stdout).trim() || "(no output)"),
+    );
+  }
+  // The command prints its own sentence and exits **zero** when the log folder is empty, so that
+  // case has to be recognised before parsing — otherwise it surfaces as "did not return JSON",
+  // which describes the symptom rather than the cause.
+  const out = result.stdout.trim();
+  const [newest] = NO_LOGS.test(out)
+    ? []
+    : (parseList(out, argv.join(" ")) as readonly {
+        readonly errors?: unknown;
+        readonly warnings?: unknown;
+      }[]);
+  if (newest === undefined) {
+    throw new Error(
+      "[backwpup/backups] no job log exists, so how the run ended cannot be established.",
+    );
+  }
+  const errors = optionalNumber(newest.errors);
+  const warnings = optionalNumber(newest.warnings);
+  // Absent counts are refused rather than read as zero. The plugin always emits both as integers,
+  // so a reply without them means the question was not answered — and calling that "finished" is
+  // precisely how a failed backup would slip through.
+  if (errors === undefined || warnings === undefined) {
+    throw new Error(
+      "[backwpup/backups] the newest job log carries no error/warning counts " +
+        `(errors=${JSON.stringify(newest.errors)}, warnings=${JSON.stringify(newest.warnings)}), ` +
+        "so how the run ended cannot be established.",
+    );
+  }
+  if (errors > 0) return "errors";
+  if (warnings > 0) return "warnings";
+  return "finished";
+}
+
+/**
+ * How long a real backup of a real site may take before a scenario gives up.
+ *
+ * Files, database and archive creation on a live cell, so this is minutes rather than seconds. It
+ * is deliberately generous: the wait below ends as soon as the archive exists, so a fast site pays
+ * none of it, and the only thing a tight budget would buy is a flaky failure on a slow one.
+ */
+export const BACKUP_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Starts a configured job and returns immediately.
+ *
+ * `--background` is not an optimisation, it is the only correct choice here. Without it the CLI
+ * command runs the whole backup **inside the WP-CLI process**, whose PHP is configured nothing like
+ * the web server's — on a host where the CLI has no memory limit, the plugin's own
+ * "grow the limit as needed" step computes a *finite* one from the current usage and the job then
+ * dies against it. With `--background` the command asks the site to run the job over HTTP, which is
+ * how every other run of that job happens.
+ *
+ * Use it to *arrange* a scenario that needs backups to exist. A scenario about starting a backup
+ * should drive the product's own controls instead.
+ *
+ * **It confirms dispatch, not success**, and the difference is worth knowing: the command fires the
+ * request non-blockingly (`src/Cli/Commands/Run.php` → `get_jobrun_url`, `'blocking' => false`), so a
+ * site that answered with a 500 still reports success. The only failure it genuinely detects is its
+ * own refusal to start a second job. Whether the backup actually happened is
+ * {@link waitForBackup}'s question.
+ *
+ * @param transport - the site to run on.
+ * @param jobId - the job to start.
+ * @throws {@link Error} if the command refused — in practice, because another job is already
+ * running.
+ */
+export async function startJobInBackground(
+  transport: Transport,
+  jobId: number,
+): Promise<void> {
+  const argv = ["backwpup", "run", String(jobId), "--background"];
+  const result = await wpCli(transport, argv);
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `[backwpup/backups] \`wp ${argv.join(" ")}\` exited ${String(result.exitCode)}: ` +
+        ((result.stderr || result.stdout).trim() || "(no output)"),
+    );
+  }
+}
+
+/**
+ * Waits for a backup to land and finish, then reports how it ended.
+ *
+ * **Three phases, in this order, for different reasons.** The archive appearing is what "a backup
+ * happened" means, and it is the only signal that is true whichever way the run was started. The job
+ * then has a little finalising left to do, so nothing-still-running is waited for next — that is
+ * what guarantees no job outlives the scenario, which matters because the plugin lifecycle
+ * uninstalls the plugin at the end of it. Only then is the verdict read, from the log, which is the
+ * one source that still holds it once the run is over ({@link readLastRunOutcome}).
+ *
+ * Both waits share **one** budget, so a caller that made room for `BACKUP_TIMEOUT_MS` has made room
+ * for the whole call rather than for its first half. Each probe is a WP-CLI round-trip, so the
+ * interval backs off quickly instead of hammering the site the way Playwright's DOM-facing default
+ * would — and a probe that fails is absorbed rather than fatal, up to the run length
+ * {@link PROBE_FAILURE_TOLERANCE} allows.
+ *
+ * @param transport - the site to watch.
+ * @param before - how many archives the history held before the run started.
+ * @returns how the job ended, for the caller to judge — this reports, it does not decide, so a
+ * scenario expecting success and one provoking a failure can share it.
+ * @throws {@link Error} if no new archive appears, if a job is still running when the budget is
+ * spent, or if no verdict could be read.
+ */
+/**
+ * How many *consecutive* probe failures a wait absorbs before giving up on the site.
+ *
+ * Small on purpose. It has to be greater than zero, because a probe is a WP-CLI round trip over SSH
+ * to a site that is busy writing a multi-gigabyte archive, and a dropped connection there is noise
+ * rather than an answer. It has to stay small, because a site that is genuinely broken should say so
+ * in seconds rather than at the end of a ten-minute budget. At the poll intervals below, three
+ * failures is about eight seconds.
+ */
+const PROBE_FAILURE_TOLERANCE = 3;
+
+/**
+ * Wraps a probe so a transient failure keeps the wait alive, while a persistent one still ends it.
+ *
+ * `expect.poll` calls its function **outside** its own try/catch, so by default a probe that throws
+ * ends the wait then and there — one lost connection during a ten-minute backup would be reported as
+ * a WP-CLI error rather than as the thing being waited for. Returning `undefined` instead keeps the
+ * poll going; a run of {@link PROBE_FAILURE_TOLERANCE} failures with no success between them is
+ * taken as the site being unable to answer at all, and the last error is re-thrown with its own
+ * message intact.
+ *
+ * The counter resets on every success, so a flaky link is tolerated indefinitely while a dead one is
+ * not tolerated at all.
+ */
+function forgiving<T>(probe: () => Promise<T>): () => Promise<T | undefined> {
+  let consecutive = 0;
+  return async () => {
+    try {
+      const value = await probe();
+      consecutive = 0;
+      return value;
+    } catch (error) {
+      consecutive += 1;
+      if (consecutive > PROBE_FAILURE_TOLERANCE) throw error;
+      return undefined;
+    }
+  };
+}
+
+export async function waitForBackup(
+  transport: Transport,
+  before: number,
+): Promise<RunOutcome> {
+  const deadline = Date.now() + BACKUP_TIMEOUT_MS;
+  /** What is left of the shared budget, floored so a spent budget still makes one last probe. */
+  const remaining = (): number => Math.max(1_000, deadline - Date.now());
+
+  await expect
+    .poll(
+      forgiving(() => countBackups(transport)),
+      {
+        message: `a backup should have landed in the history by now (there were ${String(before)} before it started)`,
+        timeout: remaining(),
+        intervals: [1000, 2000, 5000],
+      },
+    )
+    .toBeGreaterThan(before);
+
+  await expect
+    .poll(
+      forgiving(() => isJobRunning(transport)),
+      {
+        message:
+          "the backup job should have finished by now — leaving one running would outlive the scenario",
+        timeout: remaining(),
+        intervals: [1000, 2000, 5000],
+      },
+    )
+    .toBe(false);
+
+  return readLastRunOutcome(transport);
+}
+
+/**
+ * Runs the site's one scheduled job and waits for its archive to land.
+ *
+ * The arrangement primitive behind every scenario that needs a backup to exist without driving the
+ * controls that make one. It goes through the job the product itself scheduled, so what it produces
+ * is a real backup of a real site rather than something this suite assembled.
+ *
+ * @param transport - the site to back up.
+ * @throws {@link Error} if the run ended in errors, or if no archive appeared in time — a
+ * precondition that quietly failed would surface later as a confusing assertion about a history
+ * that is emptier than the scenario expected.
+ */
+export async function runScheduledBackup(transport: Transport): Promise<void> {
+  const before = await countBackups(transport);
+  const job = await theScheduledJob(transport);
+  await startJobInBackground(transport, job.jobId);
+  expect(
+    await waitForBackup(transport, before),
+    "a backup arranged as a precondition should not have ended in errors",
+  ).not.toBe("errors");
 }

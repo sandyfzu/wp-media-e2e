@@ -5,16 +5,19 @@ import { join } from "node:path";
 
 import {
   countBackups,
+  isJobRunning,
   listBackups,
   listJobs,
-  waitForJobToFinish,
+  readLastRunOutcome,
+  startJobInBackground,
+  waitForBackup,
 } from "./backups";
 import type { LocalTransport } from "../../../common/config/types";
 
 // A stub `wp` on PATH exercises these readers plus the real exec layer, with no WordPress. The
 // scenario is chosen per test via $WP_STUB_MODE. Payloads mirror the field names the commands
-// document (Backup.php / Job.php at the ref under test), including WP-CLI's habit of emitting
-// numeric fields as strings.
+// document (src/Cli/Commands/Backup.php and Job.php at the ref under test), including WP-CLI's
+// habit of emitting numeric fields as strings.
 const STUB_WP = `#!/usr/bin/env bash
 case "$WP_STUB_MODE" in
   empty)        printf '[]' ;;
@@ -29,16 +32,54 @@ case "$WP_STUB_MODE" in
     printf '%s' '[{"name":"a.tar","time":"t","size":"s","storage":"folder","type":"dbdump","size_bytes":"not-a-number"}]' ;;
   jobs)
     printf '%s' '[{"job_id":"3","name":"Database","active_type":"wpcron","type":"DBDUMP","storages":"FOLDER","cron":"0 3 * * *","last_run":"never","last_runtime":"-"}]' ;;
+  jobs-numeric)
+    printf '%s' '[{"job_id":3,"name":"Database","active_type":"wpcron","type":"DBDUMP","storages":"FOLDER","cron":"0 3 * * *","last_run":"never","last_runtime":"-"}]' ;;
   not-json)   printf 'Error: Something exploded' ;;
   not-array)  printf '{"name":"x"}' ;;
   count)      printf '4' ;;
   count-bad)  printf 'many' ;;
   fail)       printf 'Error: boom' >&2; exit 1 ;;
-  idle)       printf 'Success: No job running.' ;;
-  finished)   printf 'Success: Job finished.' ;;
-  warnings)   printf 'Warning: Job finished with warnings.' ;;
-  errors)     printf 'Error: Job finished with errors!' >&2; exit 1 ;;
-  gibberish)  printf 'who knows' ;;
+  running)     printf '1' ;;
+  not-running) printf '0' ;;
+  gibberish)   printf 'who knows' ;;
+  # The status column is assembled from the counts in the site's own language, so it can read
+  # "O.K." while the counts say otherwise. The readers judge on the integers.
+  log-errors)   printf '%s' '[{"name":"backwpup_log_a.html","errors":"2","warnings":"0","status":"O.K."}]' ;;
+  log-warnings) printf '%s' '[{"name":"backwpup_log_b.html","errors":0,"warnings":3}]' ;;
+  log-clean)    printf '%s' '[{"name":"backwpup_log_c.html","errors":0,"warnings":0}]' ;;
+  log-none)     printf 'No logs found.' ;;
+  # Counts that are present but carry no number. Coercing null or an empty string yields 0, so a
+  # lenient read would report a run whose verdict is unknown as a clean one.
+  log-null-counts)  printf '%s' '[{"name":"backwpup_log_d.html","errors":null,"warnings":null}]' ;;
+  log-blank-counts) printf '%s' '[{"name":"backwpup_log_e.html","errors":"","warnings":""}]' ;;
+  # run --background succeeds silently; the failing case is the command refusing to start a
+  # second job, which is the one refusal a caller must not mistake for a start.
+  started)    printf 'Success: Job "Database" runs now in background.' ;;
+  already-running) printf 'Error: A job is already running.' >&2; exit 1 ;;
+  # One archive appears on the second probe: the first --format=count reports the pre-run total,
+  # every later one the new total. The status call then answers from WP_STUB_STATUS.
+  grew)
+    case "$1" in
+      eval) printf '0' ;;                                   # nothing running
+      *)
+        case "$3" in
+          *count*)
+            if [ -f "$WP_STUB_PROBED" ]; then printf '2'; else touch "$WP_STUB_PROBED"; printf '1'; fi ;;
+          *) printf '%s' "$WP_STUB_LOG" ;;                   # the run's log entry
+        esac ;;
+    esac ;;
+  # The first count probe dies the way a dropped SSH connection does; every later one answers.
+  flaky-count)
+    case "$1" in
+      eval) printf '0' ;;
+      *)
+        case "$3" in
+          *count*)
+            if [ -f "$WP_STUB_FLAKY_STATE" ]; then printf '1'
+            else touch "$WP_STUB_FLAKY_STATE"; printf 'Error: connection closed by remote host' >&2; exit 1; fi ;;
+          *) printf '%s' "$WP_STUB_LOG" ;;
+        esac ;;
+    esac ;;
 esac
 exit 0
 `;
@@ -58,9 +99,19 @@ test.beforeAll(() => {
   process.env.PATH = `${binDir}:${originalPath ?? ""}`;
 });
 
+// The `grew` scenario remembers across invocations through this file, so each test starts from
+// "nothing probed yet" rather than inheriting the previous one's second-probe state.
+test.beforeEach(() => {
+  process.env.WP_STUB_PROBED = join(binDir, "probed");
+  rmSync(process.env.WP_STUB_PROBED, { force: true });
+});
+
 test.afterAll(() => {
   if (originalPath === undefined) delete process.env.PATH;
   else process.env.PATH = originalPath;
+  delete process.env.WP_STUB_PROBED;
+  delete process.env.WP_STUB_FLAKY_STATE;
+  delete process.env.WP_STUB_STATUS;
   rmSync(binDir, { recursive: true, force: true });
   rmSync(rootDir, { recursive: true, force: true });
 });
@@ -150,6 +201,14 @@ test.describe("listJobs", () => {
       lastRuntime: "-",
     });
   });
+
+  test("accepts a job id that arrives as a number rather than a string", async () => {
+    // WP-CLI emits numeric fields either way depending on the field's own type, so the reader must
+    // not depend on which — the same case `listBackups` pins for its own optional numbers.
+    process.env.WP_STUB_MODE = "jobs-numeric";
+    const [job] = await listJobs(local());
+    expect(job?.jobId).toBe(3);
+  });
 });
 
 test.describe("countBackups", () => {
@@ -164,35 +223,128 @@ test.describe("countBackups", () => {
   });
 });
 
-// `wp backwpup status` blocks until the job ends and then prints one of four verdicts; these cover
-// all four, including the error case that exits non-zero and must still be reported rather than
-// thrown as an unknown failure.
-test.describe("waitForJobToFinish", () => {
-  test("no job running", async () => {
-    process.env.WP_STUB_MODE = "idle";
-    expect(await waitForJobToFinish(local())).toBe("idle");
+// The liveness probe reads the plugin's own running-file marker through `wp eval` and answers only
+// `0` or `1`; these cover both, plus the replies that are neither and must fail rather than be
+// guessed at.
+test.describe("isJobRunning", () => {
+  test("reads the plugin's own liveness marker", async () => {
+    process.env.WP_STUB_MODE = "running";
+    expect(await isJobRunning(local())).toBe(true);
+    process.env.WP_STUB_MODE = "not-running";
+    expect(await isJobRunning(local())).toBe(false);
   });
 
-  test("clean completion", async () => {
-    process.env.WP_STUB_MODE = "finished";
-    expect(await waitForJobToFinish(local())).toBe("finished");
-  });
-
-  test("completion with warnings", async () => {
-    process.env.WP_STUB_MODE = "warnings";
-    expect(await waitForJobToFinish(local())).toBe("warnings");
-  });
-
-  test("completion with errors is reported, not thrown", async () => {
-    process.env.WP_STUB_MODE = "errors";
-    expect(await waitForJobToFinish(local())).toBe("errors");
-  });
-
-  test("an unrecognisable verdict throws with the output attached", async () => {
+  test("throws rather than guessing when the answer is not 0 or 1", async () => {
+    // A notice printed ahead of the value would otherwise be read as "not running" and let a
+    // scenario uninstall the plugin out from under a live job.
     process.env.WP_STUB_MODE = "gibberish";
-    await expect(waitForJobToFinish(local())).rejects.toThrow(
-      /no recognisable verdict/,
+    await expect(isJobRunning(local())).rejects.toThrow(
+      /could not tell whether a job is running/,
     );
+  });
+});
+
+test.describe("readLastRunOutcome", () => {
+  test("judges on the counts, not on the translated status column", async () => {
+    // The stub's newest entry says `status: "O.K."` while carrying two errors — an entry the
+    // plugin can genuinely produce, since that column is assembled from the counts in the site's
+    // own language. Reading the column would call this run a success.
+    process.env.WP_STUB_MODE = "log-errors";
+    expect(await readLastRunOutcome(local())).toBe("errors");
+  });
+
+  test("reports warnings and clean runs apart", async () => {
+    process.env.WP_STUB_MODE = "log-warnings";
+    expect(await readLastRunOutcome(local())).toBe("warnings");
+    process.env.WP_STUB_MODE = "log-clean";
+    expect(await readLastRunOutcome(local())).toBe("finished");
+  });
+
+  test("throws when nothing has been logged, rather than calling it a success", async () => {
+    process.env.WP_STUB_MODE = "empty";
+    await expect(readLastRunOutcome(local())).rejects.toThrow(
+      /no job log exists/,
+    );
+  });
+
+  test("throws when the log cannot be read at all", async () => {
+    process.env.WP_STUB_MODE = "fail";
+    await expect(readLastRunOutcome(local())).rejects.toThrow(/exited 1/);
+  });
+
+  test("refuses a null count rather than reading it as a clean run", async () => {
+    // `Number(null)` is 0, so a lenient coercion would turn "the counts are missing" into
+    // "there were no errors" — the one mistake this reader must never make, because it passes a
+    // failed backup.
+    process.env.WP_STUB_MODE = "log-null-counts";
+    await expect(readLastRunOutcome(local())).rejects.toThrow(
+      /carries no error\/warning counts/,
+    );
+  });
+
+  test("refuses an empty-string count as well", async () => {
+    // `Number("")` is 0 too, and an empty field is a different reply from a null one, so it is
+    // pinned separately.
+    process.env.WP_STUB_MODE = "log-blank-counts";
+    await expect(readLastRunOutcome(local())).rejects.toThrow(
+      /carries no error\/warning counts/,
+    );
+  });
+});
+
+test.describe("startJobInBackground", () => {
+  test("returns once the command has asked the site to run the job", async () => {
+    process.env.WP_STUB_MODE = "started";
+    await expect(startJobInBackground(transport, 3)).resolves.toBeUndefined();
+  });
+
+  test("throws when the command refuses — a job already running is not a start", async () => {
+    process.env.WP_STUB_MODE = "already-running";
+    await expect(startJobInBackground(transport, 3)).rejects.toThrow(
+      /A job is already running/,
+    );
+  });
+});
+
+test.describe("waitForBackup", () => {
+  test("waits for the count to grow past the baseline, then reports the verdict", async () => {
+    // The count must *increase*, not merely be non-zero: a scenario that already had archives would
+    // otherwise be told its new backup had landed before anything ran.
+    process.env.WP_STUB_MODE = "grew";
+    process.env.WP_STUB_LOG = '[{"name":"l.html","errors":0,"warnings":0}]';
+    expect(await waitForBackup(transport, 1)).toBe("finished");
+  });
+
+  test("a site that cannot answer fails quickly, with the cause", async () => {
+    // A site that never answers must not be reported ten minutes later as "no backup appeared", so
+    // a run of consecutive failures ends the wait and re-raises the real error. Timed as well as
+    // asserted: the tolerance must cost seconds, not the whole budget.
+    process.env.WP_STUB_MODE = "fail";
+    const started = Date.now();
+    await expect(waitForBackup(transport, 0)).rejects.toThrow(/exited 1/);
+    expect(Date.now() - started).toBeLessThan(30_000);
+  });
+
+  test("a probe that fails once does not end the wait", async () => {
+    // `expect.poll` calls its function outside its own try/catch, so an unguarded probe that throws
+    // ends the wait then and there. Over SSH, to a site busy writing a multi-gigabyte archive, one
+    // lost connection is noise — this is the case that would otherwise surface as a WP-CLI error
+    // in place of the thing being waited for.
+    process.env.WP_STUB_MODE = "flaky-count";
+    process.env.WP_STUB_FLAKY_STATE = join(binDir, "flaky-count");
+    rmSync(process.env.WP_STUB_FLAKY_STATE, { force: true });
+    process.env.WP_STUB_STATUS = "not-running";
+    process.env.WP_STUB_LOG = '[{"name":"l.html","errors":0,"warnings":0}]';
+    expect(await waitForBackup(transport, 0)).toBe("finished");
+  });
+
+  test("reports a failed run rather than throwing, leaving the judgement to the caller", async () => {
+    // The regression this pins: the verdict now comes from the log, so a run that ended before it
+    // could be watched is still judged — where asking `wp backwpup status` too late reported
+    // "nothing was running" and every caller read that as "did not fail".
+    process.env.WP_STUB_MODE = "grew";
+    process.env.WP_STUB_LOG = '[{"name":"l.html","errors":1,"warnings":0}]';
+    expect(await waitForBackup(transport, 1)).toBe("errors");
   });
 });
 

@@ -62,9 +62,12 @@ import { renderFixture } from "./__fixtures__/render";
  * is in `.prettierignore` precisely so nothing reflows the markup afterwards — a reformat would break the
  * "nobody edited this" guarantee and let a Prettier upgrade masquerade as plugin drift.
  *
- * Current captures: **BackWPup Pro 5.7.5** (latest stable). `parts/` and `components/` are
- * byte-identical in 5.7.4, 5.7.5 and Pro `9.99.99-c0dd22c2`, so these also describe the `develop`
- * builds the cells run.
+ * Current captures: **BackWPup Pro 5.7.5** (latest stable). Re-measured 2026-08-28 against the
+ * `develop` build the cells actually install (`9.99.99-90f93911`): `components/`, `pages/`,
+ * `parts/`, `pro/parts/` and `assets/js/` are **byte-identical** between the two, as are the whole
+ * of `src/` (so every REST route) and `src/Cli/Commands/`. What differs is `inc/`'s three
+ * archive-engine files, the version header, the readme, the translation template and `vendor/` —
+ * none of which these captures describe. So they describe the build under test as well as 5.7.5.
  */
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "__fixtures__");
@@ -559,24 +562,45 @@ test.describe("BackupHistoryTable — a real captured row", () => {
 });
 
 test.describe("BackupHistoryTable — the failure branch", () => {
-  // No failed backup exists on the cell to capture, so this reproduces the row template's failure
-  // branch (`components/table-row-backups.php`: `.backwpup-failure-icon` plus the
-  // "%1$s backup failed – %2$s" message) to prove the POM filters on the plugin's own marker rather
-  // than on row text. A scenario that provokes a real failure asserts it end to end.
+  // No failed backup exists on the cell to capture, so this reproduces the row template's
+  // failed/aborted branch (`components/table-row-backups.php`). Both statuses take that branch and
+  // both get the `delete-failed-backup` delete control, but only `failed` gets the
+  // `.backwpup-failure-icon` class — an aborted backup is styled `text-alert` instead. The rows
+  // below carry exactly what the template emits for each, so a POM that filtered on the icon would
+  // pass the first case and miss the second.
   const MIXED = `<table id="backwpup-backup-history"><tbody>
-    <tr data-backup-id="11"><td>ok</td></tr>
-    <tr data-backup-id="12"><td><span class="backwpup-failure-icon"></span><span>Website Server backup failed – disk full</span></td></tr>
-    <tr data-backup-id="13"><td>ok</td></tr>
+    <tr data-backup-id="11"><td>ok</td><td><button data-content="delete-backup">Delete</button></td></tr>
+    <tr data-backup-id="12"><td><span class="backwpup-failure-icon"></span><span>Website Server backup failed – disk full</span></td><td><button data-content="delete-failed-backup">Delete</button></td></tr>
+    <tr data-backup-id="13"><td>ok</td><td><button data-content="delete-backup">Delete</button></td></tr>
+    <tr data-backup-id="14"><td><span class="inline-flex items-center justify-center text-alert"></span><span>Aborted by user</span></td><td><button data-content="delete-failed-backup">Delete</button></td></tr>
   </tbody></table>`;
 
-  test("failedRows finds the failure branch and nothing else", async ({
+  test("failedRows finds both unsuccessful branches and nothing else", async ({
     page,
   }) => {
     await renderFixture(page, MIXED);
     const table = new BackupHistoryTable(page);
-    await expect(table.rows).toHaveCount(3);
-    await expect(table.failedRows).toHaveCount(1);
-    await expect(table.failedRows).toHaveAttribute("data-backup-id", "12");
+    await expect(table.rows).toHaveCount(4);
+    await expect(table.failedRows).toHaveCount(2);
+    expect(
+      await table.failedRows.evaluateAll((rows) =>
+        rows.map((row) => row.getAttribute("data-backup-id")),
+      ),
+    ).toEqual(["12", "14"]);
+  });
+
+  test("an aborted backup counts as a failure, though it carries no failure icon", async ({
+    page,
+  }) => {
+    await renderFixture(page, MIXED);
+    // Pins the reason `failedRows` cannot key on the icon: the aborted row genuinely has none.
+    const table = new BackupHistoryTable(page);
+    await expect(table.row(14).locator(".backwpup-failure-icon")).toHaveCount(
+      0,
+    );
+    await expect(
+      table.failedRows.filter({ hasText: "Aborted by user" }),
+    ).toHaveCount(1);
   });
 
   test("expectNoFailures fails when a failed row is present", async ({
@@ -1060,6 +1084,23 @@ test.describe("Sidebars — a job screen's aside", () => {
   }) => {
     await expect(page.locator("#sidebar-delete-backup")).toHaveCount(1);
     await expect(page.locator("#sidebar-backup-log")).toHaveCount(1);
+  });
+
+  test("the bulk delete confirmation resolves, with the button the POM clicks", async ({
+    page,
+  }) => {
+    // Pressing "Apply" issues no request at all: its handler stores the selection and opens this
+    // dialog, and the `process_bulk_actions` call happens only when this button is pressed
+    // (`backwpup-admin.js`, the `action === 'delete'` branch). So this modal is what the POM waits
+    // for, and this button is what completes the action.
+    const table = new BackupHistoryTable(page);
+    await expect(table.bulkDeleteModal).toHaveCount(1);
+    await expect(
+      table.bulkDeleteModal.getByRole("button", { name: "Delete Backups" }),
+    ).toHaveCount(1);
+    await expect(
+      table.bulkDeleteModal.locator(".js-backwpup-bulk-delete-backups"),
+    ).toHaveCount(1);
   });
 });
 

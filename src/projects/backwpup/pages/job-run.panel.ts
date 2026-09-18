@@ -1,7 +1,7 @@
 import { expect } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
 
-import { waitForRest } from "../support/rest";
+import { expectRestPayloadOk, waitForRest } from "../support/rest";
 
 /**
  * Page object for a running backup job.
@@ -29,24 +29,30 @@ export class JobRunPanel {
    *
    * The `startbackup` REST call is the point of no return, so it is awaited as a barrier around the
    * click — a click that opened no request is a failure here, not a silent no-op that surfaces later
-   * as an empty backup history. The progress region becoming visible is then asserted as the
-   * user-visible consequence.
+   * as an empty backup history. Its **body** is then checked, because the route reports its own
+   * refusals with HTTP 200 (see {@link expectRestPayloadOk}).
+   *
+   * **The progress region is deliberately not asserted.** The plugin waits one second and then
+   * answers on **HTTP 200 whatever happened**, putting the real outcome in the body's own `status`:
+   * `200` (`Job "<name>" started.`) means the run is still going, `201` (`Job "<name>" executed.`)
+   * that it already finished. Both are successes, and only the body tells them apart — which is why
+   * the payload is checked and `response.ok()` alone would prove nothing. On a small site the second
+   * is the normal answer, and
+   * the page's own script then shows `#runningjob` and hides it again on its first poll
+   * (`assets/js/backwpup-generate.js`). Requiring it to be visible therefore fails for the sole
+   * reason that the backup was fast — observed on a cell with a 3 MB database. What "the backup
+   * started" is worth is the archive that follows, which the scenario asserts.
    */
   async startFromModal(): Promise<void> {
     const start = this.page
       .locator("#sidebar-backup-now")
       .locator(".js-backwpup-start-backup-now");
     await expect(start).toBeVisible();
-    await Promise.all([waitForRest(this.page, "startbackup"), start.click()]);
-    await expect(this.region).toBeVisible();
-  }
-
-  /** Asserts a backup is currently running, by its own heading. */
-  async expectRunning(): Promise<void> {
-    await expect(this.region).toBeVisible();
-    await expect(
-      this.page.locator("#backupgeneration-progress-box-title"),
-    ).toBeVisible();
+    const [response] = await Promise.all([
+      waitForRest(this.page, "startbackup"),
+      start.click(),
+    ]);
+    await expectRestPayloadOk(response, "startbackup");
   }
 
   /**
@@ -62,8 +68,9 @@ export class JobRunPanel {
   /**
    * The step the job is currently on (the plugin's `lastmsg`).
    *
-   * Empty until the first step reports, which is why "a job is running" is asserted via
-   * {@link expectRunning} and not via this element having text.
+   * Empty until the first step reports, so it is never a sound way to ask whether a job is running
+   * — the plugin hides this whole region as soon as its progress poll finds no working data, and a
+   * fast run leaves nothing to see. A scenario wanting that answer should assert the archive.
    */
   get currentStep(): Locator {
     return this.region.locator(".js-backwpup-current-file");

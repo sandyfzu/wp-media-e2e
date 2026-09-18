@@ -87,15 +87,26 @@ export class BackupHistoryTable {
   }
 
   /**
-   * The rows for backups that **failed**.
+   * The rows for backups that produced **no usable archive** — failed or aborted.
    *
-   * Matched on the plugin's own `backwpup-failure-icon`, which it renders only on the failure branch
-   * of the row template — not by scanning the row's text for words like "failed", which would also
-   * match a filename or a log excerpt that happened to contain them.
+   * Matched on the delete control the row template offers *only* on that branch: a failed or aborted
+   * row's delete opens `delete-failed-backup`, which no other row emits under any viewport
+   * (`components/table-row-backups.php`, where both statuses take the same branch). That is the
+   * plugin's own JS contract hook, so it is stable by construction — and it is not text matching,
+   * which would also hit a filename or a log excerpt containing the word "failed".
+   *
+   * One narrower condition than the status cell's: the control is guarded on the row also carrying a
+   * real backup id, while the failure *styling* is not. A failed row with an id of `0` would render
+   * as failed and be invisible here — unreachable in practice, since the id is the backups table's
+   * own primary key, but the gap is the locator's and not the template's.
+   *
+   * **Deliberately not `.backwpup-failure-icon`.** The template puts that class on the icon only
+   * when the status is `failed`; an **aborted** backup gets `text-alert` instead and would slip
+   * through — the exact rows a scenario asserting "nothing went wrong" most needs to catch.
    */
   get failedRows(): Locator {
     return this.rows.filter({
-      has: this.page.locator(".backwpup-failure-icon"),
+      has: this.page.locator('[data-content="delete-failed-backup"]'),
     });
   }
 
@@ -186,14 +197,29 @@ export class BackupHistoryTable {
     ).toBeVisible();
   }
 
-  /** Confirms an open delete-confirmation modal, then waits for the refreshed history. */
+  /**
+   * Confirms an open delete-confirmation modal and waits for the page it navigates to.
+   *
+   * **This one navigates; its bulk sibling does not.** The per-row confirm button is rendered with
+   * the plugin's `open-url` trigger, whose handler is a bare `window.location = data-href`
+   * (`assets/js/backwpup-admin.js`) — there is no REST call to await, and the history is rebuilt by
+   * the server on the way back. Waiting on the main frame's navigation response is therefore the
+   * only honest barrier: `waitForLoaded()` alone would race the old page, and the loading marker it
+   * looks for is emitted only by the initial server render, so it can also be satisfied instantly by
+   * a page that is about to be replaced.
+   */
   async confirmDelete(): Promise<void> {
     const modal = this.page
       .locator("#sidebar-delete-backup, #sidebar-delete-failed-backup")
       .filter({ visible: true });
-    await modal
-      .getByRole("button", { name: /^Delete (Backup|Entry)$/ })
-      .click();
+    await Promise.all([
+      this.page.waitForResponse(
+        (response) =>
+          response.request().isNavigationRequest() &&
+          response.request().frame() === this.page.mainFrame(),
+      ),
+      modal.getByRole("button", { name: /^Delete (Backup|Entry)$/ }).click(),
+    ]);
     await this.waitForLoaded();
   }
 
@@ -230,21 +256,48 @@ export class BackupHistoryTable {
     await setToggle(this.root.locator("thead label").first(), input, selected);
   }
 
+  /** The confirmation the bulk **delete** opens before anything is removed. */
+  get bulkDeleteModal(): Locator {
+    return this.page.locator("#sidebar-bulk-delete-backups");
+  }
+
   /**
-   * Applies a bulk action to the selected rows.
+   * Chooses a bulk action and presses Apply, stopping at its confirmation.
    *
-   * "Apply" ships `disabled` and the plugin enables it once a selection and an action exist, so both
-   * are asserted before clicking — a disabled-button click would otherwise pass silently and the
-   * scenario would fail later with nothing deleted. `process_bulk_actions` is the completion signal.
+   * "Apply" ships `disabled` and the plugin enables it only once a selection **and** the `delete`
+   * action both exist, so it is asserted enabled before clicking — a disabled-button click would
+   * otherwise pass silently and the scenario would fail later with nothing deleted.
+   *
+   * **Apply does not delete anything, and that is the plugin's design, not a quirk of this object.**
+   * Its handler stores the selection and opens `#sidebar-bulk-delete-backups`, returning without
+   * issuing a request at all (`assets/js/backwpup-admin.js`, the `action === 'delete'` branch); the
+   * REST call happens only when that dialog is confirmed. So the modal appearing is the honest
+   * completion signal here, and {@link confirmBulkDelete} owns the rest — the same arm-then-confirm
+   * split the per-row delete uses, for the same reason.
    */
   async applyBulkAction(action: "delete"): Promise<void> {
     const select = this.page.locator("#bulk-actions-select");
     await select.selectOption(action);
     const apply = this.page.locator("#bulk-actions-apply");
     await expect(apply).toBeEnabled();
+    await apply.click();
+    await expect(this.bulkDeleteModal).toBeVisible();
+  }
+
+  /**
+   * Confirms an armed bulk delete, then waits for the refreshed history.
+   *
+   * `process_bulk_actions` is the completion signal — this is where the plugin finally issues it —
+   * and the reload afterwards is what makes the following assertions read server state rather than
+   * the rows that were on screen before.
+   */
+  async confirmBulkDelete(): Promise<void> {
     await Promise.all([
       waitForRest(this.page, "process_bulk_actions"),
-      apply.click(),
+      this.bulkDeleteModal
+        .getByRole("button", { name: "Delete Backups" })
+        .click(),
     ]);
+    await this.reload();
   }
 }

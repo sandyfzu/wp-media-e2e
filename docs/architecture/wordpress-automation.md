@@ -575,6 +575,140 @@ shows. Needed wherever a plugin distinguishes *this* install's tables from other
 sharing the database; a hard-coded `wp_` would quietly assert the wrong thing on any site
 not using the default.
 
+## WP-Cron ([`wp/cron.ts`](../../src/common/wp/cron.ts))
+
+Lets a scenario about a *scheduled* feature answer its two separate questions: **is the
+event registered**, and **what happens when it fires**.
+
+- `nextScheduled(transport, hook, args?)` → the Unix timestamp of the next run, or
+  `undefined` when nothing is scheduled. Asked of `wp_next_scheduled` rather than read
+  out of `wp cron event list`, which prints a formatted date and cannot tell two events
+  on the same hook apart. Args matter: WordPress keys an event by hook **and** argument
+  array, so a plugin that schedules one event per job (BackWPup does) needs both.
+- `triggerScheduledEvent(transport, hook, args?)` → re-schedules **that one event** into
+  the past and hands it to WordPress's own `spawn_cron()`. Throws if the event is not
+  scheduled, so a scenario cannot "trigger" something the product never registered. A
+  recurring event stays recurring — its schedule is read back and re-applied, so this
+  cannot silently downgrade one to a single event. Only the target event is *moved*;
+  whatever the site already had due runs alongside it, as on any real cron tick. Returns
+  as soon as WordPress has accepted the work — the cron request is non-blocking in core,
+  so callers wait on the product's own evidence that the work finished, never on this
+  resolving.
+
+**Why not `wp cron event run <hook>`** — two reasons, both measured on a live cell:
+
+1. **It is not selective.** WP-CLI 2.12's help says it "runs the next scheduled cron
+   event for the given hook"; a probe with three events on one hook executed **all
+   three**, including one scheduled hours ahead. Adding `--due-now` *does* restrict it to
+   genuinely due events, which is why the trigger above makes only the target event due.
+2. **It runs the work inside the WP-CLI process**, whose PHP is configured nothing like
+   the web server's. On a host where the CLI has `memory_limit = -1`, BackWPup's own
+   "grow the limit as needed" step computes a *finite* limit from the current usage
+   (`(int) '-1'` is `-1`, so any requirement looks larger) and the job then dies against
+   it — a hard PHP fatal in a run that succeeds every time through the web server.
+
+`spawn_cron()` posts to `wp-cron.php`, so the event executes in the same web context a
+real schedule would. That holds whether the host disables WordPress's own cron and pokes
+`wp-cron.php` from a system crontab, or lets WordPress spawn it from page loads —
+`spawn_cron()` is gated by neither. The one arrangement it cannot serve is
+`ALTERNATE_WP_CRON`, whose branch reads `$_SERVER['REQUEST_METHOD']` and so always
+declines under WP-CLI; such a site fails loudly rather than quietly.
+
+`spawn_cron()` also declines while another cron run holds WordPress's `doing_cron` lock, so
+the trigger retries rather than reporting a property of the host as a test failure. The
+lock is **never deleted**, and the budget is what makes that safe:
+
+- Core only declines while the lock is *younger* than `WP_CRON_LOCK_TIMEOUT`
+  (`if ( $lock + WP_CRON_LOCK_TIMEOUT > $gmt_time ) return false;`). It already ignores an
+  abandoned one, so deleting a stale lock cannot change the outcome — it is not a fix, it
+  is a no-op.
+- Deleting one that a *slow* run still holds truncates that run: `wp-cron.php` re-reads the
+  lock between events and returns as soon as it has changed. Since a lock is set once and
+  not refreshed, any backup running longer than the timeout has a lock that merely *looks*
+  abandoned.
+- So the trigger simply outlasts the lock. The budget is read from the site
+  (`min( 300, max( 70, WP_CRON_LOCK_TIMEOUT + 10 ) )`) rather than hard-coded, because a
+  site may raise the constant; the cap stops an extreme value hanging the caller, and the
+  timeout is named in the failure message when the budget is spent.
+
+The event is unscheduled before it is re-scheduled as due — required, because core's
+duplicate guard in `wp_schedule_single_event` counts *all* past identical events as
+duplicates when the new timestamp is within ten minutes. If the re-schedule then fails, the
+original run is **put back**, so failing to advance a schedule never costs the site the
+schedule itself.
+
+## Talking PHP to a site ([`php.ts`](../../src/common/wp/php.ts))
+
+Every module that asks WordPress something it has no WP-CLI command for goes through here, so
+the two hard parts are solved once.
+
+- `phpLiteral(value)` embeds a value as `json_decode( base64_decode( '…' ), true )`. What lands
+  in the snippet is drawn from `A-Za-z0-9+/=` — an alphabet containing no PHP metacharacter — so
+  quotes, backslashes, newlines and `$` in the data cannot end the literal or interpolate. That
+  is what makes it safe for values **read off a site** rather than written by hand. A value with
+  no JSON form (`undefined`, a function, a symbol) throws here, naming the caller's mistake,
+  instead of failing deep inside `Buffer.from`.
+- `evalPhp(transport, php, what, scope)` runs the snippet and turns a non-zero exit into a throw
+  carrying whatever PHP or WP-CLI said — including a snippet's own `WP_CLI::error()`, which is how
+  a snippet refuses in the site's own words.
+
+**Any value that came from outside this codebase goes through `phpLiteral`** — a site's own data, a
+scenario's input, a fixture. That has no exceptions: interpolating such a value into PHP source is
+the same class of mistake as interpolating one into SQL, and it is avoidable in one line. A
+compile-time constant of ours interpolated into snippet *source* (a budget, a destination slug) is
+not a value in that sense, and the handful of sites doing it say so inline.
+
+**Every `wp eval` in the suite runs through `evalPhp`.** There is no standing exception: a caller
+that wants to interpret the reply rather than trust it validates the *returned string* after
+`evalPhp` has already turned a non-zero exit into a throw — which is what `isJobRunning` does when it
+insists on `"0"` or `"1"`. Guards that must not fail on a site whose plugin will not load belong in
+the **PHP**, not in exit-code branching: `isJobRunning` answers "nothing is running" because its
+snippet asks `class_exists( 'BackWPup' )` first.
+
+## File properties ([`files.ts`](../../src/common/wp/files.ts))
+
+`fileChecksum(transport, path)` returns a file's SHA-256 as lower-case hex, computed **on the
+site** so nothing large has to move to answer the question.
+
+This is the honest proof that a file which travelled arrived intact. Size is the tempting
+substitute and is strictly weaker: a body corrupted in place, or a truncation that happens to be
+padded, matches on size and differs here. A reply that is not a digest — a notice printed ahead of
+the value, an empty string, upper-case hex — throws rather than being compared, because comparing
+it would fail as "the download differs" and point at the wrong thing.
+
+## Looking inside an archive ([`archive.ts`](../../src/common/wp/archive.ts))
+
+A product that produces archives has to be asked what it actually put in one: a file that exists
+and is the right size proves nothing about its contents. Downloading it to find out does not
+scale — a files backup of a real site runs to **gigabytes** — so the questions are asked in place,
+through `tar`.
+
+- `findArchiveEntries(transport, archive, pattern)` — members matching an exact name or a glob.
+  Empty when none match; **throws** when the archive itself cannot be read.
+- `readArchiveEntry(transport, archive, member)` — one member's contents, streamed to stdout so
+  nothing is extracted to disk.
+
+Three decisions worth keeping:
+
+- **The member is named to `tar`, never listed and filtered here.** That keeps the *output* small —
+  a full listing of a 2 GB site is megabytes of paths nothing reads — but not the work: without
+  `--occurrence` tar scans to the end anyway, and on a compressed archive it decompresses all of it.
+  Measured on a 200 MB `.tar.gz`: full list 1.373 s, pattern list 1.386 s, pattern miss 1.385 s,
+  first-member extract 1.393 s — and 0.160 s with `--occurrence=1`. An uncompressed `.tar` is
+  seekable and costs almost nothing. `--occurrence` is deliberately **not** used, because a name can
+  legitimately match two members (a docroot file sharing the database dump's name) and both are
+  wanted.
+- **Compression is not declared.** GNU tar detects it when reading, so one code path serves `.tar`
+  and `.tar.gz`; picking a flag from the file extension would put a guess in front of an answer.
+  `.zip` — also a valid BackWPup `archiveformat` — is out of scope: tar refuses it outright, so the
+  answer is an error rather than a wrong result.
+- **"Absent" and "unreadable" cannot be told apart from `tar`'s wording.** Both exit 2, and a
+  *truncated* archive prints only `<pattern>: Not found in archive` with no corruption line at all
+  (measured). So readability is decided by behaviour instead: when a pattern matches nothing, the
+  archive is listed with no pattern and only the exit status is believed. Reading a damaged archive
+  as "the file is not in it" would turn a corrupt backup into a confident, wrong answer — and every
+  absence assertion built on it would pass.
+
 ## Type guards ([`guards.ts`](../../src/common/guards.ts))
 
 Domain-free reusable guards: `isObject` (non-null, non-array object) and

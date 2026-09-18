@@ -70,6 +70,19 @@ first backup runs), `dashboard`, `dataSelection`, `frequency`, `storages`, `jobR
 `backupHistory`, `restore` (edition-aware — Pro's in-place restore vs Free's forced upload) and the
 shared `plugins`. They are constructed lazily, so a scenario pays only for what it destructures.
 
+It also adds one fixture that is **not** a page object and does not behave like one: **`markers`**
+plants a random value in a file under the site's content directory and another in a `wp_options`
+row, so a scenario can ask an archive whether a backup really captured the site
+([`support/markers.ts`](../../src/projects/backwpup/support/markers.ts)). Two things follow from it
+touching the site rather than the page:
+
+- **Requesting it is the side effect.** The values are planted when the fixture is first resolved —
+  which Playwright does before the test body, so they are in place before any step runs — and
+  removed in its teardown, best-effort. "Pays only for what it destructures" therefore means
+  something stronger here: destructuring it *changes the site*.
+- **It must be resolved before the backup under inspection.** A marker planted after a run cannot be
+  in that run's archive, and an assertion looking for it would fail for the wrong reason.
+
 Use `site.transport` to drive the WordPress automation layer, and `page` (the
 standard Playwright fixture) for browser interaction. To install the zip under test,
 pass `pluginArtifact("plugin").zipPath` to

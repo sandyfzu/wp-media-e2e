@@ -31,7 +31,7 @@ import type { FileArea } from "../support/job-options";
  *
  * So the containers below resolve **by content rather than by position** — each matches whichever root
  * actually holds its own submit control — and one object serves both screens. Verified against
- * BackWPup 5.7.5; `parts/` and `components/` are byte-identical in 5.7.4 and in Pro `9.99.99-c0dd22c2`
+ * BackWPup 5.7.5; `parts/` and `components/` are byte-identical in 5.7.4 and in the Pro build under test
  * (the ref `__fixtures__/` was captured from), so this is not version-fragile.
  *
  * The tables side is where the baseline was weakest: it looped `for (i < count) expect(nth(i))` to

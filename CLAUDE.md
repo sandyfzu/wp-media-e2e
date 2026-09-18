@@ -42,14 +42,14 @@ src/
 │   ├── pages/              # cross-product Page Object Model (e.g. plugins.page.ts)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, verify, consume, pre-warm)
-│   └── wp/                 # WordPress automation over WP-CLI (exec, staging, plugin, log, options, residue, ownership, paths, cache, db, teardown, errors)
+│   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, log, options, cron, files, archive, residue, ownership, paths, cache, db, teardown, errors)
 └── projects/<product>/
     ├── config/             # <product>.config.ts + sites.json / sites.*.json / sites.example.json
     ├── fixtures.ts         # this product's test instance: common's + its page objects
     ├── features/           # *.feature (Gherkin)
     ├── pages/              # this product's page objects (+ locator-contract specs)
     ├── steps/              # product-specific steps
-    └── support/            # debug-log presets, REST barriers, WP-CLI readers
+    └── support/            # debug-log presets, REST barriers, WP-CLI readers, site setup
 
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)
@@ -158,7 +158,10 @@ shared fixtures:
 
 BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds `onboarding`, `firstBackup`,
 `dashboard`, `dataSelection`, `frequency`, `storages`, `jobRun`, `backupHistory`, `restore`
-(edition-aware) and `plugins`. See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
+(edition-aware), `plugins` and `markers` — the last plants a random value in the site's files and
+another in its database, and removes both afterwards, so a scenario can ask an archive what it
+actually captured. Requesting it _plants_ them, so it must be requested before the backup under
+inspection runs. See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
 the pattern, the locator policy, and the locator-contract spec every page object carries.
 
 ## Shared scenario hooks
@@ -372,6 +375,32 @@ ssh). Highlights — full reference in
   screen rendered. A missing option reads as `undefined`; a WordPress that cannot boot
   throws, so the two can never be confused. `wp/db.ts` adds `tablePrefix` for the same
   reason — never hard-code `wp_`.
+- [`wp/cron.ts`](src/common/wp/cron.ts) covers WP-Cron: `nextScheduled` proves an event is
+  registered (by hook **and** args — one hook commonly carries an event per job), and
+  `triggerScheduledEvent` brings that one event forward and hands it to WordPress's own
+  `spawn_cron()`, so the work runs in the web context a real schedule would use. **Never
+  `wp cron event run <hook>`**: measured live, it runs _every_ event on the hook, and it runs
+  the work inside the WP-CLI process, whose PHP is configured nothing like the web server's.
+- [`wp/php.ts`](src/common/wp/php.ts) is the PHP bridge, and **every `wp eval` goes through it**:
+  `phpLiteral` embeds a value as base64-encoded JSON, an alphabet with no PHP metacharacter in it, so
+  a value can never end the literal it sits in; `evalPhp` runs a snippet and turns a non-zero exit
+  into a throw carrying the site's own words. **Any value that came from outside this codebase — a
+  site, a scenario, a fixture — goes through `phpLiteral`.** That is the injection boundary and it
+  has no exceptions. (A compile-time constant of our own interpolated into snippet _source_, such as
+  a budget or a destination slug, is not such a value; the two `${…}` sites that do it say so.)
+- [`wp/files.ts`](src/common/wp/files.ts) reads properties of files on the site. `fileChecksum` is the
+  honest proof that a file which travelled arrived intact; size is the tempting substitute and is
+  strictly weaker. Computed on the site, so nothing large moves to answer the question.
+- [`wp/archive.ts`](src/common/wp/archive.ts) looks **inside** a tar on the site without moving it —
+  `findArchiveEntries` (by name or glob) and `readArchiveEntry`. Naming the member keeps the _output_
+  small, not the work: without `--occurrence` tar scans to the end regardless, and on a compressed
+  archive it decompresses the whole thing (measured: ~1.4 s per 200 MB either way). Neither call
+  declares compression, because GNU tar detects it when reading. "Absent" and "unreadable" share exit
+  status 2 and **cannot be told apart from tar's wording** — a truncated archive prints only
+  `Not found in archive` — so readability is settled by _behaviour_: list the archive with no pattern
+  and believe the exit status. Reading a corrupt archive as "that file is not in it" would make every
+  absence assertion pass. `.zip` is a valid BackWPup archive format and is **out of scope** here; tar
+  refuses it, which is honest rather than wrong.
 - [`wp/ownership.ts`](src/common/wp/ownership.ts) gives files back the ownership the **site** uses,
   after WP-CLI writes them as the transport's user. On a real cell `wp` runs for example as `ubuntu` and PHP for example as
   `www-data`, so an installed plugin is unwritable by the web server until this runs. The owner is
@@ -580,6 +609,9 @@ Update it when you change anything about:
 - The debug-log API (`readDebugLog`, `clearDebugLog`, `scanDebugLog`, `ScanDebugLogOptions`).
 - File ownership (`ownership.ts`: `planOwnership`, `normalizeOwnership`, the grant rule,
   `transport.fileOwner`) or the shared path guards (`paths.ts`).
+- The WP-Cron helpers (`cron.ts`: `nextScheduled`, `triggerScheduledEvent`).
+- The PHP bridge (`php.ts`: `phpLiteral`, `evalPhp`), the file readers (`files.ts`:
+  `fileChecksum`), or archive inspection (`archive.ts`: `findArchiveEntries`, `readArchiveEntry`).
 - Any other `wp/` module (`cache.ts`, `db.ts`, `errors.ts`, `teardown.ts`).
 
 ### docs/architecture/plugin-artifacts.md

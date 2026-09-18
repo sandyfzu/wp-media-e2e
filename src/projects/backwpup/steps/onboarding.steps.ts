@@ -2,9 +2,15 @@ import { expect } from "@playwright/test";
 import type { DataTable } from "playwright-bdd";
 
 import { Given, Then, When } from "../fixtures";
-import { countBackups, listJobs, waitForJobToFinish } from "../support/backups";
+import {
+  BACKUP_TIMEOUT_MS,
+  countBackups,
+  listJobs,
+  waitForBackup,
+} from "../support/backups";
 import {
   ONBOARDING_OPTION,
+  finishActivation,
   isOnboardingPending,
   readOnboardingFlag,
 } from "../support/onboarding";
@@ -13,13 +19,14 @@ import {
   describeJobContents,
   readStoredJobs,
   scheduledJobs,
+  theScheduledJob,
 } from "../support/job-options";
-import type { FileArea, StoredJob } from "../support/job-options";
+import type { FileArea } from "../support/job-options";
 import { LOCAL_STORAGE, storageForLabel } from "../pages/storages";
 import { isPluginActive } from "../../../common/wp/plugin";
 import { tablePrefix } from "../../../common/wp/db";
 import type { BasicFrequency } from "../pages/frequency.sidebar";
-import type { JobDataType } from "../pages/dashboard.page";
+import type { DashboardPage, JobDataType } from "../pages/dashboard.page";
 import type { Transport } from "../../../common/config/types";
 
 /**
@@ -37,15 +44,6 @@ import type { Transport } from "../../../common/config/types";
  *    rendering the right thing over the wrong state is precisely the failure a DOM-only assertion
  *    cannot see — and a stored value nobody can see is not a feature either.
  */
-
-/**
- * Budget for the backup onboarding starts the moment it is saved.
- *
- * It is a real backup of a real site — files, database and archive creation — so this is minutes,
- * not seconds. Applied as an **addition** to the scenario's own timeout by the step that waits, so
- * only scenarios that finish onboarding pay for it.
- */
-const FIRST_BACKUP_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Narrows a scenario's word for a data type to what onboarding's switches accept. */
 function dataType(value: string): "files" | "database" {
@@ -98,25 +96,6 @@ function frequency(value: string): BasicFrequency {
   return found;
 }
 
-/**
- * The one job a completed onboarding left behind, failing clearly if there is not exactly one.
- *
- * Every scenario that asks about "the scheduled backup job" configured a single one, so an
- * unexpected count means onboarding produced something else entirely — better said here than as a
- * confusing assertion about the wrong job's settings.
- */
-async function theScheduledJob(transport: Transport): Promise<StoredJob> {
-  const jobs = scheduledJobs(await readStoredJobs(transport));
-  expect(
-    jobs,
-    "expected onboarding to have configured exactly one scheduled backup job",
-  ).toHaveLength(1);
-  // Narrowing for the type checker; the assertion above is what actually enforces it.
-  const [job] = jobs;
-  if (job === undefined) throw new Error("unreachable: length asserted above");
-  return job;
-}
-
 /** A table's full name on this site — scenarios name tables without the install's prefix. */
 async function prefixedTable(
   transport: Transport,
@@ -134,10 +113,6 @@ async function prefixedTable(
  * **Deliberately asserts the install and nothing about the plugin's own state**, because the two
  * tempting checks are both unsound here:
  *
- *  - *The onboarding flag* is written lazily. The plugin schedules its upgrade routine on `init`,
- *    so the flag appears on the first WordPress request that loads the activated plugin — reading
- *    it straight after a WP-CLI install races the product's bootstrap. The step that follows the
- *    redirect reads it instead, by which time it cannot be in doubt.
  *  - *A job count* is not a property of a fresh install at all. Activation creates a placeholder
  *    job of its own, and rendering the onboarding page creates two more, so "no jobs" is only ever
  *    true in
@@ -147,9 +122,11 @@ async function prefixedTable(
  *    class during that request — which made this an intermittent failure that blamed whichever
  *    scenario ran next.
  *
- * The claim those checks were reaching for — that this site still owes its onboarding — is proved
- * race-free by the two steps after this one: asking for the dashboard and being sent to onboarding
- * instead. A site whose previous run leaked a completed onboarding fails there, clearly.
+ * What it does instead of counting jobs is **finish the install**: WP-CLI's activation never fires
+ * `init`, so the plugin's own routine has not run yet, and leaving it to whichever request gets
+ * there first is a race that can corrupt the install — see {@link finishActivation}. Running it here
+ * makes the site deterministically fresh, and confirms it owes its onboarding, before the browser is
+ * let anywhere near it.
  */
 Given("a freshly installed BackWPup", async ({ site, pluginArtifact }) => {
   const { slug } = pluginArtifact("plugin");
@@ -157,6 +134,7 @@ Given("a freshly installed BackWPup", async ({ site, pluginArtifact }) => {
     await isPluginActive(site.transport, slug),
     `the scenario's plugin ("${slug}") should have been installed and activated by the @plugin hook`,
   ).toBe(true);
+  await finishActivation(site.transport);
 });
 
 When("I open the BackWPup dashboard", async ({ dashboard }) => {
@@ -382,21 +360,10 @@ Then("the first backup completes", async ({ site, $testInfo }) => {
   // Playwright times a scenario and its hooks against one clock, so make room before spending any
   // of the budget. `0` means "no timeout" in Playwright and must be left alone.
   if ($testInfo.timeout !== 0) {
-    $testInfo.setTimeout($testInfo.timeout + FIRST_BACKUP_TIMEOUT_MS);
+    $testInfo.setTimeout($testInfo.timeout + BACKUP_TIMEOUT_MS);
   }
-  await expect
-    .poll(() => countBackups(site.transport), {
-      message:
-        "onboarding should have produced its first backup archive by now — it starts one as soon " +
-        "as it is saved",
-      timeout: FIRST_BACKUP_TIMEOUT_MS,
-      // Each probe is a WP-CLI round-trip to the site, so back off quickly rather than polling
-      // every 100ms the way Playwright's DOM-facing default would.
-      intervals: [1000, 2000, 5000],
-    })
-    .toBeGreaterThan(0);
   expect(
-    await waitForJobToFinish(site.transport),
+    await waitForBackup(site.transport, 0),
     "the first backup should not have ended in errors",
   ).not.toBe("errors");
 });
@@ -534,6 +501,48 @@ Then(
       job.includedAreas[fileArea(area)],
       `the "${area}" file area on the job onboarding created`,
     ).toBe(false);
+  },
+);
+
+/**
+ * Opens the data-selection chooser on the scheduled job's card.
+ *
+ * Shared by the two steps below so each stays usable on its own: a scenario may assert either
+ * exclusion without the other, and neither may depend on a panel a previous step left open.
+ */
+async function openScheduledJobDataSelection(
+  transport: Transport,
+  dashboard: DashboardPage,
+): Promise<void> {
+  const job = await theScheduledJob(transport);
+  await dashboard.openJobSidebar(job.jobId, "Data");
+}
+
+/**
+ * The two exclusions re-read from the job card's own panels, alongside the stored-job checks above.
+ *
+ * Both are kept deliberately: one asks the site what it stored, the other asks the screen what it
+ * shows. A configuration saved but never rendered back is as broken as one rendered but never
+ * saved, and only having both can tell the two apart.
+ */
+Then(
+  "the job card still shows the {string} file area excluded",
+  async ({ site, dashboard, dataSelection }, area: string) => {
+    await openScheduledJobDataSelection(site.transport, dashboard);
+    await dataSelection.openFilesPane();
+    await dataSelection.expectFileAreaIncluded(fileArea(area), false);
+  },
+);
+
+/** The database half of the pair above; the table is named without this install's prefix. */
+Then(
+  "the job card still shows the {string} database table excluded",
+  async ({ site, dashboard, dataSelection }, table: string) => {
+    const name = await prefixedTable(site.transport, table);
+    await openScheduledJobDataSelection(site.transport, dashboard);
+    // `openTablesPane` ends in `waitForTablesLoaded`, so the panel is ready to read here.
+    await dataSelection.openTablesPane();
+    await dataSelection.expectTableIncluded(name, false);
   },
 );
 

@@ -17,7 +17,8 @@ import type {
  *
  * A command is given as a file + array of args — never a shell string — so there is no
  * shell interpolation and no injection. It is dispatched by the site's {@link Transport}:
- * `local`/`docker` via execa, `ssh` via node-ssh (whose `exec` shell-escapes the args).
+ * `local`/`docker` via execa, `ssh` via node-ssh (whose `exec` shell-escapes the args, and whose own
+ * both-ends trimming is switched off so every transport normalises output the same way).
  *
  * Every mode returns a structured {@link ExecResult} with an `exitCode`, so callers branch
  * on the code (e.g. WP-CLI `is-installed`) instead of relying on thrown errors. A failure
@@ -83,11 +84,24 @@ function fromExeca(
     stderr: string;
     exitCode?: number;
     shortMessage?: string;
+    isMaxBuffer?: boolean;
   },
 ): ExecResult {
   if (typeof result.exitCode !== "number") {
     throw new Error(
       `[wp/exec] "${label}" did not run: ${result.shortMessage ?? "the process failed to start or was terminated by a signal"}`,
+    );
+  }
+  // execa caps captured output (100 MB of characters by default) and still reports **the child's own
+  // exit code** — measured: `isMaxBuffer` with `exitCode` 0, 1 and 2 alike. A capped success is the
+  // dangerous shape: the caller would read a silently shortened stdout as the whole answer, and an
+  // assertion about what is *not* in it would pass. So it is raised rather than returned: the command
+  // ran, but its answer cannot be trusted, which is "could not ask at all" and not an outcome.
+  // Applies to `local` and `docker` only — the ssh transport accumulates output with no cap at all.
+  if (result.isMaxBuffer === true) {
+    throw new Error(
+      `[wp/exec] "${label}" produced more output than can be captured, so its result was truncated: ` +
+        (result.shortMessage ?? "output exceeded the buffer limit"),
     );
   }
   return {
@@ -197,9 +211,16 @@ async function runSsh(
     ? ["sudo", sudoArgv(file, args)]
     : [file, args];
   // node-ssh `exec` shell-escapes `args`, so this is injection-safe.
+  //
+  // `noTrim` is load-bearing, not a detail: without it node-ssh trims **both ends** of stdout and
+  // stderr, which is a different normalisation from every other transport's and silently eats
+  // meaningful whitespace — the leading space of a tar member name, an option value stored with
+  // one. Turning it off leaves `stripFinalNewline` to do the one normalisation all transports
+  // agree on.
   const result = await ssh.exec(command, commandArgs, {
     cwd: options.cwd ?? transport.rootDir,
     stream: "both",
+    noTrim: true,
   });
   if (result.code === null) {
     throw new Error(
