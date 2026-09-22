@@ -92,13 +92,14 @@ export function verifyResolved(
       outcome.artifact.zipPath,
       expected,
     );
+    const artifact = withHeaderVersion(outcome.artifact, headerVersion);
     roles.push({
       role: outcome.role,
       checks,
-      artifact: outcome.artifact,
-      info: infoFor(outcome.artifact, headerVersion),
+      artifact,
+      info: infoFor(artifact),
     });
-    resolved.push(outcome.artifact);
+    resolved.push(artifact);
   }
 
   const ok = roles.every(roleOk);
@@ -109,7 +110,8 @@ export function verifyResolved(
 
 /**
  * Inspects one resolved zip against its expected {@link ArtifactIdentity}, returning ordered
- * {@link CheckResult}s and the artifact's own `Version:` header (informational). Read-only:
+ * {@link CheckResult}s and the artifact's own `Version:` header, which {@link verifyResolved} then
+ * records as the artifact's version. Never a check itself: a missing header fails nothing. Read-only:
  * opens the central directory and reads a single entry. Checks gate in sequence — if the archive
  * will not parse, or has no single top-level directory, later checks cannot run and are omitted.
  *
@@ -309,19 +311,31 @@ function roleOk(role: RoleReport): boolean {
   return role.checks.every((check) => check.ok);
 }
 
-/** The informational fields surfaced for a resolved artifact (reported, never asserted). */
-function infoFor(
+/**
+ * The artifact carrying the version its own main file declares, when the preflight read one.
+ *
+ * That header is what WordPress installs and reports, so it is the ground truth; the build's own
+ * report is kept only as the fallback. It is also the only version a provided zip has at all — none
+ * is recorded when one is copied in, and a version override is ignored beside a zip — so without
+ * this a test asking "which version is under test?" could not be answered for that configuration.
+ */
+function withHeaderVersion(
   artifact: ResolvedArtifact,
   headerVersion: string | undefined,
-): Record<string, string> {
-  // Prefer the version read from the zip's own header (the ground truth) over the build's report.
-  const version = headerVersion ?? artifact.version;
+): ResolvedArtifact {
+  return headerVersion === undefined
+    ? artifact
+    : { ...artifact, version: headerVersion };
+}
+
+/** The informational fields surfaced for a resolved artifact (reported, never asserted). */
+function infoFor(artifact: ResolvedArtifact): Record<string, string> {
   return {
     source: artifact.source,
     origin: artifact.origin,
     ...(artifact.ref !== undefined ? { ref: artifact.ref } : {}),
     ...(artifact.commit !== undefined ? { commit: artifact.commit } : {}),
-    ...(version !== undefined ? { version } : {}),
+    ...(artifact.version !== undefined ? { version: artifact.version } : {}),
   };
 }
 

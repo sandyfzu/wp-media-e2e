@@ -49,7 +49,7 @@ src/
     ├── features/           # *.feature (Gherkin)
     ├── pages/              # this product's page objects (+ locator-contract specs)
     ├── steps/              # product-specific steps
-    └── support/            # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, site setup
+    └── support/            # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, the CLI-under-test runner, site setup
 
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)
@@ -158,10 +158,13 @@ shared fixtures:
 
 BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds `onboarding`, `firstBackup`,
 `dashboard`, `dataSelection`, `frequency`, `storages`, `jobRun`, `backupHistory`, `restore`
-(edition-aware), `plugins` and `markers` — the last plants a random value in the site's files and
-another in its database, and removes both afterwards, so a scenario can ask an archive what it
-actually captured. Requesting it _plants_ them, so it must be requested before the backup under
-inspection runs. See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
+(edition-aware), `plugins`, `cli` and `markers`. `cli` runs one `wp backwpup …` subcommand and
+remembers the result for the step that asserts on it — for the feature where the **command is the
+system under test**, so a refusal is returned rather than thrown (`support/cli.ts`); use
+`support/backups.ts` when WP-CLI is only arranging or checking a site, since that one throws.
+`markers` plants a random value in the site's files and another in its database, and removes both
+afterwards, so a scenario can ask an archive what it actually captured. Requesting it _plants_ them,
+so it must be requested before the backup under inspection runs. See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
 the pattern, the locator policy, and the locator-contract spec every page object carries.
 
 ## Shared scenario hooks

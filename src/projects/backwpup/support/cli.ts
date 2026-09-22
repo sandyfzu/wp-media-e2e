@@ -52,6 +52,12 @@ const LEVELS: Readonly<Record<string, CliLevel>> = {
 const NOTICE = new RegExp(`^(${Object.keys(LEVELS).join("|")}): ?(.*)$`);
 
 /**
+ * A WP-CLI debug line — printed only under `--debug`, as `Debug (bootstrap): …` or `Debug: …` —
+ * which ends the notice above it without being one.
+ */
+const DEBUG_LINE = /^Debug(?: \([^)]*\))?:/;
+
+/**
  * ANSI colour codes, which WP-CLI emits only when it believes it is writing to a terminal.
  *
  * Every transport this suite uses pipes its output, so today nothing is coloured — verified live
@@ -65,17 +71,32 @@ const ANSI = /\u001B\[[0-9;]*m/g;
 /** How much command output a failure message carries before it stops being readable. */
 const OUTPUT_EXCERPT = 1000;
 
-/** Pulls WP-CLI's status lines out of one stream. */
-function noticesIn(text: string): CliNotice[] {
-  const found: CliNotice[] = [];
+/**
+ * Pulls WP-CLI's status lines out of one stream.
+ *
+ * @param text - the stream's contents.
+ * @param continued - whether a line that is not a status line continues the notice above it, which
+ * is how stderr is read — see {@link parseCliNotices}. A blank or debug line ends a notice either way.
+ */
+function noticesIn(text: string, continued: boolean): CliNotice[] {
+  const found: { readonly level: CliLevel; readonly lines: string[] }[] = [];
+  let open = false;
   for (const line of text.replace(ANSI, "").split(/\r?\n/)) {
     const match = NOTICE.exec(line);
-    if (match === null) continue;
-    const [, word = "", message = ""] = match;
-    const level = LEVELS[word];
-    if (level !== undefined) found.push({ level, message: message.trim() });
+    const level = match === null ? undefined : LEVELS[match[1] ?? ""];
+    if (level !== undefined) {
+      found.push({ level, lines: [(match?.[2] ?? "").trim()] });
+      open = continued;
+    } else if (line.trim() === "" || DEBUG_LINE.test(line)) {
+      open = false;
+    } else if (open) {
+      found.at(-1)?.lines.push(line.trim());
+    }
   }
-  return found;
+  return found.map(({ level, lines }) => ({
+    level,
+    message: lines.join("\n"),
+  }));
 }
 
 /**
@@ -87,8 +108,13 @@ function noticesIn(text: string): CliNotice[] {
  * practice WP-CLI puts `Success:` on stdout and `Warning:`/`Error:` on stderr, so a level is
  * usually enough to find a line without caring where it came from.
  *
- * A notice's message is a single line. WP-CLI does not wrap the ones these commands emit, and
- * folding continuation lines would mean guessing which indented line belongs to which notice.
+ * **A notice can span lines, so the two streams are read differently.** WP-CLI writes each notice
+ * whole, and its own refusals do span lines — `Parameter errors:`, then one line per parameter it
+ * rejected, sometimes a `Did you mean …?` after that — so on stderr, which carries little else, a
+ * line that is not a status line continues the one above it, joined with a newline. Stdout is read
+ * line by line: the command's own output shares it, and a continuation there cannot be told apart
+ * from whatever the command printed next. BackWPup's own notices are all single-line, so this only
+ * ever changes what WP-CLI's refusals read as.
  *
  * @param stdout - the command's standard output.
  * @param stderr - the command's standard error.
@@ -99,7 +125,7 @@ export function parseCliNotices(
   stdout: string,
   stderr: string,
 ): readonly CliNotice[] {
-  return [...noticesIn(stdout), ...noticesIn(stderr)];
+  return [...noticesIn(stdout, false), ...noticesIn(stderr, true)];
 }
 
 /**

@@ -33,15 +33,21 @@ import type { SiteDbResidue } from "../../../common/wp/db-residue";
 export const BACKWPUP_OPTION_FRAGMENTS = ["backwpup", "bwpup"];
 
 /**
- * The plugin's one table, named without the site's prefix.
- *
- * `bwpup_backups` (`src/Backup/Database/Tables/Backup.php`) is the row that blocks hardest: an
- * install landing on top of it fails with `Table 'wp_bwpup_backups' already exists`, which
- * WordPress reports as a database error the scenario then trips over somewhere unrelated. It is
- * the only table the plugin creates — the `CREATE TABLE` statements elsewhere in the source belong
- * to the mysqldump job type and describe the *site's* tables, not the plugin's.
+ * The plugin's backup history table, named without the site's prefix
+ * (`src/Backup/Database/Tables/Backup.php`) — one row per archive a run delivered, per destination.
  */
-export const BACKWPUP_TABLES = ["bwpup_backups"];
+export const BACKUP_HISTORY_TABLE = "bwpup_backups";
+
+/**
+ * The plugin's tables, named without the site's prefix — it creates exactly one,
+ * {@link BACKUP_HISTORY_TABLE}.
+ *
+ * That table is also the row that blocks hardest: an install landing on top of it fails with
+ * `Table 'wp_bwpup_backups' already exists`, which WordPress reports as a database error the
+ * scenario then trips over somewhere unrelated. The `CREATE TABLE` statements elsewhere in the
+ * source belong to the mysqldump job type and describe the *site's* tables, not the plugin's.
+ */
+export const BACKWPUP_TABLES = [BACKUP_HISTORY_TABLE];
 
 /**
  * The footprint the shared `@plugin` hooks sweep whenever they find it.

@@ -183,7 +183,11 @@ Per resolved artifact, via `adm-zip` (read-only — central directory plus one e
    top-level directory, not the expected slug, so a wrong-edition zip still
    reports its header — two independent witnesses instead of one.
 4. Informational, reported but not asserted: header `Version:`, zip filename,
-   source, resolved commit, origin.
+   source, resolved commit, origin. The header's `Version:` also **becomes the
+   artifact's `version`** — it is what WordPress installs and reports, and for a
+   provided zip it is the only version there is (none is recorded when one is
+   copied in, and a `_VERSION` override is ignored beside it). The build's own
+   report is kept only as the fallback for a zip whose header declares none.
 
 | Product / edition | Top-level dir (slug) | Main file       | `Plugin Name:`   |
 | ----------------- | -------------------- | --------------- | ---------------- |
@@ -301,8 +305,10 @@ in between means the run builds fresh — correct, just slower for that run.
   until it lands the fixture hard-errors.
 - **Imagify** — add a manifest (and verify its identity row from its build
   definition) when the product is wired; everything else is data-driven.
-- **Version-aware tests** — `resolution.json` already exposes the effective
-  version and commit per role, for migration or version-gated-notice assertions.
+- **Version-aware tests** — `resolution.json` already exposes the verified
+  version (the zip's own header, see the preflight above) and the commit per role,
+  for migration or version-gated-notice assertions. BackWPup's CLI feature already
+  asserts `wp backwpup version` against it.
 - **Deeper zip validation** (full CRC pass / trial install) — only if a real
   failure class appears; it slots behind the same aggregated report.
 - **Shared-ref multi-variant builds** — when a Free and a Pro cell resolve the

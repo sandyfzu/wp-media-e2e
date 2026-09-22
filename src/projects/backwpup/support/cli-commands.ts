@@ -25,10 +25,10 @@ export interface BackwpupCommand {
   /**
    * The second name it also registers under, from its `@alias` docblock tag.
    *
-   * Secondary contract: scenarios drive the canonical name. It is declared because Free's 11 and
-   * Pro's 16 aliases all resolve, so an alias that stopped resolving would be a real regression —
-   * and because the baseline suite addressed two of them (`jobs`, `backups`) rather than the
-   * canonical names.
+   * Recorded, not asserted wholesale: scenarios drive the canonical name, and only the two aliases
+   * the baseline suite addressed (`jobs`, `backups`) are exercised, by name, in the CLI feature.
+   * Free's 11 and Pro's 16 all resolved when this was verified; they are kept here so that no
+   * scenario mistakes one for an unregistered name, since WP-CLI's help does not list them.
    */
   readonly alias?: string;
   readonly availability: CommandAvailability;

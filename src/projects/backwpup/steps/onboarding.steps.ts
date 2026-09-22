@@ -125,8 +125,8 @@ async function prefixedTable(
  * What it does instead of counting jobs is **finish the install**: WP-CLI's activation never fires
  * `init`, so the plugin's own routine has not run yet, and leaving it to whichever request gets
  * there first is a race that can corrupt the install — see {@link finishActivation}. Running it here
- * makes the site deterministically fresh, and confirms it owes its onboarding, before the browser is
- * let anywhere near it.
+ * makes the site deterministically fresh, and confirms it owes its onboarding, before anything else
+ * — a browser or a WP-CLI command under test — is let near it.
  */
 Given("a freshly installed BackWPup", async ({ site, pluginArtifact }) => {
   const { slug } = pluginArtifact("plugin");
@@ -332,7 +332,7 @@ Then("onboarding can be completed", async ({ onboarding }) => {
  *
  * One step rather than two, because the order is load-bearing: the handover must be *watched for*
  * before the click, not checked afterwards. The plugin can legitimately move the browser off that
- * screen moments later — see {@link FirstBackupPage} — and a check made after the fact races it.
+ * screen moments later — see `FirstBackupPage` — and a check made after the fact races it.
  */
 When("I complete onboarding", async ({ onboarding, firstBackup }) => {
   await firstBackup.expectHandover(() => onboarding.submit());

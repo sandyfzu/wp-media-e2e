@@ -33,7 +33,8 @@ src/
     ├── features/**/*.feature        # this product's scenarios
     ├── pages/**/*.ts                # this product's page objects (+ their locator specs)
     ├── steps/**/*.ts                # this product's steps
-    └── support/                     # debug-log presets, REST barriers, WP-CLI readers
+    └── support/                     # debug-log presets, REST barriers, WP-CLI readers (arranging)
+                                     #   and the CLI runner for when the command is under test
 ```
 
 A product's `steps` array (in its config) is the exact set of files loaded at runtime:
@@ -69,6 +70,50 @@ page objects on top: `onboarding`, `firstBackup` (the screen onboarding hands ov
 first backup runs), `dashboard`, `dataSelection`, `frequency`, `storages`, `jobRun`,
 `backupHistory`, `restore` (edition-aware — Pro's in-place restore vs Free's forced upload) and the
 shared `plugins`. They are constructed lazily, so a scenario pays only for what it destructures.
+
+It also adds **`cli`**, which is not a page object either: it runs one `wp backwpup …` subcommand
+and remembers the result, so the assertion in the next step has something to judge
+([`support/cli-session.ts`](../../src/projects/backwpup/support/cli-session.ts)). It is for the
+feature where the **command is the system under test** — there a non-zero exit is an observation,
+not a broken arrangement, so nothing throws for an outcome and a scenario can assert how a command
+refused. Use `support/backups.ts` instead when WP-CLI is only *arranging* or *checking* a site;
+that one does throw, because there a failing command means the setup broke.
+
+The CLI steps ([`steps/cli.steps.ts`](../../src/projects/backwpup/steps/cli.steps.ts)) are
+deliberately generic, because for that feature the command line *is* the product language:
+
+```gherkin
+When I run the BackWPup command "job --format=count"
+Then the command succeeds
+And it prints "1"
+```
+
+`Then the command fails` and `Then it reports the error "…"` / `the success "…"` complete the set;
+the latter two match WP-CLI's own `Success:` / `Warning:` / `Error:` status lines by **level**, and
+the given text as a substring of the message — a refusal WP-CLI spreads over several lines on
+stderr (`Parameter errors:`, then the parameter it rejected) is one message. Three rules the step
+text has to respect, each refused rather than run:
+
+- the `wp backwpup` prefix is supplied for you, so it is not repeated;
+- arguments are split on whitespace, so a value that needs quoting or escaping needs a step of its
+  own;
+- WP-CLI globals that decide *where* the command runs (`--path`, `--url`, `--ssh`, `--user`,
+  `--skip-plugins`, `--exec`, …) are left out — WP-CLI honours them anywhere on the line, and the
+  runner already runs the command on the scenario's own site. `--debug`, `--quiet` and
+  `--[no-]color` only change the output, so they are allowed.
+
+A step that needs a second opinion reads it from a source the command has no hand in — the stored
+jobs (`support/job-options.ts`), the plugin's backup history table (`support/history.ts`), or the
+resolved zip — never from the same command in another format.
+
+**`Then the command succeeds` only proves exit 0, and for a command that changes the site that is
+not success.** WP-CLI itself is honest — its refusals and `WP_CLI::error()` exit 1 — but some of
+BackWPup's commands report a failure as a warning and still exit 0: a foreground `run` that logged
+errors and warnings, a `restore` that failed midway, a `log-delete` that removed nothing. Plugin code
+that stops with PHP's `exit( 'message' )` exits 0 with no status line at all. So always pair it with
+a check against a second source (the history row, the marker, a re-count), and assert a refusal the
+way the command actually makes it. The cases, and which are still to be measured live, are V104–V107
+in the [feature-porting plan](../plans/phase-6-feature-porting-plan.md).
 
 It also adds one fixture that is **not** a page object and does not behave like one: **`markers`**
 plants a random value in a file under the site's content directory and another in a `wp_options`

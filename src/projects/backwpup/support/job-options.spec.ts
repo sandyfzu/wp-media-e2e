@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
   FILE_AREAS,
+  addJobPhp,
   describeJobContents,
   fileAreaOption,
   readStoredJobs,
@@ -242,5 +243,49 @@ test.describe("file-area vocabulary", () => {
       "backupthemes",
       "backupuploads",
     ]);
+  });
+});
+
+test.describe("addJobPhp", () => {
+  /**
+   * The values the snippet embeds, decoded back out of `phpLiteral`'s base64.
+   *
+   * Reading them back is the only way to assert what the site will actually receive: the encoding
+   * is what makes the literal injection-proof, and it also makes the snippet unreadable by eye.
+   */
+  const embedded = (contents: Parameters<typeof addJobPhp>[0]): unknown[] =>
+    [...addJobPhp(contents).matchAll(/base64_decode\( '([^']+)' \)/g)].map(
+      (match): unknown =>
+        JSON.parse(Buffer.from(match[1] ?? "", "base64").toString()) as unknown,
+    );
+
+  test("posts to the add-job route under the namespace that serves it", () => {
+    // Taken from `./rest.ts`'s verified table rather than written out here, so a route that moved
+    // namespace cannot leave this snippet addressing one WordPress no longer serves.
+    expect(embedded("database")[0]).toBe("/backwpup/v1/addjob");
+  });
+
+  test("sends the endpoint's own word for each set of contents", () => {
+    expect(embedded("files")[1]).toBe("files");
+    expect(embedded("database")[1]).toBe("database");
+    // The endpoint validates against `files`/`database`/`mixed` and rejects anything else, so
+    // "files and database" cannot be passed through under the name a scenario uses for it.
+    expect(embedded("files and database")[1]).toBe("mixed");
+  });
+
+  test("acts as a real administrator, because the route checks a capability", () => {
+    const php = addJobPhp("database");
+    expect(php).toContain("wp_set_current_user");
+    expect(php).toContain("rest_do_request");
+    // The job record, its id and its cron event are the plugin's to create: writing them here
+    // would be a second implementation of a schema this suite does not own.
+    expect(php).not.toContain("update_site_option");
+    expect(php).not.toContain("wp_schedule_single_event");
+  });
+
+  test("turns a refusal from the endpoint into a failure that names the status", () => {
+    const php = addJobPhp("database");
+    expect(php).toContain("$response->is_error()");
+    expect(php).toContain("WP_CLI::error");
   });
 });

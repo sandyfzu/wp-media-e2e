@@ -351,6 +351,46 @@ test.describe("verifyResolved — aggregation", () => {
     expect(report.resolved).toHaveLength(1);
     expect(report.artifacts.plugin).toBeUndefined();
   });
+
+  // A provided zip records no version when it is copied in, and a version override is ignored
+  // beside it — so its own header is the only answer to "which version is under test?".
+  test("gives a provided zip the version its own header declares", () => {
+    const zip = makeZip("wpr-provided.zip", {
+      "wp-rocket/wp-rocket.php": pluginFile("WP Rocket", "3.18.1"),
+    });
+    const report = verifyResolved(
+      [resolved("plugin", zip, { source: "env-zip", origin: "copied" })],
+      WPR_MANIFEST,
+      undefined,
+    );
+    expect(report.artifacts.plugin?.version).toBe("3.18.1");
+    expect(report.resolved[0]?.version).toBe("3.18.1");
+  });
+
+  // The header is what WordPress installs and reports; the build's report is second-hand.
+  test("prefers the header over the version the build reported", () => {
+    const zip = makeZip("wpr-rewritten.zip", {
+      "wp-rocket/wp-rocket.php": pluginFile("WP Rocket", "3.18.1"),
+    });
+    const report = verifyResolved(
+      [resolved("plugin", zip, { version: "3.18.0" })],
+      WPR_MANIFEST,
+      undefined,
+    );
+    expect(report.artifacts.plugin?.version).toBe("3.18.1");
+  });
+
+  test("keeps the build's version when the zip declares none", () => {
+    const zip = makeZip("wpr-no-version.zip", {
+      "wp-rocket/wp-rocket.php": "<?php\n/**\n * Plugin Name: WP Rocket\n */\n",
+    });
+    const report = verifyResolved(
+      [resolved("plugin", zip, { version: "3.18.0" })],
+      WPR_MANIFEST,
+      undefined,
+    );
+    expect(report.artifacts.plugin?.version).toBe("3.18.0");
+  });
 });
 
 // ── Report formatting ────────────────────────────────────────────────────────

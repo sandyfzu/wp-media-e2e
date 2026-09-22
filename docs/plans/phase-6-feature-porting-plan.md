@@ -1,6 +1,6 @@
 # Phase 6 — Feature porting: BackWPup first
 
-> **Status:** in progress — **6A, 6B, 6C, 6D and 6E are done**; 6F in progress (**6F.0 done**; 6F.1–6F.4 next), 6G–6I planned;
+> **Status:** in progress — **6A, 6B, 6C, 6D and 6E are done**; 6F in progress (**6F.0 and 6F.1 done**; 6F.2–6F.4 next), 6G–6I planned;
 > **6H.2 deferred** (needs storage credentials — see §4.6H.2).
 > **Date:** 2026-07-28; revised 2026-07-30 (§2.3 re-verification at the ref; storage split),
 > 2026-07-31 (§2.5 — post-implementation audit of 6B; four corrections, all verified live),
@@ -25,7 +25,8 @@
 > server-backed DOM, and a **second defect was found while fixing the first** — the reload barrier
 > they depend on could settle on the previous page's request. **V73–V75** added) and 2026-09-18
 > (§2.13 — **full audit of the 6E change set**: seven defects found and fixed, all in code the
-> gates cannot see; **V76–V79** added).
+> gates cannot see; **V76–V79** added) and 2026-09-22 (§2.15 — **full audit of 6F.0–6F.1**: fifteen
+> findings fixed, one of them an assertion comparing a command with itself; **V97–V103** added).
 > **Parent:** [e2e-modernization-plan.md](e2e-modernization-plan.md) §9, Phase 6 — this doc supersedes
 > that phase's summary. Phases 0–5 are done; Phase 6 is **feature content on finished rails**.
 > **Baseline (reference only):** `wp-rocket-e2e/src/backwpup/` — 12 feature files, 28 scenarios, ~1.6k LoC.
@@ -39,7 +40,7 @@ WP-CLI → restore → the storage credential surface → Free-edition coverage 
 storage *round-trips* are carved out as **6H.2** and **deferred** until credentials exist, so no
 other sub-phase waits on them. WP Rocket reuses 6A and gets its own breakdown afterwards (§6).
 
-**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → **6F** (6F.0 ✅ → 6F.1 → then 6F.2 / 6F.3 / 6F.4 in any order) → 6G → 6H → 6I → *(later)* 6H.2.
+**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → **6F** (6F.0 ✅ → 6F.1 ✅ → then 6F.2 / 6F.3 / 6F.4 in any order) → 6G → 6H → 6I → *(later)* 6H.2.
 
 Every artifact follows **Understand → Improve → Adapt → Port** (§1): read the baseline for *intent*,
 verify the plugin's real contract in source, pick the strongest signal Playwright/WP-CLI offers, then
@@ -110,7 +111,7 @@ Each row is a defect present in the baseline BackWPup suite and how the port rem
 | `backup.feature` | 2 | Manual "Backup now"; scheduled job produces a backup | 6C, 6D |
 | `download-restore.feature` | 1 | Download the first backup from history | 6D |
 | `delete-plugin.feature` | 3 | Delete the plugin after install / after activate / after first backup | 6E |
-| `wp-cli/list-jobs.feature` | 2 | Job count via WP-CLI | 6F |
+| `wp-cli/list-jobs.feature` | 2 | Job count via WP-CLI | 6F.1 ✅ |
 | `wp-cli/restore.feature` | 3 | **Untracked WIP — does not restore**; the three scenarios only re-run onboarding | 6G (written properly) |
 | `storages/{ftp,s3,glacier,msazure,rsc,sugarsync}.feature` | 11 | Configure storage in onboarding and from the dashboard; back up to it | **6H.2 (deferred)** |
 
@@ -445,7 +446,7 @@ format clean. Live, with `E2E_RETRIES=0`: `plugin-deletion.feature` **3/3 on `pr
 
 ---
 
-### 2.14 Facts established planning 6F (live, on `pro@nginx`, at `develop@f1ebfd0`)
+### 2.14 Facts established planning and building 6F (live, on both nginx cells, at `develop@f1ebfd0`)
 
 Both editions were rebuilt with APVM at the ref the cells install, unpacked and read, and **every**
 claim below was then exercised against a real site: BackWPup Pro installed on
@@ -462,9 +463,90 @@ plugin removed and the site verified clean. Nothing here is inferred from source
 | V85 | **`backup-encrypt` / `backup-decrypt` need no settings and no credentials** — `--key=<hex>` is read before the settings lookup. Encryption is **in place, under the same filename**; the round-trip restores the exact original size (41 528 320 → 41 528 346 → 41 528 320 bytes). | `src/Cli/Commands/BackupEncrypt.php` — the `--key` branch precedes `get_site_option( 'backwpup_cfg_encryption' )`. Live round-trip, plus refusals: a non-hex key, a missing archive, and decrypting an already-plain archive (`Archive not needs decryption.`). | The one `@pro` pair that costs nothing to arrange beyond having an archive — no `backwpup_cfg_encryptionkey`, no storage credentials — so it ships long before 6H. Because encryption is in place, the round-trip is provable only by checksum, not by a filename. |
 | V86 | **`job-import` appends or overwrites, by argument.** Without `--job_id` it creates a **new** job with a fresh id; with `--job_id=<n>` it overwrites that job. `job-export <id> --file=<path>` exits 0; with no jobs at all it prints `[]` and exits **0**, not the `Nothing to export!` its source suggests. | Live round-trip: export job 3 → import → id **4** created → import `--job_id=3` → job 3 overwritten. Refusals: a missing path, and `wp-config.php` → `File is not a valid JSON file!`. | Two distinct behaviours out of one command, both worth a scenario. The empty-export answer is an empty list, so an assertion there must not expect an error. |
 | V87 | **Empty states answer; they do not fail.** On a fresh install `job` and `backup` report `0` / `[]` at exit 0, and `log` prints `No logs found.` — plain text, **exit 0**, not JSON. The hidden "First backup" (`backwpup_first_backup_job_id`, flagged `tempjob`) and "Backup Now" jobs are excluded from `job`, so even a freshly onboarded site counts **0** until a real job exists. | Live on a fresh install, before and after seeding onboarding; the exclusion at `src/Cli/Commands/Job.php` (the `tempjob` / backup-now guard) and `inc/class-install.php` (where the temp job is created). | The baseline's "1 job / 3 jobs" counts survive the port unchanged rather than needing an offset, and `support/backups.ts`'s existing `NO_LOGS` special case becomes a pinned contract instead of a defensive guess. |
-| V88 | **The read surface is uniform across `job`, `backup` and `log`** — `--format=table\|json\|csv\|yaml\|count\|ids`, `--field=`, `--fields=`, and `--<field>=<value>` filtering by case-insensitive **substring**. An unknown `--field` exits 1 with `Invalid field: <name>`. | Live: `--format=count` / `ids`, `--field=job_id`, `--fields=job_id,legacy,archive_format`, and `--type=dbdump` → 1 against `--type=file` → 0 on a database-only job. | One shared step vocabulary covers all three commands, which is what lets 6F.1 be mostly feature text rather than new step code. |
+| V88 | **`job` and `backup` share one read surface** — `--format=table\|json\|csv\|yaml\|count\|ids`, `--field=`, `--fields=`, and `--<field>=<value>` filtering by case-insensitive **substring**. An unknown `--field` exits 1 with `Invalid field: <name>`. | Live: `--format=count` / `ids`, `--field=job_id`, `--fields=job_id,legacy,archive_format`, and `--type=dbdump` → 1 against `--type=file` → 0 on a database-only job. | One shared step vocabulary covers both commands, which is what lets 6F.1 be mostly feature text rather than new step code. **Correction:** an earlier revision of this row said `log` shared the same surface. It does not — see V91, which supersedes that half. |
 | V89 | **Every alias is live**, including the two the baseline used (`jobs`, `backups`). 16 of the 17 commands declare one; `version` does not. | Live `wp backwpup jobs --format=count` and `wp backwpup backups --format=count` both exit 0; the `@alias` docblock tags across `src/Cli/Commands/`. | 6F targets the **canonical** names and must not assert that an alias is unregistered (V3). One scenario proves the two the baseline depended on still resolve, and nothing else spends coverage on them. |
 | V90 | **`--field=<unknown>` only fails when the list is not empty.** With at least one job, `wp backwpup job --field=nope` exits 1 with `Invalid field: nope`; with **no** jobs it exits **0** and prints nothing at all. | `src/Cli/Commands/Job.php` — the `if ( ! $items ) { return; }` guard sits *before* the field is validated. Measured both ways on the same site minutes apart: 0 jobs → exit 0 and silence, then 1 job → exit 1. | 6F.1's "an unknown field is refused" scenario **must arrange a job first**, or it passes against a command that never looked at the field. Found by running 6F.0's shipped module against a live site rather than by reading the source — which is why that step is part of the work and not a formality. |
+| V91 | **`log` is a different read surface, not a third copy of the same one.** It takes `--fields=`, `--format=table\|csv\|json\|yaml\|count` and its *own* named filters (`--search`, `--job_id`, `--type`, `--after`, `--before`, `--orderby`, `--order`, `--limit`) — but **no `--field=`, no `--format=ids` and no `--<field>=<value>`**. Because its docblock declares no such options, WP-CLI rejects them from the synopsis *before* the command runs: `--field=nope` exits 1 with `Error: Parameter errors: unknown --field parameter`, and `--format=ids` with `Invalid value specified for 'format'`. | `src/Cli/Commands/Log.php` — the `## OPTIONS` block and the hand-written filters, against `Job.php`/`Backup.php`'s `[--<field>=<value>]` and `[--field=<field>]`. Both refusals measured live on a site holding one log. | 6F.1 covers the two surfaces separately: `job` and `backup` share the generic contract, `log` is asserted on what it does document — the `--fields`/`--format=json` shape `readLastRunOutcome` depends on, and `--job_id` filtering. Asserting a uniform surface would have failed on a command that never claimed one. |
+| V92 | **A fresh install already stores a job, and `job` lists none of it.** Immediately after install + activation the `backwpup_jobs` option holds exactly **one** record — id 1, flagged `tempjob` — while `wp backwpup job --format=count` reports **0**. After onboarding the option holds **two** (the placeholder and the real job) and the command reports **1**. | Live on a clean site, read through `readStoredJobs` before and after seeding onboarding. | This is what makes 6F.1's empty-state and count scenarios non-vacuous: every one of them asserts that the site *is* holding a hidden job before asserting that none was listed. Without that half, "no hidden jobs were listed" would be trivially true of a site that had none. |
+| V93 | **The dashboard's "add new backup" card is `POST backwpup/v1/addjob`**, taking `type=files\|database\|mixed`, and it can be dispatched in-process: `wp_set_current_user( <administrator> )` then `rest_do_request()` creates the job, its id, its defaults and its WP-Cron event. The route and the `backwpup_jobs_edit` capability it checks exist in **both** editions. | `assets/js/backwpup-job.js` → `backwpupApi.addjob`; `src/Jobs/API/Rest.php` (`add_job`, `has_permission`). Live on Pro (jobs 4 and 5 created, `job --format=count` 1 → 3) and on Free (job 2 created with its `backwpup_cron` event). | Gives 6F.1 the baseline's three-job state without opening the dashboard, and without this suite writing a job record itself — the plugin owns that schema. Shipped as `addBackupJob`. |
+| V94 | **`wp backwpup <name> --help` is a safe registration probe.** It dispatches without running the command: on Pro every Pro-only command answers exit 0 with its help page (no pager, over `ssh`), on Free all five exit 1 with the same `'<name>' is not a registered subcommand of 'backwpup'.` an unknown name earns. | Live, both editions on the same site minutes apart: `restore`, `backup-encrypt`, `backup-decrypt`, `job-export`, `job-import`. | 6F.1 proves the edition split by **behaviour** rather than by re-reading the help list — and `--help` is the only probe that may be pointed at `restore`, whose `<file>` argument is optional, so running it bare on Pro would not be refused by the synopsis. |
+| V95 | **`backup` attributes an archive to whichever job enumerated it last.** With three jobs sharing one backup directory, the single archive job 3 wrote is reported with `job_id` 5. The command walks every non-`tempjob` job, lists that job's destination folder, and keys `$items` by the archive's **timestamp** — so the last job to see a file overwrites the earlier attribution, and two archives written in the same second would collapse into one row. | `src/Cli/Commands/Backup.php` — `file_get_list()` per job, `$items[ $backup['time'] ] = …`. Live: one archive, `--format=count` 1, `--field=job_id` 5. | No scenario may assert `backup`'s `job_id` on a site with more than one job. The existing history assertions are unaffected (they run with a single scheduled job), and 6F.1's count scenario deliberately asserts on `job`, never on `backup`'s attribution. |
+| V96 | **V46's activation race is still live on `pro@nginx`, and it is the environment, not this phase.** Across **33 scenario executions with `E2E_RETRIES=0`** (`pro@nginx` 12/13 then 13/13, `free@nginx` 13/13) exactly **one** failed, in shared `finishActivation`: `backwpup_onboarding` was absent immediately after a fresh install. | The failing scenario's own `debug.log` carried only `headers already sent` warnings — **no `CREATE TABLE … already exists`**, so not V47's leftover table. The site was completely clean afterwards (plugin absent, 0 `backwpup*` options, no `%bwpup%` table). **6 of 6** isolated install → activate → read → teardown cycles on the same cell, driven through the lifecycle's own `installPluginUnderTest`, kept the flag. The rate matches the cell's per-minute wp-cron supplying the second `init` request V46 describes. | **Not a defect in 6F.1** — the assertion is in a `Given` three other features already use, and the retry policy (2, the default; `E2E_RETRIES=0` is what made it visible) absorbs it while Playwright still reports the scenario **flaky** rather than green. Adding scenarios raises the exposure proportionally, which is true of any phase. A candidate fix — let `finishActivation` **restore** the flag when the site is otherwise pristine (version written, one stored job, that job flagged `tempjob`, no real jobs), since that state is the plugin's upgrade path having run on a never-onboarded site — is **not taken here**: it changes shared code on one unreproduced observation, and the rule is to reproduce the mechanism first. |
+
+### 2.15 Facts established auditing 6F.0–6F.1 (2026-09-22)
+
+A full re-read of both sub-phases against the plugin source at `develop@f1ebfd0` (unchanged since
+§2.14), with every open claim measured live on `pro@nginx`. Nothing below was visible to typecheck,
+lint, format or the unit suite. One hypothesis was **refuted** by measuring it (V98), which is why it
+was measured.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V97 | **WP-CLI honours its global parameters anywhere on the line**, after the subcommand too: `wp backwpup version --path=/nonexistent-…` looked for another WordPress, and `--skip-plugins` unloaded BackWPup. `version` documents `--debug` as its own option. | Live, both measured. Globals listed from the site's own `GLOBAL PARAMETERS` block; no BackWPup option shares a name with one except `version`'s `--debug`. | The generic step could have moved a command off the bound site — on a host shared with another cell's site (V72), onto that site. `parseCommandText` now refuses the globals that decide where, as whom or with what code the command runs, or where its arguments come from (`--path`, `--url`, `--ssh`, `--http`, `--user`, `--skip-*`, `--require`, `--exec`, `--context`, `--prompt`), and keeps the presentation ones (`--debug`, `--quiet`, `--[no-]color`). A backslash is refused along with the quotes. |
+| V98 | **WP-CLI's formatter validates `--fields` itself.** `job --fields=job_id,nope --format=json` exits 1 with `Invalid field: nope.` — the audit expected `pick_fields` to fill the unknown field with `null`, which would have let the exact-keys step pass on a field that does not exist. It does not. | Live. | The exact-keys step is sound as written, and its TSDoc now says why. The two refusals differ by a period (`--field`'s is the plugin's, `--fields`' is WP-CLI's); the substring match absorbs it. |
+| V99 | **The backup history table is an independent record of each run** — one row per destination, written by the run itself (`backwpup_create_job` → `add_backup_row`, `created` → `completed`), with `filename`, `job_id`, `status` and `backup_trigger`. `$wpdb` hands every column over as a string; a missing table reads as an empty result, with the error only in `last_error`. | `src/Backup/Database.php`, `src/Backup/Subscriber.php`. Live after one `run --background`: one row `FOLDER / <archive> / "3" / completed / backup_now_job`, its filename equal to `backup --field=name`. Live with the plugin absent: `Table '…wp_bwpup_backups' doesn't exist`. | **6F.1's archive assertion compared `backup --field=name` with `listBackups` — the same command in JSON**, against the feature's own promise of a source the command has no hand in. It now reads the history (`support/history.ts`), which refuses a failed query rather than answering "no backups". 6F.2's trigger and abort assertions build on the same reader. |
+| V100 | **`log` reads every header value it cannot find as 0** — `errors`, `warnings` and `job_id` are all `(int) ( $hdr[…] ?? 0 )`, so an unparseable header reports a clean run. The header's `job_id` (3, live) is the witness that it was read: 0 is no job's. | `src/Cli/Helpers/CommandsLogHelpersTrait.php::read_log_header`; live `log --fields=name,job_id,errors,warnings --format=json`. | The log scenario now asserts the header's `job_id` against the stored scheduled job. A header-parse regression — which would turn every verdict `readLastRunOutcome` returns into a success — fails there instead of passing everywhere. |
+| V101 | **A provided zip had no version at all.** `resolveZipRequest` records none and `E2E_PLUGIN_VERSION` is ignored beside a zip, so under `E2E_PLUGIN_ZIP` the `version` scenario could not establish what to expect. The preflight already read the zip's `Version:` header, but only printed it. | `src/common/artifacts/resolve.ts`, `request.ts`, `verify.ts`. | The verified artifact now carries its header's version, with the build's report only as fallback — the value WordPress installs and `wp backwpup version` prints. Unit-tested; proven live below. |
+| V102 | **Six of 6F.1's eleven scenarios ran with BackWPup's own activation still pending**, so the command under test was the request that performed it — racing the cell's cron (V46) unchecked. Every other `@plugin` feature runs `finishActivation` first. | `cli-reads.feature` against `onboarding`, `backups`, `backup-contents` and `plugin-deletion.feature`. | `Background: Given a freshly installed BackWPup`. A lost race now fails at the lifecycle and says so (V96), rather than as a wrong answer from a command. |
+| V103 | **WP-CLI's own refusals span lines, and the notice parser kept only the first.** A parameter the synopsis does not declare fails as `Error: Parameter errors:` and then one line per parameter (` unknown --nope parameter`), sometimes followed by an unindented `Did you mean '--format'?` — so `it reports the error "unknown --field parameter"` could never have matched, while `cli.ts` claimed WP-CLI does not wrap. (V91 quotes that refusal on one line; it is two.) BackWPup's own notices are all single-line. | WP-CLI 2.12.0 on the cells, verbatim: `wp option get blogname --nope=1` and `--formt=json`, `wp option list --format=nope`. WP-CLI's `Dispatcher/Subcommand.php` builds the message with `"\n {$error}"`. No `WP_CLI::error\|warning\|success` in `src/Cli/Commands/` carries a newline. | On stderr — where WP-CLI writes each notice whole and little else — a line that is not a status line now continues the notice above it; a blank or `Debug` line ends it. Stdout stays line by line, because the command's own output shares it. |
+
+**Smaller corrections.** The ids step compared **ordered** lists, but the two sources do not share an
+order by construction: PHP iterates the option in insertion order, while JSON hands a sparse one to
+JavaScript as an object whose integer keys `Object.values` returns sorted (measured: `{"2":…,"0":…}`
+reads back as ids 1 then 5). They agree today only because `BackWPup_Option::update` allocates keys as
+`max + 1`; the migration's `update_job_id` does not. Compared as sets now, and the TSDoc that called
+the order "exactly what the reader does" is gone. `log --job_id` was claimed by V91 and asserted
+nowhere; it now is, both ways. The Pro half of the `--help` probe also requires the page to name the
+command, since an exit code alone would be satisfied by some other page. The alias field's TSDoc
+implied protection nothing provides. Plus one duplicate import, one unresolvable `{@link}` (6C) and a
+TSDoc orphaned above the wrong declaration (6D, `waitForBackup` — V77's class), whose neighbour's doc
+was also off by one against its code.
+
+**Also recorded, not fixed — outside 6F.** The orphaned-TSDoc scan that caught `waitForBackup` found
+five more of the same class elsewhere: `src/common/wp/residue.ts:264` (a `@param target`/`root` block
+stranded above `describeRemoval`), and one test doc each in `preflight.spec.ts:430`,
+`ownership.spec.ts:576` and `:802`, and `residue.spec.ts:363`.
+
+**Verification after the audit.** Unit **821 passed / 8 skipped** (793 before); typecheck, lint and
+format clean; both new PHP snippets pass `php -l`. Each new guard was **proved to catch its defect**:
+with the fix removed its tests fail — two for the artifact version, eight for the step-text
+refusals, two for multi-line notices — and pass again once the file is restored byte for byte. The
+`version` scenario passed live under `E2E_PLUGIN_ZIP` (`source=env-zip origin=copied
+version=9.99.99`), the configuration it could not pass before. Live, with `E2E_RETRIES=0` and both
+cells in parallel: after the main fixes **`pro@nginx` 13/13** and **`free@nginx` 13/13**, and again
+after the parser change, **13/13 on each** — 45 scenario executions, no failure. Both sites were
+left exactly as found: no plugin, no `backwpup`/`bwpup` option or table, no `uploads/backwpup`.
+
+### 2.16 Where exit 0 does not mean success (source review, 2026-09-22)
+
+Prompted by a review question on `Then the command succeeds`: does WP-CLI exit 0 even when a command
+fails? **In general, no.** Its own refusals exit 1 (V80, V103), `WP_CLI::error()` exits 1, and a PHP
+fatal exits 255 — and all 62 `WP_CLI::error()` calls under `src/Cli/Commands/` exit, since none
+passes `$exit = false`. What exits 0 after a failure is plugin code that reports it some other way.
+Beyond the two already recorded — `wp eval` (V31) and `--field` on an empty list (V90, with the same
+guard in `Backup.php:188-190`) — there are four.
+
+**Read from `develop@f1ebfd0`'s source, not yet measured live** — only PHP's own exit statuses were
+measured, locally. Whichever sub-phase drives a command below measures its row on a cell before a
+scenario relies on it, as V90 was.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V104 | **A foreground `run` exits 0 on a run that logged errors, if it also logged a warning.** The verdict tests `$warnings` first and returns after warning, so `There are N errors…` is reached only by a run with no warnings at all. What prints instead is `Warning: There are %d wearings due to job execution please chack the logs.` (sic). | `src/Cli/Commands/Run.php:182-192`. | A plugin bug, worth reporting upstream. 6F.2 takes `run`'s outcome from the log header or the history row, never from its exit code or the absence of `Error:` — `readLastRunOutcome` in `support/backups.ts` already does. Pinning the bug in a scenario needs a run that logs both, which nothing arranges today. |
+| V105 | **A `restore` that fails once it has started exits 0.** Everything after the archive is resolved sits in a `catch ( \Throwable )` that prints `Warning: Restore failed: …`. With a pre-backup snapshot it then offers a rollback and, if that works, ends on `Success: Rollback completed.` — a failed restore whose last line is a success. Only a bad archive argument (`:132-135`) or a failed rollback exits 1. | `src/Cli/Commands/Restore.php:210-223`. | 6G's CLI restore: the restored marker is the verdict, as its acceptance already requires, and `the command succeeds` adds nothing. A failure scenario asserts the warning **and** that the marker is still drifted — not a non-zero exit. |
+| V106 | **`log-delete` reports success when it deleted nothing.** A file it cannot remove — missing, not writable, or `wp_delete_file` failing — is a `Warning:` from `delete_one`, after which the command still prints `Success: No logfile deleted.` (one file) or `Success: 0 logfile(s) deleted.` (bulk) and exits 0. On these cells the likely trigger is ownership: `wp_is_writable` is asked as the transport's user, and a `--background` run writes as the web server (V82 measured it for the archive). | `src/Cli/Commands/LogDelete.php:127` and `:177`; `delete_one` at `:216-241`. | 6F.3 confirms every deletion by re-reading `log --format=count`, as its acceptance already says, and asserts a refusal as a warning plus a surviving file — the same shape as `backup-delete`'s ownership split (V84). |
+| V107 | **`BackWPup_Job::start_cli()` stops with PHP's `exit( 'message' )`, which prints the message and exits 0 with no `Error:` prefix.** It does so for an unknown job id, a log or temp folder that fails `check_folder`, and a job already running. `run` rules out the first and checks the running file itself, so what stays reachable is the folder checks — and a job the site's own cron starts between `run`'s check and `start_cli`'s. `run` then never reaches its own verdict. | `inc/class-job.php:3070-3098`. Measured locally on PHP 8.1: `php -r 'exit("…");'` prints the string and exits **0**; an uncaught fatal exits **255**. | Invisible to the notice parser, so no exit-code or status-line check can catch it — only a second source can: a new history row, a log for the job. |
+
+**What this means for the generic step.** `Then the command succeeds` asserts the exit code alone.
+That is sound for 6F.1: each use is followed by a check of the output or of a second source, and
+none of the commands it runs (`version`, `job`, `backup`, `log`, idle `status` and `kill`) has one of
+the paths above. `Then the command fails` is safe by direction — a false 0 fails it loudly. The risk
+is reuse from 6F.2 on, where `run`, `restore` and `log-delete` would pass it after failing.
+**Proposed, not implemented:** `the command succeeds` also requires no `Error:` and no `Warning:`
+notice, which catches V104–V106, with a separate step for a success that is meant to warn
+(`log-delete`'s `Ignoring --all…`, `status` after a run that warned). That check would also trip on
+PHP's own warnings, which share WP-CLI's prefix, if a cell displays them on stdout — arguably right,
+but to be measured first. V107 stays beyond any such check; a second source is the only defence.
 
 ---
 
@@ -1225,7 +1307,7 @@ commands that create the conditions it is judged under. Splitting per command wo
 across a dozen near-identical Backgrounds; splitting per edition would put `backup-delete`'s two
 outcomes (V84) in different phases.
 
-**Order:** 6F.0 ✅ → 6F.1 → then 6F.2, 6F.3 and 6F.4 in any order — each arranges its own state, and
+**Order:** 6F.0 ✅ → 6F.1 ✅ → then 6F.2, 6F.3 and 6F.4 in any order — each arranges its own state, and
 none depends on another's scenarios.
 
 #### 6F.0 — CLI rails *(no feature files)* — **DONE**
@@ -1282,32 +1364,73 @@ site minutes apart: Pro reported exactly its 17 with **no drift**, Free exactly 
 drift**, and each edition compared against the other named exactly the five Pro-only commands, in the
 right direction each time.
 
-#### 6F.1 — Registration and the read surface *(untagged)*
+#### 6F.1 — Registration and the read surface *(untagged)* — **DONE**
 
-`version`, `job`, `backup`, `log`, and the idle answers of `status` and `kill`.
+**Shipped 2026-09-22.** `features/cli-reads.feature` — **11 scenarios**, all untagged, plus the
+shared Gherkin vocabulary 6F.2–6F.4 reuse. Unit tests **778 → 793**; typecheck, lint and format
+clean. Run live with `E2E_RETRIES=0` on **`free@nginx` (13/13, every scenario first attempt)** and on
+**`pro@nginx`** (12/13, then **13/13** on an immediate re-run — the one failure was the activation
+race V96 records, in shared onboarding code rather than in this feature). **33 scenario executions,
+one failure, not reproducible.** The facts it rests on are §2.14, V80–V96.
 
-Also lands the **shared Gherkin vocabulary** 6F.2–6F.4 reuse (moved here from 6F.0, which had no
-feature to prove it against), so those phases are mostly feature text rather than new step code.
+What shipped:
 
-- **The registration scenario is the acceptance gate for all of 6F.** Every name the manifest
-  declares is registered for this cell's edition, and Free additionally proves the five Pro commands
-  are **absent**. A typo then fails as *"not a registered subcommand"* rather than as an empty list
-  (V80).
-- **`version` names the edition** — `BackWPup Pro 9.99.99` against Free's `BackWPup …`. The only CLI
-  answer that distinguishes editions by itself, and a one-line check that the cell installed what it
-  meant to.
-- **The read contract, once, across all three list commands** (V88): the formats, `--field` /
-  `--fields`, substring filtering, and `--field=<bogus>` → exit 1 — which **only happens when the
-  list is not empty** (V90), so that scenario arranges a job first or it proves nothing.
-- **The empty-state contract** (V87) — where a ported count assertion is easiest to get wrong: a
-  fresh site holds 0 jobs and 0 backups and answers `[]`, while `log` answers in prose at exit 0.
-- **The baseline's intent**: one job, then three — through `--format=count`, against what the site
-  actually holds, with the hidden temp and backup-now jobs **proved** excluded rather than assumed.
-- **The two aliases the baseline depended on** still resolve (V89); nothing else spends coverage on
-  aliases.
+- **`steps/cli.steps.ts` and the `cli` fixture** (`support/cli-session.ts`) — the vocabulary:
+  `When I run the BackWPup command "<subcommand …>"`, then `the command succeeds` / `fails`,
+  `it prints "<exact stdout>"`, and `it reports the success|error "<text>"`. The last two match
+  WP-CLI's own status lines by **level** and the text as a substring, because some messages carry a
+  tail their command does not own (WP-CLI appends `See 'wp help …'`; the plugin embeds paths). The
+  session keeps only the **latest** result, so no assertion can reach back past the command it
+  judges. The `wp backwpup` prefix is supplied, and repeating it is refused rather than run.
+- **`addBackupJob`** (`support/job-options.ts`) — the site's second and third jobs, created through
+  `POST backwpup/v1/addjob`, the endpoint the dashboard's own "add new backup" card calls (V93).
+  Dispatched in-process, as an administrator, so the plugin allocates the id, the defaults and the
+  cron event; this suite writes no job record of its own. Verified by diffing the stored jobs.
+- **`readHistory`** (`support/history.ts`, added by the audit — V99) — the plugin's own history
+  table, which the run writes and the `backup` command never reads, so the command can be checked
+  against it.
 
-**Acceptance** — a renamed command fails as "not registered", not as an empty list; the count
-scenarios fail if a hidden job leaks into the listing.
+A **Background** finishes the install before any command runs (V102). The eleven scenarios, and what
+each rests on:
+
+- **Registration is the gate for all of 6F** — zero drift **both ways** against the declared set for
+  this cell's edition. Free registering a Pro command shows up as drift, which is that edition's
+  half of the split; the other half is a scenario of its own, which probes each Pro-only command
+  with `--help` (V94) — the one probe that dispatches without *running* `restore`.
+- **An unknown name is refused by name**, which is the wording every later mistyped command fails as.
+- **`version` names the edition and the build** — asserted against the artifact manifest's own
+  identity for this edition and the version the zip's own header declares (V101), so it also proves
+  the cell installed what the run intended.
+- **The empty state** (V87): `job` and `backup` answer `[]`, `log` answers in prose at exit 0.
+- **Idle `status` and `kill`** (V81, V83) — `No job running.` and `Nothing to abort.`
+- **The read contract, once, on `job`** (V88): count, `--field`, `--fields` (asserted as an *exact*
+  key set, so a `--fields` that was ignored is caught), and the substring filter in **both**
+  directions — `--type=DBDUMP` → 1 against `--type=file` → 0, because a filter that matched
+  everything would pass the first half alone.
+- **`--field=<bogus>` is refused** — in a scenario that arranges a job first, since with an empty
+  list the command returns before it ever looks at the field (V90).
+- **The baseline's intent, one job then three** — and every ids assertion **proves the exclusion is
+  not vacuous**: it first asserts the site *is* holding a hidden job (V92) and only then that none
+  was listed.
+- **The two aliases the baseline used** still resolve (V89); nothing else spends coverage on aliases.
+- **After a run**, `backup` and `log` each report it: the archive names against the history table
+  (V99), `log --job_id` in both directions (V91), and the `errors`/`warnings` counts
+  `readLastRunOutcome` depends on — beside the header's `job_id`, which proves they were read and not
+  defaulted (V100).
+
+**One plan claim corrected by building it.** V88 said `log` shared `job`'s and `backup`'s read
+surface. It does not (**V91**): no `--field`, no `--format=ids`, no `--<field>=<value>`, and WP-CLI
+rejects all three from its synopsis before the command runs. So the feature asserts two surfaces
+rather than one — `log` on what it actually documents.
+
+**Acceptance met** — a renamed command fails as "not registered" rather than as an empty list, by
+mechanism; every count is taken against what the site stores, so a hidden job leaking into the
+listing fails the scenario that reads it.
+
+**Audited 2026-09-22** (§2.15): fifteen findings fixed — among them an archive assertion that compared
+the `backup` command with itself, a generic step whose text could move a command onto another site,
+six scenarios running unguarded against BackWPup's activation race, and a `version` scenario that
+could not pass with a provided zip. Unit tests **793 → 821**.
 
 #### 6F.2 — Running, watching and aborting *(untagged, `@slow`)* — **closes §2.9's deferral**
 
@@ -1319,6 +1442,9 @@ scenarios fail if a hidden job leaks into the listing.
   observable difference and nothing else in the suite asserts it.
 - **`run`'s refusals**: no arguments → exit 1; a second job while one runs → `A job is already
   running.`; `--background` with more than one id.
+- **`run`'s exit code is not its verdict** (V104, V107). A run that logged errors *and* warnings
+  exits 0, and `start_cli`'s own refusals exit 0 with no status line. Judge a run by its log header
+  or its history row; measure V104 and V107 live before a scenario relies on either.
 - **`status`** (V81) answers immediately when idle, and **blocks to completion** during a run, its
   exit code carrying the job's verdict. It gets a budget of its own and is never polled — the
   cheap, non-blocking probe stays `isJobRunning`.
@@ -1346,7 +1472,8 @@ scenario leaves a job running behind it.
   same file.
 - **`log-show`** by filename, by `--job_id`, and `--lines=N`; a missing file exits 1.
 - **`log-delete`** by file, `--all` and `--older-than`, each verified against `log --format=count`
-  rather than against its own success message.
+  rather than against its own success message — which it prints even when it deleted nothing, at
+  exit 0 (V106). Its refusal is a warning plus a surviving file, never a non-zero exit.
 
 **Acceptance** — the refused delete leaves both the archive and the history untouched; every deletion
 is confirmed by re-reading, never by the command's own line.
@@ -1405,7 +1532,8 @@ Scenario: Restore by uploading the backup file
 - **Restore scope** (full / database-only / files-only) is orthogonal to entry path — cover it once,
   on the cheaper `@pro` in-place path, rather than multiplying both journeys by three.
 - **CLI restore** (`@pro`, V4): `wp backwpup restore <file> --yes --type=full|db|file`, with
-  `--pre-backup` on one scenario.
+  `--pre-backup` on one scenario. A restore that fails midway exits 0 with a warning — and, after a
+  successful rollback, ends on `Success:` (V105) — so the marker is the verdict, never the exit code.
 - Tag `@slow`; a restore rewrites the site, so it must run on a worker-bound site and re-authenticate
   afterwards if the restore rolls the session back.
 

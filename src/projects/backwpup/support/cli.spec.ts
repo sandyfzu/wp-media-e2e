@@ -121,6 +121,54 @@ test.describe("parseCliNotices", () => {
       { level: "success", message: "" },
     ]);
   });
+
+  // WP-CLI 2.12's own refusal of a parameter the synopsis does not declare, verbatim from a cell.
+  // Read line by line, the notice would say only "Parameter errors:" — never which parameter.
+  test("reads WP-CLI's multi-line refusal on stderr as one notice", () => {
+    expect(
+      parseCliNotices(
+        "",
+        "Error: Parameter errors:\n unknown --nope parameter",
+      ),
+    ).toEqual([
+      {
+        level: "error",
+        message: "Parameter errors:\nunknown --nope parameter",
+      },
+    ]);
+  });
+
+  // Also verbatim: the suggestion follows on a line of its own, and not indented.
+  test("keeps the suggestion WP-CLI adds after a mistyped parameter", () => {
+    const [notice] = parseCliNotices(
+      "",
+      "Error: Parameter errors:\n unknown --formt parameter\nDid you mean '--format'?",
+    );
+    expect(notice?.message).toContain("unknown --formt parameter");
+    expect(notice?.message).toContain("Did you mean '--format'?");
+  });
+
+  // Stdout carries the command's own output too, so a line after a notice there is not part of it.
+  test("never continues a notice on stdout", () => {
+    expect(
+      parseCliNotices("Success: Job finished.\narchive.tar", "").map(
+        (notice) => notice.message,
+      ),
+    ).toEqual(["Job finished."]);
+  });
+
+  // `--debug` interleaves labelled debug lines on stderr; they belong to no notice.
+  test("ends a notice at a blank line or a debug line on stderr", () => {
+    expect(
+      parseCliNotices(
+        "",
+        "Warning: first\n\nstray\nWarning: second\nDebug (bootstrap): step (0.01s)\nafter debug",
+      ),
+    ).toEqual([
+      { level: "warning", message: "first" },
+      { level: "warning", message: "second" },
+    ]);
+  });
 });
 
 test.describe("backwpupCli", () => {

@@ -261,7 +261,10 @@ export interface ResolvedArtifact {
   readonly ref?: string;
   /** The resolved commit SHA, when APVM produced the artifact; absent for a provided zip. */
   readonly commit?: string;
-  /** The effective version (built, overridden, or read from the artifact); absent when unknown. */
+  /**
+   * The plugin's version. Once verified, the zip's own `Version:` header — what WordPress installs
+   * and reports — falling back to what the build reported; absent when neither says.
+   */
   readonly version?: string;
   readonly origin: ArtifactOrigin;
   /** ISO-8601 timestamp of when this role was resolved. */

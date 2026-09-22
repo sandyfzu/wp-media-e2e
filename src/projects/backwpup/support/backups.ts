@@ -369,6 +369,45 @@ export async function startJobInBackground(
 }
 
 /**
+ * How many *consecutive* probe failures a wait absorbs before giving up on the site.
+ *
+ * Small on purpose. It has to be greater than zero, because a probe is a WP-CLI round trip over SSH
+ * to a site that is busy writing a multi-gigabyte archive, and a dropped connection there is noise
+ * rather than an answer. It has to stay small, because a site that is genuinely broken should say so
+ * in seconds rather than at the end of a ten-minute budget. At the poll intervals below, three
+ * failures is about eight seconds.
+ */
+const PROBE_FAILURE_TOLERANCE = 3;
+
+/**
+ * Wraps a probe so a transient failure keeps the wait alive, while a persistent one still ends it.
+ *
+ * `expect.poll` calls its function **outside** its own try/catch, so by default a probe that throws
+ * ends the wait then and there — one lost connection during a ten-minute backup would be reported as
+ * a WP-CLI error rather than as the thing being waited for. Returning `undefined` instead keeps the
+ * poll going; one failure more than {@link PROBE_FAILURE_TOLERANCE}, with no success between them, is
+ * taken as the site being unable to answer at all, and that last error is re-thrown with its own
+ * message intact.
+ *
+ * The counter resets on every success, so a flaky link is tolerated indefinitely while a dead one is
+ * not tolerated at all.
+ */
+function forgiving<T>(probe: () => Promise<T>): () => Promise<T | undefined> {
+  let consecutive = 0;
+  return async () => {
+    try {
+      const value = await probe();
+      consecutive = 0;
+      return value;
+    } catch (error) {
+      consecutive += 1;
+      if (consecutive > PROBE_FAILURE_TOLERANCE) throw error;
+      return undefined;
+    }
+  };
+}
+
+/**
  * Waits for a backup to land and finish, then reports how it ended.
  *
  * **Three phases, in this order, for different reasons.** The archive appearing is what "a backup
@@ -391,45 +430,6 @@ export async function startJobInBackground(
  * @throws {@link Error} if no new archive appears, if a job is still running when the budget is
  * spent, or if no verdict could be read.
  */
-/**
- * How many *consecutive* probe failures a wait absorbs before giving up on the site.
- *
- * Small on purpose. It has to be greater than zero, because a probe is a WP-CLI round trip over SSH
- * to a site that is busy writing a multi-gigabyte archive, and a dropped connection there is noise
- * rather than an answer. It has to stay small, because a site that is genuinely broken should say so
- * in seconds rather than at the end of a ten-minute budget. At the poll intervals below, three
- * failures is about eight seconds.
- */
-const PROBE_FAILURE_TOLERANCE = 3;
-
-/**
- * Wraps a probe so a transient failure keeps the wait alive, while a persistent one still ends it.
- *
- * `expect.poll` calls its function **outside** its own try/catch, so by default a probe that throws
- * ends the wait then and there — one lost connection during a ten-minute backup would be reported as
- * a WP-CLI error rather than as the thing being waited for. Returning `undefined` instead keeps the
- * poll going; a run of {@link PROBE_FAILURE_TOLERANCE} failures with no success between them is
- * taken as the site being unable to answer at all, and the last error is re-thrown with its own
- * message intact.
- *
- * The counter resets on every success, so a flaky link is tolerated indefinitely while a dead one is
- * not tolerated at all.
- */
-function forgiving<T>(probe: () => Promise<T>): () => Promise<T | undefined> {
-  let consecutive = 0;
-  return async () => {
-    try {
-      const value = await probe();
-      consecutive = 0;
-      return value;
-    } catch (error) {
-      consecutive += 1;
-      if (consecutive > PROBE_FAILURE_TOLERANCE) throw error;
-      return undefined;
-    }
-  };
-}
-
 export async function waitForBackup(
   transport: Transport,
   before: number,

@@ -1,11 +1,14 @@
 import { expect } from "@playwright/test";
 
+import { evalPhp, phpLiteral } from "../../../common/wp/php";
 import { getOptionJson } from "../../../common/wp/options";
 import { isObject } from "../../../common/guards";
+import { routeNamespace } from "./rest";
 import type { Transport } from "../../../common/config/types";
 
 /**
- * The backup jobs a site has configured, read from the option BackWPup stores them in.
+ * The backup jobs a site has configured — reading them out of the option BackWPup stores them in,
+ * and adding one the way the dashboard does ({@link addBackupJob}, the module's only writer).
  *
  * This is the companion to `./backups.ts`: `wp backwpup job` reports the fields the **command**
  * chose to expose — contents, storages, cron — while a job's finer configuration (which file areas
@@ -249,5 +252,106 @@ export async function theScheduledJob(
   // Narrowing for the type checker; the assertion above is what actually enforces it.
   const [job] = jobs;
   if (job === undefined) throw new Error("unreachable: length asserted above");
+  return job;
+}
+
+// ── Adding a job ─────────────────────────────────────────────────────────────
+
+/** The route key for the dashboard's "add new backup" call, in `./rest.ts`'s verified table. */
+const ADD_JOB = "addjob";
+
+/** That route's full REST path, with its namespace taken from the one table that records it. */
+const ADD_JOB_ROUTE = `/${routeNamespace(ADD_JOB)}/${ADD_JOB}`;
+
+/**
+ * The word the dashboard sends for each set of contents when it adds a job.
+ *
+ * Its own vocabulary, not the job-type slugs: the endpoint validates against exactly these three
+ * and turns them into the plugin's `BackWPup_JobTypes` constants itself, which is why a caller
+ * names {@link JobContents} and never a slug list.
+ */
+const ADD_JOB_TYPE = {
+  files: "files",
+  database: "database",
+  "files and database": "mixed",
+} as const satisfies Readonly<Record<JobContents, string>>;
+
+/**
+ * The PHP that adds a job, expressed as the request the dashboard's own button makes.
+ *
+ * Goes through the plugin's REST endpoint rather than writing the job record, for the reason the
+ * onboarding seeder gives: the plugin owns the job schema, the id allocation, the defaults and the
+ * cron registration, and anything here that wrote them would be a second implementation to keep in
+ * step. WordPress dispatches the route in-process, so the permission callback runs for real — hence
+ * the administrator, who is the user pressing that button on a real site.
+ *
+ * Exported for its unit test, which pins the emitted snippet per {@link JobContents}; callers use
+ * {@link addBackupJob}.
+ *
+ * @param contents - what the new job should back up.
+ */
+export function addJobPhp(contents: JobContents): string {
+  return `
+$admins = get_users( [ 'role' => 'administrator', 'number' => 1, 'fields' => 'ID' ] );
+if ( ! $admins ) {
+	WP_CLI::error( 'this site has no administrator, so no user can add a job' );
+}
+wp_set_current_user( (int) $admins[0] );
+
+$request = new WP_REST_Request( 'POST', ${phpLiteral(ADD_JOB_ROUTE)} );
+$request->set_param( 'type', ${phpLiteral(ADD_JOB_TYPE[contents])} );
+$response = rest_do_request( $request );
+if ( $response->is_error() ) {
+	WP_CLI::error( 'adding a job answered ' . $response->get_status() . ': ' . wp_json_encode( $response->get_data() ) );
+}
+`;
+}
+
+/**
+ * Adds one backup job to a site, through the endpoint the dashboard's "add new backup" card uses.
+ *
+ * The arrangement primitive behind any scenario that needs more jobs than onboarding creates — it
+ * creates exactly one, scheduled and ready, without driving the screen that would otherwise have to
+ * be opened to make one.
+ *
+ * **Verified, never assumed**: the endpoint answers with a message rather than the job it made, so
+ * the site's stored jobs are compared before and after. Exactly one new job, backing up what was
+ * asked for, is the whole claim — and a permission failure or a schema change shows up here as that
+ * claim failing rather than as a puzzling count several steps later.
+ *
+ * @param transport - the site to add the job to. BackWPup must be installed and past activation.
+ * @param contents - what the new job should back up.
+ * @returns the job as the site now stores it.
+ * @throws {@link Error} if PHP failed, if the endpoint refused, or if the site did not end up with
+ * exactly one new job covering what was asked for.
+ */
+export async function addBackupJob(
+  transport: Transport,
+  contents: JobContents,
+): Promise<StoredJob> {
+  const before = new Set(
+    (await readStoredJobs(transport)).map((job) => job.jobId),
+  );
+  await evalPhp(
+    transport,
+    addJobPhp(contents),
+    "adding a backup job",
+    "backwpup/jobs",
+  );
+
+  const added = (await readStoredJobs(transport)).filter(
+    (job) => !before.has(job.jobId),
+  );
+  expect(
+    added.map((job) => job.jobId),
+    "adding a backup job should have left the site with exactly one new job",
+  ).toHaveLength(1);
+  const [job] = added;
+  if (job === undefined) throw new Error("unreachable: asserted above");
+
+  expect(
+    describeJobContents(job.type),
+    `what the job added as "${contents}" actually backs up`,
+  ).toBe(contents);
   return job;
 }
