@@ -14,6 +14,7 @@
 // options in `../wp/log` (whose presets products author in `support/debug-log.ts`).
 import type { ProductArtifacts } from "../artifacts/types";
 import type { ScanDebugLogOptions } from "../wp/log";
+import type { SiteDbResidue } from "../wp/db-residue";
 
 // Re-exported so a product-config author gets the manifest schema and `ProductConfig` from one
 // place.
@@ -222,5 +223,20 @@ export interface ProductConfig {
    * a site. Omit when a product leaves nothing behind.
    */
   readonly siteResidue?: readonly string[];
+  /**
+   * What this product leaves in a site's **database** when its files are removed without its own
+   * uninstall ever running — the option fragments and tables the shared scenario hooks sweep
+   * whenever they find them.
+   *
+   * The filesystem counterpart above exists because a plugin's uninstall keeps the files it wrote.
+   * This one exists because that uninstall lives in the plugin's own `uninstall.php`, so it only
+   * runs while the plugin's files are still there: a site whose plugin directory has gone while its
+   * rows remain looks already-clean to `wp plugin is-installed` and is skipped, and the next
+   * install then reads the leftover rows as evidence that it is an upgrade. Swept off the
+   * footprint, never off whether the plugin is installed — see {@link SiteDbResidue}.
+   *
+   * Omit when a product's uninstall is the only cleanup its database needs.
+   */
+  readonly siteDbResidue?: SiteDbResidue;
   readonly services?: ServiceConfig;
 }

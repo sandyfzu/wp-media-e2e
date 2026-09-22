@@ -63,11 +63,29 @@ export class BackupHistoryTable {
   /**
    * Reloads the history from the server and waits for the new data.
    *
-   * Used after an action that changes the history (a delete, a completed backup), so an assertion
-   * reads server state rather than whatever the page rendered before.
+   * **The only way to read this table after something changed it.** The plugin refreshes it from a
+   * client-side poll of its own, on its own schedule, and only for some of the ways a backup can
+   * end — so the rows on screen are not a statement about the site until they have been fetched
+   * again. Every assertion made after an action goes through this first.
+   *
+   * The navigation and {@link waitForLoaded} are the whole barrier, and together they are exact.
+   * The reload resolving means the new document has loaded; the server always renders the
+   * placeholder row into it; and nothing removes that row except the plugin replacing the entire
+   * `tbody` with the rows it fetched. So the row being gone means the listing arrived and
+   * rendered — and a listing that failed leaves it in place, which fails here instead of reading
+   * as a history that emptied itself.
+   *
+   * **Awaiting the `backups` call instead would not be sound**, which is why it is not done: the
+   * listing is requested on document-ready, so a barrier armed after the navigation can miss it,
+   * and one armed before it is satisfied just as happily by the *previous* page's request, which
+   * is usually still in flight. That barrier reports the wrong page and proves nothing about this
+   * one.
+   *
+   * @throws {@link Error} if the history never finishes loading — the listing failed, or the
+   * screen does not carry one.
    */
   async reload(): Promise<void> {
-    await Promise.all([waitForRest(this.page, "backups"), this.page.reload()]);
+    await this.page.reload();
     await this.waitForLoaded();
   }
 
@@ -110,21 +128,43 @@ export class BackupHistoryTable {
     });
   }
 
-  /** Asserts the exact number of backups in the history. */
+  /**
+   * Asserts the exact number of backups in the history **as currently rendered**.
+   *
+   * It makes no claim about how fresh that is: establishing freshness is the caller's job, through
+   * {@link reload}, because only the caller knows whether anything has changed the history since
+   * the page was rendered. Keeping the two apart is what lets this be asserted against captured
+   * markup as well as against a live site.
+   *
+   * Nor does it see past the **first page**: the listing is paged ten rows at a time, client and
+   * server agreeing on that default, so a site holding more renders ten whatever the total is.
+   * Every scenario starts from a freshly installed plugin and counts in single digits, which is
+   * well inside it — a caller that could exceed ten needs a different question, not a larger
+   * number here.
+   */
   async expectRowCount(count: number): Promise<void> {
     await this.waitForLoaded();
-    await expect(this.rows).toHaveCount(count);
+    await expect(this.rows, "rows the history table renders").toHaveCount(
+      count,
+    );
   }
 
   /**
-   * Asserts no backup in the history failed or was aborted.
+   * Asserts no backup in the history failed or was aborted, **as currently rendered**.
    *
    * One retrying assertion over a filtered set, rather than a loop of per-row checks — so it reports
    * "expected 0 failed rows, found 2" instead of failing on whichever row came first.
+   *
+   * Freshness is the caller's job here too, and it matters more than it does for a count: this
+   * passes trivially on a table that renders no rows, so a caller asserting it after an action that
+   * changed the history must {@link reload} first or it proves nothing.
    */
   async expectNoFailures(): Promise<void> {
     await this.waitForLoaded();
-    await expect(this.failedRows).toHaveCount(0);
+    await expect(
+      this.failedRows,
+      "history rows for backups that failed or were aborted",
+    ).toHaveCount(0);
   }
 
   // ── Per-row actions ──────────────────────────────────────────────────────────

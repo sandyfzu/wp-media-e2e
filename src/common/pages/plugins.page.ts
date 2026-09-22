@@ -96,9 +96,14 @@ export class PluginsPage {
    * live wp-admin, drive this implementation:
    *  - the `confirm()` is accepted by a dialog handler that is removed in a `finally`, so it can
    *    never linger to auto-accept an unrelated later dialog if the click fires no confirm;
-   *  - the click uses `force: true` because the normal actionability wait can stall on the
-   *    plugins screen right after an in-session deactivate (it is still a real click, and the
-   *    page carries no CSS animation that would justify the wait);
+   *  - the Delete click is **not** forced. It used to be, to dodge a stall on the plugins screen
+   *    right after an in-session deactivate, and that is precisely what broke it: measured on a
+   *    live cell, `elementFromPoint` at the link's own bounding-box centre returned the document
+   *    root while the link reported `visibility: visible`, so the forced click — which skips the
+   *    "receives pointer events" check — landed on nothing and produced no request at all. The
+   *    ordinary click waits for that check to pass and then works first time, dialog and AJAX
+   *    included. A stall now fails with Playwright's actionability log, which says what the
+   *    element was doing; "no response arrived" never could;
    *  - the slug-specific `delete-plugin` response is awaited only as a barrier: its arrival
    *    proves the request was issued (a missing one ⇒ failure) and stops the reload below from
    *    racing the in-flight AJAX — the body is not parsed. Success is then asserted
@@ -127,6 +132,17 @@ export class PluginsPage {
         await expect(this.page.locator(`#delete-${slug}`)).toBeVisible({
           timeout,
         });
+        // The link being *present* is not the same as Delete being wired up. WordPress binds the
+        // action in `updates.js` on document-ready, so a click landing before that script has run
+        // follows the link's plain `href` instead — a navigation to the "are you sure" screen, on
+        // which the AJAX barrier below waits out its timeout and reports a deletion that never
+        // failed so much as never happened. Waiting for `load` means the scripts have executed.
+        // Ordered *after* the visibility assertion on purpose: that assertion is what proves the
+        // new document is the current one, so this cannot resolve against the old page's load
+        // state. `load` is a real event, not the `networkidle` heuristic the lint gate rightly
+        // bans, and it takes the caller's budget like every other wait in this method — its own
+        // default is the navigation timeout, which has nothing to do with what was asked for.
+        await this.page.waitForLoadState("load", { timeout });
       } catch {
         throw new PluginDeactivationFailedError(slug);
       }
@@ -158,7 +174,7 @@ export class PluginsPage {
             },
             { timeout },
           ),
-          this.page.locator(`#delete-${slug}`).click({ force: true }),
+          this.page.locator(`#delete-${slug}`).click({ timeout }),
         ]);
       } catch {
         throw new PluginDeletionFailedError(slug);

@@ -172,10 +172,21 @@ Then("the newest backup was made by the scheduled job", async ({ site }) => {
  * Both sources in one step, because either alone is a weaker claim than it looks: the table can
  * render rows for archives that no longer exist, and the tally can count archives the table never
  * shows. The number comes from the scenario, so neither source can quietly define the answer.
+ *
+ * **The table is re-read from the server first, and that is load-bearing.** What is on screen is
+ * refreshed by the plugin's own client-side poll — `backwpup-generate.js` asks `backwpup_working`
+ * every 750 ms and re-fetches the listing only once that reports the job done — so immediately
+ * after a backup the rendered table still holds the state from before it, and asserting against it
+ * is a race rather than a check. There is no barrier that would fix that in place: whether the
+ * refresh happens at all depends on a race inside the plugin (a job that finishes before the page
+ * reload it triggers leaves no poll running at all), and both outcomes issue the same `backups`
+ * call, so nothing distinguishes the stale fetch from the fresh one. Reading the table back from
+ * the server is therefore the only form of this assertion that is not timing-dependent.
  */
 Then(
   "the backup history shows {int} backup(s)",
   async ({ site, backupHistory }, expected: number) => {
+    await backupHistory.reload();
     await backupHistory.expectRowCount(expected);
     expect(
       await countBackups(site.transport),
@@ -187,11 +198,16 @@ Then(
 /**
  * That nothing in the history failed or was aborted.
  *
+ * Re-read from the server for the reason the count step gives — and here that is what stops the
+ * assertion passing for free rather than merely making it reliable: a stale table straight after a
+ * backup renders no rows at all, and "no row failed" is trivially true of no rows.
+ *
  * Matched on the delete control the row template offers only on that branch, so an *aborted*
  * backup counts too — it renders no failure icon at all, and keying on the icon would let exactly
  * the rows this exists to catch pass through. See {@link BackupHistoryTable.failedRows}.
  */
 Then("no backup in the history has failed", async ({ backupHistory }) => {
+  await backupHistory.reload();
   await backupHistory.expectNoFailures();
 });
 

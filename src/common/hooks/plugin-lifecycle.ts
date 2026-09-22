@@ -3,6 +3,7 @@ import {
   PluginActivationFailedError,
   SiteResidueRemovalFailedError,
 } from "../wp/errors";
+import { isEmptyDbResidue, removeSiteDbResidue } from "../wp/db-residue";
 import { clearDebugLog, scanDebugLog } from "../wp/log";
 import { ensurePluginAbsent, isPluginActive } from "../wp/plugin";
 import { prepareSiteDataDirs, removeSiteResidue } from "../wp/residue";
@@ -10,6 +11,7 @@ import { pluginSitePath } from "../wp/paths";
 import { stageAndInstallPlugin } from "../wp/staging";
 import { errorMessage } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
+import type { SiteDbResidue } from "../wp/db-residue";
 import type { ResolvedArtifact } from "../artifacts/types";
 import type { Transport } from "../config/types";
 
@@ -21,8 +23,26 @@ import type { Transport } from "../config/types";
  * Two operations, mirroring the hook pair:
  *  - {@link installPluginUnderTest} — scope the log, guarantee a clean baseline, install.
  *  - {@link teardownPluginUnderTest} — judge what PHP wrote, then restore the baseline: remove the
- *    plugin *and* the data it left on disk, which its uninstall deliberately keeps.
+ *    plugin *and* the data it left behind, on disk and in the database.
  */
+
+/**
+ * What one product leaves on a site, in the two places a plugin's own uninstall does not reach.
+ *
+ * Grouped because the hooks always carry both and neither means much alone: `files` is what the
+ * uninstall *deliberately* keeps (a user's backups are not the installer's to delete), `db` is what
+ * it would have removed had it been able to run at all. Passing them as one value also keeps the
+ * teardown's parameter list readable, which two more positional lists would not.
+ */
+export interface DeclaredResidue {
+  /** Paths relative to the WordPress root — `ProductConfig.siteResidue`. */
+  readonly files: readonly string[];
+  /** The database footprint — `ProductConfig.siteDbResidue`. */
+  readonly db: SiteDbResidue;
+}
+
+/** A product that declares neither kind of leftover; every step below then costs nothing. */
+const NO_RESIDUE: DeclaredResidue = { files: [], db: {} };
 
 /**
  * Tag that opts a scenario into the plugin lifecycle: the artifact under test is installed and
@@ -47,6 +67,11 @@ export const PLUGIN_TAG = "@plugin";
  * still well inside this budget, but the breakdown above is a floor and not a total. The cost is
  * round-trips rather than work: a product declaring many data paths would pay linearly, and batching
  * the paths into single commands is the lever if it ever matters.
+ *
+ * The leftover-footprint sweep adds **one `wp eval` per hook** on the ordinary path — a product that
+ * declares one stops after the scan that finds nothing, and one that declares none pays no
+ * round-trip at all. Only a site that really is carrying a footprint pays the removal and the
+ * verifying re-read, which is exactly the run that has time to spare.
  *
  * Applied per hook — so a hang is reported as a hook timeout naming the hook, rather than as an
  * opaque scenario timeout — **and** added to the scenario's own budget by {@link extendedTimeout},
@@ -104,6 +129,14 @@ export function extendedTimeout(current: number): number {
  * install *fresh*: `ensurePluginAbsent` runs that uninstall procedure, so leftover options and
  * tables from an earlier (or crashed) run cannot leak into this scenario's assertions.
  *
+ * Between the removal and the install sits the one step that copes with a site the removal could
+ * not clean: the plugin's **database footprint**, swept off what is actually there rather than off
+ * whether the plugin is installed. `ensurePluginAbsent` is gated on a file test, so a site whose
+ * plugin directory has gone while its rows remain is skipped as already-clean and the install lands
+ * on top of a previous run's state — see {@link removeSiteDbResidue} for what that costs. It runs
+ * *after* the removal on purpose: a still-installed plugin re-creates its own rows on the next
+ * request, so sweeping before that point would achieve nothing.
+ *
  * The install is followed by an explicit **is-it-active?** check rather than trusting
  * `wp plugin install --activate` to fail loudly, mirroring the discipline the removal path already
  * applies to WP-CLI's ambiguous exit codes. It is also the one assertion that catches an archive
@@ -126,8 +159,8 @@ export function extendedTimeout(current: number): number {
  * @param artifact - the resolved artifact under test. Its `slug` addresses the plugin without
  * knowing the edition, and its `zipPath` is staged onto the site first — a runner path means
  * nothing to a remote `wp`.
- * @param residue - the product's declared data paths (`ProductConfig.siteResidue`), the same list the
- * teardown clears. Defaults to none, so a product that declares nothing pays nothing.
+ * @param residue - what this product leaves behind, on disk and in the database. Defaults to
+ * neither, so a product that declares nothing pays nothing.
  * @throws Error if the artifact's slug is unusable, if the removal, the install or the directory
  * preparation fails, or {@link PluginActivationFailedError} if the plugin is not active afterwards.
  * Ownership normalisation is best-effort and never throws.
@@ -135,7 +168,7 @@ export function extendedTimeout(current: number): number {
 export async function installPluginUnderTest(
   transport: Transport,
   artifact: ResolvedArtifact,
-  residue: readonly string[] = [],
+  residue: DeclaredResidue = NO_RESIDUE,
 ): Promise<void> {
   // Before the first command: `stageAndInstallPlugin` validates the slug too, but by then the log
   // has been cleared and an uninstall has been attempted with it. A slug this suite cannot use is
@@ -143,6 +176,7 @@ export async function installPluginUnderTest(
   pluginSitePath(artifact.slug);
   await clearDebugLog(transport);
   await ensurePluginAbsent(transport, artifact.slug);
+  await sweepDbResidue(transport, residue.db, "before installing");
   await stageAndInstallPlugin(transport, artifact.zipPath, {
     activate: true,
     slug: artifact.slug,
@@ -153,7 +187,33 @@ export async function installPluginUnderTest(
   // After the install, because a fresh install is what removes the previous scenario's copy of these
   // directories; before any scenario step, because the first writer is otherwise whoever gets there
   // first. See `prepareSiteDataDirs` for the failure this prevents.
-  await prepareSiteDataDirs(transport, residue);
+  await prepareSiteDataDirs(transport, residue.files);
+}
+
+/**
+ * Clears a leftover database footprint and says so when there was one.
+ *
+ * Silent on the common path — a site that was left clean has nothing to report, and a line per
+ * scenario would train everyone to ignore it. When it *does* fire, something abnormal happened to
+ * the previous run and the counts are the evidence, so they are printed rather than swallowed.
+ *
+ * @param transport - the target site's transport.
+ * @param db - the product's declared footprint.
+ * @param when - where in the lifecycle this ran, for the message.
+ * @throws whatever {@link removeSiteDbResidue} throws; the caller decides what that means.
+ */
+async function sweepDbResidue(
+  transport: Transport,
+  db: SiteDbResidue,
+  when: string,
+): Promise<void> {
+  const removed = await removeSiteDbResidue(transport, db);
+  if (isEmptyDbResidue(removed)) return;
+  console.warn(
+    `[hooks] ${when}, cleared a leftover plugin footprint from the site: ` +
+      `${String(removed.options.length)} option(s), ${String(removed.tables.length)} table(s). ` +
+      "An earlier run's plugin files were removed without its uninstall ever running.",
+  );
 }
 
 /**
@@ -174,11 +234,13 @@ export interface ScenarioReport {
  * Closes out a plugin scenario: judge what PHP wrote to `debug.log`, remove the plugin, then clear
  * the data it left on disk.
  *
- * **All three duties always run, whatever the ones before them did.** That independence is the
- * point of the third: uninstalling a plugin does not delete the files it wrote — nor should it, for
- * a real user — so a suite that reinstalls per scenario accumulates them until the cell runs out of
- * disk. Skipping the sweep because the uninstall failed would lose exactly the runs most likely to
- * have left a mess behind.
+ * **All four duties always run, whatever the ones before them did.** That independence is the point
+ * of the last two: uninstalling a plugin does not delete the files it wrote — nor should it, for a
+ * real user — so a suite that reinstalls per scenario accumulates them until the cell runs out of
+ * disk. Skipping a sweep because the uninstall failed would lose exactly the runs most likely to
+ * have left a mess behind. The database sweep is ordered straight after the removal, and is what
+ * catches a footprint the plugin's own uninstall did not take with it — a table re-created by a
+ * request that outlived the uninstall, or rows left by a run killed between the two.
  *
  * When more than one fails, the **debug-log verdict wins**: it is a statement about the product
  * under test, whereas a cleanup failure is about the environment. Cleanup failures are never merely
@@ -194,17 +256,18 @@ export interface ScenarioReport {
  * @param transport - the target site's transport.
  * @param slug - the plugin slug to remove; from the resolved artifact, so no edition branching.
  * @param options - the product's `debug.log` scan preset (`ignore` / `source` patterns).
- * @param residue - the product's declared leftover paths, relative to the WordPress root. Empty
- * for a product that leaves nothing behind, which then costs nothing.
+ * @param residue - what this product leaves behind, on disk and in the database. Either being empty
+ * costs nothing.
  * @param report - the scenario's result and attachment sink.
  * @throws {@link DebugLogFatalError} when PHP logged a fatal, else the first cleanup failure —
- * from {@link ensurePluginAbsent}, or from a residue path that is not a usable declaration.
+ * from {@link ensurePluginAbsent}, from the database sweep (a footprint that survived removal, or a
+ * declaration the site refuses), or from a residue path that is not a usable declaration.
  */
 export async function teardownPluginUnderTest(
   transport: Transport,
   slug: string,
   options: ScanDebugLogOptions,
-  residue: readonly string[],
+  residue: DeclaredResidue,
   report: ScenarioReport,
 ): Promise<void> {
   let failure: Error | undefined;
@@ -231,7 +294,10 @@ export async function teardownPluginUnderTest(
   };
 
   await cleanUp(() => ensurePluginAbsent(transport, slug));
-  await cleanUp(() => sweepResidue(transport, residue, report));
+  await cleanUp(() =>
+    sweepDbResidue(transport, residue.db, "after the scenario"),
+  );
+  await cleanUp(() => sweepResidue(transport, residue.files, report));
 
   if (failure !== undefined) throw failure;
 }

@@ -1,5 +1,6 @@
 import { isNonEmptyString, isObject } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
+import type { SiteDbResidue } from "../wp/db-residue";
 import type { Edition, SiteConfig } from "./types";
 
 /**
@@ -143,4 +144,31 @@ export function registerSiteResidue(
  */
 export function getSiteResidue(product: string): readonly string[] {
   return siteResidue.get(product) ?? [];
+}
+
+// Per-process registry: product -> the database footprint it leaves when its files go without its
+// own uninstall running.
+const siteDbResidue = new Map<string, SiteDbResidue>();
+
+/**
+ * Registers the database footprint a product leaves on a site, for the shared hooks to sweep.
+ * Called while building the config, in each process. A product that declares none is not
+ * registered.
+ */
+export function registerSiteDbResidue(
+  product: string,
+  residue: SiteDbResidue | undefined,
+): void {
+  if (residue === undefined) return;
+  siteDbResidue.set(product, residue);
+}
+
+/**
+ * The database footprint for a product, or an empty declaration when it declares none.
+ *
+ * Never throws, for the same reason as {@link getSiteResidue}: a product whose uninstall is the
+ * only cleanup its database needs is a legitimate state, and the sweep then costs no round-trip.
+ */
+export function getSiteDbResidue(product: string): SiteDbResidue {
+  return siteDbResidue.get(product) ?? {};
 }

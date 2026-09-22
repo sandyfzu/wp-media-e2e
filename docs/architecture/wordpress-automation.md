@@ -373,6 +373,66 @@ plus an `uncleared-site-data` report attachment) rather than failing the run. A 
 usable declaration, an implausible `rootDir` for a privileged delete, or a transport that cannot run
 a command, still throws.
 
+## Left-over plugin footprint ([`wp/db-residue.ts`](../../src/common/wp/db-residue.ts))
+
+The mirror image of the section above. A plugin's uninstall keeps the *files* it wrote on purpose;
+it clears its *database* footprint properly — but that cleanup lives in the plugin's own
+`uninstall.php`, so it only ever runs **while the plugin's files are still there**.
+
+`ensurePluginAbsent` is gated on `wp plugin is-installed`, which is a **file** test. So a site whose
+plugin directory has gone while its rows remain looks already-clean, the uninstall block is skipped,
+and the next install lands on top of the previous run's state. Measured on `pro@apache` with
+BackWPup: `wp plugin uninstall <slug> --deactivate` — the one call [the plugin
+lifecycle](#plugin-lifecycle-wpplugints) forbids, precisely because the plugin's own guard then
+skips its cleanup — deletes the files and leaves **26 options and `wp_bwpup_backups`** behind. The
+next run then fails in the product's own setup with *"a freshly installed BackWPup should owe its
+onboarding"*, because the plugin reads its leftover `backwpup_version`, concludes it is an upgrade
+rather than a first install, and never sets the onboarding flag.
+
+So the sweep keys off the **footprint**, never off whether the plugin is installed.
+
+- A product declares it as `ProductConfig.siteDbResidue` — `optionsContaining` (fragments of option
+  names) and `tables` (unprefixed) — and the shared `@plugin` hooks sweep it whenever they find it.
+  Read from the per-process registry, so the hooks never import product code.
+- **Fragments match anywhere in a name, not as a prefix.** A plugin's transients are options whose
+  names it does not begin: BackWPup's `backwpup_<jobid>_gdrive` is stored as
+  `_site_transient_backwpup_<jobid>_gdrive`, observed on a cell during an ordinary scenario. They are
+  matched *literally* — `%` and `_` are escaped with `esc_like` — so a fragment can only ever mean
+  itself.
+- **Ordering is the guarantee, and it is not cosmetic.** Both callers sweep immediately after
+  `ensurePluginAbsent`, which throws rather than return with the plugin still installed. Measured on
+  a cell: sweeping while the plugin is active *does* delete the rows, and the very next WordPress
+  request puts all 26 options and the table straight back, because the plugin re-creates its own
+  footprint on `init`.
+- **Rows go through `delete_option`, not a `DELETE`**, so WordPress invalidates its own caches as it
+  would for any other deletion — which is why no cache flush follows. Tables are dropped with
+  `IF EXISTS`. Removal is then **verified by re-reading**, in a second process and straight from the
+  database: `DROP` reports success for a table it never touched, and `delete_option` returns false
+  both for "absent" and for "a filter refused it".
+- WordPress is loaded **without its plugins** (`--skip-plugins`), so the sweep's outcome cannot
+  depend on what else the site has installed — these cells carry plugins that hook option and
+  transient writes. Core, and so `delete_option`, is unaffected.
+- **Two guards, both aimed at a wrong declaration rather than a hostile one.** `PROTECTED_TABLES`
+  refuses a declaration naming one of WordPress's own tables, at declaration time. `PROTECTED_OPTIONS`
+  is checked against what the query actually *matched* — a fragment is not a name, and only the site
+  can say what it reaches — and refuses the **whole** sweep, before anything is deleted, if the match
+  reached `siteurl`, `active_plugins`, `cron`, the prefixed `user_roles`, or the rest of that list.
+  The same bet `PROTECTED_SITE_PATHS` makes for a privileged `rm -rf`, made here for a `DELETE`.
+  A fragment shorter than three characters is refused outright: matched anywhere in a name, it would
+  sweep the site rather than the product.
+- Nothing here is ever **elevated** — it is WP-CLI and SQL, not the filesystem. Verified on both
+  cells: a sweep of a clean site leaves its entire state (options, tables, user meta, roles,
+  capabilities, cron) byte-identical and runs no privileged command.
+- Multisite is **refused**, not half-handled: there a plugin keeps its options in `sitemeta` per
+  network, and a sweep that quietly looked in the wrong table would report a dirty site as clean.
+
+**Scope, deliberately.** Only options and tables, because those are the two that *block a fresh
+install* — the options are what a plugin reads to decide it has been installed before, the table is
+what its installer tries to create again. A footprint also holds roles, capabilities and user meta;
+none of those blocks anything, activation re-establishes them idempotently, and the next scenario's
+own uninstall removes them, so they cannot accumulate. Declaring them would mean reproducing the
+plugin's role handling here — a second implementation to keep in step with it.
+
 ## File ownership ([`wp/ownership.ts`](../../src/common/wp/ownership.ts))
 
 The same two-user problem as the data directories above, one step earlier: **WP-CLI unpacks a
@@ -648,9 +708,16 @@ the two hard parts are solved once.
   is what makes it safe for values **read off a site** rather than written by hand. A value with
   no JSON form (`undefined`, a function, a symbol) throws here, naming the caller's mistake,
   instead of failing deep inside `Buffer.from`.
-- `evalPhp(transport, php, what, scope)` runs the snippet and turns a non-zero exit into a throw
-  carrying whatever PHP or WP-CLI said — including a snippet's own `WP_CLI::error()`, which is how
-  a snippet refuses in the site's own words.
+- `evalPhp(transport, php, what, scope, options)` runs the snippet and turns a non-zero exit into a
+  throw carrying whatever PHP or WP-CLI said — including a snippet's own `WP_CLI::error()`, which is
+  how a snippet refuses in the site's own words.
+- `options.skipPlugins` boots WordPress **without its plugins** (`--skip-plugins`), for a snippet
+  whose answer must not depend on what else the site has installed — a cleanup step, or anything
+  asking about a plugin that is supposed to be gone. Core is fully loaded either way, so `$wpdb` and
+  the option API behave normally; only plugin code and the filters it registers stay out. Off by
+  default, because a snippet asking about a *running* site needs the site as it really runs. The
+  flag leads the argv: WP-CLI reads global parameters before it dispatches, and one placed after the
+  snippet is handed to `eval` as another positional argument.
 
 **Any value that came from outside this codebase goes through `phpLiteral`** — a site's own data, a
 scenario's input, a fixture. That has no exceptions: interpolating such a value into PHP source is

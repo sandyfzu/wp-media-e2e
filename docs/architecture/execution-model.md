@@ -98,6 +98,15 @@ must never carry secrets. The split ([`src/common/config/metadata.ts`](../../src
   worker process, so each worker rebuilds its pool locally from the sites files —
   never from a report-bound channel.
 
+The same channel carries the rest of a product's policy to the **shared scenario hooks**, which must
+not import product code: its debug-log preset (`registerDebugLogOptions` / `getDebugLogOptions` —
+RegExps, which JSON cannot express anyway), the paths it leaves on disk (`registerSiteResidue` /
+`getSiteResidue`) and the footprint it leaves in the database (`registerSiteDbResidue` /
+`getSiteDbResidue`). The last two *would* fit in metadata and still do not go there: one channel for
+product policy is easier to follow than two. Unlike `getPool`, each of these returns an empty value
+rather than throwing — a product that declares none is a legitimate state, and the corresponding
+step then costs no round-trip at all.
+
 ## Artifact directories & lifecycle
 
 [`src/common/config/run-context.ts`](../../src/common/config/run-context.ts)

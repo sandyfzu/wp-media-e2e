@@ -42,14 +42,14 @@ src/
 │   ├── pages/              # cross-product Page Object Model (e.g. plugins.page.ts)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, verify, consume, pre-warm)
-│   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, log, options, cron, files, archive, residue, ownership, paths, cache, db, teardown, errors)
+│   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/<product>/
     ├── config/             # <product>.config.ts + sites.json / sites.*.json / sites.example.json
     ├── fixtures.ts         # this product's test instance: common's + its page objects
     ├── features/           # *.feature (Gherkin)
     ├── pages/              # this product's page objects (+ locator-contract specs)
     ├── steps/              # product-specific steps
-    └── support/            # debug-log presets, REST barriers, WP-CLI readers, site setup
+    └── support/            # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, site setup
 
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)
@@ -178,17 +178,22 @@ module so it is unit-testable without the runtime.
   artifact staged and installed with `--activate`, its files handed back to the ownership the
   **site** uses (WP-CLI installs as the transport's user, which the web server is not — see
   `wp/ownership.ts`) — and the plugin's **active state re-asserted**, never inferred from the
-  install's exit code. The edition is never named:
+  install's exit code — and, between the removal and the install, the plugin's leftover **database
+  footprint** swept off what is actually on the site (`ProductConfig.siteDbResidue`). That sweep is
+  keyed off the footprint, never off `is-installed`, which is a _file_ test: a site whose plugin
+  directory went without its `uninstall.php` ever running looks clean and would otherwise be
+  installed straight on top of the last run's rows. The edition is never named:
   the slug comes from `pluginArtifact("plugin").slug`. Finally the product's declared data
   directories (`ProductConfig.siteResidue`) are created, opened to **both** users sharing the
   docroot and handed to the site's ownership — WP-CLI and the web server are different users on a
   real cell, and whichever writes first would otherwise lock the other out (`prepareSiteDataDirs`).
 - **After** — `debug.log` scanned with the product's preset: a **PHP fatal fails the
   scenario** (`DebugLogFatalError`) with the log attached; warnings/notices are logged.
-  Then the plugin is removed, and finally the **files it left behind** are cleared
-  (`ProductConfig.siteResidue`) — a plugin's uninstall keeps the data it wrote, so a suite that
-  reinstalls per scenario would fill the cell's disk. All three duties always run, independently:
-  the sweep is not skipped because the uninstall failed. The log verdict wins when more than one
+  Then the plugin is removed, then any **database footprint** that outlived its uninstall is swept,
+  and finally the **files it left behind** are cleared (`ProductConfig.siteResidue`) — a plugin's
+  uninstall keeps the data it wrote, so a suite that reinstalls per scenario would fill the cell's
+  disk. All four duties always run, independently: a sweep is not skipped because the uninstall
+  failed. The log verdict wins when more than one
   fails, and the others are still logged. Left-over data the transport's user is not _permitted_
   to remove is reported, not failed — see
   [wordpress-automation.md](docs/architecture/wordpress-automation.md).
@@ -423,6 +428,18 @@ ssh). Highlights — full reference in
   lands outside — a symlink in _any_ parent, not just the last component, otherwise redirects a root
   `chmod`/`mkdir`/`rm -rf` out of the docroot while every string comparison agrees. A path that
   cannot be resolved is refused too.
+- [`wp/db-residue.ts`](src/common/wp/db-residue.ts) is the mirror image: the rows a plugin leaves
+  when its **files** go without its `uninstall.php` ever running — which is the only time that
+  cleanup cannot run. Declared per product as `ProductConfig.siteDbResidue` (`optionsContaining`
+  fragments, matched **anywhere** in a name so a plugin's transients are caught, plus unprefixed
+  `tables`) and swept off the footprint, never off `is-installed`. Measured on a cell: the forbidden
+  `uninstall --deactivate` leaves 26 options and `wp_bwpup_backups`, and the next run then blames the
+  product for not owing its onboarding. Ordered right after `ensurePluginAbsent` because an installed
+  plugin re-creates its own footprint on `init` (measured). Rows go through `delete_option` so caches
+  invalidate themselves, removal is verified by re-reading, WordPress is loaded `--skip-plugins`, and
+  nothing is ever elevated. Two guards refuse a wrong declaration rather than a hostile one:
+  `PROTECTED_TABLES` at declaration time, `PROTECTED_OPTIONS` against what the query actually matched
+  — and that one refuses the **whole** sweep before deleting anything. Multisite is refused outright.
 - [`wp/residue.ts`](src/common/wp/residue.ts) removes the files a plugin leaves behind after it
   is uninstalled, from the paths its product declares as `ProductConfig.siteResidue`. Validated
   before removal and **verified afterwards**, never inferred from `rm`'s exit code. Removal runs
@@ -595,7 +612,9 @@ Update it when you change anything about:
 - How products, cells, pools, or run units are defined or selected.
 - The `parallelIndex` invariant or the worker-to-site binding.
 - The config factory (`createProductConfig`) or the project pairs it generates.
-- The metadata/credential registry (`registerPool`, `routingMetadata`).
+- The metadata/credential registry (`registerPool`, `routingMetadata`), or the per-process
+  registries that carry a product's policy to the shared hooks (`registerDebugLogOptions`,
+  `registerSiteResidue`, `registerSiteDbResidue`).
 - Artifact directories, `RUN_ID` handling, or the `*_ROOT` env vars.
 
 ### docs/architecture/wordpress-automation.md
@@ -609,8 +628,10 @@ Update it when you change anything about:
 - The debug-log API (`readDebugLog`, `clearDebugLog`, `scanDebugLog`, `ScanDebugLogOptions`).
 - File ownership (`ownership.ts`: `planOwnership`, `normalizeOwnership`, the grant rule,
   `transport.fileOwner`) or the shared path guards (`paths.ts`).
+- The leftover-footprint sweep (`db-residue.ts`: `SiteDbResidue`, `findSiteDbResidue`,
+  `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`).
 - The WP-Cron helpers (`cron.ts`: `nextScheduled`, `triggerScheduledEvent`).
-- The PHP bridge (`php.ts`: `phpLiteral`, `evalPhp`), the file readers (`files.ts`:
+- The PHP bridge (`php.ts`: `phpLiteral`, `evalPhp`, `EvalPhpOptions`), the file readers (`files.ts`:
   `fileChecksum`), or archive inspection (`archive.ts`: `findArchiveEntries`, `readArchiveEntry`).
 - Any other `wp/` module (`cache.ts`, `db.ts`, `errors.ts`, `teardown.ts`).
 

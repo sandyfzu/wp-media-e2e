@@ -23,7 +23,7 @@ import {
   installPluginUnderTest,
   teardownPluginUnderTest,
 } from "./plugin-lifecycle";
-import type { ScenarioReport } from "./plugin-lifecycle";
+import type { DeclaredResidue, ScenarioReport } from "./plugin-lifecycle";
 import type { ResolvedArtifact } from "../artifacts/types";
 import type { LocalTransport } from "../config/types";
 
@@ -62,13 +62,17 @@ const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
  *  - `WP_STUB_FAIL` — an argv prefix to fail (e.g. `"plugin uninstall"`), leaving state untouched.
  *  - `WP_STUB_SILENT_ACTIVATE_FAIL` — install succeeds and exits 0, but the plugin never becomes
  *    active: the failure mode an exit code alone would miss.
+ *  - a `db-residue` marker in the state dir — a leftover database footprint, which the sweep's own
+ *    snippet reports until the snippet that deletes runs, exactly as a real site would.
  */
 const STUB_WP = `#!/usr/bin/env bash
-echo "$@" >> "$WP_STUB_ARGV_FILE"
+printf '%s' "$*" | tr '\n' ' ' >> "$WP_STUB_ARGV_FILE"
+printf '\n' >> "$WP_STUB_ARGV_FILE"
 if [ -n "$WP_STUB_FAIL" ] && [[ "$*" == "$WP_STUB_FAIL"* ]]; then
   echo "stub: refusing $*" >&2
   exit 1
 fi
+if [ "$1" = "--skip-plugins" ]; then shift; fi
 S="$WP_STUB_STATE_DIR"
 case "$1 $2" in
   "plugin is-installed") [ -e "$S/installed" ] && exit 0 || exit 1 ;;
@@ -85,10 +89,35 @@ esac
 if [ "$1" = "eval" ]; then
   case "$2" in
     *file_get_contents*) printf '%s' "$WP_STUB_LOG" ;;
+    *leftover-footprint*)
+      if [[ "$2" == *delete_option* ]]; then rm -f "$S/db-residue"; fi
+      if [ -e "$S/db-residue" ]; then
+        printf '{"prefix":"wp_","options":["backwpup_version"],"tables":["wp_bwpup_backups"]}'
+      else
+        printf '{"prefix":"wp_","options":[],"tables":[]}'
+      fi ;;
   esac
 fi
 exit 0
 `;
+
+/** Marks the site as carrying a leftover database footprint with no plugin files behind it. */
+function seedDbResidue(): void {
+  writeFileSync(join(stateDir, "db-residue"), "");
+}
+
+/** True while the stub site still carries that footprint. */
+function hasDbResidue(): boolean {
+  return existsSync(join(stateDir, "db-residue"));
+}
+
+/** A declaration covering both halves, for the cases that exercise the database sweep. */
+function bothResidue(...paths: string[]): DeclaredResidue {
+  return {
+    files: paths,
+    db: { optionsContaining: ["backwpup"], tables: ["bwpup_backups"] },
+  };
+}
 
 /** Marks the plugin as already installed and active, as a crashed earlier run would leave it. */
 function seedInstalled(): void {
@@ -119,6 +148,14 @@ function artifact(slug = "backwpup-pro"): ResolvedArtifact {
     origin: "built",
     resolvedAt: "2026-07-28T00:00:00.000Z",
   };
+}
+
+/**
+ * The filesystem half of a {@link DeclaredResidue}, which is what these cases exercise.
+ * The database half has its own suite in `wp/db-residue.spec.ts`.
+ */
+function files(...paths: string[]): DeclaredResidue {
+  return { files: paths, db: {} };
 }
 
 /** Every `wp` invocation so far, one per line. */
@@ -278,9 +315,11 @@ test.describe("installPluginUnderTest", () => {
   // docroot; leaving it out let whichever user wrote first lock the other out, which surfaced as a
   // PHP fatal from the plugin rather than as anything a scenario could explain.
   test("opens the product's declared data directories after installing", async () => {
-    await installPluginUnderTest(local, artifact(), [
-      "wp-content/uploads/backwpup-restore",
-    ]);
+    await installPluginUnderTest(
+      local,
+      artifact(),
+      files("wp-content/uploads/backwpup-restore"),
+    );
     const dir = join(wpRoot, "wp-content/uploads/backwpup-restore");
     expect(existsSync(dir)).toBe(true);
     expect((statSync(dir).mode & 0o777).toString(8)).toBe("777");
@@ -323,7 +362,7 @@ test.describe("installPluginUnderTest", () => {
     await installPluginUnderTest(
       { ...local, fileOwner: "not a valid spec" },
       artifact(),
-      ["wp-content/uploads/backwpup-restore"],
+      files("wp-content/uploads/backwpup-restore"),
     );
 
     // First that ownership was genuinely *attempted* and refused: without this the rest of the test
@@ -354,11 +393,64 @@ test.describe("installPluginUnderTest", () => {
     expect(isActive()).toBe(true);
   });
 
+  /**
+   * The defect the sweep exists for. A run interrupted between a plugin's uninstall and its teardown —
+   * or one ended with the `uninstall --deactivate` this suite forbids — leaves the plugin's rows
+   * behind with no files to explain them. `is-installed` is a *file* test, so the removal above is
+   * skipped and, before this sweep, the install landed straight on top of the previous run's state.
+   */
+  test("clears a leftover footprint even though there is no plugin to uninstall", async () => {
+    seedDbResidue();
+
+    await installPluginUnderTest(local, artifact(), bothResidue());
+
+    expect(hasDbResidue()).toBe(false);
+    expect(
+      wpCalls().filter((call) => call.startsWith("plugin uninstall")),
+    ).toEqual([]);
+    expect(isActive()).toBe(true);
+  });
+
+  // Ordering is the whole guarantee: measured on a cell, a plugin that is still installed re-creates
+  // every row of its own footprint on the next request, so a sweep before the removal achieves
+  // nothing and a sweep after the install undoes the install's own work.
+  test("sweeps the footprint after the removal and before the install", async () => {
+    seedInstalled();
+    seedDbResidue();
+
+    await installPluginUnderTest(local, artifact(), bothResidue());
+
+    const calls = wpCalls();
+    const uninstalled = calls.findIndex((c) =>
+      c.startsWith("plugin uninstall"),
+    );
+    const swept = calls.findIndex((c) => c.includes("leftover-footprint"));
+    const installed = calls.findIndex((c) => c.startsWith("plugin install"));
+    expect(uninstalled).toBeGreaterThanOrEqual(0);
+    expect(swept).toBeGreaterThan(uninstalled);
+    expect(installed).toBeGreaterThan(swept);
+  });
+
+  // A clean site is the common case and must not pay for the recovery path: one read, no writes.
+  test("costs a single read on a site with no leftover footprint", async () => {
+    await installPluginUnderTest(local, artifact(), bothResidue());
+
+    const footprint = wpCalls().filter((c) => c.includes("leftover-footprint"));
+    expect(footprint).toHaveLength(1);
+    expect(footprint[0]).not.toContain("delete_option");
+  });
+
   test("fails loudly when the install fails, rather than leaving a plugin-less scenario", async () => {
     process.env.WP_STUB_FAIL = "plugin install";
     await expect(installPluginUnderTest(local, artifact())).rejects.toThrow(
       /install .* failed/,
     );
+  });
+
+  // A product that declares no footprint must not pay a round-trip discovering that.
+  test("asks the site nothing when the product declares no footprint", async () => {
+    await installPluginUnderTest(local, artifact(), files());
+    expect(wpCalls().some((c) => c.includes("leftover-footprint"))).toBe(false);
   });
 
   test("fails when a stale copy cannot be removed, so no scenario runs on a dirty baseline", async () => {
@@ -384,7 +476,7 @@ test.describe("teardownPluginUnderTest", () => {
     seedInstalled();
     const report = reportSink();
 
-    await teardownPluginUnderTest(local, "backwpup-pro", {}, [], report);
+    await teardownPluginUnderTest(local, "backwpup-pro", {}, files(), report);
 
     expect(isInstalled()).toBe(false);
     expect(report.attached.size).toBe(0);
@@ -400,7 +492,7 @@ test.describe("teardownPluginUnderTest", () => {
       local,
       "backwpup-pro",
       {},
-      [],
+      files(),
       report,
     ).catch((error: unknown) => error);
 
@@ -416,7 +508,7 @@ test.describe("teardownPluginUnderTest", () => {
     process.env.WP_STUB_LOG = "PHP Parse error: syntax error\n";
 
     await expect(
-      teardownPluginUnderTest(local, "backwpup-pro", {}, [], reportSink()),
+      teardownPluginUnderTest(local, "backwpup-pro", {}, files(), reportSink()),
     ).rejects.toThrow(DebugLogFatalError);
 
     // The fatal must not cost the next scenario its clean site.
@@ -429,7 +521,7 @@ test.describe("teardownPluginUnderTest", () => {
     const report = reportSink();
 
     await expect(
-      teardownPluginUnderTest(local, "backwpup-pro", {}, [], report),
+      teardownPluginUnderTest(local, "backwpup-pro", {}, files(), report),
     ).resolves.toBeUndefined();
     // Named, so the line is traceable to its scenario when workers share a terminal.
     expect(warnings.join("\n")).toMatch(
@@ -448,7 +540,7 @@ test.describe("teardownPluginUnderTest", () => {
         local,
         "backwpup-pro",
         { ignore: [/known-benign/] },
-        [],
+        files(),
         reportSink(),
       ),
     ).resolves.toBeUndefined();
@@ -458,7 +550,7 @@ test.describe("teardownPluginUnderTest", () => {
     process.env.WP_STUB_LOG = "PHP Notice:  undefined index\n";
     const report = reportSink(true);
 
-    await teardownPluginUnderTest(local, "backwpup-pro", {}, [], report);
+    await teardownPluginUnderTest(local, "backwpup-pro", {}, files(), report);
 
     // The log is usually where a failing scenario's real cause is.
     expect(report.attached.get("debug.log")).toContain("PHP Notice");
@@ -468,7 +560,7 @@ test.describe("teardownPluginUnderTest", () => {
     seedInstalled();
     process.env.WP_STUB_FAIL = "plugin uninstall";
     await expect(
-      teardownPluginUnderTest(local, "backwpup-pro", {}, [], reportSink()),
+      teardownPluginUnderTest(local, "backwpup-pro", {}, files(), reportSink()),
     ).rejects.toThrow(/still installed after uninstall/);
   });
 
@@ -478,7 +570,7 @@ test.describe("teardownPluginUnderTest", () => {
     process.env.WP_STUB_LOG = "PHP Fatal error:  the real defect\n";
 
     await expect(
-      teardownPluginUnderTest(local, "backwpup-pro", {}, [], reportSink()),
+      teardownPluginUnderTest(local, "backwpup-pro", {}, files(), reportSink()),
     ).rejects.toThrow(DebugLogFatalError);
     // Secondary, but never silent.
     expect(errors.join("\n")).toMatch(/a cleanup step also failed/);
@@ -496,11 +588,53 @@ test.describe("teardownPluginUnderTest", () => {
       local,
       "backwpup-pro",
       {},
-      ["wp-content/uploads/backwpup"],
+      files("wp-content/uploads/backwpup"),
       reportSink(),
     );
 
     expect(existsSync(leftovers)).toBe(false);
+  });
+
+  /**
+   * Teardown's own half of that duty: the uninstall is what normally clears a plugin's rows, so anything
+   * still there afterwards outlived it — a table re-created by a request that finished after the
+   * uninstall, or the rows a run killed mid-teardown never reached. Swept here so the cell is left
+   * clean rather than left for the next run's install to trip over.
+   */
+  test("clears a leftover footprint the plugin's own uninstall did not take with it", async () => {
+    seedInstalled();
+    seedDbResidue();
+
+    await teardownPluginUnderTest(
+      local,
+      "backwpup-pro",
+      {},
+      bothResidue(),
+      reportSink(),
+    );
+
+    expect(hasDbResidue()).toBe(false);
+    expect(isInstalled()).toBe(false);
+  });
+
+  // Same independence the filesystem sweep has, for the same reason: the runs that fail to uninstall
+  // are the ones most likely to have left rows behind.
+  test("clears the footprint even when the plugin removal fails", async () => {
+    seedInstalled();
+    seedDbResidue();
+    process.env.WP_STUB_FAIL = "plugin uninstall";
+
+    await expect(
+      teardownPluginUnderTest(
+        local,
+        "backwpup-pro",
+        {},
+        bothResidue(),
+        reportSink(),
+      ),
+    ).rejects.toThrow(/still installed/);
+
+    expect(hasDbResidue()).toBe(false);
   });
 
   // The property this duty is built around: the runs that fail to uninstall are exactly the ones
@@ -516,7 +650,7 @@ test.describe("teardownPluginUnderTest", () => {
         local,
         "backwpup-pro",
         {},
-        ["wp-content/uploads/backwpup"],
+        files("wp-content/uploads/backwpup"),
         reportSink(),
       ),
     ).rejects.toThrow(/still installed/);
@@ -542,7 +676,7 @@ test.describe("teardownPluginUnderTest", () => {
           { ...local, elevate: false },
           "backwpup-pro",
           {},
-          ["wp-content/uploads/backwpup"],
+          files("wp-content/uploads/backwpup"),
           report,
         ),
       ).resolves.toBeUndefined();
@@ -564,7 +698,7 @@ test.describe("teardownPluginUnderTest", () => {
         local,
         "backwpup-pro",
         {},
-        ["wp-content/uploads"],
+        files("wp-content/uploads"),
         reportSink(),
       ),
     ).rejects.toThrow(/WordPress itself owns/);
@@ -578,7 +712,7 @@ test.describe("teardownPluginUnderTest", () => {
         local,
         "backwpup-pro",
         {},
-        ["../escape"],
+        files("../escape"),
         reportSink(),
       ),
     ).rejects.toThrow(DebugLogFatalError);
@@ -594,7 +728,7 @@ test.describe("teardownPluginUnderTest", () => {
     };
 
     await expect(
-      teardownPluginUnderTest(local, "backwpup-pro", {}, [], failing),
+      teardownPluginUnderTest(local, "backwpup-pro", {}, files(), failing),
     ).rejects.toThrow(DebugLogFatalError);
     expect(warnings.join("\n")).toMatch(/could not attach debug\.log/);
   });

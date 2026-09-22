@@ -1,6 +1,6 @@
 # Phase 6 — Feature porting: BackWPup first
 
-> **Status:** in progress — **6A, 6B, 6C and 6D are done**; 6E–6I planned;
+> **Status:** in progress — **6A, 6B, 6C, 6D and 6E are done**; 6F–6I planned;
 > **6H.2 deferred** (needs storage credentials — see §4.6H.2).
 > **Date:** 2026-07-28; revised 2026-07-30 (§2.3 re-verification at the ref; storage split),
 > 2026-07-31 (§2.5 — post-implementation audit of 6B; four corrections, all verified live),
@@ -14,7 +14,18 @@
 > 2026-09-01 (§4.6D.1 — what a backup *contains*, across files, database and both; **V50–V53**
 > added, the download check strengthened to a full SHA-256, and a third adversarial round that fixed
 > eight further defects — two of which would have let a broken backup pass — and a fourth round
-> that fixed nine more, including two of round three's own fixes that did not actually work).
+> that fixed nine more, including two of round three's own fixes that did not actually work) and
+> 2026-09-18 (§2.10 — 6E shipped; **V54–V63** added. The leftover-footprint sweep is in, verified
+> against a deliberately reproduced dirty cell on both cells; **one shared-code defect found and
+> fixed** — a forced Delete click that landed on nothing and reported the timeout as the plugin's
+> fault — and **one of this plan's own claims corrected**: a dirty landing costs one scenario, not a
+> whole run) and 2026-09-18 (§2.11 — a **`free@nginx` cell** was stood up and 6E's one open acceptance
+> claim closed against it; **V64–V72** added. The Free edition is verified, not assumed, to leave the
+> same footprint as Pro) and 2026-09-18 (§2.12 — **V70 closed**: the history assertions now read
+> server-backed DOM, and a **second defect was found while fixing the first** — the reload barrier
+> they depend on could settle on the previous page's request. **V73–V75** added) and 2026-09-18
+> (§2.13 — **full audit of the 6E change set**: seven defects found and fixed, all in code the
+> gates cannot see; **V76–V79** added).
 > **Parent:** [e2e-modernization-plan.md](e2e-modernization-plan.md) §9, Phase 6 — this doc supersedes
 > that phase's summary. Phases 0–5 are done; Phase 6 is **feature content on finished rails**.
 > **Baseline (reference only):** `wp-rocket-e2e/src/backwpup/` — 12 feature files, 28 scenarios, ~1.6k LoC.
@@ -28,7 +39,7 @@ WP-CLI → restore → the storage credential surface → Free-edition coverage 
 storage *round-trips* are carved out as **6H.2** and **deferred** until credentials exist, so no
 other sub-phase waits on them. WP Rocket reuses 6A and gets its own breakdown afterwards (§6).
 
-**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → **6E** → 6F → 6G → 6H → 6I → *(later)* 6H.2.
+**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → **6F** → 6G → 6H → 6I → *(later)* 6H.2.
 
 Every artifact follows **Understand → Improve → Adapt → Port** (§1): read the baseline for *intent*,
 verify the plugin's real contract in source, pick the strongest signal Playwright/WP-CLI offers, then
@@ -340,6 +351,94 @@ means to stop. The branch itself is not untested: V42's fix is what makes the as
 the first place, and both of its statuses are pinned against the row template's real markup. The live
 half belongs with **6F**, which introduces `wp backwpup kill` and can issue the abort from the same
 process that starts the run.
+
+---
+
+### 2.10 Facts established while building 6E (live, on both cells, at `develop@f1ebfd0`)
+
+| # | Fact | Evidence | Consequence |
+| --- | --- | --- | --- |
+| V54 | **The state that poisons a run is reproducible on demand, and `wp plugin uninstall --deactivate` is how it happens.** That flag deletes the files while the plugin's own `uninstall.php` guard (`! class_exists( \BackWPup::class )`) skips the cleanup — the exact call this suite forbids, now shown to produce the exact leftover V53 observed. | On `pro@apache`: install, activate, `completeOnboarding()`, then that one call. Result: plugin files **gone**, **26 options** and `wp_bwpup_backups` present, `backwpup_onboarding` absent, `backwpup_version` still `9.99.99`. The suite then failed with, verbatim: *"a freshly installed BackWPup should owe its onboarding (`backwpup_onboarding` = undefined); an earlier scenario's footprint surviving its uninstall looks exactly like this"* (`support/onboarding.ts:110`). | 6E.0's requirement 1 met with the real message recorded. It is also the reproduction recipe: no kill is needed, and the state is reachable in three commands. |
+| V55 | **The footprint alone does not break a run — the *missing onboarding flag* does.** A first attempt stripped the plugin immediately after install, never onboarding it; `backwpup_onboarding` was left behind at `1`, and the next run **passed**. | That run, which passed on a site carrying 27 leftover options. The mechanism, read from source: `BackWPup_Install::activate()` → `BackWPup_Migrate::migrate()`, whose `should_migrate( $old, $new )` needs `version_compare( $old, '5.0.0', '<' )` with `$old = get_site_option( 'backwpup_version', '0.0.0' )`. A leftover `9.99.99` makes it false, so `redirect_to_onboarding()` never runs and the flag is never set. A completed onboarding is what deletes that row (`class-page-onboarding.php:174`). | Recorded because the obvious short reproduction **does not reproduce it**, and a fix validated against it would have been validated against nothing. The seed has to include a completed onboarding. |
+| V56 | **A dirty landing costs exactly one scenario, and the cell then heals itself.** The plan's framing — "a cell that starts dirty makes every later result suspect" — is stronger than what happens. | After the failing scenario of V54, a full-state snapshot of `pro@apache` was **identical to its clean baseline**: the Before hook had installed the files, so the After hook's `ensurePluginAbsent` found something to uninstall and ran the plugin's complete cleanup. | Sharpens what the sweep buys: not a suite-wide rescue, but the removal of one unexplained failure per dirty landing — and one that blames the product's onboarding for an environment fault. Worth doing, and worth not overstating. |
+| V57 | **The plugin's own uninstall is complete, so the sweep only has to cover the case where it cannot run.** | `pro@apache`, full-state snapshot (every option name, every table, every distinct user-meta key, every role, the administrator's capabilities, every cron hook) before install versus after a proper deactivate-then-uninstall: **identical**, bar two incidental WordPress core transients. That includes `bwpup_backups_version`, which the plugin's own `uninstall.php` pattern (`LIKE '%backwpup_%'`) does **not** match — BerlinDB's `Table::uninstall()` drops it. | The sweep is a recovery path, not a second implementation of the uninstall. It is only ever reached when the files are gone. |
+| V58 | **Two prefixes and a transient — a prefix match would have missed two of the three.** | The complete footprint, sampled every 6 s throughout a real UI scenario on `pro@apache` and unioned: 25 `backwpup*` options, `bwpup_backups_version`, the `wp_bwpup_backups` table, **and** `_site_transient_backwpup_gdrive_jobid_1` with its `_site_transient_timeout_…` row — on a cell with no cloud credentials configured. Three roles and eleven administrator capabilities. **No user meta at all.** | `optionsContaining` matches **anywhere** in a name, not as a prefix, and the declaration carries both `backwpup` and `bwpup`. Roles, capabilities and user meta are deliberately left out: none blocks an install, activation re-establishes them idempotently, and the next scenario's own uninstall removes them. |
+| V59 | **Sweeping while the plugin is installed is undone by the very next request**, which is why ordering — not a flag — is the guarantee. | `pro@apache`, plugin active: deleting all 27 matching options and dropping the table left the site clean, and one ordinary `wp` call afterwards restored **all 27 and the table**. The plugin re-creates its own footprint on `init`. | Both callers sweep immediately after `ensurePluginAbsent`, which throws rather than return with the plugin still installed. `--skip-plugins` is defence in depth for the sweep's own request, not a substitute for the ordering. |
+| V60 | **The sweep is a true no-op on a clean site, on both cells.** | Full-state snapshot before and after `removeSiteDbResidue` on `pro@nginx` and `pro@apache`: **byte-identical** each time, one read and no write, and no privileged command — it is WP-CLI and SQL, never the filesystem. | 6E.0's requirement 3 met. The over-match guards are not theatre either: `backwpup-helper`, a real plugin installed on both cells, stores `bwh_debug_monitor` — it does not collide, but it is exactly the kind of neighbour a careless fragment would sweep. |
+| V61 | **A hard kill produces the *other* dirty state, which the suite already recovered from.** | Killing the whole process tree mid-scenario on `pro@nginx` left the plugin **installed** with its 26 options and its table — the shape `ensurePluginAbsent` has always handled. The files-gone shape is not reachable by a kill at all: `wp plugin uninstall` removes the rows and the files in one call, so it arises only when `uninstall.php`'s own guard skips the cleanup (V54). Also measured, and the reason interrupted runs so often look self-healing: killing only the Playwright **parent** leaves the worker process alive, and it finishes the teardown. | 6E.0's requirement 4, answered honestly: the interrupted case was reproduced, and what it produces is the recoverable one. The sweep's case is V54's, which was reproduced separately and recovered (requirement 2). |
+| V62 | **Deleting through wp-admin runs the plugin's uninstall; `wp plugin delete` does not.** | WP 7.1.1 on the cells, `wp-admin/includes/plugin.php`: `delete_plugins()` calls `is_uninstallable_plugin()` and then `uninstall_plugin()` before removing any files. | It is the only flow in which the complete removal a *user* performs can be observed, which is what makes 6E.1's footprint assertions worth making — and why they belong on the admin screen rather than on a WP-CLI call. |
+| V63 | **`force: true` on the Delete click was silently breaking deletion**, and had been hiding behind a timeout message that blamed the plugin. | `pro@apache`, probed in the page at the moment of the click: `#delete-backwpup-pro` reported `visibility: visible` with a sane box (288, 477, 39×16; viewport 1600×700, `scrollY` 0) — yet `document.elementFromPoint` at its own centre returned the **document root**. A forced click skips the "receives pointer events" check, so it landed on nothing and produced **no request whatsoever**: not the AJAX, not even the plain navigation the link falls back to. The identical page, clicked **without** `force`, raised the confirm, fired `delete-plugin` and removed the row first time. The trace of the failing run agrees: after the post-deactivate document loaded `updates.min.js`, nothing left the browser for ten seconds until an unrelated poll. | `PluginsPage.delete` no longer forces the click, and waits for the post-deactivate page's `load` first so WordPress has wired the action. Pinned by a unit test that fails with `force: true` restored, and — after §2.13 — by a second one that fails if the `load` wait goes. The old comment claimed the ordinary wait "can stall"; measured, it does not — and when it does, Playwright's actionability log says what the element was doing, which "no response arrived" never could. |
+
+### 2.11 Facts established validating the `free@nginx` cell (live, at `develop@f1ebfd0`)
+
+The cell is `bwu.e2e.rocketlabsqa.ovh` — its own site and its own database, on the same host as
+`pro@nginx`. Everything below was measured against it; where a claim compares the editions, both
+were built by APVM from the **same commit**, so the comparison is of packages and not of releases.
+
+| # | Fact | Evidence | Consequence |
+| --- | --- | --- | --- |
+| V64 | **The untagged suite runs on Free with zero new scenario code.** | `bddgen` + `--list` for `free@nginx` generates all 22 scenarios (24 tests with the two setup projects), and the artifact preflight verified the Free identity — `backwpup-9.99.99-f1ebfd05.zip`, slug `backwpup/`, header `BackWPup` — from APVM's `free` variant with no manifest change. Full suite: **24/24, every scenario first attempt**, 26.1 min. | **V1 confirmed live** and 6I's first bullet done. Nothing in the ported scenarios names an edition. |
+| V65 | **The two editions ship a byte-identical `uninstall.php`, and Free is a strict subset of Pro.** | Both variants built from `f1ebfd05`. `uninstall.php` SHA-256 `edc75fe00dd0c895…` on both. `src/Backup/Database/Tables/Backup.php` identical too, declaring `$name = 'bwpup_backups'` and `$db_version_key = 'bwpup_backups_version'`. File sets: **266 files in Pro only, 0 in Free only**. | The 6E footprint declaration is edition-independent **by construction**. This is the claim §4.6E previously had to leave as "expected". |
+| V66 | **Free's leftover footprint is the same shape as Pro's, and the declaration misses none of it.** | V54's recipe on `free@nginx` left **26 options and `wp_bwpup_backups`** (plus 3 roles and 11 administrator capabilities, which are deliberately not declared). `findSiteDbResidue` matched **all 26 options and the table, with none unmatched**. Cross-checked against the source: every literal `add_option` / `update_option` / `set_transient` / `update_user_meta` name in the Free package outside `vendor/` contains `backwpup`. | The sweep then recovered the cell — the hook printed *"before installing, cleared a leftover plugin footprint from the site: 26 option(s), 1 table(s)"* and the scenario passed. 6E.0 is verified on Free as well as Pro. |
+| V67 | **The option match relies on a case-insensitive collation, and that is not free.** | The Free source stores a site transient under a capital-B prefix (`set_site_transient( 'BackWPup_' …)`). On the cell `wp_options.option_name` is `utf8mb4_unicode_520_ci`, and `SELECT 'BackWPup_probe' LIKE '%backwpup%'` returns `1`. | The fragments do catch it. Recorded because a site created with a `_bin` or `_cs` collation would **not**, and silent under-matching is the one failure mode this declaration cannot detect by itself. |
+| V68 | **Free is a third cron arrangement, and the most concurrent of the three.** V44 recorded two; this cell does **both**. | `bwu`'s `wp-config.php` does **not** define `DISABLE_WP_CRON`, *and* the host curls its `wp-cron.php` every minute — `pro@nginx` defines the constant, `pro@apache` has no system cron. Read on the cell: `add_action( 'init', 'wp_cron' )` is guarded only by `DOING_CRON` (`default-filters.php:412-414`), and `_wp_cron()` returns early only when `DISABLE_WP_CRON` is true. So here every request with due work spawns `wp-cron.php` **as well as** the per-minute poke. | It supplies V46's second concurrent request more readily than any other cell. Defining `DISABLE_WP_CRON` on this site would align it with `pro@nginx` and lose nothing, since the system cron already runs the schedule. |
+| V69 | **The activation path is sound on Free; what fails is the known race.** | **10 of 10** install → bootstrap → read cycles on `free@nginx` came out owing their onboarding (`backwpup_onboarding = "1"`, `backwpup_version = 9.99.99`). Under a full suite with **retries disabled**, 2 of 22 scenarios hit V46's missing-flag failure; the same 22 with the suite's own retry policy passed **24/24, none retried**. | Not an edition or configuration defect — V46/V47's window, made likelier by V68. The suite's retry policy already absorbs it, which is what retries are for. |
+| V70 | **One genuine robustness gap, exposed by this cell and not caused by it.** `the backup history shows {int} backup(s)` asserted a **polled** table with Playwright's **default 5 s**, immediately after `waitForBackup` had returned on server-side truth. | Measured on `free@nginx`: archive on disk at **+3.3 s**, job finished at **+8.5 s**, row in the DOM at **+9.5 s** — a **1.0 s** margin when healthy, with a much longer tail. | **Closed 2026-09-18 — see §2.12.** The step now re-reads the history from the server before asserting, which removes the race rather than widening it. |
+| V71 | **Two `headers already sent` warnings are this site's, not the edition's.** | The deletion scenarios log two PHP warnings from core's `wp_redirect()` (`pluggable.php:1539` and `:1542`) on `bwu`. The identical scenario on `pro@nginx` logs **none**, and an unauthenticated `/wp-admin/` redirect logs none on either site. The cause was not isolated further. | Reported, never fatal: the debug-log gate fails on fatals and logs warnings. Worth knowing only so nobody attributes it to the plugin. |
+| V72 | **The Free cell is not a mirror of `pro@nginx`, and the differences matter operationally.** | Own database (`wp_bwu_e2e_rocketlabsqa_ovh` vs `e2eSimple`) and own docroot, but the **same host and the same disk**. Docroot **3.6 GB** (3.3 GB of it `wp-content/bigFiles`) against pro's 2.6 GB, on a volume **81 % full with 20 GB free**. `query-monitor` (with its `db.php` dropin) and `imagify` are active here and not there; `wp-crontrol` there and not here; the themes differ. | V50's rule — never arrange two files backups at once — binds harder here, and the two nginx cells **must not run files-backup scenarios concurrently**, because one disk serves both. The differing plugin set is coverage rather than a problem, and it is where V71 comes from. |
+
+---
+
+### 2.12 Facts established closing V70 (live, at `develop@f1ebfd0`)
+
+V70 was left open on the grounds that the choice between "raise the budget" and "re-read
+server-backed DOM" was a judgement call. It was not: reading the plugin's own JavaScript settles
+it, and the same reading shows that neither option as originally framed was quite right.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V73 | **The history refreshes from a client-side poll that a test cannot wait on.** `backwpup-generate.js` asks `admin-ajax.php?action=backwpup_working` every **750 ms** and only fires its `backup-complete` event once that reports `job_done`; `backwpup-admin.js` listens for that event and re-fetches the listing. Whether any of it runs depends on a race inside the plugin: pressing *Backup Now* reloads the page (`startBackupProcess`, immediately on status 200 and after 750 ms on 201), and a job that finished before the reload lands leaves **no poll running at all**. | Read at the ref under test: `assets/js/backwpup-generate.js:56`, `assets/js/backwpup-admin.js:2376` and `:2341-2365`; `inc/class-page-jobs.php::ajax_working` (which reports `job_done` once the working data is gone), `inc/class-admin.php:1257` (`backupslistings` → `rest_url('backwpup/v1/backups')`). | **No barrier can fix the assertion in place.** Both outcomes issue the same `backups` call, so nothing distinguishes the stale fetch from the fresh one, and the refresh may never happen. Re-reading from the server is the only non-timing-dependent form of the assertion — so raising the budget was never the cheaper half of a trade-off, it was the option that keeps the race. |
+| V74 | **The reload the fix leans on had a defect of its own, found by the test written for the fix.** `BackupHistoryTable.reload()` armed a `waitForRest(page, "backups")` barrier around the navigation. That barrier settles on the **previous** page's listing request, which is still in flight at that moment — so it reported on a page that no longer existed, and the non-ok check it performed was not against the response the read depends on. | Observed directly: a spec case serving the listing as **500** passed 3 of 4 runs against that implementation, because the response matched was the earlier page's 200. | The barrier is gone. Correctness now rests on the navigation plus the loading placeholder, which is exact: the server renders `tr#backwpup-backup-history-loading` unconditionally (`components/table-backups.php:29`) and only `refreshBackupTable` replacing the whole `tbody` removes it — and that runs only for a listing that reports success. A failed listing therefore fails the read instead of reading as a history that emptied itself. |
+| V75 | **The fix holds on every cell, with retries disabled.** | `backups.feature` with `E2E_RETRIES=0`: **5/5** on `free@nginx`, **5/5** on `pro@nginx`, **5/5** on `pro@apache`, plus **6/6** repeats of the two scenarios that exercise the race on `free@nginx`. **21 scenario executions, no failures, nothing retried.** Unit suite **737 passed / 8 skipped** (six new cases); typecheck, lint and format clean. | The two history assertions (`the backup history shows {int} backup(s)`, `no backup in the history has failed`) each re-read the history first, so each stands alone — the second mattered most, because "no row failed" is trivially true of the zero rows a stale table shows. |
+
+**One of this plan's own claims corrected.** V70 cited "the failing run's own snapshot shows the
+dashboard still reading *Backup Scheduled!*" as evidence of a long tail. That string is from
+`views/notice/notice_upgrade_to_pro.php` — an upsell notice, not the job-progress UI — so it says
+nothing about how far behind the table was. The measured timings in V70 stand; that sentence does
+not, and has been removed.
+
+### 2.13 Facts established auditing the 6E change set (2026-09-18)
+
+A full re-read of everything 6E touched — 18 changed files and 8 new ones — against the plugin
+source at the ref under test. Every defect below was **invisible to typecheck, lint, format and the
+739-test unit suite**, which is the point: they are in the layer those gates do not reach.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V76 | **Four code comments named plan phases**, which this repo's conventions forbid outright — plans move, rename and get deleted, and code must stand alone. | `support/db-residue.ts` ("an edge case of 6H"), `support/footprint.ts` ("the bug 6E.0 spends its time recovering from") and two cases in `hooks/plugin-lifecycle.spec.ts`. | All four rewritten to say the thing instead of citing where it was decided. A `grep` over `src/**/*.ts` for plan phases, `docs/plans` and `§` now comes back empty, which is the check worth keeping. |
+| V77 | **Two TSDoc blocks were orphaned by insertion**, leaving two functions undocumented and two carrying someone else's doc. | `hooks/plugin.hooks.ts`: `declaredResidue` was inserted between `scenarioReport`'s doc and `scenarioReport`. Identical slip in `plugin-lifecycle.spec.ts` between `files()` and `wpCalls()`. A third: `installPluginUnderTest`'s database-sweep rationale sat **inside** its `@param artifact` description. | Restored. The class of mistake — inserting a documented helper directly above an existing one — is worth knowing about, because nothing in the toolchain notices it. |
+| V78 | **Six `{@link}` targets could not resolve**, against a baseline of one in nine untouched modules. | Checked mechanically across the change set: `{@link ./residue.ts}` (a file path is not a declaration reference, and it is the only one in the repo), plus `PROTECTED_SITE_PATHS`, `ensurePluginAbsent`, `BACKWPUP_SITE_DB_RESIDUE` and `PluginsPage.delete` — all named from files that do not import them. | Rewritten as plain code references. A link that does not resolve is worse than no link: it reads as a promise the IDE does not keep. |
+| V79 | **Three real code defects**, each small and each with a failure mode worth naming. | (a) `PluginsPage.delete`'s new `waitForLoadState("load")` took no timeout, so it silently used the navigation default instead of the caller's budget — every other wait in that method takes it. (b) The `load` wait itself, added for V63, had **no test at all**, while the `force` half it shipped beside did. (c) `readBackwpupFootprint` builds `WHERE` from the shared fragment list with no guard: emptied, the query fails, `get_col` returns `[]`, and the site reads as holding **nothing of the plugin** — which is exactly the answer the deletion scenarios look for, in a module whose own doc calls that trap out. | (a) fixed; (b) pinned by a stand-in wp-admin whose Delete handler arrives on a blocking script, **verified to fail without the guard** (`PluginDeletionFailedError`, the live symptom) and to pass with it; (c) the snippet now refuses instead of answering. |
+
+**Also recorded, not fixed.** `BackupHistoryTable.expectRowCount` counts one **page** of the history:
+the listing is paged ten rows at a time, client and server agreeing on that default
+(`inc/class-admin.php:1279`, `src/Backups/History/Frontend/API/Rest.php:159`). Every scenario counts
+in single digits, so nothing reaches it; the method now says so rather than leaving the next author
+to find out.
+
+**A new intermittent, seen once and not reproduced.** On `pro@apache`, *"Deleting the plugin after it
+has made a backup"* failed in setup with `completing onboarding should leave exactly one scheduled
+backup job` — the site held a `files and database` job **beside** the requested `database` one. The
+same scenario passed on `pro@nginx` and `free@nginx` in that run and **3/3 on immediate re-run** with
+retries disabled, so the cell healed itself as V56 describes. It is **distinct from V46/V47/V69**,
+which are the missing-*flag* race, and it is upstream of everything 6E changed. Not diagnosed
+further and deliberately not "fixed": the mechanism was not reproduced, and `completeOnboarding`'s own
+freshness assertion did the right thing — it refused a site that was not in the expected state and
+said what it saw, rather than failing later as a puzzling claim about the wrong job.
+
+**Verification after the audit.** Unit **739 passed / 8 skipped** (737 before); typecheck, lint and
+format clean. Live, with `E2E_RETRIES=0`: `plugin-deletion.feature` **3/3 on `pro@nginx`**, **3/3 on
+`free@nginx`**, **2/3 then 3/3 on `pro@apache`** — 12 scenario executions, the one failure above.
 
 ---
 
@@ -969,64 +1068,119 @@ archives it can read — so a path that comes back is one WP-CLI can open, and n
 The download scenario now compares a **full SHA-256** as well as name and size, the site's half
 computed on the site so proving it costs one small reply rather than a second transfer.
 
-### 6E — Plugin lifecycle (UI)
+### 6E — Plugin lifecycle (UI) — **DONE**
 
-#### 6E.0 — Recover a site from a leftover footprint (do this **first**)
+**Shipped 2026-09-18.** The full BackWPup suite is **24/24 on both cells** with retries disabled, and
+both cells are left pristine afterwards — no plugin, no options, no `bwpup` table, no BackWPup role,
+capability, user-meta key or cron event, no archives, no staging directory. Two halves: a shared
+recovery mechanism (6E.0) and the three ported scenarios it unblocks (6E.1). The facts behind both
+are **§2.10, V54–V63**. Unit tests **690 → 731**.
 
-**Before any of the scenarios below.** A cell that starts dirty makes every later result suspect, and
-this phase is precisely the one that reasons about what removal leaves behind — so the suite has to
-be able to *land* on a dirty site and put it right before it can be trusted to judge one.
+#### 6E.0 — Recover a site from a leftover footprint
 
-**The gap, established from the code path and observed live (V47, V53).** `ensurePluginAbsent` is
-gated on `isPluginInstalled`, which is `wp plugin is-installed` — a **file** test
-([`plugin.ts`](../../src/common/wp/plugin.ts)). So recovery today depends on *where* a run was
-interrupted:
+**The gap.** `ensurePluginAbsent` is gated on `wp plugin is-installed`, a **file** test, so a site
+whose plugin directory has gone while its rows remain looks already-clean and the uninstall is
+skipped. The next install then lands on the previous run's state, the plugin reads its leftover
+`backwpup_version`, concludes it is an upgrade rather than a first install, never sets the onboarding
+flag — and the scenario fails blaming the product (V54, V55).
 
-| Interrupted… | Files | DB footprint | Next run |
-| --- | --- | --- | --- |
-| before teardown | present | present | uninstalls the old copy — **recovers** |
-| during teardown | **gone** | present | `is-installed` is false, the uninstall block is skipped — **does not recover** |
+**What shipped.** `ProductConfig.siteDbResidue`, a database counterpart to `siteResidue`, declared
+per product as `optionsContaining` fragments plus unprefixed `tables`, reaching the shared hooks
+through the same per-process registry as the other product policy. `common/wp/db-residue.ts` sweeps
+it, keyed off **the footprint** and never off whether the plugin is installed. Both lifecycle hooks
+call it immediately after `ensurePluginAbsent` — the Before hook so the install is genuinely fresh,
+the After hook so a footprint that outlived the uninstall does not become the next run's problem.
 
-The second row is not hypothetical: `pro@apache` was found in exactly that state — no plugin
-directory, `active_plugins` still naming it, **30** options and `wp_bwpup_backups` present. The next
-run then fails in `finishActivation` ("a freshly installed BackWPup should owe its onboarding"), or
-on `CREATE TABLE … already exists`, both of which blame the wrong thing.
+Decisions worth carrying forward:
 
-**Requirement.** A database counterpart to `ProductConfig.siteResidue` that keys off the **footprint,
-not off the plugin being installed** — a declared set of option patterns and tables, swept whenever
-they are found. A mechanism conditioned on `isPluginInstalled` would leave this row untouched and is
-therefore not a fix. It also subsumes V47: the same sweep removes a table that outlived an uninstall
-under concurrency.
+- **Fragments match anywhere in a name, not as a prefix** (V58). The plugin's destination caches are
+  site transients — `_site_transient_backwpup_<jobid>_gdrive` — and a prefix would walk past them and
+  past `bwpup_backups_version`, which shares no substring with `backwpup`. They are matched
+  *literally*: `esc_like` escapes `%` and `_` before the query.
+- **Ordering is the guarantee, not a flag** (V59). An installed plugin re-creates its own footprint on
+  `init`, so a sweep that ran before the removal would achieve nothing. `--skip-plugins` is defence in
+  depth for the sweep's own request — and insurance against the cells' unrelated plugins, which hook
+  option and transient writes — not a substitute for the ordering.
+- **Rows go through `delete_option`, not a `DELETE`**, so WordPress invalidates its own caches; that
+  is why no flush follows. Removal is then verified by re-reading in a second process, straight from
+  the database.
+- **Two guards, aimed at a wrong declaration rather than a hostile one.** `PROTECTED_TABLES` refuses a
+  declaration naming a core table at declaration time; `PROTECTED_OPTIONS` is checked against what the
+  query actually *matched* and refuses the **whole** sweep before deleting anything. Multisite is
+  refused outright rather than half-handled.
+- **Scope is options and tables only**, because those are the two that block a fresh install. Roles,
+  capabilities and user meta are re-established idempotently by activation and removed by the next
+  real uninstall (V57), so they cannot accumulate; declaring them would mean reproducing the plugin's
+  role handling here.
 
-**Everything here is to be verified empirically — no part of it may be argued from the code alone.**
-Specifically, and each on a real cell:
+**The five empirical requirements, each answered:**
 
-1. **Reproduce the failing state deliberately** — install, seed onboarding, delete the plugin
-   directory while leaving the options and the table — and confirm the *current* suite fails on it,
-   with the message it actually produces recorded here. A fix for a state nobody has reproduced is a
-   guess.
-2. **Confirm the sweep recovers it**, from that same reproduction, and that a following scenario
-   passes on the recovered site.
-3. **Confirm it is a no-op on a clean site** — no options removed that should not be, nothing
-   elevated that need not be — because a sweep that keys off a pattern can over-match.
-4. **Confirm it survives the interrupted case it exists for**: kill a run mid-teardown, then run
-   again, and observe recovery rather than reasoning about it.
-5. **Re-verify on both cells.** They differ in the ways that matter here (per-minute system cron on
-   `pro@nginx`, page-load cron on `pro@apache`), and V47's leftover table has only ever been seen on
-   the former.
+1. **Reproduced deliberately**, and the message recorded verbatim — V54.
+2. **The sweep recovers it**: from that same reproduction the previously-failing scenario passed, with
+   the hook reporting *"before installing, cleared a leftover plugin footprint from the site: 26
+   option(s), 1 table(s)"*. Repeated on `pro@nginx`, where the **full 21-scenario suite ran 21/21 from
+   the dirty state**.
+3. **A no-op on a clean site**, on both cells: full-state snapshot byte-identical, one read, no write,
+   nothing elevated — V60.
+4. **The interrupted case**, reproduced by killing the whole process tree mid-scenario — and it
+   produces the *files-present* shape, which `ensurePluginAbsent` already recovered. The files-gone
+   shape is not reachable by a kill; it comes from a skipped `uninstall.php`, which is what 2 covers.
+   Recorded rather than glossed — V61.
+5. **Both cells**, throughout.
+
+One correction to this plan's own framing, from measurement: a dirty landing does **not** make every
+later result suspect. It costs exactly one scenario, and the cell then heals itself, because the
+Before hook installs the files the After hook needs in order to uninstall properly (V56). The sweep
+removes that one unexplained failure; it is not a suite-wide rescue, and saying so would be
+overselling it.
 
 #### 6E.1 — The UI scenarios
 
-Ports `delete-plugin.feature` (3): delete after install, after activate, after a first backup. Uses
-the existing `PluginsPage.delete` (asserted flow, dialog handling, reload-and-re-assert) — the
-baseline's hand-rolled duplicate is dropped. Adds the missing check that deletion removes the
-plugin's data footprint (`wp option list` / uploads dir), which the baseline's `#backwpup-pro-deleted`
-element never proved.
+Ports `delete-plugin.feature` (3) onto the shared `PluginsPage.delete`; the baseline's hand-rolled
+duplicate is dropped. Its three states — after install, after activate, after a first backup — are
+kept, renamed to say what actually differs, since the `@plugin` lifecycle always hands a scenario an
+installed, activated plugin:
 
-**Acceptance** — 6E.0's sweep is in place and empirically verified to all five points above; all
-three scenarios pass on both editions (the slug comes from the resolved artifact, 6A, so `backwpup`
-vs `backwpup-pro` needs no branching); and both cells are left clean, checked by reading the site
-rather than by trusting the teardown.
+- *Deleting a deactivated plugin removes it and everything it put in the database.*
+- *Deleting an active plugin deactivates it first and still removes it completely* — WordPress only
+  offers Delete once a plugin is inactive, so the flow has to deactivate, and that extra step is
+  exactly where the deletion used to be lost (V63).
+- *Deleting the plugin after it has made a backup clears its settings but keeps the archive.*
+
+**What the baseline never proved.** It asserted that WordPress rendered `#backwpup-pro-deleted` and
+stopped. These assert both halves of what deletion means, which is only observable through wp-admin
+at all because core's `delete_plugins()` runs `uninstall_plugin()` while `wp plugin delete` does not
+(V62): the plugin is gone *from the site* (asked of WP-CLI, an independent witness from the screen
+that just claimed it), and so is everything it had in the database — options, table, roles, the
+capabilities it granted and its user meta, read back with plugins unloaded
+(`support/footprint.ts`). That reader is deliberately **broader** than the 6E.0 declaration: a
+scenario asserting the product cleaned up should check what the product's own `uninstall.php`
+promises, not what our sweep happens to declare.
+
+The third scenario adds the other half of the bargain — a backup plugin's uninstall may take its
+settings and must not take the user's archives — counted off the filesystem, since the WP-CLI command
+that would normally answer has just been deleted.
+
+**One shared-code defect found and fixed.** `PluginsPage.delete` forced its Delete click, which made
+it land on nothing on a live cell and produce no request at all; the failure surfaced as a timeout
+blaming the plugin. Diagnosed in the page (V63), fixed by dropping `force` and waiting for the
+post-deactivate page's `load` so WordPress has wired the action, and pinned by a unit test that fails
+if `force: true` returns.
+
+**Acceptance met in full.** 6E.0's sweep is in place and verified to all five points; the three
+scenarios pass on every cell; and each cell is left clean, checked by reading the site rather than by
+trusting the teardown.
+
+**Including "both editions", which is now verified rather than expected (§2.11).** A `free@nginx`
+cell was stood up afterwards, and the claim this section previously left open held on inspection as
+well as in the run: the two editions ship a **byte-identical `uninstall.php`** and an identical table
+declaration, with Free a strict subset of Pro (V65); the Free edition leaves **the same 26 options and
+the same table**, all of them matched by the existing declaration and none missed (V66); the sweep
+recovers a deliberately dirtied Free cell with the same message it prints on Pro; and the whole
+untagged suite runs there with **no new scenario code** (V64). One assumption the declaration turned
+out to rest on is now written down instead of implied: the option match needs a case-insensitive
+collation, because the plugin stores one transient under a capital-B name (V67).
+
 
 ### 6F — WP-CLI surface
 
@@ -1125,11 +1279,14 @@ each provider without them still skips with a clear reason.
 
 ### 6I — Free edition + parity gate
 
-- Add a **`free@nginx`** cell to `src/projects/backwpup/config/sites.json`, mirroring the existing
-  `pro@nginx` (same shape, `"edition": "free"`, its own site so the two cells never share state) —
-  everything untagged then runs on Free with **zero** new scenario code (V1, re-confirmed at the ref
-  in §2.3). The Free artifact needs no manifest change: `resolveVariant` already maps
-  `free` → the `free` APVM variant, and that build is already in the commit cache.
+- ~~Add a **`free@nginx`** cell~~ — **done (2026-09-18)**, and validated in §2.11: the cell is
+  `bwu.e2e.rocketlabsqa.ovh`, its own site and its own database. Everything untagged runs on Free with
+  **zero** new scenario code and the Free artifact needed no manifest change, exactly as V1 predicted
+  (V64). Two things to carry forward rather than rediscover: the cell shares a **host and a disk** with
+  `pro@nginx` and holds a larger docroot, so the two must not run files-backup scenarios concurrently
+  (V72); and it is the only cell that leaves WordPress's own cron enabled *and* pokes `wp-cron.php`
+  from a system crontab, which makes V46's activation race likelier there than anywhere else
+  (V68) — defining `DISABLE_WP_CRON` on the site would align it with `pro@nginx` at no cost.
 - Add the `@free` locked-storage upsell scenario (V2).
 - **Parity review** against §2.1: every baseline intent is covered or has a written, deliberate
   reason not to be. A checklist in the PR — not a claim.

@@ -94,6 +94,20 @@ export function phpLiteral(value: unknown): string {
   return `json_decode( base64_decode( '${encoded}' ), true )`;
 }
 
+/** How a snippet wants WordPress loaded before it runs. */
+export interface EvalPhpOptions {
+  /**
+   * Boot WordPress **without its plugins** (`--skip-plugins`).
+   *
+   * For snippets whose answer must not depend on what else is installed on the site — a cleanup
+   * step, or anything asking about a plugin that is supposed to be gone. Core is fully loaded
+   * either way, so `$wpdb` and the option API behave normally; only plugin code, and the filters it
+   * registers, stay out. Off by default: a snippet that asks about a *running* site needs the site
+   * as it really runs.
+   */
+  readonly skipPlugins?: boolean;
+}
+
 /**
  * Runs a `wp eval` snippet and returns its trimmed standard output.
  *
@@ -105,6 +119,7 @@ export function phpLiteral(value: unknown): string {
  * @param php - the snippet, without its opening tag.
  * @param what - what was being attempted, phrased to complete "… failed".
  * @param scope - the module reporting the failure, for the message prefix.
+ * @param options - how WordPress should be loaded; see {@link EvalPhpOptions}.
  * @returns the snippet's output, trimmed.
  * @throws {@link Error} if the command exited non-zero.
  */
@@ -113,8 +128,14 @@ export async function evalPhp(
   php: string,
   what: string,
   scope = "wp/php",
+  options: EvalPhpOptions = {},
 ): Promise<string> {
-  const { stdout, stderr, exitCode } = await wpCli(transport, ["eval", php]);
+  // The flag leads the argv: WP-CLI reads global parameters before it dispatches the subcommand,
+  // and one placed after the snippet would be handed to `eval` as another positional argument.
+  const argv = options.skipPlugins
+    ? ["--skip-plugins", "eval", php]
+    : ["eval", php];
+  const { stdout, stderr, exitCode } = await wpCli(transport, argv);
   if (exitCode !== 0) {
     throw new Error(
       `[${scope}] ${what} failed (exit ${String(exitCode)}): ` +

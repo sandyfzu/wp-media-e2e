@@ -110,7 +110,7 @@ await stageAndInstallPlugin(site.transport, artifact.zipPath, {
 | Tag         | Effect                                                                                          |
 | ----------- | ----------------------------------------------------------------------------------------------- |
 | `@noauth`   | Scenario starts unauthenticated with an empty session (login/logout flows). The only tag that runs against placeholder sites, so it is what CI's smoke job greps. |
-| `@plugin`   | The plugin under test is freshly installed + activated before the scenario, `debug.log` is scoped to it and **a PHP fatal fails it**, and afterwards the plugin *and the files it left on the site* are removed. Needs a real site. |
+| `@plugin`   | The plugin under test is freshly installed + activated before the scenario, `debug.log` is scoped to it and **a PHP fatal fails it**, and afterwards the plugin is removed along with *the files and the database rows it left behind*. "Freshly" is load-bearing: a site whose plugin directory went without its `uninstall.php` ever running still carries that plugin's options and tables, and those are swept before the install rather than installed on top of. Needs a real site. |
 | `@mobile`   | Runs under the mobile device profile (viewport + `isMobile` + `hasTouch` + mobile UA + DPR). Untagged scenarios stay desktop. |
 | `@smoke`    | Scaffolding/smoke scenarios; run with `--grep @smoke`.                                           |
 | `@free` / `@pro` | Edition scoping. An edition-ful cell auto-filters: a `pro` cell skips `@free` and vice-versa. |
@@ -248,6 +248,22 @@ Each message names the replacement — a web-first `expect()`, a specific
 `page.waitForResponse(…)`, or `fill()`. Only the *called* member matches, so a property that
 happens to share a name (`describe(job.type)`) is fine. See
 [CLAUDE.md → Improvement gate](../../CLAUDE.md#improvement-gate-lint).
+
+## Asserting rendered state after an action
+
+A `toHaveCount`/`toBeVisible` assertion carries its own timeout, so pointing one at a screen
+that has not caught up yet does not fail — it **waits**, and then passes or flakes depending on
+the day. That is a banned wait wearing an assertion's clothes, and the lint gate cannot see it.
+
+So: after an action changes something on the site, assert against DOM the **server** produced,
+not the DOM the action left behind. Re-read it (a reload, or the page object's own `reload()`),
+and wait on a signal that can only mean the new data arrived — a placeholder the server always
+renders and only the fetched rows replace, say. Awaiting the fetch itself is usually weaker than
+it looks: a barrier armed before a navigation can settle on the *previous* page's request, and
+one armed after it can miss the response entirely.
+
+The tell is an assertion whose correctness argument is a measured margin ("the row lands about a
+second before the budget runs out"). That is a race, not a check.
 
 ## Unit / integration tests
 

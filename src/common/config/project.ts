@@ -8,6 +8,7 @@ import { intEnv } from "./env";
 import {
   registerDebugLogOptions,
   registerPool,
+  registerSiteDbResidue,
   registerSiteResidue,
   routingMetadata,
 } from "./metadata";
@@ -89,6 +90,10 @@ export function createProductConfig(
   // Same channel for the paths this product leaves on a site after it is uninstalled: the shared
   // scenario hooks clear them, and must not import product code to learn what they are.
   registerSiteResidue(product.name, product.siteResidue);
+
+  // And for the footprint it leaves in the site's *database* when its files go without its own
+  // uninstall running — swept off what is found, not off whether the plugin is installed.
+  registerSiteDbResidue(product.name, product.siteDbResidue);
 
   // Resolve the targeted cell. Selecting multiple cells in one invocation is unsafe
   // (parallelIndex is global), so fail fast instead of silently mis-sizing workers.
