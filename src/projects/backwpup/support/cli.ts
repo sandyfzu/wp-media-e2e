@@ -1,0 +1,215 @@
+import { wpCli } from "../../../common/wp/exec";
+import type { ExecResult } from "../../../common/wp/exec";
+import type { Transport } from "../../../common/config/types";
+
+/**
+ * Running `wp backwpup …` when the **command itself is what is under test**.
+ *
+ * This is the deliberate opposite of `support/backups.ts`, which runs some of the same commands as
+ * *instrumentation* and throws on a non-zero exit — there, a failing command means the scenario's
+ * arrangement broke. Here a non-zero exit is an observation to assert: half the surface's contract
+ * is how it refuses (a missing archive, an unknown field, a second job while one is running). One
+ * module cannot hold both stances without every caller passing a "do I throw?" flag, so the two
+ * live side by side and this one never throws for an outcome. It still throws when the command
+ * could not be run at all — that distinction is `common/wp/exec.ts`'s and is inherited unchanged.
+ *
+ * Assertions read {@link CliResult.notices} rather than hunting substrings in raw output: WP-CLI
+ * prefixes its own status lines with `Success:` / `Warning:` / `Error:`, and all 17 commands speak
+ * it, so matching it structurally keeps a reworded sentence a visible mismatch instead of a
+ * silently passing `.includes()`.
+ */
+
+/** The severity word WP-CLI prefixes a status line with. */
+export type CliLevel = "success" | "warning" | "error";
+
+/** One status line WP-CLI tagged with its own severity, with that prefix removed. */
+export interface CliNotice {
+  readonly level: CliLevel;
+  readonly message: string;
+}
+
+/** What one `wp backwpup …` invocation reported. */
+export interface CliResult extends ExecResult {
+  /** The full argv as run, so a failure message names the command rather than describing it. */
+  readonly argv: readonly string[];
+  /** WP-CLI's own status lines — see {@link parseCliNotices} for what ordering does and does not mean. */
+  readonly notices: readonly CliNotice[];
+}
+
+/**
+ * WP-CLI's status prefixes, mapped to the level they mean.
+ *
+ * Exhaustive by construction: the regex below is built to match exactly these keys, so a lookup
+ * cannot miss — but it is still checked, which keeps the parser free of a type assertion.
+ */
+const LEVELS: Readonly<Record<string, CliLevel>> = {
+  Success: "success",
+  Warning: "warning",
+  Error: "error",
+};
+
+/** A status line: one of WP-CLI's prefixes at the very start of a line, then its message. */
+const NOTICE = new RegExp(`^(${Object.keys(LEVELS).join("|")}): ?(.*)$`);
+
+/**
+ * ANSI colour codes, which WP-CLI emits only when it believes it is writing to a terminal.
+ *
+ * Every transport this suite uses pipes its output, so today nothing is coloured — verified live
+ * over `ssh`. Stripping anyway costs one pass and means a transport that ever does allocate a TTY
+ * (a `docker exec -t`, a future runner) degrades to plain text rather than to every notice
+ * assertion failing on invisible bytes.
+ */
+// eslint-disable-next-line no-control-regex -- matching the escape character is the point.
+const ANSI = /\u001B\[[0-9;]*m/g;
+
+/** How much command output a failure message carries before it stops being readable. */
+const OUTPUT_EXCERPT = 1000;
+
+/** Pulls WP-CLI's status lines out of one stream. */
+function noticesIn(text: string): CliNotice[] {
+  const found: CliNotice[] = [];
+  for (const line of text.replace(ANSI, "").split(/\r?\n/)) {
+    const match = NOTICE.exec(line);
+    if (match === null) continue;
+    const [, word = "", message = ""] = match;
+    const level = LEVELS[word];
+    if (level !== undefined) found.push({ level, message: message.trim() });
+  }
+  return found;
+}
+
+/**
+ * Every status line WP-CLI emitted, stdout's before stderr's.
+ *
+ * That ordering is **not** the order they were printed in and must not be read as one: the two
+ * streams arrive down separate pipes, which carry no shared sequence. What survives is the order
+ * *within* each stream, which is what a caller asserting "it warned twice" actually needs. In
+ * practice WP-CLI puts `Success:` on stdout and `Warning:`/`Error:` on stderr, so a level is
+ * usually enough to find a line without caring where it came from.
+ *
+ * A notice's message is a single line. WP-CLI does not wrap the ones these commands emit, and
+ * folding continuation lines would mean guessing which indented line belongs to which notice.
+ *
+ * @param stdout - the command's standard output.
+ * @param stderr - the command's standard error.
+ * @returns the notices found, in the order described above; empty when the command said nothing
+ * WP-CLI tagged, which is normal for the list commands.
+ */
+export function parseCliNotices(
+  stdout: string,
+  stderr: string,
+): readonly CliNotice[] {
+  return [...noticesIn(stdout), ...noticesIn(stderr)];
+}
+
+/**
+ * Runs a `wp backwpup …` subcommand and reports everything it said.
+ *
+ * The `backwpup` namespace is supplied here rather than by the caller: every command in this
+ * surface lives under it, and fixing it means an unrelated WP-CLI command cannot be run through
+ * the path reserved for the plugin under test.
+ *
+ * @param transport - the site to run on.
+ * @param args - the subcommand and its arguments, e.g. `["job", "--format=count"]`.
+ * @returns the outcome, whatever it was — a non-zero exit is returned, never thrown.
+ * @throws {@link Error} only if the command could not be run at all (the transport failed), which
+ * `common/wp/exec.ts` distinguishes from a command that ran and refused.
+ */
+export async function backwpupCli(
+  transport: Transport,
+  args: readonly string[],
+): Promise<CliResult> {
+  const argv = ["backwpup", ...args];
+  const result = await wpCli(transport, [...argv]);
+  return {
+    ...result,
+    argv,
+    notices: parseCliNotices(result.stdout, result.stderr),
+  };
+}
+
+/** The messages of every notice at one level, in {@link parseCliNotices}'s order. */
+export function noticesAt(
+  result: CliResult,
+  level: CliLevel,
+): readonly string[] {
+  return result.notices
+    .filter((notice) => notice.level === level)
+    .map((notice) => notice.message);
+}
+
+/**
+ * One line naming the command, its exit code and what it printed — for assertion messages.
+ *
+ * **Embeds the argv and the raw output**, so it is not for a command carrying a secret: `job-export
+ * --passwords` prints storage credentials, and `backup-encrypt --key=<hex>` puts its key in the
+ * argv. A failure message is one of the few places a scenario's output is kept, so a caller passing
+ * either must describe the command itself rather than call this. Nothing does today.
+ */
+export function describeCli(result: CliResult): string {
+  const output = [result.stdout, result.stderr]
+    .map((stream) => stream.trim())
+    .filter((stream) => stream !== "")
+    .join("\n");
+  const excerpt =
+    output.length > OUTPUT_EXCERPT
+      ? `${output.slice(0, OUTPUT_EXCERPT)}…`
+      : output;
+  return (
+    `\`wp ${result.argv.join(" ")}\` exited ${String(result.exitCode)}` +
+    (excerpt === "" ? " with no output" : `:\n${excerpt}`)
+  );
+}
+
+/**
+ * Reads WP-CLI's `--format=json` output as a list.
+ *
+ * An **empty string** reads as an empty list: some commands print nothing rather than `[]` for an
+ * empty result, and a caller cannot tell the two apart from the outside. Anything else that is not
+ * a JSON array throws with the output attached, because quietly returning `[]` would turn a broken
+ * command into a passing "nothing there yet" assertion — the precise false negative these readers
+ * exist to prevent. A scenario that needs the literal reply (that `job` answers `[]` and not
+ * silence) asserts on `stdout` instead, where the difference survives.
+ *
+ * @param stdout - the command's standard output.
+ * @param command - the argv, without `wp`, for the failure message.
+ * @throws {@link Error} if the output is neither empty nor a JSON array.
+ */
+export function parseJsonList(
+  stdout: string,
+  command: string,
+): readonly unknown[] {
+  const trimmed = stdout.trim();
+  if (trimmed === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new Error(
+      `[backwpup/cli] \`wp ${command}\` did not return JSON. Output was: ${trimmed.slice(0, OUTPUT_EXCERPT)}`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(
+      `[backwpup/cli] \`wp ${command}\` returned ${typeof parsed}, expected a JSON array.`,
+    );
+  }
+  return parsed;
+}
+
+/**
+ * {@link parseJsonList} for a result that carries its own argv.
+ *
+ * Refuses a command that failed, before parsing: WP-CLI writes its `Error:` to stderr and leaves
+ * stdout empty, which would otherwise read as an empty list and pass.
+ *
+ * @throws {@link Error} if the command exited non-zero, or if its output is not a JSON array.
+ */
+export function readJsonList(result: CliResult): readonly unknown[] {
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `[backwpup/cli] cannot read JSON from a command that failed — ${describeCli(result)}`,
+    );
+  }
+  return parseJsonList(result.stdout, result.argv.join(" "));
+}

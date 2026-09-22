@@ -2,6 +2,7 @@ import { expect } from "@playwright/test";
 
 import { theScheduledJob } from "./job-options";
 import { evalPhp } from "../../../common/wp/php";
+import { parseJsonList } from "./cli";
 import { wpCli } from "../../../common/wp/exec";
 import type { Transport } from "../../../common/config/types";
 
@@ -91,34 +92,6 @@ export interface JobRecord {
 }
 
 /**
- * Parses WP-CLI JSON output into an array.
- *
- * WP-CLI prints `[]`-wrapped JSON for list commands, but an **empty** list can also arrive as an
- * empty string on some commands, so that is normalised to `[]` rather than throwing. Anything else
- * unparseable throws with the raw output attached, because silently returning `[]` there would
- * turn a broken command into a passing "no backups yet" assertion — the exact false negative these
- * readers exist to prevent.
- */
-function parseList(stdout: string, command: string): readonly unknown[] {
-  const trimmed = stdout.trim();
-  if (trimmed === "") return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch {
-    throw new Error(
-      `[backwpup/backups] \`wp ${command}\` did not return JSON. Output was: ${trimmed.slice(0, 500)}`,
-    );
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error(
-      `[backwpup/backups] \`wp ${command}\` returned ${typeof parsed}, expected a JSON array.`,
-    );
-  }
-  return parsed;
-}
-
-/**
  * Coerces WP-CLI's numeric-ish field to a number, or `undefined` when there is no number in it.
  *
  * WP-CLI emits numbers as strings in some formats and as numbers in others, so both are accepted.
@@ -149,7 +122,7 @@ async function readList<T>(
         (result.stderr.trim() || "(no stderr)"),
     );
   }
-  return parseList(result.stdout, argv.join(" ")) as readonly T[];
+  return parseJsonList(result.stdout, argv.join(" ")) as readonly T[];
 }
 
 /**
@@ -322,7 +295,7 @@ export async function readLastRunOutcome(
   const out = result.stdout.trim();
   const [newest] = NO_LOGS.test(out)
     ? []
-    : (parseList(out, argv.join(" ")) as readonly {
+    : (parseJsonList(out, argv.join(" ")) as readonly {
         readonly errors?: unknown;
         readonly warnings?: unknown;
       }[]);
