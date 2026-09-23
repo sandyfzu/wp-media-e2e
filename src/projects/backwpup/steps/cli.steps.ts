@@ -14,7 +14,7 @@ import {
   compareCommands,
   readRegisteredCommands,
 } from "../support/cli-commands";
-import { parseCommandText } from "../support/cli-session";
+import { parseCommandText, withJobId } from "../support/cli-session";
 import { readHistory } from "../support/history";
 import {
   addBackupJob,
@@ -56,6 +56,21 @@ When(
   "I run the BackWPup command {string}",
   async ({ cli }, command: string) => {
     await cli.run(parseCommandText(command));
+  },
+);
+
+/**
+ * The same, for a command that names the site's scheduled job — `run {job}`, `job-activate
+ * --job_id={job}` — whose id the plugin allocates and the feature therefore cannot spell out.
+ *
+ * The id is read from what the site stores at the moment the command runs, so it is always the job
+ * the scenario set up — and a failure message, which quotes the argv, shows the id actually sent.
+ */
+When(
+  "I run the BackWPup command {string} on the scheduled job",
+  async ({ cli, site }, command: string) => {
+    const job = await theScheduledJob(site.transport);
+    await cli.run(parseCommandText(withJobId(command, job.jobId)));
   },
 );
 
@@ -106,10 +121,11 @@ function sortedForComparison(values: readonly string[]): string[] {
 /**
  * That the command exited 0 — which, on this surface, rules out a refusal and no more.
  *
- * Some commands report a failure as a warning and still exit 0 (a foreground `run` that logged errors
- * alongside warnings, a failed `restore`, a `log-delete` that removed nothing), and plugin code that
- * stops with `exit( 'message' )` exits 0 with no status line at all. Pair it with a claim checked
- * against a source the command has no hand in.
+ * Several commands exit 0 after failing: a foreground `run` never reaches a verdict of its own (the
+ * job ends the process at exit 0, whatever it logged), `run --background` reports even a job id the
+ * site does not have as started, a failed `restore` and a `log-delete` that removed nothing only
+ * warn, and plugin code that stops with `exit( 'message' )` prints no status line at all. Pair it
+ * with a claim checked against a source the command has no hand in.
  */
 Then("the command succeeds", ({ cli }) => {
   expect(cli.last.exitCode, describeCli(cli.last)).toBe(0);

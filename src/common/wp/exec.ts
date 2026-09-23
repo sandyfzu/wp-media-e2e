@@ -178,11 +178,43 @@ async function runDocker(
 
 const connections = new Map<string, NodeSSH>();
 
+/**
+ * How often an SSH connection is probed while it is open, and how many unanswered probes mean it is
+ * dead.
+ *
+ * Without them a link that goes silent — no reset, just nothing arriving — is never noticed: through
+ * a proxy that stopped forwarding, a command was still waiting after 70 s, with node-ssh reporting
+ * the connection alive (measured). Probed every 10 s, a dead link is given up on within about 40 s
+ * and the command on it fails rather than hangs. A healthy server answers a probe at once whatever
+ * it is running, so a long command is not affected.
+ */
+export const SSH_KEEPALIVE = { intervalMs: 10_000, countMax: 3 } as const;
+
+/** Why a pooled connection was lost, kept for the command that was running on it when it went. */
+const connectionLosses = new WeakMap<NodeSSH, Error>();
+
+/** ssh2's refusal of a request on a socket that no longer takes writes — raised before sending. */
+const NOT_CONNECTED = "Not connected";
+
+/**
+ * The one part of ssh2's client this listens to. ssh2 ships no type declarations, so node-ssh's
+ * `connection` field resolves to nothing the type checker can see; this names what is used.
+ */
+interface ErrorEmitter {
+  on(event: "error", listener: (error: Error) => void): unknown;
+}
+
 /** Cache key for one SSH endpoint (host + user + key), so calls to the same site reuse a connection. */
 function connectionKey(transport: SshTransport): string {
   return `${transport.username}@${transport.host}#${transport.privateKeyPath}`;
 }
 
+/**
+ * The pooled connection to a site's SSH endpoint, opened on first use and again whenever node-ssh
+ * reports the pooled one disconnected.
+ *
+ * @throws Error naming the endpoint if a connection cannot be opened.
+ */
 async function connection(transport: SshTransport): Promise<NodeSSH> {
   const key = connectionKey(transport);
   const existing = connections.get(key);
@@ -190,15 +222,69 @@ async function connection(transport: SshTransport): Promise<NodeSSH> {
   // A cached-but-dead client is replaced below; release its resources first.
   existing?.dispose();
   const ssh = new NodeSSH();
-  await ssh.connect({
-    host: transport.host,
-    username: transport.username,
-    privateKeyPath: transport.privateKeyPath,
+  // Named here because ssh2's own reason — `read ECONNRESET`, say — names neither the site nor the
+  // step, and reaches a scenario's report as all there is to go on.
+  await ssh
+    .connect({
+      host: transport.host,
+      username: transport.username,
+      privateKeyPath: transport.privateKeyPath,
+      keepaliveInterval: SSH_KEEPALIVE.intervalMs,
+      keepaliveCountMax: SSH_KEEPALIVE.countMax,
+    })
+    .catch((cause: unknown) => {
+      throw new Error(
+        `[wp/exec] could not connect to ${describeTarget(transport)}: ${cause instanceof Error ? cause.message : String(cause)}`,
+        { cause },
+      );
+    });
+  // node-ssh listens for connection errors only while connecting and while opening a channel. An
+  // error after that — a keepalive timeout, a reset — would have no listener, and Node turns an
+  // unhandled 'error' event into an uncaught exception that kills the worker process (measured, for
+  // both). Either way the next call gets a new connection — at once after a reset or a timeout, and
+  // through `withConnection`'s retry while ssh2 has only half-closed it; this listener only keeps the
+  // reason, for the command that was running.
+  (ssh.connection as ErrorEmitter | null)?.on("error", (error) => {
+    connectionLosses.set(ssh, error);
   });
   connections.set(key, ssh);
   return ssh;
 }
 
+/**
+ * Runs `work` on the site's pooled connection — and once more, on a new connection, if the pooled
+ * one turns out to be dead before anything was sent.
+ *
+ * node-ssh reports a client connected until its socket has fully closed, but ssh2 stops writing
+ * sooner: after a protocol error or a server's disconnect it half-closes the socket, and refuses
+ * every request from then on with {@link NOT_CONNECTED}, checked before a byte goes out. On a failing
+ * link the close can take minutes; a runner waking from sleep met exactly that, and lost a scenario
+ * to it each time. Only that refusal is retried: a failure after a request went out is passed on,
+ * so no command ever runs twice.
+ */
+async function withConnection<T>(
+  transport: SshTransport,
+  work: (ssh: NodeSSH) => Promise<T>,
+): Promise<T> {
+  const ssh = await connection(transport);
+  try {
+    return await work(ssh);
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== NOT_CONNECTED) {
+      throw error;
+    }
+    // Marks the client disconnected, which is what the pool checks — so it opens a new one.
+    ssh.dispose();
+    return work(await connection(transport));
+  }
+}
+
+/**
+ * Runs one command over SSH, in the WordPress root unless `options.cwd` says otherwise.
+ *
+ * @throws Error if the connection could not be opened, or was lost — or the command killed — before
+ * it exited, since how it ended is then unknown.
+ */
 async function runSsh(
   transport: SshTransport,
   file: string,
@@ -206,32 +292,37 @@ async function runSsh(
   options: ExecOptions,
   elevate: boolean,
 ): Promise<ExecResult> {
-  const ssh = await connection(transport);
   const [command, commandArgs] = elevate
     ? ["sudo", sudoArgv(file, args)]
     : [file, args];
-  // node-ssh `exec` shell-escapes `args`, so this is injection-safe.
-  //
-  // `noTrim` is load-bearing, not a detail: without it node-ssh trims **both ends** of stdout and
-  // stderr, which is a different normalisation from every other transport's and silently eats
-  // meaningful whitespace — the leading space of a tar member name, an option value stored with
-  // one. Turning it off leaves `stripFinalNewline` to do the one normalisation all transports
-  // agree on.
-  const result = await ssh.exec(command, commandArgs, {
-    cwd: options.cwd ?? transport.rootDir,
-    stream: "both",
-    noTrim: true,
+  return withConnection(transport, async (ssh) => {
+    // node-ssh `exec` shell-escapes `args`, so this is injection-safe.
+    //
+    // `noTrim` is load-bearing, not a detail: without it node-ssh trims **both ends** of stdout and
+    // stderr, which is a different normalisation from every other transport's and silently eats
+    // meaningful whitespace — the leading space of a tar member name, an option value stored with
+    // one. Turning it off leaves `stripFinalNewline` to do the one normalisation all transports
+    // agree on.
+    const result = await ssh.exec(command, commandArgs, {
+      cwd: options.cwd ?? transport.rootDir,
+      stream: "both",
+      noTrim: true,
+    });
+    if (result.code === null) {
+      const lost = connectionLosses.get(ssh);
+      throw new Error(
+        lost === undefined
+          ? `[wp/exec] "${file}" on ${transport.host} was terminated by signal ${result.signal ?? "unknown"} before exiting.`
+          : `[wp/exec] the connection to ${transport.host} was lost (${lost.message}) while "${file}" was ` +
+              "running, so how it ended is unknown.",
+      );
+    }
+    return {
+      stdout: stripFinalNewline(result.stdout),
+      stderr: stripFinalNewline(result.stderr),
+      exitCode: result.code,
+    };
   });
-  if (result.code === null) {
-    throw new Error(
-      `[wp/exec] "${file}" on ${transport.host} was terminated by signal ${result.signal ?? "unknown"} before exiting.`,
-    );
-  }
-  return {
-    stdout: stripFinalNewline(result.stdout),
-    stderr: stripFinalNewline(result.stderr),
-    exitCode: result.code,
-  };
 }
 
 function dispatch(
@@ -503,9 +594,9 @@ export async function resolveOnTarget(
 /**
  * Refuses a privileged target whose **resolved** path leaves the site's WordPress root.
  *
- * {@link assertSafeElevatedTarget} settles the same question lexically; this settles it against the
- * filesystem, which is the half a string comparison cannot see. Both run, and they fail for
- * different reasons, so an operator is told which.
+ * `assertSafeElevatedTarget` (in `./paths.ts`) settles the same question lexically; this settles it
+ * against the filesystem, which is the half a string comparison cannot see. Both run, and they fail
+ * for different reasons, so an operator is told which.
  *
  * A path that does not exist yet cannot be a symlink, so what matters is its **deepest existing
  * ancestor** — this walks up to it rather than relying on `readlink -f` tolerating an absent
@@ -646,8 +737,9 @@ export function dockerCpArgv(
  * Copies a file from the runner onto the target, overwriting `targetAbs` if it exists.
  *
  * Per transport: a same-filesystem copy (`local`), `docker cp` (`docker`), or SFTP over the
- * cached connection (`ssh`). The parent directory of `targetAbs` must already exist — none of
- * the three primitives creates it (see `staging.ts`, which does the `mkdir -p` first).
+ * cached connection (`ssh`). The parent directory of `targetAbs` must already exist: `copyFile` and
+ * `docker cp` do not create it, and SFTP only does so through node-ssh's retry after a failed
+ * write — so callers create it first (see `staging.ts`, which does the `mkdir -p`).
  *
  * @param transport - the target site's transport.
  * @param localAbs - absolute path of the source file on the runner.
@@ -692,18 +784,17 @@ export async function copyIntoTarget(
       }
       return;
     }
-    case "ssh": {
-      const ssh = await connection(transport);
-      // SFTP upload over the connection `exec` already uses; overwrites, but does NOT create
-      // missing parent directories.
-      await ssh.putFile(localAbs, targetAbs).catch((cause: unknown) => {
+    case "ssh":
+      // SFTP upload over the connection `exec` already uses; overwrites.
+      await withConnection(transport, (ssh) =>
+        ssh.putFile(localAbs, targetAbs),
+      ).catch((cause: unknown) => {
         throw new Error(
           `[wp/exec] could not upload "${localAbs}" to ${transport.username}@${transport.host}:"${targetAbs}".`,
           { cause },
         );
       });
       return;
-    }
     default: {
       // Exhaustiveness: assigning to `never` makes an unhandled transport mode a compile error.
       const exhaustive: never = transport;

@@ -17,9 +17,9 @@ Feature: Asking BackWPup about a site over WP-CLI
   count by parsing one command's output and comparing it to a number written in the feature, which
   cannot tell a miscount from a command that was never reached.
 
-  # The install is finished before any command runs. BackWPup defers its own activation to the
-  # first request that loads it, so without this the command under test would be that request —
-  # racing the site's cron to set the plugin up, with a lost race showing only as a wrong answer.
+  # The install is confirmed fresh before any command runs. BackWPup finishes its own activation in
+  # whichever request first loads it, and another request reaching the site at that moment can leave
+  # it half set up — which a command under test would show only as a wrong answer.
   Background:
     Given a freshly installed BackWPup
 

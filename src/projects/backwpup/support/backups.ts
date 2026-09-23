@@ -3,7 +3,9 @@ import { expect } from "@playwright/test";
 import { theScheduledJob } from "./job-options";
 import { evalPhp } from "../../../common/wp/php";
 import { parseJsonList } from "./cli";
+import { PROBE_INTERVALS, forgiving } from "./polling";
 import { wpCli } from "../../../common/wp/exec";
+import type { TestInfo } from "@playwright/test";
 import type { Transport } from "../../../common/config/types";
 
 /**
@@ -248,8 +250,22 @@ export async function isJobRunning(transport: Transport): Promise<boolean> {
   return answer === "1";
 }
 
+/** The newest job log's header, as `wp backwpup log` reads it. */
+export interface RunLog {
+  /** The log's filename, e.g. `backwpup_log_a51e01_2026-09-22_16-53-13.html`. */
+  readonly name: string;
+  /**
+   * The job the header names, when the reply carried one. The command reads a header it cannot
+   * parse as job `0`, which is no job's id, so matching this against a real job is what proves the
+   * header — and the counts beside it — were read at all.
+   */
+  readonly jobId?: number;
+  readonly errors: number;
+  readonly warnings: number;
+}
+
 /**
- * How the most recent job run ended, from the log entry it wrote.
+ * The header of the most recent job run's log.
  *
  * **The log is the only verdict that survives the run.** `wp backwpup status` reports one too, but
  * only when it is called *while the job is still running*: asked afterwards it prints
@@ -257,9 +273,9 @@ export async function isJobRunning(transport: Transport): Promise<boolean> {
  * verdict lives past its `while` loop). A short backup can therefore finish between two probes and
  * leave that command with nothing to say, which is precisely when a caller most needs an answer.
  *
- * Judged on the **counts**, never on the `status` column: that column is assembled from translated
- * strings ("O.K.", "%d ERRORS"), while `errors` and `warnings` are integers the plugin reads out of
- * the log's own header (`src/Cli/Helpers/CommandsLogHelpersTrait::read_log_header`).
+ * The counts are integers the plugin reads out of the log's own header
+ * (`src/Cli/Helpers/CommandsLogHelpersTrait::read_log_header`); the `status` column beside them is
+ * assembled from translated strings ("O.K.", "%d ERRORS") and is never read.
  *
  * `--limit=1` is the newest run and not the oldest: the command defaults to `--orderby=time`
  * `--order=desc` and sorts before it slices. The newest entry is the run in question because a
@@ -267,19 +283,16 @@ export async function isJobRunning(transport: Transport): Promise<boolean> {
  * (`src/Cli/Commands/Run.php`, "A job is already running.").
  *
  * @param transport - the site to ask.
- * @returns the outcome of the newest logged run.
- * @throws {@link Error} if no run has been logged, if its error/warning counts are absent, or if
- * the log could not be read — each means the question cannot be answered, and answering it wrongly
- * would pass a failed backup.
+ * @throws {@link Error} if no run has been logged, if the entry has no name or its error/warning
+ * counts are absent, or if the log could not be read — each means the question cannot be answered,
+ * and answering it wrongly would pass a failed backup.
  */
-export async function readLastRunOutcome(
-  transport: Transport,
-): Promise<RunOutcome> {
+export async function readLastRunLog(transport: Transport): Promise<RunLog> {
   const argv = [
     "backwpup",
     "log",
     "--limit=1",
-    "--fields=name,errors,warnings",
+    "--fields=name,job_id,errors,warnings",
     "--format=json",
   ];
   const result = await wpCli(transport, argv);
@@ -296,6 +309,8 @@ export async function readLastRunOutcome(
   const [newest] = NO_LOGS.test(out)
     ? []
     : (parseJsonList(out, argv.join(" ")) as readonly {
+        readonly name?: unknown;
+        readonly job_id?: unknown;
         readonly errors?: unknown;
         readonly warnings?: unknown;
       }[]);
@@ -316,9 +331,39 @@ export async function readLastRunOutcome(
         "so how the run ended cannot be established.",
     );
   }
-  if (errors > 0) return "errors";
-  if (warnings > 0) return "warnings";
+  if (typeof newest.name !== "string" || newest.name === "") {
+    throw new Error(
+      `[backwpup/backups] the newest job log entry names no log file: ${JSON.stringify(newest)}`,
+    );
+  }
+  const jobId = optionalNumber(newest.job_id);
+  return {
+    name: newest.name,
+    ...(jobId === undefined ? {} : { jobId }),
+    errors,
+    warnings,
+  };
+}
+
+/** Judges a run by its log's counts, an error outranking a warning. */
+export function outcomeOf(
+  log: Pick<RunLog, "errors" | "warnings">,
+): RunOutcome {
+  if (log.errors > 0) return "errors";
+  if (log.warnings > 0) return "warnings";
   return "finished";
+}
+
+/**
+ * How the most recent job run ended, from the log entry it wrote — see {@link readLastRunLog} for
+ * why the log, and why the counts.
+ *
+ * @throws {@link Error} whenever {@link readLastRunLog} does.
+ */
+export async function readLastRunOutcome(
+  transport: Transport,
+): Promise<RunOutcome> {
+  return outcomeOf(await readLastRunLog(transport));
 }
 
 /**
@@ -329,6 +374,23 @@ export async function readLastRunOutcome(
  * none of it, and the only thing a tight budget would buy is a flaky failure on a slow one.
  */
 export const BACKUP_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Makes room in a scenario's budget for a step about to wait on `backups` backups.
+ *
+ * Playwright times a scenario as a whole, so a step that may wait as long as a backup takes has to
+ * add that time itself. A budget of `0` means the scenario has no timeout at all, and is left alone.
+ *
+ * @param testInfo - the scenario's own test info.
+ * @param backups - how many backups the step may wait on.
+ */
+export function allowForBackup(
+  testInfo: Pick<TestInfo, "timeout" | "setTimeout">,
+  backups = 1,
+): void {
+  if (testInfo.timeout === 0) return;
+  testInfo.setTimeout(testInfo.timeout + backups * BACKUP_TIMEOUT_MS);
+}
 
 /**
  * Starts a configured job and returns immediately.
@@ -345,9 +407,10 @@ export const BACKUP_TIMEOUT_MS = 10 * 60 * 1000;
  *
  * **It confirms dispatch, not success**, and the difference is worth knowing: the command fires the
  * request non-blockingly (`src/Cli/Commands/Run.php` → `get_jobrun_url`, `'blocking' => false`), so a
- * site that answered with a 500 still reports success. The only failure it genuinely detects is its
- * own refusal to start a second job. Whether the backup actually happened is
- * {@link waitForBackup}'s question.
+ * site that answered with a 500 still reports success — and so does a job id the site does not have
+ * (measured: `Job "" runs now in background.`, exit 0, and nothing ran). What it does refuse is a
+ * second job while one runs, a missing id and more than one id. Whether the backup actually happened
+ * is {@link waitForBackup}'s question.
  *
  * @param transport - the site to run on.
  * @param jobId - the job to start.
@@ -369,45 +432,6 @@ export async function startJobInBackground(
 }
 
 /**
- * How many *consecutive* probe failures a wait absorbs before giving up on the site.
- *
- * Small on purpose. It has to be greater than zero, because a probe is a WP-CLI round trip over SSH
- * to a site that is busy writing a multi-gigabyte archive, and a dropped connection there is noise
- * rather than an answer. It has to stay small, because a site that is genuinely broken should say so
- * in seconds rather than at the end of a ten-minute budget. At the poll intervals below, three
- * failures is about eight seconds.
- */
-const PROBE_FAILURE_TOLERANCE = 3;
-
-/**
- * Wraps a probe so a transient failure keeps the wait alive, while a persistent one still ends it.
- *
- * `expect.poll` calls its function **outside** its own try/catch, so by default a probe that throws
- * ends the wait then and there — one lost connection during a ten-minute backup would be reported as
- * a WP-CLI error rather than as the thing being waited for. Returning `undefined` instead keeps the
- * poll going; one failure more than {@link PROBE_FAILURE_TOLERANCE}, with no success between them, is
- * taken as the site being unable to answer at all, and that last error is re-thrown with its own
- * message intact.
- *
- * The counter resets on every success, so a flaky link is tolerated indefinitely while a dead one is
- * not tolerated at all.
- */
-function forgiving<T>(probe: () => Promise<T>): () => Promise<T | undefined> {
-  let consecutive = 0;
-  return async () => {
-    try {
-      const value = await probe();
-      consecutive = 0;
-      return value;
-    } catch (error) {
-      consecutive += 1;
-      if (consecutive > PROBE_FAILURE_TOLERANCE) throw error;
-      return undefined;
-    }
-  };
-}
-
-/**
  * Waits for a backup to land and finish, then reports how it ended.
  *
  * **Three phases, in this order, for different reasons.** The archive appearing is what "a backup
@@ -420,8 +444,8 @@ function forgiving<T>(probe: () => Promise<T>): () => Promise<T | undefined> {
  * Both waits share **one** budget, so a caller that made room for `BACKUP_TIMEOUT_MS` has made room
  * for the whole call rather than for its first half. Each probe is a WP-CLI round-trip, so the
  * interval backs off quickly instead of hammering the site the way Playwright's DOM-facing default
- * would — and a probe that fails is absorbed rather than fatal, up to the run length
- * {@link PROBE_FAILURE_TOLERANCE} allows.
+ * would — and a probe that fails is absorbed rather than fatal, up to the run of failures
+ * {@link forgiving} tolerates.
  *
  * @param transport - the site to watch.
  * @param before - how many archives the history held before the run started.
@@ -444,7 +468,7 @@ export async function waitForBackup(
       {
         message: `a backup should have landed in the history by now (there were ${String(before)} before it started)`,
         timeout: remaining(),
-        intervals: [1000, 2000, 5000],
+        intervals: [...PROBE_INTERVALS],
       },
     )
     .toBeGreaterThan(before);
@@ -456,7 +480,7 @@ export async function waitForBackup(
         message:
           "the backup job should have finished by now — leaving one running would outlive the scenario",
         timeout: remaining(),
-        intervals: [1000, 2000, 5000],
+        intervals: [...PROBE_INTERVALS],
       },
     )
     .toBe(false);

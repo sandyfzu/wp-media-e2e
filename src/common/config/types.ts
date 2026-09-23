@@ -183,6 +183,18 @@ export interface CellConfig {
 /** Cell name → its config. The set of cells is data-driven (the keys of `sites.json`). */
 export type CellMap = Readonly<Record<string, CellConfig>>;
 
+/**
+ * Brings to a stop whatever a product is still doing on a site in the background — see
+ * {@link ProductConfig.stopRunningWork}.
+ *
+ * Resolves with one sentence saying what it had to stop, for the scenario's report, or with
+ * `undefined` when the site was idle — the common case, which should cost a single round trip.
+ * Rejects when the work would not stop, since removing the plugin underneath it is then unsafe.
+ */
+export type StopRunningWork = (
+  transport: Transport,
+) => Promise<string | undefined>;
+
 /** Everything that defines a product (one BDD project family). */
 export interface ProductConfig {
   readonly name: string;
@@ -238,5 +250,16 @@ export interface ProductConfig {
    * Omit when a product's uninstall is the only cleanup its database needs.
    */
   readonly siteDbResidue?: SiteDbResidue;
+  /**
+   * How to stop work this product may still be doing on a site when a scenario ends — a backup job
+   * that a scenario failing midway left running, say — before the shared teardown removes it.
+   *
+   * Work that runs in web requests outlives the scenario that started it, and uninstalling the
+   * plugin underneath it races it: the request can re-create the rows the uninstall just deleted, or
+   * go on writing files the teardown is clearing. So the teardown asks the product to stop first.
+   * Declared here rather than imported by the hooks, for the same reason as {@link debugLog}. Omit
+   * when the product runs nothing in the background.
+   */
+  readonly stopRunningWork?: StopRunningWork;
   readonly services?: ServiceConfig;
 }

@@ -32,6 +32,20 @@ Key design points:
   so a relative path means the same thing everywhere.
 - SSH connections are cached per endpoint and reused. Call `disposeConnections()`
   from a worker-teardown fixture to close them.
+- **A broken SSH link fails the command on it, never the run.** Each connection is probed every
+  10 s (`SSH_KEEPALIVE`), so a link that goes silent is given up on within about 40 s — unprobed, a
+  command on one was measured still waiting after 70 s. node-ssh listens for connection errors only
+  while connecting and while opening a channel, and an unhandled `error` event is an uncaught
+  exception that ends the worker process — measured for a reset (`ECONNRESET`) mid-command. So the
+  transport keeps a listener of its own on every connection: the command then fails with `the
+  connection to <host> was lost (<reason>)`, and the next command reconnects. A connection that died
+  **between** commands costs a reconnect, not a failure: once ssh2 has half-closed its socket (after
+  a protocol error or a server's disconnect) it refuses every request with `Not connected`, before
+  sending anything, while node-ssh still reports it connected — minutes, on a failing link; a runner
+  waking from sleep met it twice. That refusal alone is retried, once, on a new connection, for
+  commands and uploads alike (`withConnection`); nothing that was sent is ever re-sent. A connection
+  that cannot be opened fails as `could not connect to <user>@<host>: <reason>`. Pinned against
+  ssh2's in-process server in `exec.ssh.spec.ts`.
 
 ### Elevated housekeeping
 

@@ -1,16 +1,24 @@
 import { expect } from "@playwright/test";
+import type { TestInfo } from "@playwright/test";
 
 import { evalPhp } from "../../../common/wp/php";
 import { nextScheduled } from "../../../common/wp/cron";
 import { getOption } from "../../../common/wp/options";
+import {
+  HOOK_TIMEOUT_MS,
+  installPluginUnderTest,
+} from "../../../common/hooks/plugin-lifecycle";
 import {
   JOB_CONTENTS,
   describeJobContents,
   readStoredJobs,
   scheduledJobs,
 } from "./job-options";
+import { BACKWPUP_SITE_DB_RESIDUE } from "./db-residue";
+import { BACKWPUP_SITE_RESIDUE } from "./residue";
 import { LOCAL_STORAGE } from "../pages/storages";
-import type { JobContents } from "./job-options";
+import type { JobContents, StoredJob } from "./job-options";
+import type { ResolvedArtifact } from "../../../common/artifacts/types";
 import type { Transport } from "../../../common/config/types";
 
 /**
@@ -68,46 +76,141 @@ export function isOnboardingPending(value: string | undefined): boolean {
 }
 
 /**
- * Runs the plugin's activation routine, once, before anything else can.
+ * How many installs {@link finishActivation} lets a site have — the `@plugin` hook's, then up to two
+ * more — before it stops putting a lost activation race down to chance.
+ */
+export const ACTIVATION_ATTEMPTS = 3;
+
+/** What BackWPup's activation routine left behind: the onboarding flag, and the jobs it stored. */
+export interface ActivationOutcome {
+  /** The raw {@link ONBOARDING_OPTION}, `undefined` when the row does not exist. */
+  readonly flag: string | undefined;
+  /** Every stored job, placeholders included. */
+  readonly jobs: readonly StoredJob[];
+}
+
+/**
+ * Whether an activation left the site the way a fresh install is: owing its onboarding, and holding
+ * one job — the placeholder the plugin runs the first backup from. Measured on both editions, two
+ * clean installs each.
+ */
+export function isPristineActivation(outcome: ActivationOutcome): boolean {
+  const [job, ...others] = outcome.jobs;
+  return (
+    isOnboardingPending(outcome.flag) &&
+    job?.tempJob === true &&
+    others.length === 0
+  );
+}
+
+/** An {@link ActivationOutcome} in words, for a warning or a failure. */
+function describeActivation(outcome: ActivationOutcome): string {
+  const placeholders = outcome.jobs.filter((job) => job.tempJob).length;
+  return (
+    `${ONBOARDING_OPTION} = ${JSON.stringify(outcome.flag)} and ${String(outcome.jobs.length)} ` +
+    `job(s), ${String(placeholders)} of them a placeholder`
+  );
+}
+
+/**
+ * Runs the plugin's activation routine and makes sure the site came out of it as a fresh install
+ * does, reinstalling the plugin when it did not.
  *
- * **Installing does not activate BackWPup's own bootstrap.** The plugin defers `BackWPup_Install::
- * activate()` to `init`, and WP-CLI's `plugin activate` never fires `init` — measured on a live
- * cell: straight after `wp plugin install --activate`, `backwpup_version`, `backwpup_onboarding` and
- * `backwpup_jobs` are all still absent, and one ordinary WP-CLI call afterwards sets them (3 of 3
- * attempts). So the routine actually runs in whichever *request* reaches `init` first.
+ * **Installing does not run BackWPup's own bootstrap.** The plugin defers `BackWPup_Install::
+ * activate()` to `init`, which WP-CLI's `plugin activate` never fires: straight after `wp plugin
+ * install --activate`, `backwpup_version`, `backwpup_onboarding` and `backwpup_jobs` are all absent
+ * (measured). The routine runs in whichever request next loads the plugin — in this suite normally
+ * the `@plugin` hook's own active-state check, so the bootstrap here is usually a no-op, kept so this
+ * never depends on which commands that hook happens to run.
  *
- * That is a race, and losing it corrupts the install. While `backwpup_version` is unset the plugin
- * considers itself due a migration; if a second request reaches `init` before the first has written
- * that version, it re-runs the routine, now sees the job the first one just created, and takes the
- * upgrade path — which **deletes the onboarding flag** (`BackWPup_Migrate::convert_jobs()`, its first
- * statement) on a site that has never been onboarded. A cell that pokes `wp-cron.php` every minute
- * supplies that second request for free, and it was observed failing roughly one run in two.
- *
- * Doing it here, in a single WP-CLI request, closes the window for good: once the version is
- * written the migration path can never be taken again for this install. Any `wp` call loads plugins
- * and so fires `init`; `eval` is used because it says out loud that running WordPress *is* the point.
+ * **That is a race, and losing it corrupts the install.** Provoked on a live cell by booting
+ * WordPress twice straight after activation, it goes wrong two ways. A second request 150–450 ms
+ * behind the first reads the jobs after the first created its placeholder, and so takes the upgrade
+ * path, whose first statement deletes the onboarding flag (`BackWPup_Migrate::convert_jobs()`) — 4
+ * times in 4 at 300 ms. Two requests together instead both create a placeholder, and because every
+ * job write rewrites the whole jobs option from the request's own copy (`BackWPup_Option::update()`),
+ * the later one drops the earlier's placeholder flag — leaving a real, scheduled job on a site nobody
+ * configured, 5 times in 10. A cell whose cron fires every minute supplies that
+ * request by chance, a few installs in a hundred, and nothing on this side can hold it off — so
+ * either outcome is redone from a clean install, and reported.
  *
  * @param transport - the freshly installed site.
- * @throws {@link Error} if WordPress could not be run, or if the site did not come out of it owing
- * its onboarding — which is what a leaked footprint from an earlier run looks like, reported here
- * rather than as a puzzling redirect failure several steps later.
+ * @param reinstall - puts a fresh copy of the plugin under test on the site, the way the `@plugin`
+ * hook did — see {@link reinstallPlugin}.
+ * @throws {@link Error} if WordPress could not be run, if a reinstall failed, or if
+ * {@link ACTIVATION_ATTEMPTS} installs in a row left the site other than a fresh install is.
  */
-export async function finishActivation(transport: Transport): Promise<void> {
-  // The snippet is a no-op on purpose: booting WordPress *is* the call. `wp eval` loads core and
-  // the active plugins and fires `init` before it evaluates anything, which is what runs the
-  // routine; there is nothing for the PHP itself to do once that has happened.
+export async function finishActivation(
+  transport: Transport,
+  reinstall: () => Promise<void>,
+): Promise<void> {
+  let outcome = await runActivation(transport);
+  for (
+    let attempt = 2;
+    attempt <= ACTIVATION_ATTEMPTS && !isPristineActivation(outcome);
+    attempt++
+  ) {
+    console.warn(
+      `[backwpup/onboarding] BackWPup's activation left ${describeActivation(outcome)} — what ` +
+        "another request reaching the site while it ran leaves — reinstalling " +
+        `(install ${String(attempt)} of ${String(ACTIVATION_ATTEMPTS)}).`,
+    );
+    await reinstall();
+    outcome = await runActivation(transport);
+  }
+  expect(
+    isPristineActivation(outcome),
+    "a freshly installed BackWPup should owe its onboarding and hold only its first-backup " +
+      `placeholder (${describeActivation(outcome)}) after ${String(ACTIVATION_ATTEMPTS)} installs — ` +
+      "another request reaching the site during every one, or a footprint of an earlier run that " +
+      "the sweep does not know about, looks exactly like this",
+  ).toBe(true);
+}
+
+/**
+ * Boots WordPress so the plugin's pending activation routine runs, then reads what it left.
+ *
+ * The snippet is a no-op on purpose: `wp eval` loads core and the active plugins and fires `init`
+ * before it evaluates anything, which is what runs the routine.
+ */
+async function runActivation(transport: Transport): Promise<ActivationOutcome> {
   await evalPhp(
     transport,
     "// bootstrap only",
     "running the plugin's activation routine",
     "backwpup/onboarding",
   );
-  const flag = await readOnboardingFlag(transport);
-  expect(
-    isOnboardingPending(flag),
-    `a freshly installed BackWPup should owe its onboarding (${ONBOARDING_OPTION} = ${JSON.stringify(flag)}); ` +
-      "an earlier scenario's footprint surviving its uninstall looks exactly like this",
-  ).toBe(true);
+  return {
+    flag: await readOnboardingFlag(transport),
+    jobs: await readStoredJobs(transport),
+  };
+}
+
+/**
+ * The reinstall {@link finishActivation} performs: exactly the `@plugin` hook's install — the plugin
+ * removed with its leftovers swept, then the artifact installed and activated afresh.
+ *
+ * The hook's install ran on a budget of its own; this one runs inside a step, on the scenario's, so
+ * it adds the hook's budget first. A scenario with no timeout (`0`) is left alone.
+ *
+ * @param transport - the scenario's site.
+ * @param artifact - the plugin under test, as the `pluginArtifact` fixture resolves it.
+ * @param testInfo - the scenario's own test info.
+ */
+export function reinstallPlugin(
+  transport: Transport,
+  artifact: ResolvedArtifact,
+  testInfo: Pick<TestInfo, "timeout" | "setTimeout">,
+): () => Promise<void> {
+  return async () => {
+    if (testInfo.timeout !== 0) {
+      testInfo.setTimeout(testInfo.timeout + HOOK_TIMEOUT_MS);
+    }
+    await installPluginUnderTest(transport, artifact, {
+      files: BACKWPUP_SITE_RESIDUE,
+      db: BACKWPUP_SITE_DB_RESIDUE,
+    });
+  };
 }
 
 // ── Putting a site past onboarding ───────────────────────────────────────────
@@ -218,17 +321,19 @@ BackWPup_Page_Onboarding::save_post_form();
  * @param transport - the site to set up. It must have BackWPup freshly installed and activated,
  * and still owe its onboarding — the `@plugin` lifecycle leaves exactly that.
  * @param contents - what the resulting scheduled job should back up.
+ * @param reinstall - how to put a fresh copy of the plugin on the site if its activation raced —
+ * see {@link finishActivation}.
  * @returns the id of the scheduled job onboarding created.
  * @throws {@link Error} if PHP failed, or if the site did not end up in the expected state.
  */
 export async function completeOnboarding(
   transport: Transport,
   contents: JobContents,
+  reinstall: () => Promise<void>,
 ): Promise<number> {
-  // The seeding call would fire `init` itself, and so would run the activation routine as a side
-  // effect — but only if nothing else got there first. Doing it explicitly makes that ordering the
-  // contract rather than a coincidence, and fails clearly when the site is not actually fresh.
-  await finishActivation(transport);
+  // Seeding a site whose activation raced would complete an onboarding it no longer owes, so the
+  // fresh state is settled first — and fails here, clearly, when it cannot be had.
+  await finishActivation(transport, reinstall);
 
   await evalPhp(
     transport,

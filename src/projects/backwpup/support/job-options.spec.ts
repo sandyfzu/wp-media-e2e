@@ -5,11 +5,13 @@ import { join } from "node:path";
 
 import {
   FILE_AREAS,
+  addBackupJob,
   addJobPhp,
   describeJobContents,
   fileAreaOption,
   readStoredJobs,
   scheduledJobs,
+  theScheduledJob,
 } from "./job-options";
 import type { StoredJob } from "./job-options";
 import type { LocalTransport } from "../../../common/config/types";
@@ -73,6 +75,13 @@ const BACKUP_NOW = JSON.stringify([
   { jobid: 7, tempjob: false, backup_now: false },
 ]);
 
+// Two jobs a user would call their own: the state in which "the scheduled job" means nothing.
+const TWO_SCHEDULED = JSON.stringify([
+  { jobid: 1, tempjob: true },
+  { jobid: 2, type: ["DBDUMP"], tempjob: false },
+  { jobid: 3, type: ["FILE", "WPPLUGIN"], tempjob: false },
+]);
+
 const STUB_WP = `#!/usr/bin/env bash
 case "$WP_STUB_MODE" in
   packed)    printf '%s' '${PACKED}' ;;
@@ -80,8 +89,16 @@ case "$WP_STUB_MODE" in
   spellings) printf '%s' '${SPELLINGS}' ;;
   no-job-id) printf '%s' '${NO_JOB_ID}' ;;
   backup-now) printf '%s' '${BACKUP_NOW}' ;;
+  two-scheduled) printf '%s' '${TWO_SCHEDULED}' ;;
   empty)     printf '[]' ;;
   not-set)   printf "Error: Could not get 'backwpup_jobs' option. Does it exist?" >&2; exit 1 ;;
+  # The add-job endpoint: \`eval\` leaves the site holding the jobs in \`after\`, and the option
+  # reads back whatever the site holds now.
+  add-job)
+    case "$1" in
+      eval) cp "$WP_STUB_JOBS_AFTER" "$WP_STUB_JOBS" ;;
+      *)    cat "$WP_STUB_JOBS" ;;
+    esac ;;
   broken)    printf 'Error: Error establishing a database connection.' >&2; exit 1 ;;
 esac
 exit 0
@@ -104,6 +121,8 @@ test.beforeAll(() => {
 test.afterAll(() => {
   if (originalPath === undefined) delete process.env.PATH;
   else process.env.PATH = originalPath;
+  delete process.env.WP_STUB_JOBS;
+  delete process.env.WP_STUB_JOBS_AFTER;
   rmSync(binDir, { recursive: true, force: true });
   rmSync(rootDir, { recursive: true, force: true });
 });
@@ -287,5 +306,76 @@ test.describe("addJobPhp", () => {
     const php = addJobPhp("database");
     expect(php).toContain("$response->is_error()");
     expect(php).toContain("WP_CLI::error");
+  });
+});
+
+test.describe("addBackupJob", () => {
+  /** A job record as the endpoint leaves it: its id, and what it backs up. */
+  const job = (jobid: number, type: readonly string[]): object => ({
+    jobid,
+    type,
+    destinations: ["FOLDER"],
+    activetype: "wpcron",
+  });
+  const PLACEHOLDER = { jobid: 1, tempjob: true };
+
+  /** The site holds `before`; the endpoint call leaves it holding `after`. */
+  function site(before: readonly object[], after: readonly object[]): void {
+    process.env.WP_STUB_MODE = "add-job";
+    process.env.WP_STUB_JOBS = join(rootDir, "jobs.json");
+    process.env.WP_STUB_JOBS_AFTER = join(rootDir, "jobs-after.json");
+    writeFileSync(process.env.WP_STUB_JOBS, JSON.stringify(before));
+    writeFileSync(process.env.WP_STUB_JOBS_AFTER, JSON.stringify(after));
+  }
+
+  const existing = [PLACEHOLDER, job(3, ["DBDUMP"])];
+
+  test("returns the one job the endpoint added, as the site now stores it", async () => {
+    site(existing, [...existing, job(4, ["FILE", "DBDUMP", "WPPLUGIN"])]);
+    const added = await addBackupJob(local(), "files and database");
+    expect(added.jobId).toBe(4);
+  });
+
+  // The endpoint answers with a message rather than the job, so the stored jobs are the only proof.
+  test("fails when the call left the site without a new job", async () => {
+    site(existing, existing);
+    await expect(addBackupJob(local(), "database")).rejects.toThrow(
+      /exactly one new job/,
+    );
+  });
+
+  test("fails when more than one job appeared", async () => {
+    site(existing, [...existing, job(4, ["DBDUMP"]), job(5, ["DBDUMP"])]);
+    await expect(addBackupJob(local(), "database")).rejects.toThrow(
+      /exactly one new job/,
+    );
+  });
+
+  test("fails when the new job backs up something other than what was asked for", async () => {
+    site(existing, [...existing, job(4, ["DBDUMP"])]);
+    await expect(addBackupJob(local(), "files and database")).rejects.toThrow(
+      /what the job added as "files and database" actually backs up/,
+    );
+  });
+});
+
+// What `{job}` resolves to in a scenario's command, so it must never pick one of two.
+test.describe("theScheduledJob", () => {
+  test("is the one job a user configured, past the hidden ones", async () => {
+    process.env.WP_STUB_MODE = "packed";
+    expect((await theScheduledJob(local())).jobId).toBe(2);
+    process.env.WP_STUB_MODE = "backup-now";
+    expect((await theScheduledJob(local())).jobId).toBe(7);
+  });
+
+  test("refuses a site with none, and one with two", async () => {
+    process.env.WP_STUB_MODE = "empty";
+    await expect(theScheduledJob(local())).rejects.toThrow(
+      /exactly one scheduled backup job/,
+    );
+    process.env.WP_STUB_MODE = "two-scheduled";
+    await expect(theScheduledJob(local())).rejects.toThrow(
+      /exactly one scheduled backup job/,
+    );
   });
 });

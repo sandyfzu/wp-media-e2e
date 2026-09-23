@@ -25,7 +25,7 @@ import {
 } from "./plugin-lifecycle";
 import type { DeclaredResidue, ScenarioReport } from "./plugin-lifecycle";
 import type { ResolvedArtifact } from "../artifacts/types";
-import type { LocalTransport } from "../config/types";
+import type { LocalTransport, StopRunningWork } from "../config/types";
 
 /**
  * The `@plugin` lifecycle policy, driven end to end on the `local` transport: a real WP-root-like
@@ -731,5 +731,133 @@ test.describe("teardownPluginUnderTest", () => {
       teardownPluginUnderTest(local, "backwpup-pro", {}, files(), failing),
     ).rejects.toThrow(DebugLogFatalError);
     expect(warnings.join("\n")).toMatch(/could not attach debug\.log/);
+  });
+});
+
+test.describe("teardownPluginUnderTest — work the plugin left running", () => {
+  /** What a product's stop function saw of the site when it was called. */
+  interface StopCall {
+    readonly installed: boolean;
+    readonly callsBefore: readonly string[];
+  }
+
+  /** A stop function that records the moment it ran, then answers `answer`. */
+  function recordingStop(
+    calls: StopCall[],
+    answer: () => Promise<string | undefined>,
+  ): StopRunningWork {
+    return () => {
+      calls.push({ installed: isInstalled(), callsBefore: wpCalls() });
+      return answer();
+    };
+  }
+
+  // The whole point of the duty: the work has to be stopped while the plugin that runs it is still
+  // there, and after the log has been judged as the scenario left it.
+  test("asks the product to stop its work after the log is judged and before the plugin is removed", async () => {
+    seedInstalled();
+    const calls: StopCall[] = [];
+    const report = reportSink();
+
+    await teardownPluginUnderTest(
+      local,
+      "backwpup-pro",
+      {},
+      files(),
+      report,
+      recordingStop(calls, () => Promise.resolve(undefined)),
+    );
+
+    expect(calls).toHaveLength(1);
+    const [call] = calls;
+    expect(call?.installed).toBe(true);
+    expect(call?.callsBefore.some((line) => line.startsWith("eval"))).toBe(
+      true,
+    );
+    expect(
+      call?.callsBefore.some((line) => line.startsWith("plugin uninstall")),
+    ).toBe(false);
+    // An idle site is the common case, and it says nothing.
+    expect(report.attached.size).toBe(0);
+    expect(warnings).toEqual([]);
+    expect(isInstalled()).toBe(false);
+  });
+
+  test("reports what it had to stop, without failing the scenario", async () => {
+    seedInstalled();
+    const report = reportSink();
+
+    await expect(
+      teardownPluginUnderTest(local, "backwpup-pro", {}, files(), report, () =>
+        Promise.resolve("a backup of job 3 was still running"),
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(warnings.join("\n")).toContain(
+      `after "${SCENARIO_TITLE}": a backup of job 3 was still running`,
+    );
+    expect(report.attached.get("stopped-running-work")).toContain(
+      "a backup of job 3 was still running",
+    );
+    expect(isInstalled()).toBe(false);
+  });
+
+  // Independence, as for every other duty: a site whose work would not stop still gets its plugin
+  // and its leftovers removed, and the failure is the one reported.
+  test("work that would not stop is a cleanup failure, and every later duty still runs", async () => {
+    seedInstalled();
+    const leftovers = join(wpRoot, "wp-content/uploads/backwpup");
+    mkdirSync(leftovers, { recursive: true });
+
+    await expect(
+      teardownPluginUnderTest(
+        local,
+        "backwpup-pro",
+        {},
+        files("wp-content/uploads/backwpup"),
+        reportSink(),
+        () => Promise.reject(new Error("the job would not stop")),
+      ),
+    ).rejects.toThrow("the job would not stop");
+
+    expect(isInstalled()).toBe(false);
+    expect(existsSync(leftovers)).toBe(false);
+  });
+
+  test("a fatal still outranks work that would not stop", async () => {
+    seedInstalled();
+    process.env.WP_STUB_LOG = "PHP Fatal error:  the real defect\n";
+
+    await expect(
+      teardownPluginUnderTest(
+        local,
+        "backwpup-pro",
+        {},
+        files(),
+        reportSink(),
+        () => Promise.reject(new Error("the job would not stop")),
+      ),
+    ).rejects.toThrow(DebugLogFatalError);
+    expect(errors.join("\n")).toMatch(
+      /a cleanup step also failed.*the job would not stop/,
+    );
+  });
+
+  test("a reporter fault while reporting stopped work is only a warning", async () => {
+    seedInstalled();
+    const failing: ScenarioReport = {
+      title: SCENARIO_TITLE,
+      failed: false,
+      attach: () => Promise.reject(new Error("reporter is gone")),
+    };
+
+    await expect(
+      teardownPluginUnderTest(local, "backwpup-pro", {}, files(), failing, () =>
+        Promise.resolve("a backup of job 3 was still running"),
+      ),
+    ).resolves.toBeUndefined();
+    expect(warnings.join("\n")).toMatch(
+      /could not attach the stopped-work report: reporter is gone/,
+    );
   });
 });

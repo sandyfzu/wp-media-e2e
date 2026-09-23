@@ -6,13 +6,17 @@ import { expect } from "@playwright/test";
 
 import { Given, Then, When } from "../fixtures";
 import {
-  BACKUP_TIMEOUT_MS,
+  allowForBackup,
   countBackups,
   listBackups,
   runScheduledBackup,
   waitForBackup,
 } from "../support/backups";
-import { CRON_HOOK, completeOnboarding } from "../support/onboarding";
+import {
+  CRON_HOOK,
+  completeOnboarding,
+  reinstallPlugin,
+} from "../support/onboarding";
 import { theScheduledJob } from "../support/job-options";
 import { nextScheduled, triggerScheduledEvent } from "../../../common/wp/cron";
 import { fileChecksum } from "../../../common/wp/files";
@@ -62,8 +66,12 @@ function jobContents(value: string): JobContents {
  */
 Given(
   "BackWPup is set up to back up the {string} on a schedule",
-  async ({ site }, contents: string) => {
-    await completeOnboarding(site.transport, jobContents(contents));
+  async ({ site, pluginArtifact, $testInfo }, contents: string) => {
+    await completeOnboarding(
+      site.transport,
+      jobContents(contents),
+      reinstallPlugin(site.transport, pluginArtifact("plugin"), $testInfo),
+    );
   },
 );
 
@@ -77,9 +85,7 @@ Given(
 Given(
   "the site has already made {int} backup(s)",
   async ({ site, $testInfo }, count: number) => {
-    if ($testInfo.timeout !== 0) {
-      $testInfo.setTimeout($testInfo.timeout + count * BACKUP_TIMEOUT_MS);
-    }
+    allowForBackup($testInfo, count);
     for (let made = 0; made < count; made++) {
       await runScheduledBackup(site.transport);
     }
@@ -100,9 +106,7 @@ Given(
  * user pressing "Backup Now" means both.
  */
 When("I back up now", async ({ site, dashboard, jobRun, $testInfo }) => {
-  if ($testInfo.timeout !== 0) {
-    $testInfo.setTimeout($testInfo.timeout + BACKUP_TIMEOUT_MS);
-  }
+  allowForBackup($testInfo);
   const before = await countBackups(site.transport);
   await dashboard.openBackupNow();
   await jobRun.startFromModal();
@@ -128,6 +132,21 @@ Then("the backup job is scheduled to run", async ({ site }) => {
 });
 
 /**
+ * The inverse: the job has no WP-Cron event, so nothing will ever start it on a schedule.
+ *
+ * Asked by hook and job id for the same reason as above — the hidden placeholder job can hold an
+ * event of its own on that hook, so "no event on the hook" could fail for a reason that has nothing
+ * to do with this job.
+ */
+Then("the backup job is not scheduled to run", async ({ site }) => {
+  const job = await theScheduledJob(site.transport);
+  expect(
+    await nextScheduled(site.transport, CRON_HOOK, { arg: job.jobId }),
+    `job ${String(job.jobId)} should have no WP-Cron event`,
+  ).toBeUndefined();
+});
+
+/**
  * Time reaching the schedule, without waiting out a month of it.
  *
  * The job's own event is brought forward and WordPress is asked to run what is due, so the backup
@@ -136,9 +155,7 @@ Then("the backup job is scheduled to run", async ({ site }) => {
  * anything the site already had due runs alongside it, as on any real cron tick.
  */
 When("its schedule comes due", async ({ site, $testInfo }) => {
-  if ($testInfo.timeout !== 0) {
-    $testInfo.setTimeout($testInfo.timeout + BACKUP_TIMEOUT_MS);
-  }
+  allowForBackup($testInfo);
   const before = await countBackups(site.transport);
   const job = await theScheduledJob(site.transport);
   await triggerScheduledEvent(site.transport, CRON_HOOK, { arg: job.jobId });
@@ -204,12 +221,31 @@ Then(
  *
  * Matched on the delete control the row template offers only on that branch, so an *aborted*
  * backup counts too — it renders no failure icon at all, and keying on the icon would let exactly
- * the rows this exists to catch pass through. See {@link BackupHistoryTable.failedRows}.
+ * the rows this exists to catch pass through. See `BackupHistoryTable.failedRows`.
  */
 Then("no backup in the history has failed", async ({ backupHistory }) => {
   await backupHistory.reload();
   await backupHistory.expectNoFailures();
 });
+
+/**
+ * That the history lists the one run there was, as a run the user aborted — no download, no
+ * restore, "Aborted by user" where a finished run shows its data.
+ *
+ * Re-read from the server first, for the reason the count step gives. Only a row the plugin's own
+ * hook marks unsuccessful can match, so a completed run could not satisfy it whatever it displayed.
+ */
+Then(
+  "the backup history shows the run as aborted by the user",
+  async ({ backupHistory }) => {
+    await backupHistory.reload();
+    await backupHistory.expectRowCount(1);
+    await expect(
+      backupHistory.abortedRows,
+      "history rows for runs a user aborted",
+    ).toHaveCount(1);
+  },
+);
 
 // ── Downloading ──────────────────────────────────────────────────────────────
 

@@ -4,16 +4,18 @@ import {
   getDebugLogOptions,
   getPool,
   getSiteResidue,
+  getStopRunningWork,
   readRouting,
   registerDebugLogOptions,
   registerPool,
   registerSiteResidue,
+  registerStopRunningWork,
   routingMetadata,
 } from "./metadata";
 import type { SiteConfig } from "./types";
 
 /**
- * The project-metadata contract and the three per-process registries behind it.
+ * The project-metadata contract and the per-process registries behind it.
  *
  * The registries are module-global and deliberately have no reset (the config factory populates
  * them once per process), so each test uses its own product/cell names for isolation.
@@ -105,6 +107,22 @@ test.describe("debug-log preset registry", () => {
     registerDebugLogOptions("spec-product-b", b);
     expect(getDebugLogOptions("spec-product-a")).toBe(a);
     expect(getDebugLogOptions("spec-product-b")).toBe(b);
+  });
+});
+
+test.describe("running-work registry", () => {
+  test("serves back the function a product declared", () => {
+    const stop = (): Promise<string | undefined> => Promise.resolve(undefined);
+    registerStopRunningWork("spec-with-work", stop);
+    expect(getStopRunningWork("spec-with-work")).toBe(stop);
+  });
+
+  // Absent means "runs nothing in the background", so the teardown has nothing to ask — not a
+  // default function that would cost every product a round trip for a question it cannot answer.
+  test("is absent for a product that declares none", () => {
+    expect(getStopRunningWork("spec-no-work")).toBeUndefined();
+    registerStopRunningWork("spec-undefined-work", undefined);
+    expect(getStopRunningWork("spec-undefined-work")).toBeUndefined();
   });
 });
 

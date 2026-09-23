@@ -3,7 +3,13 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { HISTORY_PHP, parseHistory, readHistory } from "./history";
+import {
+  HISTORY_PHP,
+  HISTORY_ROWS_PHP,
+  historyRecords,
+  parseHistory,
+  readHistory,
+} from "./history";
 import type { LocalTransport } from "../../../common/config/types";
 
 // What the snippet printed on a live cell after one `run --background`, verbatim. `$wpdb` hands every
@@ -119,7 +125,27 @@ test.describe("parseHistory", () => {
   });
 });
 
+test.describe("historyRecords", () => {
+  // What a snippet reporting the rows beside something else hands over, once decoded.
+  test("maps rows that were decoded elsewhere", () => {
+    expect(historyRecords(JSON.parse(LIVE))).toEqual(parseHistory(LIVE));
+  });
+
+  test("refuses anything that is not a list of rows", () => {
+    expect(() => historyRecords(undefined)).toThrow(/expected a list of rows/);
+    expect(() => historyRecords({})).toThrow(/expected a list of rows/);
+  });
+});
+
 test.describe("HISTORY_PHP", () => {
+  // One query, shared: the snippet that prints the rows is the one that reads them, plus the echo.
+  test("prints exactly the rows the shared query reads", () => {
+    expect(HISTORY_PHP.startsWith(HISTORY_ROWS_PHP)).toBe(true);
+    expect(HISTORY_PHP.slice(HISTORY_ROWS_PHP.length).trim()).toBe(
+      "echo wp_json_encode( $rows );",
+    );
+  });
+
   test("reads the plugin's table under the site's own prefix", () => {
     const [encoded] = [
       ...HISTORY_PHP.matchAll(/base64_decode\( '([^']+)' \)/g),

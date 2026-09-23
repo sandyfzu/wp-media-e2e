@@ -14,6 +14,37 @@ import type { Transport } from "../../../common/config/types";
 /** Quoting characters — both quotes and the backslash — which the split below would mangle. */
 const QUOTING = /["'\\]/;
 
+/**
+ * Where a scenario writes the id of the site's scheduled job, which it cannot know in advance —
+ * the plugin allocates it.
+ */
+export const JOB_PLACEHOLDER = "{job}";
+
+/**
+ * Anything shaped like a placeholder, resolved or not. No BackWPup argument is a braced word, so
+ * one that reaches the split is a placeholder this step cannot fill.
+ */
+const PLACEHOLDER = /\{[a-z][a-z ]*\}/i;
+
+/**
+ * Writes a job's id into the command a scenario wrote, wherever it says {@link JOB_PLACEHOLDER}.
+ *
+ * @param text - the command as written in the feature, e.g. `run {job} --background`.
+ * @param jobId - the id to write in.
+ * @returns the command with every placeholder filled.
+ * @throws {@link Error} if the text has no placeholder — a step that promises to act on a job and
+ * then runs a command naming none would be claiming something it did not do.
+ */
+export function withJobId(text: string, jobId: number): string {
+  if (!text.includes(JOB_PLACEHOLDER)) {
+    throw new Error(
+      `[backwpup/cli] the command "${text}" does not say where the job goes — write ` +
+        `${JOB_PLACEHOLDER} where its id belongs, e.g. "run ${JOB_PLACEHOLDER} --background".`,
+    );
+  }
+  return text.replaceAll(JOB_PLACEHOLDER, String(jobId));
+}
+
 /** Names that mean the caller re-typed a prefix {@link backwpupCli} already supplies. */
 const IMPLIED_PREFIXES = new Set(["wp", "backwpup"]);
 
@@ -58,21 +89,30 @@ function runGlobalIn(arg: string): string | undefined {
  * hyphen-and-underscore filenames — and a scenario that ever needs more is better served by a step
  * of its own than by a quoting dialect invented here. All three are refused rather than mangled.
  *
- * Two more refusals keep the text a BackWPup command and nothing else. `wp` and `backwpup` as the
+ * Three more refusals keep the text a BackWPup command and nothing else. `wp` and `backwpup` as the
  * first word: {@link backwpupCli} supplies both, and repeating them would run `wp backwpup wp
- * backwpup …`, failing as an unregistered subcommand several lines from the real mistake. And any
- * of {@link RUN_GLOBALS}, which would move the command off the site the scenario is bound to.
+ * backwpup …`, failing as an unregistered subcommand several lines from the real mistake. Any of
+ * {@link RUN_GLOBALS}, which would move the command off the site the scenario is bound to. And a
+ * placeholder nobody filled, which the plugin would read as job `0` and answer about a job that
+ * does not exist — see {@link withJobId}, which fills {@link JOB_PLACEHOLDER} first.
  *
  * @param text - the command as written in the feature, without `wp backwpup`.
  * @returns the subcommand and its arguments.
- * @throws {@link Error} if the text is empty, quotes anything, repeats the implied prefix, or sets
- * a global that decides where the command runs.
+ * @throws {@link Error} if the text is empty, quotes anything, repeats the implied prefix, sets a
+ * global that decides where the command runs, or still holds a placeholder.
  */
 export function parseCommandText(text: string): readonly string[] {
   if (QUOTING.test(text)) {
     throw new Error(
       `[backwpup/cli] the command "${text}" quotes or escapes an argument, which this step cannot ` +
         "honour — arguments are split on whitespace. Write a step of its own for such a value.",
+    );
+  }
+  const placeholder = PLACEHOLDER.exec(text)?.[0];
+  if (placeholder !== undefined) {
+    throw new Error(
+      `[backwpup/cli] the command "${text}" still holds ${placeholder}, which this step cannot ` +
+        `fill. A command naming the scheduled job by ${JOB_PLACEHOLDER} runs "on the scheduled job".`,
     );
   }
   const args = text.split(/\s+/).filter((arg) => arg !== "");
@@ -98,6 +138,35 @@ export function parseCommandText(text: string): readonly string[] {
 }
 
 /**
+ * Settles with `work`, unless `budgetMs` passes first.
+ *
+ * The command itself cannot be stopped from here — the exec layer has no way to — so it is left to
+ * finish on its own; racing it still turns "it never came back" into a failure that says so.
+ */
+async function withinBudget<T>(
+  work: Promise<T>,
+  budgetMs: number,
+  args: readonly string[],
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(
+          `[backwpup/cli] \`wp backwpup ${args.join(" ")}\` had not answered after ` +
+            `${String(budgetMs / 1000)} s.`,
+        ),
+      );
+    }, budgetMs);
+  });
+  try {
+    return await Promise.race([work, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * The commands one scenario has run against its site, remembering the last of them.
  *
  * Deliberately keeps only the latest result: every assertion in this surface is about the command
@@ -119,10 +188,20 @@ export class CliSession {
    * Runs one `wp backwpup …` subcommand and remembers what it said.
    *
    * @param args - the subcommand and its arguments, e.g. `["job", "--format=count"]`.
+   * @param budgetMs - how long the command may take, for one that blocks on something else — as
+   * `status` does on a running job. Omit for a command that simply answers.
    * @returns the outcome, whatever it was — a refusal is a result here, never a throw.
+   * @throws {@link Error} if the command could not be run, or was still running when its budget ran
+   * out — it is then left to finish on the site. Either way the previous result is already
+   * forgotten, so no assertion can judge an earlier command in place of the one that never answered.
    */
-  async run(args: readonly string[]): Promise<CliResult> {
-    const result = await backwpupCli(this.transport, args);
+  async run(args: readonly string[], budgetMs?: number): Promise<CliResult> {
+    this.result = undefined;
+    const pending = backwpupCli(this.transport, args);
+    const result =
+      budgetMs === undefined
+        ? await pending
+        : await withinBudget(pending, budgetMs, args);
     this.result = result;
     return result;
   }
@@ -130,14 +209,14 @@ export class CliSession {
   /**
    * What the last command said.
    *
-   * @throws {@link Error} if nothing has been run — which is a feature written with an assertion
+   * @throws {@link Error} if no command has answered — which is a feature written with an assertion
    * ahead of the command it judges, and is worth saying plainly rather than failing as a mismatch
    * against an empty result.
    */
   get last(): CliResult {
     if (this.result === undefined) {
       throw new Error(
-        "[backwpup/cli] no BackWPup command has been run in this scenario yet, so there is " +
+        "[backwpup/cli] no BackWPup command has answered in this scenario yet, so there is " +
           "nothing to assert on. Run one before asserting what it reported.",
       );
     }

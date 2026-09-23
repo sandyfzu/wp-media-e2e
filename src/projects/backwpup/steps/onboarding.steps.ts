@@ -3,7 +3,7 @@ import type { DataTable } from "playwright-bdd";
 
 import { Given, Then, When } from "../fixtures";
 import {
-  BACKUP_TIMEOUT_MS,
+  allowForBackup,
   countBackups,
   listJobs,
   waitForBackup,
@@ -13,6 +13,7 @@ import {
   finishActivation,
   isOnboardingPending,
   readOnboardingFlag,
+  reinstallPlugin,
 } from "../support/onboarding";
 import {
   FILE_AREAS,
@@ -107,35 +108,36 @@ async function prefixedTable(
 // ── Starting state ───────────────────────────────────────────────────────────
 
 /**
- * The site as the plugin lifecycle hook has just left it: the edition under test, freshly installed
- * and active.
+ * The site as the plugin lifecycle hook has just left it: the edition under test, freshly installed,
+ * active, and owing its onboarding.
  *
- * **Deliberately asserts the install and nothing about the plugin's own state**, because the two
- * tempting checks are both unsound here:
+ * **It does not count jobs**, the tempting check, because a job count is not a property of a fresh
+ * install. Activation creates a placeholder job of its own, and rendering the onboarding page
+ * creates two more, so "no jobs" is only ever true in the window before the plugin has
+ * bootstrapped. Worse, it is not even guaranteed *between* scenarios: BackWPup's `uninstall.php`
+ * wraps its entire database cleanup in `! class_exists( \BackWPup::class )`, so the footprint is only
+ * removed when nothing loaded the class during that request — which made this an intermittent
+ * failure that blamed whichever scenario ran next.
  *
- *  - *A job count* is not a property of a fresh install at all. Activation creates a placeholder
- *    job of its own, and rendering the onboarding page creates two more, so "no jobs" is only ever
- *    true in
- *    the window before the plugin has bootstrapped. Worse, it is not even guaranteed *between*
- *    scenarios: BackWPup's `uninstall.php` wraps its entire database cleanup in
- *    `! class_exists( \BackWPup::class )`, so the footprint is only removed when nothing loaded the
- *    class during that request — which made this an intermittent failure that blamed whichever
- *    scenario ran next.
- *
- * What it does instead of counting jobs is **finish the install**: WP-CLI's activation never fires
- * `init`, so the plugin's own routine has not run yet, and leaving it to whichever request gets
- * there first is a race that can corrupt the install — see {@link finishActivation}. Running it here
- * makes the site deterministically fresh, and confirms it owes its onboarding, before anything else
- * — a browser or a WP-CLI command under test — is let near it.
+ * It takes the plugin's own verdict instead: its activation routine has run and left the site owing
+ * its onboarding — redone from a clean install when another request raced it, see
+ * {@link finishActivation} — before anything else, a browser or a WP-CLI command under test, is let
+ * near it.
  */
-Given("a freshly installed BackWPup", async ({ site, pluginArtifact }) => {
-  const { slug } = pluginArtifact("plugin");
-  expect(
-    await isPluginActive(site.transport, slug),
-    `the scenario's plugin ("${slug}") should have been installed and activated by the @plugin hook`,
-  ).toBe(true);
-  await finishActivation(site.transport);
-});
+Given(
+  "a freshly installed BackWPup",
+  async ({ site, pluginArtifact, $testInfo }) => {
+    const artifact = pluginArtifact("plugin");
+    expect(
+      await isPluginActive(site.transport, artifact.slug),
+      `the scenario's plugin ("${artifact.slug}") should have been installed and activated by the @plugin hook`,
+    ).toBe(true);
+    await finishActivation(
+      site.transport,
+      reinstallPlugin(site.transport, artifact, $testInfo),
+    );
+  },
+);
 
 When("I open the BackWPup dashboard", async ({ dashboard }) => {
   await dashboard.goto();
@@ -358,10 +360,8 @@ When("I complete onboarding", async ({ onboarding, firstBackup }) => {
  */
 Then("the first backup completes", async ({ site, $testInfo }) => {
   // Playwright times a scenario and its hooks against one clock, so make room before spending any
-  // of the budget. `0` means "no timeout" in Playwright and must be left alone.
-  if ($testInfo.timeout !== 0) {
-    $testInfo.setTimeout($testInfo.timeout + BACKUP_TIMEOUT_MS);
-  }
+  // of the budget.
+  allowForBackup($testInfo);
   expect(
     await waitForBackup(site.transport, 0),
     "the first backup should not have ended in errors",

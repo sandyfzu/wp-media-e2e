@@ -6,6 +6,7 @@ import { loadSites } from "../../../common/config/sites";
 import { BACKWPUP_LOG_OPTIONS } from "../support/debug-log";
 import { BACKWPUP_SITE_DB_RESIDUE } from "../support/db-residue";
 import { BACKWPUP_SITE_RESIDUE } from "../support/residue";
+import { stopRunningJobs } from "../support/job-runs";
 import type {
   ProductArtifacts,
   ProductConfig,
@@ -107,5 +108,8 @@ export const backwpup: ProductConfig = {
   debugLog: BACKWPUP_LOG_OPTIONS,
   siteResidue: BACKWPUP_SITE_RESIDUE,
   siteDbResidue: BACKWPUP_SITE_DB_RESIDUE,
+  // A backup job runs in a web request of its own, so one a scenario left running would otherwise
+  // outlive the plugin's removal.
+  stopRunningWork: stopRunningJobs,
   services,
 };

@@ -603,6 +603,18 @@ test.describe("BackupHistoryTable — the failure branch", () => {
     ).toHaveCount(1);
   });
 
+  test("abortedRows finds the aborted run and not the one that failed on its own", async ({
+    page,
+  }) => {
+    await renderFixture(page, MIXED);
+    const table = new BackupHistoryTable(page);
+    expect(
+      await table.abortedRows.evaluateAll((rows) =>
+        rows.map((row) => row.getAttribute("data-backup-id")),
+      ),
+    ).toEqual(["14"]);
+  });
+
   test("expectNoFailures fails when a failed row is present", async ({
     page,
   }) => {

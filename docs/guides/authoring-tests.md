@@ -102,18 +102,37 @@ text has to respect, each refused rather than run:
   runner already runs the command on the scenario's own site. `--debug`, `--quiet` and
   `--[no-]color` only change the output, so they are allowed.
 
+A command that names the site's scheduled job cannot spell its id out, because the plugin allocates
+it. Write `{job}` where the id goes and end the step with *on the scheduled job* — `When I run the
+BackWPup command "run {job} --background" on the scheduled job` — and the id is read from what the
+site stores when the command runs. A `{job}` left in the plain step is refused rather than sent,
+since the plugin would read it as job `0`. A command that **blocks** on a running job, as `status`
+does, runs through `When I watch the running backup with the BackWPup command "…"`, which gives it a
+backup's length as a budget of its own and fails naming the command if it never answers.
+
 A step that needs a second opinion reads it from a source the command has no hand in — the stored
 jobs (`support/job-options.ts`), the plugin's backup history table (`support/history.ts`), or the
 resolved zip — never from the same command in another format.
 
 **`Then the command succeeds` only proves exit 0, and for a command that changes the site that is
 not success.** WP-CLI itself is honest — its refusals and `WP_CLI::error()` exit 1 — but some of
-BackWPup's commands report a failure as a warning and still exit 0: a foreground `run` that logged
-errors and warnings, a `restore` that failed midway, a `log-delete` that removed nothing. Plugin code
-that stops with PHP's `exit( 'message' )` exits 0 with no status line at all. So always pair it with
-a check against a second source (the history row, the marker, a re-count), and assert a refusal the
-way the command actually makes it. The cases, and which are still to be measured live, are V104–V107
-in the [feature-porting plan](../plans/phase-6-feature-porting-plan.md).
+BackWPup's commands exit 0 after failing: a foreground `run` never reaches its own verdict at all
+(the job ends the WP-CLI process itself, whatever it logged), `run <id> --background` reports success
+for a job id the site does not have, a `restore` that failed midway warns, a `log-delete` that
+removed nothing still reports success, and plugin code that stops with PHP's `exit( 'message' )`
+prints no status line at all. So always pair it with a check against a second source (the history
+row, the log, the marker, a re-count), and assert a refusal the way the command actually makes it.
+The cases, and which of them are measured live, are §2.16–§2.17 of the
+[feature-porting plan](../plans/phase-6-feature-porting-plan.md).
+
+**A job that must still be running when the next command arrives needs arranging.** A database
+backup of the cells finishes in about a second — less than one WP-CLI round trip — so
+[`cli-running-job.feature`](../../src/projects/backwpup/features/cli-running-job.feature) sets two
+of BackWPup's own settings first (`Given BackWPup's "…" setting is "…"`, which refuses a value the
+Settings screen does not offer): **Reduce server load** at `maximum` stretches the run to several
+seconds, and a **Maximum script execution time** of `0` keeps it in one request, since the plugin
+otherwise hands a long run to a fresh request midway and a command landing in that handover is
+answered about a job that is briefly not there.
 
 It also adds one fixture that is **not** a page object and does not behave like one: **`markers`**
 plants a random value in a file under the site's content directory and another in a `wp_options`
@@ -155,7 +174,7 @@ await stageAndInstallPlugin(site.transport, artifact.zipPath, {
 | Tag         | Effect                                                                                          |
 | ----------- | ----------------------------------------------------------------------------------------------- |
 | `@noauth`   | Scenario starts unauthenticated with an empty session (login/logout flows). The only tag that runs against placeholder sites, so it is what CI's smoke job greps. |
-| `@plugin`   | The plugin under test is freshly installed + activated before the scenario, `debug.log` is scoped to it and **a PHP fatal fails it**, and afterwards the plugin is removed along with *the files and the database rows it left behind*. "Freshly" is load-bearing: a site whose plugin directory went without its `uninstall.php` ever running still carries that plugin's options and tables, and those are swept before the install rather than installed on top of. Needs a real site. |
+| `@plugin`   | The plugin under test is freshly installed + activated before the scenario, `debug.log` is scoped to it and **a PHP fatal fails it**, and afterwards — once anything it left running has been stopped (`ProductConfig.stopRunningWork`) — the plugin is removed along with *the files and the database rows it left behind*. "Freshly" is load-bearing: a site whose plugin directory went without its `uninstall.php` ever running still carries that plugin's options and tables, and those are swept before the install rather than installed on top of. Needs a real site. |
 | `@mobile`   | Runs under the mobile device profile (viewport + `isMobile` + `hasTouch` + mobile UA + DPR). Untagged scenarios stay desktop. |
 | `@smoke`    | Scaffolding/smoke scenarios; run with `--grep @smoke`.                                           |
 | `@free` / `@pro` | Edition scoping. An edition-ful cell auto-filters: a `pro` cell skips `@free` and vice-versa. |

@@ -129,6 +129,18 @@ export class BackupHistoryTable {
   }
 
   /**
+   * The {@link failedRows} for runs a user **aborted**, rather than ones that failed on their own.
+   *
+   * The template gives both the same row and tells them apart only in the status it prints —
+   * "Aborted by user" against "<destination> backup failed – <reason>" — and in a colour class, which
+   * is styling rather than a contract. The message is what a user reads, so it is what this matches,
+   * and only inside a row the plugin's own hook has already marked unsuccessful.
+   */
+  get abortedRows(): Locator {
+    return this.failedRows.filter({ hasText: "Aborted by user" });
+  }
+
+  /**
    * Asserts the exact number of backups in the history **as currently rendered**.
    *
    * It makes no claim about how fresh that is: establishing freshness is the caller's job, through

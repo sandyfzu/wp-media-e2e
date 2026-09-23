@@ -4,10 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  BACKUP_TIMEOUT_MS,
+  allowForBackup,
   countBackups,
   isJobRunning,
   listBackups,
   listJobs,
+  outcomeOf,
+  readLastRunLog,
   readLastRunOutcome,
   startJobInBackground,
   waitForBackup,
@@ -48,6 +52,9 @@ case "$WP_STUB_MODE" in
   log-warnings) printf '%s' '[{"name":"backwpup_log_b.html","errors":0,"warnings":3}]' ;;
   log-clean)    printf '%s' '[{"name":"backwpup_log_c.html","errors":0,"warnings":0}]' ;;
   log-none)     printf 'No logs found.' ;;
+  # What the command prints once asked for the job as well, measured on a cell after an abort.
+  log-named)    printf '%s' '[{"name":"backwpup_log_e7c378_2026-09-22_17-47-45.html","job_id":3,"errors":0,"warnings":2}]' ;;
+  log-no-name)  printf '%s' '[{"job_id":3,"errors":0,"warnings":0}]' ;;
   # Counts that are present but carry no number. Coercing null or an empty string yields 0, so a
   # lenient read would report a run whose verdict is unknown as a clean one.
   log-null-counts)  printf '%s' '[{"name":"backwpup_log_d.html","errors":null,"warnings":null}]' ;;
@@ -289,6 +296,65 @@ test.describe("readLastRunOutcome", () => {
     await expect(readLastRunOutcome(local())).rejects.toThrow(
       /carries no error\/warning counts/,
     );
+  });
+});
+
+test.describe("readLastRunLog", () => {
+  test("reports the log's name, the job its header names, and both counts", async () => {
+    process.env.WP_STUB_MODE = "log-named";
+    expect(await readLastRunLog(local())).toEqual({
+      name: "backwpup_log_e7c378_2026-09-22_17-47-45.html",
+      jobId: 3,
+      errors: 0,
+      warnings: 2,
+    });
+  });
+
+  // Left out rather than defaulted: a job id of 0 would be indistinguishable from the one the
+  // command reports for a header it could not read.
+  test("leaves the job out when the reply names none", async () => {
+    process.env.WP_STUB_MODE = "log-clean";
+    expect(await readLastRunLog(local())).not.toHaveProperty("jobId");
+  });
+
+  test("refuses an entry that names no log file", async () => {
+    process.env.WP_STUB_MODE = "log-no-name";
+    await expect(readLastRunLog(local())).rejects.toThrow(/names no log file/);
+  });
+});
+
+test.describe("outcomeOf", () => {
+  test("lets an error outrank a warning", () => {
+    expect(outcomeOf({ errors: 1, warnings: 3 })).toBe("errors");
+    expect(outcomeOf({ errors: 0, warnings: 2 })).toBe("warnings");
+    expect(outcomeOf({ errors: 0, warnings: 0 })).toBe("finished");
+  });
+});
+
+test.describe("allowForBackup", () => {
+  /** Enough of a TestInfo to record what the scenario's budget became. */
+  const budget = (timeout: number) => {
+    const info = {
+      timeout,
+      setTimeout: (next: number): void => {
+        info.timeout = next;
+      },
+    };
+    return info;
+  };
+
+  test("adds a backup's length to the scenario's budget, once per backup", () => {
+    const info = budget(30_000);
+    allowForBackup(info);
+    expect(info.timeout).toBe(30_000 + BACKUP_TIMEOUT_MS);
+    allowForBackup(info, 2);
+    expect(info.timeout).toBe(30_000 + 3 * BACKUP_TIMEOUT_MS);
+  });
+
+  test("leaves a scenario with no timeout without one", () => {
+    const info = budget(0);
+    allowForBackup(info);
+    expect(info.timeout).toBe(0);
   });
 });
 

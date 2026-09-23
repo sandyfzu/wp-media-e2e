@@ -2,7 +2,7 @@ import { expect } from "@playwright/test";
 
 import { Given, Then, When } from "../fixtures";
 import {
-  BACKUP_TIMEOUT_MS,
+  allowForBackup,
   listBackups,
   runScheduledBackup,
 } from "../support/backups";
@@ -155,10 +155,8 @@ When("a backup runs", async ({ site, $testInfo }) => {
   // Playwright times a scenario and its hooks against one clock, so make room before spending any
   // of the budget `waitForBackup` is entitled to — without this the wait can be cut short by the
   // scenario timeout and fail as a bare "test timeout" that names nothing. A files backup of a real
-  // site is minutes of tar, so the room is not theoretical. `0` means "no timeout" and is left alone.
-  if ($testInfo.timeout !== 0) {
-    $testInfo.setTimeout($testInfo.timeout + BACKUP_TIMEOUT_MS);
-  }
+  // site is minutes of tar, so the room is not theoretical.
+  allowForBackup($testInfo);
   await runScheduledBackup(site.transport);
 });
 

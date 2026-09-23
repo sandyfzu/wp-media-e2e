@@ -13,7 +13,7 @@ import { errorMessage } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
 import type { SiteDbResidue } from "../wp/db-residue";
 import type { ResolvedArtifact } from "../artifacts/types";
-import type { Transport } from "../config/types";
+import type { StopRunningWork, Transport } from "../config/types";
 
 /**
  * The policy behind the {@link PLUGIN_TAG} scenario hooks: what "a freshly installed plugin under
@@ -22,8 +22,8 @@ import type { Transport } from "../config/types";
  *
  * Two operations, mirroring the hook pair:
  *  - {@link installPluginUnderTest} — scope the log, guarantee a clean baseline, install.
- *  - {@link teardownPluginUnderTest} — judge what PHP wrote, then restore the baseline: remove the
- *    plugin *and* the data it left behind, on disk and in the database.
+ *  - {@link teardownPluginUnderTest} — judge what PHP wrote, then restore the baseline: stop what the
+ *    plugin is still doing, remove it *and* the data it left behind, on disk and in the database.
  */
 
 /**
@@ -72,6 +72,11 @@ export const PLUGIN_TAG = "@plugin";
  * declares one stops after the scan that finds nothing, and one that declares none pays no
  * round-trip at all. Only a site that really is carrying a footprint pays the removal and the
  * verifying re-read, which is exactly the run that has time to spare.
+ *
+ * Stopping the product's running work adds **one more `wp eval` to the After hook** on an idle site.
+ * One that has to act is bounded by its own budgets — BackWPup's give a stop and the run's own
+ * record of its end 30 s each, about 70 s at the very worst — which still leaves the removal and the
+ * sweeps their time within this one.
  *
  * Applied per hook — so a hang is reported as a hook timeout naming the hook, rather than as an
  * opaque scenario timeout — **and** added to the scenario's own budget by {@link extendedTimeout},
@@ -231,16 +236,18 @@ export interface ScenarioReport {
 }
 
 /**
- * Closes out a plugin scenario: judge what PHP wrote to `debug.log`, remove the plugin, then clear
- * the data it left on disk.
+ * Closes out a plugin scenario: judge what PHP wrote to `debug.log`, stop whatever the plugin is
+ * still doing, remove it, then clear the data it left behind.
  *
- * **All four duties always run, whatever the ones before them did.** That independence is the point
+ * **All five duties always run, whatever the ones before them did.** That independence is the point
  * of the last two: uninstalling a plugin does not delete the files it wrote — nor should it, for a
  * real user — so a suite that reinstalls per scenario accumulates them until the cell runs out of
  * disk. Skipping a sweep because the uninstall failed would lose exactly the runs most likely to
  * have left a mess behind. The database sweep is ordered straight after the removal, and is what
  * catches a footprint the plugin's own uninstall did not take with it — a table re-created by a
- * request that outlived the uninstall, or rows left by a run killed between the two.
+ * request that outlived the uninstall, or rows left by a run killed between the two. Stopping the
+ * plugin's running work comes before the removal for the same reason: it is the work that would
+ * otherwise outlive the uninstall — see {@link stopWorkLeftRunning}.
  *
  * When more than one fails, the **debug-log verdict wins**: it is a statement about the product
  * under test, whereas a cleanup failure is about the environment. Cleanup failures are never merely
@@ -259,9 +266,12 @@ export interface ScenarioReport {
  * @param residue - what this product leaves behind, on disk and in the database. Either being empty
  * costs nothing.
  * @param report - the scenario's result and attachment sink.
- * @throws {@link DebugLogFatalError} when PHP logged a fatal, else the first cleanup failure —
- * from {@link ensurePluginAbsent}, from the database sweep (a footprint that survived removal, or a
- * declaration the site refuses), or from a residue path that is not a usable declaration.
+ * @param stopRunningWork - how the product stops work it may still be doing on the site
+ * (`ProductConfig.stopRunningWork`); omitted for a product that runs nothing in the background.
+ * @throws {@link DebugLogFatalError} when PHP logged a fatal, else the first cleanup failure — work
+ * that would not stop, then {@link ensurePluginAbsent}, the database sweep (a footprint that
+ * survived removal, or a declaration the site refuses), or a residue path that is not a usable
+ * declaration.
  */
 export async function teardownPluginUnderTest(
   transport: Transport,
@@ -269,6 +279,7 @@ export async function teardownPluginUnderTest(
   options: ScanDebugLogOptions,
   residue: DeclaredResidue,
   report: ScenarioReport,
+  stopRunningWork?: StopRunningWork,
 ): Promise<void> {
   let failure: Error | undefined;
 
@@ -293,6 +304,7 @@ export async function teardownPluginUnderTest(
     }
   };
 
+  await cleanUp(() => stopWorkLeftRunning(transport, stopRunningWork, report));
   await cleanUp(() => ensurePluginAbsent(transport, slug));
   await cleanUp(() =>
     sweepDbResidue(transport, residue.db, "after the scenario"),
@@ -300,6 +312,34 @@ export async function teardownPluginUnderTest(
   await cleanUp(() => sweepResidue(transport, residue.files, report));
 
   if (failure !== undefined) throw failure;
+}
+
+/**
+ * Has the product stop whatever it is still doing on the site, and says so when it had to.
+ *
+ * Ahead of the removal, because uninstalling a plugin underneath its own running work races that
+ * work. Having had to stop something is **reported, not failed**: a scenario that failed midway is
+ * expected to leave work behind, and one that passed while leaving work running deserves to be seen
+ * without turning a clean result red. Work that *would not* stop is the product's function throwing,
+ * which the caller treats like any other cleanup failure.
+ */
+async function stopWorkLeftRunning(
+  transport: Transport,
+  stopRunningWork: StopRunningWork | undefined,
+  report: ScenarioReport,
+): Promise<void> {
+  if (stopRunningWork === undefined) return;
+  const stopped = await stopRunningWork(transport);
+  if (stopped === undefined) return;
+  const message = `[hooks] after "${report.title}": ${stopped}`;
+  console.warn(message);
+  await report
+    .attach("stopped-running-work", message)
+    .catch((attachError: unknown) => {
+      console.warn(
+        `[hooks] could not attach the stopped-work report: ${errorMessage(attachError)}`,
+      );
+    });
 }
 
 /**

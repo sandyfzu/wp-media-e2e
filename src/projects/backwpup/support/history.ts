@@ -33,20 +33,24 @@ export interface HistoryRecord {
 }
 
 /**
- * The PHP that reads every history row, oldest first, as JSON.
+ * PHP that reads every history row, oldest first, into `$rows` — for a snippet that reports them
+ * alongside something else, as the running-job reader does.
  *
- * A failed query is turned into an error rather than echoed: `$wpdb` answers a missing table with an
- * empty result and a note in `last_error`, which would otherwise read as "no backups yet" — the one
- * wrong answer that makes an absence assertion pass.
+ * A failed query is turned into an error rather than left in `$rows`: `$wpdb` answers a missing
+ * table with an empty result and a note in `last_error`, which would otherwise read as "no backups
+ * yet" — the one wrong answer that makes an absence assertion pass.
  */
-export const HISTORY_PHP = `
+export const HISTORY_ROWS_PHP = `
 global $wpdb;
 $table = $wpdb->prefix . ${phpLiteral(BACKUP_HISTORY_TABLE)};
 $rows  = $wpdb->get_results( "SELECT filename, destination, job_id, status, backup_trigger FROM \`{$table}\` ORDER BY id", ARRAY_A );
 if ( $wpdb->last_error ) {
 	WP_CLI::error( 'reading ' . $table . ' failed: ' . $wpdb->last_error );
 }
-echo wp_json_encode( $rows );
+`;
+
+/** The PHP that prints every history row, oldest first, as JSON. */
+export const HISTORY_PHP = `${HISTORY_ROWS_PHP}echo wp_json_encode( $rows );
 `;
 
 /** The message for a column holding something its type cannot. */
@@ -110,11 +114,26 @@ function toHistoryRecord(row: unknown): HistoryRecord {
 }
 
 /**
+ * Maps the rows {@link HISTORY_ROWS_PHP} read, once decoded from JSON.
+ *
+ * @param rows - the decoded `$rows`.
+ * @throws {@link Error} if they are not a list of rows shaped like the table's — a reply that
+ * cannot be read must never pass as an empty history.
+ */
+export function historyRecords(rows: unknown): readonly HistoryRecord[] {
+  if (!Array.isArray(rows)) {
+    throw new Error(
+      `[backwpup/history] expected a list of rows, got ${JSON.stringify(rows)}.`,
+    );
+  }
+  return rows.map(toHistoryRecord);
+}
+
+/**
  * Parses what {@link HISTORY_PHP} printed.
  *
  * @param json - the snippet's output.
- * @throws {@link Error} if it is not a JSON list of rows shaped like the table's — a reply that
- * cannot be read must never pass as an empty history.
+ * @throws {@link Error} if it is not JSON, or not a list of rows shaped like the table's.
  */
 export function parseHistory(json: string): readonly HistoryRecord[] {
   let parsed: unknown;
@@ -125,12 +144,7 @@ export function parseHistory(json: string): readonly HistoryRecord[] {
       `[backwpup/history] the history did not come back as JSON: ${json.slice(0, 500) || "(empty)"}`,
     );
   }
-  if (!Array.isArray(parsed)) {
-    throw new Error(
-      `[backwpup/history] expected a list of rows, got ${JSON.stringify(parsed)}.`,
-    );
-  }
-  return parsed.map(toHistoryRecord);
+  return historyRecords(parsed);
 }
 
 /**

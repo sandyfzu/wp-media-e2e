@@ -49,7 +49,7 @@ src/
     ├── features/           # *.feature (Gherkin)
     ├── pages/              # this product's page objects (+ locator-contract specs)
     ├── steps/              # product-specific steps
-    └── support/            # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, the CLI-under-test runner, site setup
+    └── support/            # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
 
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)
@@ -192,13 +192,16 @@ module so it is unit-testable without the runtime.
   real cell, and whichever writes first would otherwise lock the other out (`prepareSiteDataDirs`).
 - **After** — `debug.log` scanned with the product's preset: a **PHP fatal fails the
   scenario** (`DebugLogFatalError`) with the log attached; warnings/notices are logged.
-  Then the plugin is removed, then any **database footprint** that outlived its uninstall is swept,
-  and finally the **files it left behind** are cleared (`ProductConfig.siteResidue`) — a plugin's
-  uninstall keeps the data it wrote, so a suite that reinstalls per scenario would fill the cell's
-  disk. All four duties always run, independently: a sweep is not skipped because the uninstall
-  failed. The log verdict wins when more than one
-  fails, and the others are still logged. Left-over data the transport's user is not _permitted_
-  to remove is reported, not failed — see
+  Then any **work the plugin is still running** is stopped (`ProductConfig.stopRunningWork` — for
+  BackWPup, a backup job a scenario left running, which runs in a web request and would otherwise
+  outlive the uninstall), then the plugin is removed, then any **database footprint** that
+  outlived its uninstall is swept, and finally the **files it left behind** are cleared
+  (`ProductConfig.siteResidue`) — a plugin's uninstall keeps the data it wrote, so a suite that
+  reinstalls per scenario would fill the cell's disk. All five duties always run, independently: a
+  sweep is not skipped because the uninstall failed. The log verdict wins when more than one
+  fails, and the others are still logged. Having to stop running work is reported, not failed;
+  work that _would not_ stop is a cleanup failure. Left-over data the transport's user is not
+  _permitted_ to remove is reported, not failed — see
   [wordpress-automation.md](docs/architecture/wordpress-automation.md).
 - The scenario timeout is extended **additively** to cover both hooks (remote WP-CLI plus
   an SFTP upload is slow), so a scenario keeps any budget it asked for.
@@ -208,8 +211,9 @@ Hooks register only when their file is imported, and that glob is the only impor
 it and the lifecycle is _silently absent_ rather than failing.
 
 A product declares its `debug.log` scan preset as `ProductConfig.debugLog` (from its
-`support/debug-log.ts`); the config factory registers it per process, so the shared hooks
-never import product code — and RegExp patterns cannot ride project metadata anyway.
+`support/debug-log.ts`) and how to stop its background work as `ProductConfig.stopRunningWork`;
+the config factory registers both per process, so the shared hooks never import product code — and
+neither RegExp patterns nor functions can ride project metadata anyway.
 
 ## Device profiles (desktop & `@mobile`)
 
@@ -548,7 +552,9 @@ npm run test:unit     # unit/integration specs pass
 ```
 
 For behavioural changes, also verify against a real cell:
-`npm run test:<product> -- --project=<cell>`.
+`npm run test:<product> -- --project=<cell>`. Keep the runner awake through it (`caffeinate -i`
+on macOS): a runner that sleeps drops its SSH connections, and the run fails as if the network
+had — hooks far past their timeouts, `ECONNRESET` after each wake.
 
 `husky` + `lint-staged` run `eslint --fix` + `prettier --write` on commit, and CI
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) enforces typecheck, lint,
@@ -617,7 +623,7 @@ Update it when you change anything about:
 - The config factory (`createProductConfig`) or the project pairs it generates.
 - The metadata/credential registry (`registerPool`, `routingMetadata`), or the per-process
   registries that carry a product's policy to the shared hooks (`registerDebugLogOptions`,
-  `registerSiteResidue`, `registerSiteDbResidue`).
+  `registerSiteResidue`, `registerSiteDbResidue`, `registerStopRunningWork`).
 - Artifact directories, `RUN_ID` handling, or the `*_ROOT` env vars.
 
 ### docs/architecture/wordpress-automation.md
