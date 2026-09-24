@@ -19,7 +19,7 @@ Feature: Running BackWPup jobs over WP-CLI
     Given BackWPup is set up to back up the "database" on a schedule
 
   Scenario: A job run in the foreground backs the site up inside WP-CLI, and the history says WP-CLI started it
-    When I run the BackWPup command "run {job}" on the scheduled job
+    When I run the BackWPup command "run {job}"
     Then the command succeeds
     And it streamed the log of the run it made
     And the backup history holds 1 completed run of the scheduled job, started by "wp-cli"
@@ -28,7 +28,7 @@ Feature: Running BackWPup jobs over WP-CLI
     Then it prints "1"
 
   Scenario: A job run in the background is handed to the web server, and the history records it as started on demand
-    When I run the BackWPup command "run {job} --background" on the scheduled job
+    When I run the BackWPup command "run {job} --background"
     Then the command succeeds
     And it reports the success "runs now in background"
     When the scheduled job's run has ended
@@ -59,13 +59,13 @@ Feature: Running BackWPup jobs over WP-CLI
   # The command falls back to a value of its own when no default reaches it, and that value is
   # misspelt ("wp-cron"), so this also proves the default still arrives.
   Scenario: Deactivating a job takes it off the schedule, and activating it again puts it back on WP-Cron
-    When I run the BackWPup command "job-activate --job_id={job} --type=disable" on the scheduled job
+    When I run the BackWPup command "job-activate --job_id={job} --type=disable"
     Then the command succeeds
     And it reports the success "deactivated"
     And the backup job is not scheduled to run
     When I run the BackWPup command "job --field=active_type"
     Then it prints "none"
-    When I run the BackWPup command "job-activate --job_id={job}" on the scheduled job
+    When I run the BackWPup command "job-activate --job_id={job}"
     Then the command succeeds
     And it reports the success "changed to active type wpcron"
     And the backup job is scheduled to run

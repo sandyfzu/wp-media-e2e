@@ -1,6 +1,6 @@
 # Phase 6 — Feature porting: BackWPup first
 
-> **Status:** in progress — **6A, 6B, 6C, 6D and 6E are done**; 6F in progress (**6F.0, 6F.1 and 6F.2 done**; 6F.3–6F.4 next), 6G–6I planned;
+> **Status:** in progress — **6A, 6B, 6C, 6D and 6E are done**; 6F in progress (**6F.0–6F.3 done**; 6F.4 next), 6G–6J planned;
 > **6H.2 deferred** (needs storage credentials — see §4.6H.2).
 > **Date:** 2026-07-28; revised 2026-07-30 (§2.3 re-verification at the ref; storage split),
 > 2026-07-31 (§2.5 — post-implementation audit of 6B; four corrections, all verified live),
@@ -33,21 +33,34 @@
 > and 2026-09-23 (§2.18, continued — the audit's live re-verification; **V120–V122** added. Both of
 > its "network" episodes were the runner asleep; a pooled SSH connection could be dead while reported
 > connected, costing a scenario each time; and V96's activation race was reproduced on demand, shown
-> never to have been closed by `finishActivation`, and fixed).
+> never to have been closed by `finishActivation`, and fixed) and 2026-09-23 (§2.19 — **6F.3 shipped**;
+> **V123–V133** added. §2.16's guess about logs was refuted — the web server's logs are writable by
+> WP-CLI on these cells, its archives are not; four plugin bugs found and left unpinned — a refused
+> delete poisons the next one, a download to an unwritable path fatals, `log-delete` removes the log
+> folder's own guards, and a documented `--dry-run` would delete for real; and the `local` transport
+> would have hung at any `[y/n]` prompt, now fixed) and 2026-09-24 (§2.20 — **the whole of 6F audited
+> again**; **V134–V141** added. A refusal could pass for an empty list, a misspelt placeholder reached
+> the plugin as job `0`, a reinstall mid-scenario wiped the log the fatal gate reads, and the "already
+> running" scenario had been winning the race against its own backup by 0.06 s — all fixed) and
+> 2026-09-24 (§2.21, §4.6J — **6J planned**: the staging area stays where and as it is, and the web
+> server is told not to serve it — a `.htaccess` written with it, an nginx include for operators, and
+> a pre-flight probe that measures the result; **V142–V145** added, both guards measured on the
+> docker env's own Apache and nginx images).
 > **Parent:** [e2e-modernization-plan.md](e2e-modernization-plan.md) §9, Phase 6 — this doc supersedes
 > that phase's summary. Phases 0–5 are done; Phase 6 is **feature content on finished rails**.
 > **Baseline (reference only):** `wp-rocket-e2e/src/backwpup/` — 12 feature files, 28 scenarios, ~1.6k LoC.
 
 ## TL;DR
 
-Phase 6 splits into **ten sub-phases**, of which 6F is broken down further (6F.0–6F.4). **6A** lands the shared rails every product needs (plugin
+Phase 6 splits into **eleven sub-phases**, of which 6F is broken down further (6F.0–6F.4). **6A** lands the shared rails every product needs (plugin
 install/cleanup hooks, the debug-log gate, `@mobile`, an anti-pattern lint gate). **6B–6I** port
 BackWPup — **page objects first (6B)**, then onboarding → backup & history → plugin deletion →
 WP-CLI → restore → the storage credential surface → Free-edition coverage + the parity gate. The
 storage *round-trips* are carved out as **6H.2** and **deferred** until credentials exist, so no
-other sub-phase waits on them. WP Rocket reuses 6A and gets its own breakdown afterwards (§6).
+other sub-phase waits on them. **6J** is shared rails again, product-agnostic like 6A: it keeps the
+staging area off the web. WP Rocket reuses 6A and gets its own breakdown afterwards (§6).
 
-**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → **6F** (6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → then 6F.3 / 6F.4 in any order) → 6G → 6H → 6I → *(later)* 6H.2.
+**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → **6F** (6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → 6F.3 ✅ → 6F.4) → 6G → 6H → 6I → 6J → *(later)* 6H.2. 6J depends on nothing and can be pulled forward.
 
 Every artifact follows **Understand → Improve → Adapt → Port** (§1): read the baseline for *intent*,
 verify the plugin's real contract in source, pick the strongest signal Playwright/WP-CLI offers, then
@@ -506,7 +519,7 @@ reads back as ids 1 then 5). They agree today only because `BackWPup_Option::upd
 the order "exactly what the reader does" is gone. `log --job_id` was claimed by V91 and asserted
 nowhere; it now is, both ways. The Pro half of the `--help` probe also requires the page to name the
 command, since an exit code alone would be satisfied by some other page. The alias field's TSDoc
-implied protection nothing provides. Plus one duplicate import, one unresolvable `{@link}` (6C) and a
+implied protection nothing provides (**corrected only in §2.20** — it still said so). Plus one duplicate import, one unresolvable `{@link}` (6C) and a
 TSDoc orphaned above the wrong declaration (6D, `waitForBackup` — V77's class), whose neighbour's doc
 was also off by one against its code.
 
@@ -542,7 +555,7 @@ scenario relies on it, as V90 was.
 | - | ---- | -------- | ----------- |
 | V104 | ~~**A foreground `run` exits 0 on a run that logged errors, if it also logged a warning.**~~ **Superseded by V108 — the verdict below is never reached at all.** The verdict tests `$warnings` first and returns after warning, so `There are N errors…` is reached only by a run with no warnings at all. What prints instead is `Warning: There are %d wearings due to job execution please chack the logs.` (sic). | `src/Cli/Commands/Run.php:182-192`. | A plugin bug, worth reporting upstream. 6F.2 takes `run`'s outcome from the log header or the history row, never from its exit code or the absence of `Error:` — `readLastRunOutcome` in `support/backups.ts` already does. Pinning the bug in a scenario needs a run that logs both, which nothing arranges today. |
 | V105 | **A `restore` that fails once it has started exits 0.** Everything after the archive is resolved sits in a `catch ( \Throwable )` that prints `Warning: Restore failed: …`. With a pre-backup snapshot it then offers a rollback and, if that works, ends on `Success: Rollback completed.` — a failed restore whose last line is a success. Only a bad archive argument (`:132-135`) or a failed rollback exits 1. | `src/Cli/Commands/Restore.php:210-223`. | 6G's CLI restore: the restored marker is the verdict, as its acceptance already requires, and `the command succeeds` adds nothing. A failure scenario asserts the warning **and** that the marker is still drifted — not a non-zero exit. |
-| V106 | **`log-delete` reports success when it deleted nothing.** A file it cannot remove — missing, not writable, or `wp_delete_file` failing — is a `Warning:` from `delete_one`, after which the command still prints `Success: No logfile deleted.` (one file) or `Success: 0 logfile(s) deleted.` (bulk) and exits 0. On these cells the likely trigger is ownership: `wp_is_writable` is asked as the transport's user, and a `--background` run writes as the web server (V82 measured it for the archive). | `src/Cli/Commands/LogDelete.php:127` and `:177`; `delete_one` at `:216-241`. | 6F.3 confirms every deletion by re-reading `log --format=count`, as its acceptance already says, and asserts a refusal as a warning plus a surviving file — the same shape as `backup-delete`'s ownership split (V84). |
+| V106 | **`log-delete` reports success when it deleted nothing.** A file it cannot remove — missing, not writable, or `wp_delete_file` failing — is a `Warning:` from `delete_one`, after which the command still prints `Success: No logfile deleted.` (one file) or `Success: 0 logfile(s) deleted.` (bulk) and exits 0. On these cells the likely trigger is ownership: `wp_is_writable` is asked as the transport's user, and a `--background` run writes as the web server (V82 measured it for the archive). | `src/Cli/Commands/LogDelete.php:127` and `:177`; `delete_one` at `:216-241`. | 6F.3 confirms every deletion by re-reading `log --format=count`, as its acceptance already says, and asserts a refusal as a warning plus a surviving file — the same shape as `backup-delete`'s ownership split (V84). **Measured in 6F.3 (V123, V130):** the warning and the success line are as written, but the ownership guess is refuted — the web server's logs are `0777` on these cells — and a missing name is an error at exit 1, not a warning. Deletions are confirmed against the log folder itself rather than `log --format=count`, which walks it through the same helper. |
 | V107 | **`BackWPup_Job::start_cli()` stops with PHP's `exit( 'message' )`, which prints the message and exits 0 with no `Error:` prefix.** It does so for an unknown job id, a log or temp folder that fails `check_folder`, and a job already running. `run` rules out the first and checks the running file itself, so what stays reachable is the folder checks — and a job the site's own cron starts between `run`'s check and `start_cli`'s. `run` then never reaches its own verdict. | `inc/class-job.php:3070-3098`. Measured locally on PHP 8.1: `php -r 'exit("…");'` prints the string and exits **0**; an uncaught fatal exits **255**. | Invisible to the notice parser, so no exit-code or status-line check can catch it — only a second source can: a new history row, a log for the job. |
 
 **What this means for the generic step.** `Then the command succeeds` asserts the exit code alone.
@@ -658,6 +671,125 @@ audit's two unexplained failures chased to their causes:
 | V121 | **A pooled SSH connection could be dead while node-ssh called it connected, and every command on it failed at once.** After a protocol error or a server's disconnect ssh2 half-closes its socket and refuses each request with `Not connected`, checked before a byte is sent (`isWritable` in `exec()` and `sftp()`); node-ssh marks the client disconnected only on the socket's `end`/`close`, which on a failing link comes minutes later. | Seen live twice, each right after a wake (V120): the first run's refusal scenario, and the full run's background scenario at the 20:37:34 dark wake — `Error: Not connected` from `Client.exec`, under `isPluginActive`. Reproduced on demand through a proxy that holds both FINs back while the server disconnects. | **Fixed in the shared transport** (above): the refusal is retried once on a new connection, and nothing that was sent is ever re-sent. A connection that cannot be opened now fails naming its endpoint, where it had surfaced as a bare `read ECONNRESET`. |
 | V122 | **V46's race is the suite's own, and `finishActivation` never closed it.** The `@plugin` hook's active-state check — `wp plugin is-active`, plugins loaded — has been the first request after activation since 6A, so it runs BackWPup's routine: `backwpup_version` is written by the time `installPluginUnderTest` returns (3 of 3), and `finishActivation`'s bootstrap has been a no-op since it was added. A second request 150–450 ms behind the first loses the race: the flag is deleted (`convert_jobs()`), an extra job is left that is no longer a placeholder, and `activate()`'s own cleanup then removes the files/database job-id options the upgrade path wrote. Two requests at once instead each create a placeholder and keep the flag — but every job write rewrites the whole jobs option from the request's own copy (`BackWPup_Option::update()`), so the later drops the earlier's placeholder flag and leaves a real, scheduled job nobody configured. | Provoked on `pro@nginx` by booting WordPress twice right after `install --activate`: 300 ms apart lost the flag **4 of 4**, 150 ms 1 of 4, 450 ms 2 of 4, 600 ms 0 of 4; 0 ms kept it 18 of 18 but left two jobs 7 of 18 — in the 5 whose flags were read, job 1 no longer a placeholder and job 2 the placeholder the plugin records as its first backup. A clean install leaves exactly one placeholder, measured on both editions (2 installs each). In real runs, 2 lost races in about 60 retries-off `pro@nginx` scenarios (~3 %). `isPluginActive` right after the install since 6A (`2bcf033`); `finishActivation` added 2026-09-18 (`c2c051e`). | **Fixed** (above): either outcome is redone from a clean install — the stray job would otherwise have failed `completeOnboarding`'s one-job check, `theScheduledJob` and the empty-site CLI scenario, and the old flag-only check let it through. Nothing on this side can hold the cell's cron off, so the fix is recovery, not prevention: three lost races in a row, which the measured rate makes a few in a hundred thousand, still fail — clearly. In the verification runs the suite met the race once (`free@nginx`), redid the install and passed. The mechanism is a plugin bug worth reporting upstream: activation should not be re-entrant, and the jobs option is written without a lock. |
 
+
+### 2.19 Facts established building 6F.3 (live, on both nginx cells, at `develop@f1ebfd0`)
+
+Measured on `pro@nginx` and `free@nginx` through the repo's own modules: a scratch driver installed
+the plugin with the lifecycle's own `installPluginUnderTest`, seeded onboarding, made backups both
+inside WP-CLI and through the web server, then drove all four commands through their success paths,
+their refusals and their edges. Both sites were left as found. A row read from source rather than
+provoked says so.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V123 | **Logs are not archives: on these cells WP-CLI may write a log the web server made, but not an archive.** BackWPup writes its logs through WordPress's filesystem API, which gives each file `FS_CHMOD_FILE` — derived on both cells as `0777` from a `0777` `index.php`, with no `wp-config.php` define — while the archive is written with `fopen` under PHP-FPM's umask. | Both cells: logs `-rwxrwxrwx`, one `ubuntu`, one `www-data`; archives `ubuntu 664` (inside WP-CLI) and `www-data 644` (web server); `is_writable()` as WP-CLI's user — logs 1 and 1, archives 1 and 0. `inc/class-job.php` (`$filesystem->put_contents( $this->logfile, … )`). | V84's split holds for archives on both cells. **§2.16's guess for logs (V106) is refuted here**: a `--background` run does not leave a log WP-CLI may not write, so `log-delete` removes web-written logs on these cells. Its refusal needs a log WP-CLI may not write — which a host whose `FS_CHMOD_FILE` is `0644` makes of every web-written log — so the refusal scenario makes one read-only. |
+| V124 | **A refused `backup-delete` leaves its error queued, and the next `backup-delete` repeats it — after deleting its own archive.** The folder destination reports the refusal through `BackWPup_Admin::message(…, true)`; the command reads the queue back and calls `WP_CLI::error()`, which exits before the line that would clear it. Each refusal adds another copy. | Live on both cells: refused the web server's archive, then deleted the WP-CLI one — file **gone**, exit **1**, `Error: Could not delete backup archive "<the other file>", check permissions!`; `backwpup_messages` held one copy, then two. `src/Cli/Commands/BackupDelete.php`. | A plugin bug worth reporting upstream; the queued error also surfaces on the next admin screen. Not pinned. The refusal scenario runs exactly one delete, and `Then the command fails` now says a non-zero exit is not proof nothing happened. |
+| V125 | **`backup-delete` leaves the run's history row; the dashboard's delete removes it.** The command calls only the destination's `file_delete()`; the REST route behind the dashboard also fires `backwpup_after_delete_backups`, which drops the row. The orphan stays `completed`, and invisible — the history lists a completed run only while a destination still holds its file. | Live: after the CLI delete the history still held both runs as `completed`. `src/Backups/API/Rest.php` (`delete_backup`), `src/Backup/Database.php` (`backups_list`). | Not pinned: it is a divergence the plugin may well fix. It is why "the oldest backup" is fixed when the backup is made (`ArchiveSnapshot`) rather than re-read from the history after a delete — that fix would otherwise move the name between the delete and the assertion about it. |
+| V126 | **Without `--yes`, every destructive command only asks — and ends at exit 0 having done nothing.** `backup-delete` prints `Delete Backup file <name> on Folder ? [y/n]`, `backup-download` onto an existing file `File <path> already exists. Overwrite it? [y/n]`, `log-delete` `Delete logfile <name> ? [y/n]`. WP-CLI's `confirm()` reads the answer from stdin, meets end-of-input — node-ssh ends the channel's — and exits 0. **On `local` the same prompt would hang**: execa leaves a child's stdin open by default. | Live: prompt last on stdout, exit 0, archive, log and placed file all unchanged. Locally, through execa: `sh -c 'read x'` was still waiting when killed at 5 s with the default, and answered in 9 ms with `stdin: "ignore"`; PHP's `fgets( STDIN )` read `false`. | **Fixed in the shared transport**: the execa-backed modes ignore stdin, so a prompt is declined the same way on every transport — `docker` measured too (V140) (`exec.spec.ts`, mutation-checked). The scenarios assert the prompt, the exit 0 and the untouched file — the trap a script without `--yes` walks into. |
+| V127 | **`backup-download` resolves a relative destination against WP-CLI's working directory** — the WordPress root here, since WP-CLI does not change directory. A missing destination folder is created, an existing folder receives the archive under its own name, and the copy is written by WP-CLI's user. An archive the web server made downloads fine: WP-CLI may read what it may not delete. Refusals — `Backup file not found.` and `Backup file not found in storage <s>.` — come before anything is created. | Live, both cells: `getcwd()` is the root; the copy's SHA-256 equals the archive's; neither refusal created its destination folder. `src/Cli/Commands/BackupDownload.php`. | The download scenario hands the command a folder relative to the root and reads it back by absolute path, so the copy being there is what proves where a relative path leads; the refusals assert that nothing was downloaded. |
+| V128 | **`backup-download` to a path it cannot write fatals** rather than refusing. The folder downloader opens the target with a silenced `fopen`, keeps the `false`, and writes to it — `Uncaught TypeError: fwrite(): Argument #1 ($stream) must be of type resource, false given` (`inc/class-destination-folder-downloader.php:74`), then a second from `__destruct`'s `fclose( false )`; exit 255, and the fatal lands in `debug.log`. The `catch ( \RuntimeException … )` meant for it cannot fire. | Live on `pro@nginx`: `backup-download <archive> /proc/<name>.tar`. | A plugin bug worth reporting upstream. Never a scenario: the debug-log gate would fail it, rightly, and it would pin a crash. |
+| V129 | **`log-show`, measured.** Plain text is `wp_strip_all_tags` plus `html_entity_decode`, each line trimmed, blank ones dropped. Every log names itself (`[INFO] Logfile is: …`) and its run's archive (`[INFO] Backup file is located at: …/<archive>`), and the history records each run's log (`wp_bwpup_backups.logfile`, an absolute path). The extension is optional and `--file=` equals the positional; `--job_id` picks the newest by modification time; `--lines=N` keeps the last `max( 1, (int) N )` lines, so `0` and `abc` both print one. Refusals: `Logfile <name> not found or unreadable.`, `No logs found for the given job_id.`, `Please provide <file>, --file=<file>, or --job_id=<id>.` | Live on `pro@nginx`, the whole matrix. `src/Cli/Commands/LogShow.php`, `src/Cli/Helpers/CommandsLogHelpersTrait.php`. | The log scenarios name a log through the history and check what was printed against the run's own record: its archive, and no other run's. |
+| V130 | **`log-delete`, measured.** `--older-than` reads a file's **modification time** — `log` shows the header's time instead, so the two can disagree; `strtotime( 'now - 7days' )` works, so the value needs no space; `--older-than=0` reads as absent; nothing matching prints `No logs match the criteria.` at exit 0. A log WP-CLI may not write draws `Warning: Logfile <name> is not writable. Check permissions!` and then `Success: No logfile deleted.` at exit 0 — V106's shape, confirmed; but a **missing** name is an error at exit 1, `Log file not found or unreadable: <name>`, not the warning V106 listed it under. Other refusals: `Provide <file>/--file, or --older-than, or --all.`, `Invalid --older-than value.` | Live on `pro@nginx`: a log backdated ten days went with `--older-than=7days` and the fresh one stayed; a `0444` log survived both a single delete and `--all`. `src/Cli/Commands/LogDelete.php`. | The age scenario backdates a WP-CLI-owned log by the site's own clock (`wp/files.ts: backdateFile`); the read-only one asserts the warning and the surviving file, and nothing about the exit code or the success line. |
+| V131 | **`log-delete` deletes any file in the log folder.** Its single-file mode checks that the name is readable there, not that it is a log, so `log-delete .htaccess --yes` and `log-delete index.php --yes` remove the folder's own guards with `Success: 1 logfile deleted.` `log-show .htaccess` prints the rules. | Live on `pro@nginx`. `LogDelete::resolve_filename()` and `delete_one()`. | A plugin bug worth reporting upstream: on Apache that `.htaccess` (`Require all denied`) is what keeps the logs from being served. Not pinned. |
+| V132 | **`--dry-run` is documented and would delete for real.** The class docblock offers "an optional --dry-run preview", and the code passes the flag to `delete_one( $name, $dry )` — a method taking one argument, which ignores it. The synopsis does not declare it, so today WP-CLI refuses it before the command runs: `Parameter errors: unknown --dry-run parameter`. | Live; `LogDelete.php`. | Pinned by the refusals scenario, which asserts the logs survive the attempt: if the synopsis ever gains the option without the code honouring it, the "dry run" deletes, and the scenario fails. |
+| V133 | **The basename hardening holds.** A path from the log folder to a file outside it reaches nothing: `log-show` answers `Logfile <basename> not found or unreadable.`, `log-delete` `Log file not found or unreadable: <basename>`, and the file survives untouched. | Live on `pro@nginx`, with a file planted under `wp-content`. | Pinned. It is the only thing between a user's argument and `log-delete ../../wp-config.php --yes`. The path is proved on the site before it is used — it resolves to the marker, the marker is writable by WP-CLI's user, the log folder holds no file of its name — so the refusal cannot pass for the wrong reason. |
+
+
+### 2.20 Facts established auditing the whole of 6F again (2026-09-24)
+
+Three independent reviews — one each for 6F.0–6F.1, 6F.2 and 6F.3 — and a re-read of my own, every
+finding checked against the plugin source at `develop@f1ebfd0` or measured before it was fixed, and
+every fix mutation-checked: **26 of 26** caught, each file restored byte for byte. Fixed:
+
+- **A refusal could pass for an empty list (6F.1).** `Then the ids it printed are the site's own
+  jobs…` never read the exit code, and on a site with no jobs of its own a refused `--format=ids`
+  prints exactly the nothing it expected. It now requires exit 0.
+- **A misspelt placeholder reached the plugin (6F.1).** Only `{words and spaces}` counted, so
+  `{job_id}` — the plugin's own spelling of the flag — `{job2}` or `{ job }` went out as text, which
+  the plugin reads as job `0` and refuses exactly as a "refused" scenario expects. Anything in braces
+  is now a name, refused unless a step fills it, and a brace left after filling is refused too.
+- **Command text could name a path off the site.** `backup-download … /var/www/other/wp-config.php
+  --yes` would have been sent. The text as written may no longer hold an absolute path or a `..`
+  segment; judged before filling, so the proven path out of the log folder still works.
+- **A reinstall mid-scenario wiped the log the fatal gate reads (6F.2).** `finishActivation`'s
+  reinstall ran the `@plugin` hook's whole install, whose first act is `clearDebugLog`, so whatever
+  PHP logged before it — a fatal in the raced activation included — never reached the verdict. It now
+  runs `replacePluginUnderTest`, the install without the reset, with the residue the hook reads
+  (`declaredResidue`) instead of constants that only happened to match.
+- **The teardown's stop failed a passing scenario over one lost round trip (6F.2).** Every other wait
+  absorbs a probe failure; `stopRunningJobs` threw on the first. It now absorbs
+  `PROBE_FAILURE_TOLERANCE` in a row, sends again a stop that never reached the site, and stops again
+  a job whose marker comes back while its run is recording its end, instead of returning under it.
+- **The "already running" scenario raced its own backup (6F.2).** Split in two — V136.
+- **A symlink could send a download out of the private folder (6F.3).** `{download folder}` is now
+  worked out on the site — V135. The folder is created `0700` by `mkdir` rather than `chmod`ed after,
+  so the one mode set by hand in a docroot is `makeLogReadOnly`'s arranged precondition, which the
+  ownership rule now names beside the staging area.
+- **One listing, three copies (6F.3).** `listFiles` had no production caller and the two folder
+  readers re-implemented it; all go through `listFiles` / `listLocatedFiles` now, with
+  `missingAsEmpty` for the one directory a scenario may never have made.
+- **A jobs option holding a scalar read as "no jobs"** — now refused.
+- **Claims that were not true**, corrected where they stood: "every count is read back against a
+  source" (they were typed numbers — each count above zero is now checked beside the ids it counted,
+  `--type=DUMP` proves substring *and* case where `DBDUMP` proved only case, and `log --format=json`
+  pins the sentence `readLastRunLog` relies on); `log --job_id`'s rationale (V138); the Backup Now
+  job, one reused record with three writers (V139); "5 times in 10" (V122 recorded two jobs 7 times
+  in 18); the setting's label (V137); the alias TSDoc §2.15 recorded as fixed and was not; "both
+  stop at a question" (a download asks only onto an existing file); `log-delete` "reports success
+  when it deleted nothing" (when it could not delete a log it found — a missing one is an error);
+  "refused by name" (the download refusals name no file); guard files that "keep the logs from being
+  served" (on Apache); and stdin "the same way everywhere", unmeasured on `docker` until V140.
+- **A test that could not fail**: "a silent link is given up on" checked arithmetic on constants. It
+  now silences a link under a running command and waits for ssh2's own probes to give up — 0.3 s with
+  the probing shortened in the test alone; the production values stay pinned beside it.
+
+**Also recorded, not fixed.** The staged plugin zip is downloadable while a run has it staged:
+`.e2e_temp/plugins/<zip>` sits in the docroot under the build's own name, guessable by anyone who
+knows the ref (`backwpup-pro-en-9.99.99-f1ebfd05.zip`), and nginx serves it (V134) — BackWPup Pro
+is a commercial plugin. That is 6A's shared staging, documented as occasionally useful over HTTP, so
+the change belongs to that design rather than to this audit; staging the plugin category the way the
+download folder is staged would close it. **Planned as 6J instead** (§4.6J): the area stays as it
+is, and the web server is told not to serve it. Outside 6F: `plugin.spec.ts`'s
+cache-flush ordering check passes with the uninstall absent; `{@link}`s that resolve to nothing
+(`ownership.ts:772`, `dashboard.page.ts:19/37/74`, `onboarding.page.ts:263`) and doc comments cut off
+from their code (`run-context.ts:24`, `residue.ts:255`, `preflight.spec.ts:426`, `exec.spec.ts:146`,
+`ownership.spec.ts:566/798`, `residue.spec.ts:357`).
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V134 | **nginx serves the staging area to anyone who can name a file in it.** A file in `.e2e_temp/…` answers HTTP 200; one inside a folder only the transport's user may enter answers 404; a directory is not listed (403). | Live, both nginx cells, with probe files planted and removed. | `downloads` creates its folder `0700`, verified, under a name with a random part — the copy is a whole database. Reported for the plugin zip above. |
+| V135 | **A relative path that climbs out of a symlinked root leaves from the link's target.** PHP's `getcwd()` answers the physical directory, whatever the shell's `PWD` says, so `../e2e/downloads/<key>` from a root reached through a symlink resolves somewhere else — where `backup-download` would create a folder of its own, neither private nor cleaned up. | A scratch tree with PHP 8.1: the lexical path resolved to `false`, the one worked out from `getcwd()` to `realpath()` to the folder; then `DownloadFolder` end to end over a `wp eval` shim running real PHP, symlinked and plain layouts — folder `700`, the copy inside it, released. | `{download folder}` is `posix.relative(getcwd(), realpath(folder))`, both answered by the site in the request that creates it. |
+| V136 | **The paced backup outlasts one round trip, not two.** Seen running 2.7–2.8 s after its start on `free@nginx`, it drops its marker at 7.6–8.1 s — about 5 s, where two refusals, each a placeholder fill and a command, cost about 5.3 s. The refusal's check lands 0.7–1.3 s into its command. The abort's margin is the same kind: an unaborted run finishes its archive 6.6–7.4 s after start, a kill sent at "seen running" lands at about 3.5–4 s. | A scratch probe mirroring the scenario, with an on-site PHP watcher timing the marker: two refusals in a row — the second **lost the race 1 time in 3** (`run {job} --background` started a second run) and won the other two by 0.06 s; one refusal per job — **4 of 4** refused, 3.5–3.9 s before the marker went. `pro@nginx`: 7.5 s before it, archive at 10.3–10.6 s. | The refusal scenario is two, one command each; every scenario of the feature now sends its running backup a single command. It had passed every run so far by that 0.06 s. |
+| V137 | **The screen users see calls the setting "Maximum number script execution time (in seconds)".** That is the dashboard's Advanced Settings → Jobs panel (`parts/sidebar/settings-jobs.php`); "Maximum script execution time" is the legacy settings page's label, registered under a null parent and so reachable only by URL. Both save through `BackWPup_Page_Settings::save_post_form`. | `inc/class-admin.php:753` (`add_submenu_page( 'backwpup_null', … )`), `inc/class-page-settings.php:788`, `settings-jobs.php:71`. | The feature and `support/settings.ts` use the visible label, as the step promises. |
+| V138 | **`log --job_id` never looks at the jobs.** It keeps the log headers whose `(int) job_id` equals the one asked for. | `src/Cli/Commands/Log.php:226-229`. | Asking about the hidden placeholder job is still the better question — "none" is right whatever the command makes of an unknown id — but not for the reason the step gave. |
+| V139 | **Backup Now is one reused job record, written by three code paths**, each of which flags it `backup_now` in the same function that records its id. | `src/Backups/API/Rest.php:340-349`, `src/Abilities/Jobs/RunJob.php:407-418`, `src/Cli/Commands/Run.php:211-243`. | `scheduledJobs` keeps relying on the flag; its TSDoc names all three. |
+| V140 | **On `docker` too, a command meets end-of-input at once.** The docker CLI attaches no stdin without `-i` (`AttachStdin` stays false), and the transport ignores its own. Through the repo's `exec()` a shell `read` answered status 1 in 58 ms, and WP-CLI's `confirm()` printed `Proceed? [y/n] ` and exited 0 in 116 ms, going no further. Measured once the user had started Docker Desktop, which on this runner needs an administrator's approval. | A throwaway container started as `docker/docker-compose.yml` starts its WP-CLI ones — `wordpress:cli-php8.3`, user `33:33`, WP-CLI 2.12.0 — then removed with its image. Controls: with `-i` and stdin left open the same `read` was still waiting at 5 s; given `y`, `confirm()` went on. `docker/cli`'s `container/exec.go`. | V126 holds on every transport; the docs say so. |
+| V141 | **ssh2 cannot be made to close a socket it has stopped writing to.** `end()` and `destroy()` both return early once the socket is not writable, and node-ssh's `dispose()` calls `end()`, so the half-closed socket `withConnection` walks away from lingers until the server's own close arrives. | `node_modules/ssh2/lib/client.js:1179-1189`; node-ssh `dispose()`. | Documented at the call; reaching into ssh2's private socket would break on its next release. Bounded: one socket per recovered connection. |
+
+**Verified 2026-09-24**, with `E2E_RETRIES=0` on a runner kept awake and the two cells run one after
+the other (V72 — a parallel start was stopped in the Free run's first scenario, a database-only
+backup, and its site confirmed clean): the full BackWPup suite passed **54/54 on `pro@nginx`**
+(1.2 h) and **54/54 on `free@nginx`** (1.2 h), every scenario on its first attempt. Each cell met
+V122's race once, and the reinstall — now leaving the log whole — recovered it. Both sites were left
+as found: plugin absent, no footprint, no data folders, no staging area, no marker. Unit suite
+**1027 → 1069** passed (8 skipped, unchanged); **26 of 26** mutations caught, and the five new stop
+tests fail against the committed `stopRunningJobs`.
+
+### 2.21 Facts established planning 6J (2026-09-24)
+
+Measured in throwaway containers of the docker env's own images — `wordpress:php8.3-apache`, and
+`nginx:1.27-alpine` running `docker/nginx/default.conf` — with probe files planted in the staging
+root, `plugins/`, `plugins/public/` and `public/`, both images removed afterwards; and against the two
+nginx cells with anonymous, read-only requests, nothing planted. The guards tested are §4.6J's
+drafts, exactly as written there.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V142 | **The two guards deny the same thing.** Without them every staged file answers 200 — and on Apache a staged `.php` **runs**. With them, everything under the staging root answers 403 — any file, any extension, nested folders, `plugins/public/`, the directory itself — while the top-level `public/` keeps the server's normal handling: files 200, PHP run by Apache and handed to FastCGI by nginx. | Apache 2.4.68 with the image's own `AllowOverride All` (`conf-enabled/docker-php.conf`) and mod_rewrite; nginx 1.27.5. Nine paths on Apache, twelve on nginx, before and after. | 6J ships them as drafted — one rule in two languages. What they close is wider than the zip: anything staged, code included. |
+| V143 | **The `.htaccess` fails open in one configuration only: `AllowOverride None`**, where Apache ignores it (200). Every other broken setup fails **closed**: `FileInfo` alone works; `AuthConfig` alone answers 500 inside the staging area, while a file outside it still answered 200; mod_rewrite disabled leaves the fallback's 403, `public/` included; a guard the web server cannot read (`0600`, another owner) answers 403. | The same Apache container, reconfigured and reloaded per case. | The probe is needed on Apache too, not only on servers that never read `.htaccess`. A guard a server cannot parse costs its own folder, never the site. |
+| V144 | **nginx applies the include wherever it sits in `server {}`.** It picks the longest matching prefix before any regex, and `^~` on that prefix skips the regexes. Placed *after* the vhost's `\.php$` and static-asset regexes, it still denied `.php` and `.css` under the root and the normalised forms `/%2ee2e_temp/…` and `/x/../.e2e_temp/…`; the `.htaccess` — served as a plain file without the include — was denied too. | nginx's `ngx_http_core_module` docs (`location`); measured as above. | Operators can include it anywhere in the site's server block, and the file says so. |
+| V145 | **The nginx cells name themselves, and sometimes go unanswered.** Both send `server: nginx/1.24.0 (Ubuntu)`. A missing file under `.e2e_temp/` answers WordPress's own 404 page (404, `text/html`, 52–59 KB, ~1 s). Several requests in a row then got no answer for 15–60 s, and both cells answered again minutes later. | `curl` from the runner. | The `Server` header is there to show, never to branch on; the probe's verdict is its own content, never a status; and its wait is bounded, with no answer reported as *could not check*. |
+
 ---
 
 ## 3. Coverage & tagging decisions
@@ -669,7 +801,7 @@ product genuinely differs:
 
 | Tag | Scenarios |
 | --- | --- |
-| *(none)* | Onboarding, backup, history, download, delete, plugin lifecycle, WP-CLI job/backup/run/status, FTP/S3/MS Azure/Rackspace/SugarSync storages |
+| *(none)* | Onboarding, backup, history, download, delete, plugin lifecycle, WP-CLI job/backup/run/status and the backup and log files (`backup-delete`/`-download`, `log-show`/`-delete`), FTP/S3/MS Azure/Rackspace/SugarSync storages |
 | `@pro` | Glacier storage; **restore from the backup history** (in-place, V13); CLI `restore`, `backup-encrypt`/`-decrypt`, `job-export`/`-import` |
 | `@free` | Locked Pro-storage upsell rendering (`js-backwpup-locked-storage`) (V2); **restore by manual upload** (V13) |
 
@@ -1422,7 +1554,7 @@ commands that create the conditions it is judged under. Splitting per command wo
 across a dozen near-identical Backgrounds; splitting per edition would put `backup-delete`'s two
 outcomes (V84) in different phases.
 
-**Order:** 6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → then 6F.3 and 6F.4 in any order — each arranges its own state, and
+**Order:** 6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → 6F.3 ✅ → 6F.4 — each arranges its own state, and
 none depends on another's scenarios.
 
 #### 6F.0 — CLI rails *(no feature files)* — **DONE**
@@ -1551,7 +1683,8 @@ could not pass with a provided zip. Unit tests **793 → 821**.
 
 **Shipped 2026-09-22.** Two features, all untagged — `cli-runs.feature` (4 scenarios: the two
 execution contexts, the refusals, deactivate/reactivate) and `cli-running-job.feature` (3: the
-"already running" refusal, `status`, `kill`) — plus a fifth duty in the shared `@plugin` teardown.
+"already running" refusal, `status`, `kill`; **4 since §2.20**, whose measurement split the refusal
+in two, V136) — plus a fifth duty in the shared `@plugin` teardown.
 The facts are §2.17 (V108–V119); the audit that followed is §2.18.
 
 What shipped:
@@ -1609,25 +1742,79 @@ No SSH connection loss occurred. Both sites were left as found: plugin absent, n
 directories, no staging area. Unit suite 821 → 910 across 6F.2 and its audit; **60 mutations**, all
 caught, the file restored byte for byte each time.
 
-#### 6F.3 — Backups and logs on disk *(untagged)*
+#### 6F.3 — Backups and logs on disk *(untagged)* — **DONE**
 
-`backup-delete`, `backup-download`, `log-show`, `log-delete`.
+**Shipped 2026-09-23.** Two features, all untagged — `cli-backups.feature` (4 scenarios: both sides
+of the ownership split, a download and what it may overwrite, the refusals) and `cli-logs.feature`
+(7: showing a log by name, by job and by its tail; deleting by name, by age and all at once; a log
+WP-CLI may not write; the refusals; a path out of the log folder) — plus one fix in the shared
+transport. The facts are §2.19 (V123–V133).
 
-- **The ownership split is the headline** (V84). The same `backup-delete` succeeds on an archive the
-  transport's user wrote and is refused on one the web server wrote — and which of the two a site has
-  depends only on how the backup was made. Both get a scenario; the refusal asserts that the archive
-  **survives**, because a delete that half-worked is the failure worth catching. This supersedes
-  §2.6's unconditional wording.
-- **`backup-download` writes on the site**, relative to the WordPress root — not to the runner.
-  Asserted by checksum against the source (`wp/files.ts`), which is the only proof the copy is the
-  same file.
-- **`log-show`** by filename, by `--job_id`, and `--lines=N`; a missing file exits 1.
-- **`log-delete`** by file, `--all` and `--older-than`, each verified against `log --format=count`
-  rather than against its own success message — which it prints even when it deleted nothing, at
-  exit 0 (V106). Its refusal is a warning plus a surviving file, never a non-zero exit.
+What shipped:
 
-**Acceptance** — the refused delete leaves both the archive and the history untouched; every deletion
-is confirmed by re-reading, never by the command's own line.
+- **`support/plugin-folders.ts`** — BackWPup's backup and log folders read off the filesystem with
+  PHP's own `scandir`, taking only their *locations* from the plugin; its log naming; a log made
+  read-only; and the path from the log folder to the marker file, proved on the site before use.
+- **`support/archive-snapshot.ts`** and the **`archives`** fixture — each archive a scenario's
+  backups left, with its digest, recorded as it was made: what "byte for byte" and "the oldest
+  backup" are measured against, so neither can move under a later delete (V125).
+- **`support/download-folder.ts`** and the **`downloads`** fixture — the scenario's own folder in the
+  site's staging area, created private to the transport's user under a name with a random part
+  (V134), handed to `backup-download` relative to the directory WP-CLI runs in as the site itself
+  resolves it (V135, both from §2.20), and removed afterwards only if a step used it; a copy of a
+  database backup is not left in a docroot. Only that
+  folder goes, never its category: a staging root declared as an absolute path is shared by the
+  sites on a host, so `cleanSiteStaging` now takes a path inside the area rather than a category
+  alone.
+- **One placeholder rule for every command** (`support/placeholders.ts`, `fillPlaceholders` in
+  `support/cli-session.ts`): `{job}`, `{oldest backup}`, `{newest backup}`, `{oldest log}`,
+  `{newest log}`, `{download folder}`, `{path from the log folder to the marker file}` — each read
+  only when a command uses it, and required to fit one argument. It replaces 6F.2's `… on the
+  scheduled job` step, whose six uses became the plain step.
+- **`runJobInForeground`** (`support/backups.ts`), judged by the history row and the log it left, not
+  by the command; and each run's **`logfile`** in `support/history.ts`, which ties a run to its log.
+- **`common/wp/files.ts`**: `listFiles` / `FILE_LIST_PHP` — a directory's files, digests on request,
+  refusing a directory that is not there — and `backdateFile`, by the site's own clock; since §2.20
+  also `listLocatedFiles` and `missingAsEmpty`, through which every listing in the suite now goes.
+- **`common/wp/exec.ts`**: the execa-backed transports start a command with its stdin at an end, as
+  ssh already did, so a `[y/n]` prompt is declined instead of hanging on `local` (V126; measured on
+  every transport, V140).
+- **Vocabulary**: `Given the scheduled job has made {int} backup(s) inside WP-CLI` / `… through the
+  web server`; `Given WP-CLI's user may not write the {word} backup`, which **skips** the scenario,
+  with its reason, on a site where it may; `Then it asks "…"`; `Then it reports the warning "…"`;
+  and the backup, download, log-folder and log-output assertions in `steps/cli-backups.steps.ts` and
+  `steps/cli-logs.steps.ts`.
+
+**Deliberate revisions** against this section as planned, each for a measured reason:
+
+- **`log-delete`'s refusal is arranged by making a log read-only**, not by having the web server
+  write it: the web server's logs are `0777` on these cells (V123).
+- **Deletions are confirmed against the folders themselves**, not against `log --format=count`: the
+  listing command walks the log folder through the same helper `log-delete` does, so it could not
+  see a defect the two shared.
+- **Four measured edges added**, each a safety property nothing else covers: the `[y/n]` prompts
+  (V126), the documented `--dry-run` (V132), a path out of the log folder (V133), and a refused
+  download writing nothing (V127).
+- **Plugin bugs left unpinned**, as §2.17 left V111 and V115: the poisoned second delete (V124), the
+  orphaned history row (V125), the fatal on an unwritable download (V128), `log-delete` removing the
+  folder's guards (V131), and `log-delete`'s success line when nothing was deleted (V106/V130). The
+  scenarios steer clear of each, and say so where they come close.
+
+**Acceptance met** — the refused delete leaves the archive byte for byte and the history exactly as it
+was; every deletion is confirmed by reading the folder, never by the command's own line.
+
+**Verified 2026-09-23**, with `E2E_RETRIES=0` on a runner kept awake: the two new features passed
+**13/13 on `pro@nginx`** (19.9 min) and **13/13 on `free@nginx`** (18.2 min), every scenario on its
+first attempt — each cell met V122's activation race once, and the reinstall recovered it, as
+designed. The full BackWPup suite then passed **53/53 on `pro@nginx`** (1.1 h) and **53/53 on
+`free@nginx`** (1.1 h, meeting the race three times and recovering each), run one cell after the
+other, since the onboarding and contents features make files backups on a disk the two sites share
+(V72). Both sites were left as found: plugin absent, no footprint, no data
+folders, no staging area, no marker. Narrowing the download folder's cleanup to its own folder came
+after those runs, so `cli-backups` was run again on both cells: **6/6 on each**, both sites clean. Unit suite
+**910 → 1021** passed (8 skipped, unchanged); **45 mutations**, all caught — two only once their
+tests were strengthened, each a real weakness: the missing-directory guard was pinned by its
+condition alone, and an ordering check compared against `indexOf`'s `-1`.
 
 #### 6F.4 — Pro-only round-trips *(`@pro`)*
 
@@ -1747,6 +1934,157 @@ each provider without them still skips with a clear reason.
 **Acceptance** — both cells green; the parity checklist is complete; no scenario is a
 transliteration of its baseline ancestor.
 
+### 6J — Staging area web guard *(product-agnostic; depends on nothing)*
+
+**The gap.** The staging area is in the docroot, and a web server serves whatever it can read there
+(V134). From the first scenario's install to the worker's teardown — hours — the plugin zip under test
+can be downloaded, BackWPup Pro's included, and on Apache a staged `.php` would even run (V142). The
+area itself stays exactly as it is: location, modes, cleanup, the download folder's `0700`. 6J tells
+the web server not to serve it, and has every run measure whether it listened.
+
+**1. The `.htaccess` guard** — Apache, and any server that honours `.htaccess`.
+`src/common/wp/staging-guard/staging.htaccess`, copied to the staging root as `.htaccess`:
+
+```apache
+<IfModule mod_rewrite.c>
+	RewriteEngine On
+	RewriteRule !^public(?:/|$) - [F]
+</IfModule>
+<IfModule !mod_rewrite.c>
+	Require all denied
+</IfModule>
+```
+
+- **Everything answers 403 except the top-level `public/`**, which keeps the server's normal handling
+  (V142). The pattern is matched relative to the root, so `plugins/public/` stays denied. Nothing
+  creates `public/`: it is reserved for an artifact a plugin must fetch over HTTP — the one use the
+  staging docs call useful today — and exported as `PUBLIC_CATEGORY`. Code staged there would run, so
+  it never holds any.
+- **Fails closed in every setup but `AllowOverride None`** (V143), which is what the probe exists to
+  see.
+- **One writer.** `stageArtifact` is already the one way files are staged; BackWPup's download folder is
+  the only other code that creates the root (PHP's `wp_mkdir_p`). A new
+  `prepareStagingArea(transport, ...path)` creates the directory, writes the guard and returns the
+  path. Both call it, so nothing is ever staged into an area without its guard.
+- **Rewritten on every call, atomically**: uploaded under a temporary name, then renamed over the old
+  one. `mkdir -p` cannot say whether it created anything, a per-process memo goes stale the moment
+  something else removes the area, and a rewrite that truncated in place would leave an empty guard in
+  front of files already staged. It goes through `copyIntoTarget` from the committed file, so there is
+  no shell string and nothing to escape. Its cost, two small round trips per staging call, is measured
+  in the verification.
+- **The one staged file the web server reads.** It keeps the transport user's ownership like everything
+  else staged. The default umask makes it `0644`, and a guard the web server cannot read fails closed
+  (V143). The ownership rule's "only the transport user ever reads it" is amended to name it as the
+  exception.
+
+**2. The pre-flight probe** — a report, never a gate. Per site, once the transport checks pass, beside
+"File ownership" and "Elevation":
+
+- **Stages through `stageArtifact`** — the production path, so it measures the protection a run
+  actually gets, guard included. The probe is a `.zip` (the extension actually staged) holding a random
+  token, in a category with a random name of its own, so two sites sharing an absolute root, or a
+  healthcheck beside a run, never meet.
+- **Fetches it** at `baseURL` plus the root's path relative to the WordPress root — the suite's
+  standing assumption that the WordPress root is served at `baseURL`. A root outside the WordPress root
+  is **not probed**, and the check says so.
+- **Judges by content.** *Served*: the token came back, redirects followed so an http→https hop still
+  counts. *Not served*: any other answer — 403, 404 (WordPress's own page on these cells, V145), 500, a
+  login page. *Could not check*: no answer within a bounded wait (timeout, TLS, DNS), never reported as
+  safe (V145).
+- **Cleans up after itself.** The probe's category is removed whatever happened. The root and its guard
+  stay: a run's teardown removes them, and after a healthcheck they wait for the next run's, because
+  removing a root the probe did not create would pull it from under a concurrent run. This is the
+  first pre-flight check that writes to a site, and the docs say so. A root that cannot be written is
+  reported as *could not check* with the staging error; the first install still fails on it, as today.
+- **Reports** as an always-passing `CheckResult` — `Staging exposure: not served (403) — <url>`,
+  `served over HTTP`, `could not check: …`, `not probed: …` — plus a typed field the banner reads, as
+  `elevation` is.
+- **Warns** when any site is served, with a run-level banner printed from the same two places as the
+  elevation banner (the auth setup to stderr, the healthcheck to stdout) by one function, so the two
+  cannot drift. Per site: the URL that returned the probe's content; what that exposes (anything
+  staged, the plugin under test included, and on Apache staged code would run); and the `Server`
+  header of the answer. Then the remedies:
+  - **nginx** — include `staging.nginx.conf` (its absolute path on this runner) in the site's
+    `server {}` block, then `nginx -t` and reload;
+  - **Apache, or another server that reads `.htaccess`** — the guard is in place but ignored; on
+    Apache, allow `FileInfo` overrides for the docroot;
+  - **any server** — move the staging area out of the docroot with the site's own
+    `transport.stagingDir` (absolute, one per site). It needs no server change and gives up only
+    `public/`.
+
+**Server detection** is that `Server` header and nothing more. It is free, since it comes with the
+probe's own answer, and it is shown rather than acted on: a CDN or proxy answers with its own name,
+and the verdict never needs it, because the probe measures the effect.
+
+**3. The nginx include.** `src/common/wp/staging-guard/staging.nginx.conf`:
+
+```nginx
+location ^~ /.e2e_temp/ {
+    deny all;
+}
+location /.e2e_temp/public/ {
+}
+```
+
+- The same rule as the guard (V142). `^~` makes it independent of its position inside `server {}`
+  (V144); `public/` is a plain prefix, so the vhost's own regex locations still apply there, as
+  Apache's normal handling does.
+- Written for the default layout. Its header says to adjust both paths for a WordPress served from a
+  subdirectory or a moved staging area, and that a duplicate `location` fails `nginx -t`.
+- **Baked into the docker env's nginx** through a `COPY --from` of a Compose `additional_contexts`
+  entry — proven on this runner's Compose v5.5.1 — so the image still needs no host bind. The local
+  nginx cell then runs with the include, and every pre-flight there re-proves the committed file on a
+  real nginx. Without that, the include would be proven once, here, and could rot unnoticed.
+
+**Keeping the two in sync** — one rule in two languages:
+
+- **A CLAUDE.md MUST**, beside the ownership one: change one guard, change the other in the same
+  change, keep the drift spec green, and re-probe the docker Apache and nginx cells.
+- **Each file's header names the other** and that rule. The `.htaccess` header is also what an
+  operator finds on a site, so it says what wrote it and that the suite removes it.
+- **A drift spec** reads both files: each denies `DEFAULT_STAGING_DIR` and exempts exactly
+  `PUBLIC_CATEGORY`, at the top level only. It catches a renamed default or exemption; what the rules
+  *do* is what the live checks and the docker include prove.
+
+**Docs**, by whoever implements: `wordpress-automation.md` (the Exposure bullet becomes the guard, the
+probe and `public/`; the ownership rule's exception), `configuration.md` (the include, and
+`transport.stagingDir` as the remedy that needs no server change), `CLAUDE.md` (pre-flight's reports,
+the healthcheck's checks, the staging bullet, the MUST), `README.md` (an operator note beside the
+Docker env), `.env.example` (the staging comment).
+
+**Unit coverage** — the policy is pure and the I/O thin:
+
+- Nothing is staged before its guard: call order on a recording transport, for `stageArtifact` and the
+  download folder, with the rename after the upload.
+- URL mapping: a root inside and outside the WordPress root, relative and absolute overrides, a
+  `baseURL` with a path, with and without its trailing slash (`new URL` drops a base's last segment
+  without one), segments encoded.
+- Verdicts: the token → served; a 200 with anything else → not served; 403/404/500 → not served; a
+  throw or timeout → could not check; the probe's category removed on every path, a throwing fetch
+  included.
+- The banner: silent when nothing is served; per site the URL, the `Server` value, every remedy and
+  the include's path; identical text from both entry points.
+- Mutation-checked, as every sub-phase since 6E.
+
+**Verification** — with Docker up (the user starts it):
+
+1. **Docker Apache cell** (`:8100`): not served (403). With the guard deleted by hand: served, and the
+   banner.
+2. **Docker nginx cell** (`:8101`): with the include baked in, not served. Built without it: served,
+   and the banner with `Server: nginx/…` and the include's path.
+3. **`public/` on both**: a file there answers 200, one beside it 403, `plugins/public/` 403.
+4. **`pro@nginx` and `free@nginx`**: served, and the banner, until the include is in their vhost. That
+   is an operator change on the QA host, the user's to make; after it, not served. The probe's cost per
+   site is recorded.
+5. **The full BackWPup suite on one nginx cell**: installs are undisturbed, and after the teardown there
+   is no staging area, guard included.
+6. **`pro@apache`**, the one real Apache, only with the user's go-ahead, since AutoE2E runs there.
+
+**Acceptance** — nothing is ever staged into an area without its guard; *served* means the probe's
+own random content came back, and no answer is never reported as safe; the banner is silent on both
+docker cells and present on an unprotected one, with the URL, the server's own name and every remedy;
+the two guard files cannot drift apart silently.
+
 ---
 
 ## 5. Definition of done (phase-level)
@@ -1790,6 +2128,7 @@ is done — deliberately **not** guessed here.
 | Backup jobs are genuinely slow | `@slow` for CI splitting; real barriers (`startbackup`, `job-abort-status`) instead of long fixed timeouts, so the wait is as short as the job allows. |
 | **Archives accumulate on the site under test** | **Realised, then fixed in the shared rails (2026-08-05).** BackWPup's uninstall keeps every archive it made, and a full backup of the `pro@nginx` site is ~340 MB, so each scenario left one behind — the cell reached **6.8 GB across 28 per-install directories**. The `@plugin` teardown now clears what a product declares it leaves (`ProductConfig.siteResidue` → `wp/residue.ts`), independently of whether the uninstall succeeded. Verified live: one scenario reclaimed **7 GB**, and a scenario that runs a real backup now leaves no archive behind. **One caveat, reported not failed:** the plugin creates `uploads/backwpup-restore` as `755 www-data`, which the ssh transport's user cannot unlink inside — it is ~24 KB and does not accumulate, so the sweep warns (with the fix in the message) rather than failing the run. Making it removable on a cell is an ownership change there, not a code change here. |
 | **A fresh install that is not fresh** | **Two causes, both closed.** (V46, V122) WP-CLI's activation does not fire `init`, so BackWPup's activation routine runs in whichever request reaches it first — in this suite the `@plugin` hook's own active-state check — and a second request racing it sends a never-onboarded site down the plugin's upgrade path, which deletes the onboarding flag. Nothing here can hold the second request off, so `finishActivation()` detects a lost race and redoes the install, up to three installs, each reported. (V47) The plugin's `wp_bwpup_backups` table can also outlive an uninstall under concurrency and then block the next install; 6E's database sweep (`ProductConfig.siteDbResidue`) removes it before every install. Both are worth reporting upstream: a plugin's activation should not be re-entrant, and its uninstall should be the last word on its own table. |
+| **Staged files served by the web server** | **6J.** A guard written with the staging area covers every server that honours `.htaccess`, and fails closed wherever it cannot be applied (V143). nginx needs the include in the site's vhost — an operator change the suite can report on every run but never make — so until then the nginx cells keep serving the area, and pre-flight says so each time. |
 | Scope creep from "improve" | The improvement budget is §1.1 plus the V-facts. Anything else is a follow-up issue, not this phase. |
 
 ---

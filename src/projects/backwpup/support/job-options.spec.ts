@@ -67,8 +67,9 @@ const SPELLINGS = JSON.stringify([
 // A record with no `jobid` is one BackWPup itself discards (`jobs_options()` unsets it).
 const NO_JOB_ID = JSON.stringify([{ name: "orphan" }, { jobid: 9 }]);
 
-// "Backup now" creates a throwaway job of its own, which `wp backwpup job` skips exactly as it
-// skips a `tempjob`. Both spellings appear because the option survives the table either way.
+// "Backup now" keeps a job of its own, reused by every run of it, which `wp backwpup job` skips
+// exactly as it skips a `tempjob`. Both spellings appear because the option survives the table either
+// way.
 const BACKUP_NOW = JSON.stringify([
   { jobid: 5, tempjob: false, backup_now: true },
   { jobid: 6, tempjob: false, backup_now: "1" },
@@ -91,6 +92,7 @@ case "$WP_STUB_MODE" in
   backup-now) printf '%s' '${BACKUP_NOW}' ;;
   two-scheduled) printf '%s' '${TWO_SCHEDULED}' ;;
   empty)     printf '[]' ;;
+  scalar)    printf '"a:0:{}"' ;;
   not-set)   printf "Error: Could not get 'backwpup_jobs' option. Does it exist?" >&2; exit 1 ;;
   # The add-job endpoint: \`eval\` leaves the site holding the jobs in \`after\`, and the option
   # reads back whatever the site holds now.
@@ -184,6 +186,14 @@ test.describe("readStoredJobs", () => {
 
   test("an option that was never created reads as no jobs", async () => {
     expect(await read("not-set")).toEqual([]);
+  });
+
+  // The plugin only ever stores a list here; anything else is a site this reader does not
+  // understand, and "no jobs" would be an answer made up for it.
+  test("an option holding something other than a list of jobs throws", async () => {
+    await expect(read("scalar")).rejects.toThrow(
+      'expected backwpup_jobs to hold a list of jobs, got "a:0:{}"',
+    );
   });
 
   // The false negative this reader exists to prevent: a site that cannot answer must never look

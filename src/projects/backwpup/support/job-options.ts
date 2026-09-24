@@ -186,24 +186,26 @@ function toStoredJob(value: unknown): StoredJob | undefined {
 }
 
 /**
- * Every job the site has stored, including the hidden placeholder ones.
+ * Every job the site has stored, including the hidden placeholder ones. A record the plugin itself
+ * would skip — not a record at all, or one without a job id — is left out here too.
  *
  * @param transport - the site to ask.
  * @returns the jobs, in the order the option holds them; empty when the option does not exist,
  * which is what a site with no configured jobs looks like.
- * @throws {@link Error} if the option exists but cannot be read or decoded — a broken read must
- * never pass as "no jobs".
+ * @throws {@link Error} if the option exists but cannot be read or decoded, or holds something other
+ * than a list of jobs — a broken read must never pass as "no jobs".
  */
 export async function readStoredJobs(
   transport: Transport,
 ): Promise<readonly StoredJob[]> {
   const raw = await getOptionJson<unknown>(transport, JOBS_OPTION);
   if (raw === undefined) return [];
-  const records = Array.isArray(raw)
-    ? raw
-    : isObject(raw)
-      ? Object.values(raw)
-      : [];
+  if (!Array.isArray(raw) && !isObject(raw)) {
+    throw new Error(
+      `[backwpup/job-options] expected ${JOBS_OPTION} to hold a list of jobs, got ${JSON.stringify(raw)}.`,
+    );
+  }
+  const records = Array.isArray(raw) ? raw : Object.values(raw);
   return records
     .map(toStoredJob)
     .filter((job): job is StoredJob => job !== undefined);
@@ -217,10 +219,10 @@ export async function readStoredJobs(
  * no `jobid` (which {@link readStoredJobs} already drops), one flagged `tempjob`, one flagged
  * `backup_now`, and the one whose id matches the site option `backwpup_backup_now_job_id`.
  *
- * The last of those is not re-checked: the plugin writes that option and the record's own
- * `backup_now` flag in the same breath (`src/Abilities/Jobs/RunJob.php`, `src/Backups/API/Rest.php`), so
- * the flag already covers every such job — and reading it would cost a second round-trip on every
- * call to answer a question the record has answered.
+ * The last of those is not re-checked: every writer of that option (`src/Backups/API/Rest.php`,
+ * `src/Abilities/Jobs/RunJob.php`, `src/Cli/Commands/Run.php`) flags the same record `backup_now` in
+ * the same function, so the flag already covers every such job — and reading the option would cost a
+ * second round-trip on every call to answer a question the record has answered.
  */
 export function scheduledJobs(
   jobs: readonly StoredJob[],

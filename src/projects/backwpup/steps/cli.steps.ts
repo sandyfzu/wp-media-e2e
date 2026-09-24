@@ -6,6 +6,7 @@ import {
   backwpupCli,
   describeCli,
   noticesAt,
+  outputLines,
   readJsonList,
 } from "../support/cli";
 import {
@@ -14,14 +15,14 @@ import {
   compareCommands,
   readRegisteredCommands,
 } from "../support/cli-commands";
-import { parseCommandText, withJobId } from "../support/cli-session";
-import { readHistory } from "../support/history";
+import { archivedRuns, readHistory } from "../support/history";
 import {
   addBackupJob,
   readStoredJobs,
   scheduledJobs,
   theScheduledJob,
 } from "../support/job-options";
+import { commandArgv } from "../support/placeholders";
 import { isObject } from "../../../common/guards";
 import { resolveIdentity } from "../../../common/artifacts/manifest";
 import type { CliLevel, CliResult } from "../support/cli";
@@ -51,26 +52,22 @@ import type { CliLevel, CliResult } from "../support/cli";
  *
  * The `wp backwpup` prefix is left out of the feature text because the runner supplies it — an
  * unrelated WP-CLI command cannot be reached down the path reserved for the plugin under test.
+ *
+ * What a feature cannot spell out it names in braces — `run {job}`, `backup-delete {oldest backup}
+ * --yes` — and each is filled as the command runs, from the site or from what the scenario recorded
+ * there, never from the command under test (`support/placeholders.ts` lists them). So a failure
+ * message, which quotes the argv, shows the value actually sent.
  */
 When(
   "I run the BackWPup command {string}",
-  async ({ cli }, command: string) => {
-    await cli.run(parseCommandText(command));
-  },
-);
-
-/**
- * The same, for a command that names the site's scheduled job — `run {job}`, `job-activate
- * --job_id={job}` — whose id the plugin allocates and the feature therefore cannot spell out.
- *
- * The id is read from what the site stores at the moment the command runs, so it is always the job
- * the scenario set up — and a failure message, which quotes the argv, shows the id actually sent.
- */
-When(
-  "I run the BackWPup command {string} on the scheduled job",
-  async ({ cli, site }, command: string) => {
-    const job = await theScheduledJob(site.transport);
-    await cli.run(parseCommandText(withJobId(command, job.jobId)));
+  async ({ cli, site, downloads, archives }, command: string) => {
+    await cli.run(
+      await commandArgv(command, {
+        transport: site.transport,
+        downloads,
+        archives,
+      }),
+    );
   },
 );
 
@@ -98,14 +95,6 @@ function expectNotice(
   ).toBe(true);
 }
 
-/** The values a command printed one per line — how `--field=<name>` answers. */
-function printedLines(result: CliResult): string[] {
-  return result.stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
-}
-
 /**
  * A copy sorted for comparing as a set, digits by value so a failure lists ids in reading order.
  *
@@ -123,9 +112,10 @@ function sortedForComparison(values: readonly string[]): string[] {
  *
  * Several commands exit 0 after failing: a foreground `run` never reaches a verdict of its own (the
  * job ends the process at exit 0, whatever it logged), `run --background` reports even a job id the
- * site does not have as started, a failed `restore` and a `log-delete` that removed nothing only
- * warn, and plugin code that stops with `exit( 'message' )` prints no status line at all. Pair it
- * with a claim checked against a source the command has no hand in.
+ * site does not have as started, a failed `restore` and a `log-delete` refused a log it may not write
+ * only warn, a command that stops to ask for confirmation ends there at exit 0 having done nothing,
+ * and plugin code that stops with `exit( 'message' )` prints no status line at all. Pair it with a
+ * claim checked against a source the command has no hand in.
  */
 Then("the command succeeds", ({ cli }) => {
   expect(cli.last.exitCode, describeCli(cli.last)).toBe(0);
@@ -136,6 +126,10 @@ Then("the command succeeds", ({ cli }) => {
  *
  * Any non-zero exit, not a particular code: what these scenarios are about is *that* the command
  * declined and what it said, and WP-CLI's choice of status number is its own business.
+ *
+ * Nor does a non-zero exit prove nothing happened: after one refused `backup-delete`, the next one
+ * deletes its archive and still exits 1, repeating the earlier refusal. So a refusal, too, is
+ * confirmed against the site.
  */
 Then("the command fails", ({ cli }) => {
   expect(cli.last.exitCode, describeCli(cli.last)).not.toBe(0);
@@ -154,6 +148,27 @@ Then("it reports the success {string}", ({ cli }, message: string) => {
 /** That the command reported an error in WP-CLI's own words. */
 Then("it reports the error {string}", ({ cli }, message: string) => {
   expectNotice(cli.last, "error", message);
+});
+
+/** That the command warned in WP-CLI's own words — which a command may do and still exit 0. */
+Then("it reports the warning {string}", ({ cli }, message: string) => {
+  expectNotice(cli.last, "warning", message);
+});
+
+/**
+ * That the command stopped to ask for confirmation, and so did nothing it was asking about.
+ *
+ * WP-CLI's `confirm()` prints the question and `[y/n]` and reads the answer from stdin; this suite
+ * never types one, so the prompt meets end-of-input, and anything but `y` makes WP-CLI end the
+ * command there — at exit 0, having done nothing. The prompt is therefore the last thing printed.
+ * Whether nothing was done is for a second source to confirm.
+ */
+Then("it asks {string}", ({ cli }, question: string) => {
+  const printed = cli.last.stdout.trimEnd();
+  expect(printed.endsWith("[y/n]"), describeCli(cli.last)).toBe(true);
+  expect(outputLines(cli.last).at(-1), describeCli(cli.last)).toContain(
+    question,
+  );
 });
 
 // ── Which commands exist ─────────────────────────────────────────────────────
@@ -207,7 +222,7 @@ Then(
       if (edition === "pro") {
         expect(result.exitCode, describeCli(result)).toBe(0);
         // The help page's NAME line is the command alone; its SYNOPSIS repeats it with arguments.
-        expect(printedLines(result), describeCli(result)).toContain(
+        expect(outputLines(result), describeCli(result)).toContain(
           `wp backwpup ${name}`,
         );
       } else {
@@ -253,9 +268,11 @@ Then(
  *
  * Compared against the jobs the site **stores**, which is a source the command has no hand in. The
  * check runs in two halves, and the first is what makes the second mean anything: the site must
- * really be holding a hidden job (BackWPup keeps a placeholder of its own from installation, and a
- * throwaway one per "Backup now"), or "none of the hidden ones were listed" would be true of a site
- * that had none. Only then are the printed ids compared with the jobs a user would call their own.
+ * really be holding a hidden job (BackWPup keeps a placeholder of its own from installation, and one
+ * more for "Backup now" once that has run), or "none of the hidden ones were listed" would be true of
+ * a site that had none. Only then are the printed ids compared with the jobs a user would call their
+ * own — printed by a command that answered at exit 0, since on a site with none of its own a refusal
+ * prints no ids either.
  *
  * Reads whitespace-separated, so it judges `--format=ids` (one line) and `--field=job_id` (one per
  * line) alike — they are the same claim in two shapes. Compared **as a set**, because the order is
@@ -274,6 +291,7 @@ Then(
         `(it stores ${JSON.stringify(stored.map((job) => job.jobId))})`,
     ).toBeGreaterThan(own.length);
 
+    expect(cli.last.exitCode, describeCli(cli.last)).toBe(0);
     const printed = cli.last.stdout
       .trim()
       .split(/\s+/)
@@ -332,23 +350,23 @@ Then(
  *
  * Checked against the history table rather than against the command in another format: the command
  * lists the files it finds on each destination, while the table is written by the run that made
- * them, so the two agree only when the command reported what really happened. Only `completed` rows
- * count — a failed or aborted run is recorded too, and leaves no archive behind.
+ * them, so the two agree only when the command reported what really happened. Only the runs that
+ * left an archive count — a failed or aborted run is recorded too, and leaves none behind.
  *
  * Compared as a set: the command lists newest first, the table holds oldest first.
  */
 Then(
   "it names the archives the backup history records",
   async ({ cli, site }) => {
-    const recorded = (await readHistory(site.transport))
-      .filter((row) => row.status === "completed")
-      .map((row) => row.filename);
+    const recorded = archivedRuns(await readHistory(site.transport)).map(
+      (run) => run.filename,
+    );
     expect(
       recorded,
       "the backup history should record an archive to compare against",
     ).not.toHaveLength(0);
     expect(
-      sortedForComparison(printedLines(cli.last)),
+      sortedForComparison(outputLines(cli.last)),
       describeCli(cli.last),
     ).toEqual(sortedForComparison(recorded));
   },
@@ -391,9 +409,9 @@ Then(
  *
  * `log` filters by hand rather than through the shared field filter `job` and `backup` use, so it
  * needs a check of its own. The second half is what makes the first mean anything: a filter that
- * ignored the id would pass "the scheduled job has its run" on its own. The other job asked about is
- * a real one — BackWPup's hidden placeholder, which never ran — so the answer is "none" because the
- * filter excluded the run, not because the id matched nothing at all.
+ * ignored the id would pass "the scheduled job has its run" on its own. The other id asked about is
+ * a job the site really stores — its hidden placeholder, which has never run — so "none" is the right
+ * answer whatever the command makes of an id it does not know.
  */
 Then(
   "the log list filtered by job holds the scheduled job's run and no other job's",

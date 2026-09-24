@@ -1,19 +1,18 @@
 import { After, Before } from "../fixtures";
 import {
   getDebugLogOptions,
-  getSiteDbResidue,
-  getSiteResidue,
   getStopRunningWork,
   readRouting,
 } from "../config/metadata";
 import {
   HOOK_TIMEOUT_MS,
   PLUGIN_TAG,
+  declaredResidue,
   extendedTimeout,
   installPluginUnderTest,
   teardownPluginUnderTest,
 } from "./plugin-lifecycle";
-import type { DeclaredResidue, ScenarioReport } from "./plugin-lifecycle";
+import type { ScenarioReport } from "./plugin-lifecycle";
 import type { TestInfo } from "@playwright/test";
 
 /**
@@ -32,15 +31,6 @@ import type { TestInfo } from "@playwright/test";
  *
  * The policy itself lives in `./plugin-lifecycle.ts`; this file only binds it to the runtime.
  */
-
-/**
- * Collects what a product says it leaves on a site — paths on disk, rows in the database — from the
- * per-process registries the config factory filled. Read here rather than imported, so these hooks
- * never depend on product code.
- */
-function declaredResidue(product: string): DeclaredResidue {
-  return { files: getSiteResidue(product), db: getSiteDbResidue(product) };
-}
 
 /**
  * Adapts Playwright's `TestInfo` to the narrow {@link ScenarioReport} the teardown gate needs.

@@ -30,6 +30,13 @@ Key design points:
 - **Every command runs with the WordPress root as its working directory** on all
   three modes (`rootDir` for `local`/`ssh`; the container `WORKDIR` for `docker`),
   so a relative path means the same thing everywhere.
+- **Nothing is ever typed into a command, so none is handed any input.** node-ssh ends the
+  channel's input when given none, `local` passes `stdin: "ignore"`, and `docker exec` without `-i`
+  attaches none (its client ignores stdin too). A command that stops to ask — WP-CLI's `confirm()`,
+  behind every `[y/n]` prompt a destructive command shows without `--yes` — therefore reads
+  end-of-input and declines at once, exiting 0 having done nothing — measured on all three modes.
+  execa's default leaves stdin open instead, and the same prompt then waited forever on `local`
+  (measured; pinned in `exec.spec.ts`), as it does on `docker` given `-i`.
 - SSH connections are cached per endpoint and reused. Call `disposeConnections()`
   from a worker-teardown fixture to close them.
 - **A broken SSH link fails the command on it, never the run.** Each connection is probed every
@@ -156,7 +163,7 @@ category, so a future artifact type reuses the same transfer and cleanup.
 | `stageArtifact(transport, localPath, { category, as? })` | `mkdir -p` the category, copy the file in, return its **absolute target path**. |
 | `stageAndInstallPlugin(transport, localZip, opts?)` | `stageArtifact(category: "plugins")` → `installPlugin` from the staged path, then **restores the installed plugin's ownership** when `opts.slug` is given (see [File ownership](#file-ownership-wpownershipts) — pass it). |
 | `siteStagingDir(transport)`                         | The absolute staging directory for a site.                                   |
-| `cleanSiteStaging(transport, category?)`            | `rm -rf` the whole area, or one category.                                    |
+| `cleanSiteStaging(transport, ...path)`              | `rm -rf` the whole area, or one path in it — a category, or one entry of it. |
 | `stagingPath(root, ...segments)`                    | Pure POSIX path builder; validates each segment.                             |
 
 ```ts
@@ -196,9 +203,12 @@ const zip = await stageAndInstallPlugin(site.transport, artifact.zipPath, {
   *absolute* staging root — tracked in the
   [orchestrator plan](../plans/orchestrator-plan.md) (Phase 0A.3).
 - **Exposure** — on our environments the WP root *is* the web docroot, so
-  `.e2e_temp/…` is potentially HTTP-reachable (occasionally useful: an artifact a
-  plugin must fetch over HTTP). It is wiped in teardown; stage outside the docroot
-  via the override when that matters.
+  `.e2e_temp/…` is HTTP-reachable — measured on both nginx cells: a file there is
+  served (200), while one inside a folder only the transport's user may enter is not
+  (404), and the directories themselves are not listed (403). Occasionally useful (an
+  artifact a plugin must fetch over HTTP); for anything sensitive, stage it in such a
+  folder, as BackWPup's download folder does, or outside the docroot via the override.
+  The area is wiped in teardown.
 
 ## Plugin lifecycle ([`wp/plugin.ts`](../../src/common/wp/plugin.ts))
 
@@ -583,7 +593,9 @@ serves several sites and they need not agree — measured on the apache cell,
 > `wp`: WP-CLI as root would leave the site unwritable by the web server, which is this module's
 > problem in a more expensive form. `stageAndInstallPlugin` does it for you when given the plugin's
 > `slug` — pass it. The staging area itself is deliberately left alone: only the transport user ever
-> reads it.
+> reads it. So is a mode a scenario sets on purpose to test a refusal — `makeLogReadOnly` takes the
+> write bits off one of the plugin's logs — since handing it back would undo the arrangement; it runs
+> unelevated, on a file the scenario's own run wrote, and goes with the plugin's residue.
 
 **Linux only, deliberately.** `stat -c` and `id` are read in their GNU form; BusyBox (what the
 `wordpress:cli` container provides) implements both compatibly. Both reads are confined to one
@@ -757,6 +769,25 @@ substitute and is strictly weaker: a body corrupted in place, or a truncation th
 padded, matches on size and differs here. A reply that is not a digest — a notice printed ahead of
 the value, an empty string, upper-case hex — throws rather than being compared, because comparing
 it would fail as "the download differs" and point at the wrong thing.
+
+`listFiles(transport, dir, { digests?, missingAsEmpty? })` lists the regular files directly inside a
+directory — name, size, modification time, whether the **transport's** user may write it (what
+`is_writable()` answers inside WP-CLI, the check a plugin's own command makes before it deletes a
+file) and, when asked, each one's SHA-256, all computed on the site. Links and subdirectories are
+left out. A directory that is not there **throws** rather than listing as empty: a caller asks
+because it expects the directory, and "no files" is exactly the answer that passes an assertion that
+something was removed — for a path that was simply wrong. Only a caller asking about a directory a
+scenario may never have created passes `missingAsEmpty`, where "nothing" is the true answer.
+`listLocatedFiles(transport, locate, what, options)` is the same listing for a directory only the
+site can name — `locate` is PHP that sets `$dir`, from a plugin's own settings say — located and
+listed in one request, and it returns where the site found it as well as what it holds. Every
+listing in the suite goes through one of the two; the fragment they run is `FILE_LIST_PHP`, and
+`parseFileList` reads its entries.
+
+`backdateFile(transport, path, seconds)` sets a file's modification time back, for a scenario about
+something that judges files by age. It counts back from the **site's** clock, the one such a
+judgement uses, verifies the time it set by reading it back, and works only on a file the
+transport's user owns — only a file's owner may set its time.
 
 ## Looking inside an archive ([`archive.ts`](../../src/common/wp/archive.ts))
 

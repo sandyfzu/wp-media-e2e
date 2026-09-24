@@ -330,6 +330,34 @@ test.describe("cleanSiteStaging", () => {
     expect(existsSync(join(root, PLUGINS_CATEGORY, "keep.zip"))).toBe(true);
   });
 
+  // A category can be shared: a staging root declared as an absolute path serves every site on the
+  // host that declares it, so one run removing its own entry must leave another run's alone.
+  test("removes one entry of a category, leaving its siblings", async () => {
+    await stageArtifact(local, makeSource("mine.tar"), {
+      category: "downloads",
+    });
+    await stageArtifact(local, makeSource("theirs.tar"), {
+      category: "downloads",
+    });
+    const root = await siteStagingDir(local);
+
+    await cleanSiteStaging(local, "downloads", "mine.tar");
+    expect(existsSync(join(root, "downloads", "mine.tar"))).toBe(false);
+    expect(existsSync(join(root, "downloads", "theirs.tar"))).toBe(true);
+  });
+
+  test("refuses a path that would leave the area, before removing anything", async () => {
+    await stageArtifact(local, makeSource("kept.zip"), {
+      category: PLUGINS_CATEGORY,
+    });
+    const root = await siteStagingDir(local);
+
+    await expect(
+      cleanSiteStaging(local, PLUGINS_CATEGORY, ".."),
+    ).rejects.toThrow(/not a valid staging path segment/);
+    expect(existsSync(join(root, PLUGINS_CATEGORY, "kept.zip"))).toBe(true);
+  });
+
   test("is a no-op when the area was never created", async () => {
     await expect(cleanSiteStaging(local)).resolves.toBeUndefined();
   });

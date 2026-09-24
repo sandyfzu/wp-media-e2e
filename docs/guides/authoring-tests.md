@@ -88,8 +88,9 @@ Then the command succeeds
 And it prints "1"
 ```
 
-`Then the command fails` and `Then it reports the error "…"` / `the success "…"` complete the set;
-the latter two match WP-CLI's own `Success:` / `Warning:` / `Error:` status lines by **level**, and
+`Then the command fails` and `Then it reports the error "…"` / `the warning "…"` / `the success "…"`
+complete the set; the last three match WP-CLI's own `Success:` / `Warning:` / `Error:` status lines
+by **level**, and
 the given text as a substring of the message — a refusal WP-CLI spreads over several lines on
 stderr (`Parameter errors:`, then the parameter it rejected) is one message. Three rules the step
 text has to respect, each refused rather than run:
@@ -102,11 +103,21 @@ text has to respect, each refused rather than run:
   runner already runs the command on the scenario's own site. `--debug`, `--quiet` and
   `--[no-]color` only change the output, so they are allowed.
 
-A command that names the site's scheduled job cannot spell its id out, because the plugin allocates
-it. Write `{job}` where the id goes and end the step with *on the scheduled job* — `When I run the
-BackWPup command "run {job} --background" on the scheduled job` — and the id is read from what the
-site stores when the command runs. A `{job}` left in the plain step is refused rather than sent,
-since the plugin would read it as job `0`. A command that **blocks** on a running job, as `status`
+A command cannot spell out what the plugin allocates or names itself — a job's id, an archive's or a
+log's file name — so it names it in braces, and the value is read when the command runs
+([`support/placeholders.ts`](../../src/projects/backwpup/support/placeholders.ts)): `{job}` is the
+scheduled job's id; `{oldest backup}` / `{newest backup}` the archive of the first / latest backup
+the scenario made, fixed as they were made; `{oldest log}` / `{newest log}` the log of the first /
+latest run the backup history records; `{download folder}` a folder of the scenario's own on the
+site, relative to the directory WP-CLI runs in (the WordPress root); and `{path from the log folder
+to the marker file}` a path out of BackWPup's log folder to the `markers` fixture's file, proved on
+the site to lead there. So `When I run the BackWPup command "backup-delete {oldest backup} --yes"`
+sends one real file name. Each value is asked for only when a command uses it, and must fit in one
+argument. Whatever sits in braces is read as a placeholder's name, so one no step knows — `{job_id}`
+for `{job}` — is refused, naming the ones it does, and so is a stray brace. And the text as written
+may not name a path off the site, absolute or climbing out with `..`: a slip there would reach
+another site's files, so a path that must reach further comes from a placeholder the suite proves.
+A command that **blocks** on a running job, as `status`
 does, runs through `When I watch the running backup with the BackWPup command "…"`, which gives it a
 backup's length as a budget of its own and fails naming the command if it never answers.
 
@@ -118,11 +129,15 @@ resolved zip — never from the same command in another format.
 not success.** WP-CLI itself is honest — its refusals and `WP_CLI::error()` exit 1 — but some of
 BackWPup's commands exit 0 after failing: a foreground `run` never reaches its own verdict at all
 (the job ends the WP-CLI process itself, whatever it logged), `run <id> --background` reports success
-for a job id the site does not have, a `restore` that failed midway warns, a `log-delete` that
-removed nothing still reports success, and plugin code that stops with PHP's `exit( 'message' )`
-prints no status line at all. So always pair it with a check against a second source (the history
-row, the log, the marker, a re-count), and assert a refusal the way the command actually makes it.
-The cases, and which of them are measured live, are §2.16–§2.17 of the
+for a job id the site does not have, a `restore` that failed midway warns, a `log-delete` refused a
+log it may not write still reports success, and plugin code that stops with PHP's `exit( 'message' )`
+prints no status line at all. A destructive command run **without `--yes`** stops at a `[y/n]`
+prompt nobody answers and ends at exit 0 having done nothing (`Then it asks "…"` asserts the
+prompt). The other direction fails too: after one refused `backup-delete`, the next one deletes its
+archive and still exits 1 with the earlier error. So always pair either step with a check against a
+second source (the history row, the log, the marker, the file on disk), and assert a refusal the
+way the command actually makes it — `Then it reports the warning "…"` where it only warns.
+The cases, and which of them are measured live, are §2.16–§2.19 of the
 [feature-porting plan](../plans/phase-6-feature-porting-plan.md).
 
 **A job that must still be running when the next command arrives needs arranging.** A database
@@ -130,13 +145,27 @@ backup of the cells finishes in about a second — less than one WP-CLI round tr
 [`cli-running-job.feature`](../../src/projects/backwpup/features/cli-running-job.feature) sets two
 of BackWPup's own settings first (`Given BackWPup's "…" setting is "…"`, which refuses a value the
 Settings screen does not offer): **Reduce server load** at `maximum` stretches the run to several
-seconds, and a **Maximum script execution time** of `0` keeps it in one request, since the plugin
-otherwise hands a long run to a fresh request midway and a command landing in that handover is
-answered about a job that is briefly not there.
+seconds, and a **Maximum number script execution time (in seconds)** — the screen's own words — of
+`0` keeps it in one request, since the plugin otherwise hands a long run to a fresh request midway
+and a command landing in that handover is answered about a job that is briefly not there.
 
-It also adds one fixture that is **not** a page object and does not behave like one: **`markers`**
-plants a random value in a file under the site's content directory and another in a `wp_options`
-row, so a scenario can ask an archive whether a backup really captured the site
+Two more fixtures serve the commands that act on files. **`archives`** records the digest of every
+archive a scenario's backups left, the moment they were made, so "still on the site, byte for byte"
+compares against the run's own output and "the oldest backup" means one file for the rest of the
+scenario — the steps that make backups (`Given the scheduled job has made 2 backups inside WP-CLI`,
+or `… through the web server`, which decides who owns the files) record into it. **`downloads`** is
+a folder of the scenario's own inside the site's staging area, for `backup-download` to write into.
+It is created private to the transport's user, because the web server serves anything it can read
+there and the copy is a whole database, and handed to the command by a path worked out on the site
+from where the folder and WP-CLI really are — so a symlink on the way cannot send the copy elsewhere.
+It costs nothing until a step uses it, and is removed after the scenario only if one did
+([`support/archive-snapshot.ts`](../../src/projects/backwpup/support/archive-snapshot.ts),
+[`support/download-folder.ts`](../../src/projects/backwpup/support/download-folder.ts)).
+
+The last fixture behaves like none of the others: **`markers`** plants a random value in a file
+under the site's content directory and another in a `wp_options` row, so a scenario can ask an
+archive whether a backup really captured the site — or, since the file sits outside every BackWPup
+folder, ask a log command handed a path out of its own folder whether it reached that file
 ([`support/markers.ts`](../../src/projects/backwpup/support/markers.ts)). Two things follow from it
 touching the site rather than the page:
 

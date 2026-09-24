@@ -15,6 +15,7 @@ import {
   dockerArgv,
   dockerCpArgv,
   elevationSupport,
+  exec,
   execElevated,
   installKey,
   resetElevationCaches,
@@ -116,6 +117,29 @@ test.describe("copyIntoTarget — local transport", () => {
     await expect(
       copyIntoTarget(local, join(workDir, "absent.txt"), target),
     ).rejects.toThrow(/could not copy .*absent\.txt.*to .*x\.txt/s);
+  });
+});
+
+test.describe("exec — local transport", () => {
+  // A command that stops to ask — WP-CLI's `[y/n]` confirm — must meet end-of-input and decline, as
+  // it does over ssh. With stdin left open it would wait for an answer nobody can give; the race
+  // turns that hang into a prompt failure instead of a test timeout.
+  test("starts a command with its input already at an end", async () => {
+    let timer: NodeJS.Timeout | undefined;
+    const hung = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error("the command was still waiting on its stdin"));
+      }, 5_000);
+    });
+    try {
+      const { stdout, exitCode } = await Promise.race([
+        exec(local, "sh", ["-c", 'read answer; echo "read=$?"']),
+        hung,
+      ]);
+      expect({ stdout, exitCode }).toEqual({ stdout: "read=1", exitCode: 0 });
+    } finally {
+      clearTimeout(timer);
+    }
   });
 });
 

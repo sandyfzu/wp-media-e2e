@@ -165,6 +165,17 @@ export function noticesAt(
 }
 
 /**
+ * What a command printed on stdout, one entry per non-blank line, each trimmed — how `--field=<name>`
+ * answers, and how `log-show` prints a log.
+ */
+export function outputLines(result: CliResult): readonly string[] {
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+}
+
+/**
  * One line naming the command, its exit code and what it printed — for assertion messages.
  *
  * **Embeds the argv and the raw output**, so it is not for a command carrying a secret: `job-export

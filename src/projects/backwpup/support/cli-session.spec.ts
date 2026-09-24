@@ -5,10 +5,11 @@ import { join } from "node:path";
 
 import {
   CliSession,
-  JOB_PLACEHOLDER,
+  fillPlaceholders,
   parseCommandText,
-  withJobId,
+  refusePathsOffTheSite,
 } from "./cli-session";
+import type { PlaceholderResolvers } from "./cli-session";
 import type { LocalTransport } from "../../../common/config/types";
 
 // The same house pattern as `cli.spec.ts`: a stub `wp` on PATH exercises the session over the real
@@ -122,14 +123,17 @@ test.describe("parseCommandText", () => {
   });
 
   // Left unfilled, the plugin reads a placeholder as job 0 and answers about a job that does not
-  // exist — a refusal that would pass a scenario expecting one, for the wrong reason.
+  // exist — a refusal that would pass a scenario expecting one, for the wrong reason. An unclosed
+  // brace is no placeholder at all, so nothing would ever fill it.
   for (const text of [
     "run {job}",
     "job-activate --job_id={job}",
     "log-show {jobs}",
+    "run {job --background",
+    "run job} --background",
   ]) {
-    test(`refuses "${text}", whose placeholder nothing filled`, () => {
-      expect(() => parseCommandText(text)).toThrow(/still holds \{/);
+    test(`refuses "${text}", whose brace nothing filled`, () => {
+      expect(() => parseCommandText(text)).toThrow(/still holds a brace/);
     });
   }
 
@@ -143,25 +147,129 @@ test.describe("parseCommandText", () => {
   });
 });
 
-test.describe("withJobId", () => {
-  test("writes the id wherever the command names the job", () => {
-    expect(withJobId("run {job} --background", 3)).toBe("run 3 --background");
-    expect(withJobId("run {job},{job} --background", 7)).toBe(
-      "run 7,7 --background",
-    );
+/** Resolvers that answer fixed values and count how often each was asked. */
+function counting(values: Record<string, string>): {
+  readonly resolvers: PlaceholderResolvers;
+  readonly asked: Map<string, number>;
+} {
+  const asked = new Map<string, number>();
+  const resolvers = new Map(
+    Object.entries(values).map(([name, value]) => [
+      name,
+      () => {
+        asked.set(name, (asked.get(name) ?? 0) + 1);
+        return Promise.resolve(value);
+      },
+    ]),
+  );
+  return { resolvers, asked };
+}
+
+test.describe("fillPlaceholders", () => {
+  test("writes every value where the command names it", async () => {
+    const { resolvers } = counting({
+      job: "3",
+      "oldest backup": "2026-09-23_11-32-52_QNSWPQFL03_DBDUMP.tar",
+    });
     expect(
-      parseCommandText(withJobId("job-activate --job_id={job}", 3)),
+      await fillPlaceholders("backup-delete {oldest backup} --yes", resolvers),
+    ).toBe("backup-delete 2026-09-23_11-32-52_QNSWPQFL03_DBDUMP.tar --yes");
+    expect(
+      parseCommandText(
+        await fillPlaceholders("job-activate --job_id={job}", resolvers),
+      ),
     ).toEqual(["job-activate", "--job_id=3"]);
   });
 
-  // A step promising to act on the job would otherwise run a command naming none.
-  test("refuses a command that does not say where the job goes", () => {
-    expect(() => withJobId("run 3", 3)).toThrow(
-      new RegExp(
-        `does not say where the job goes.*${JOB_PLACEHOLDER.replace(/[{}]/g, "\\$&")}`,
-      ),
+  // Each value is a question to the site, so it is asked once however often the command uses it,
+  // and not at all for a placeholder the command does not use.
+  test("asks for each value once, and only for the placeholders the command names", async () => {
+    const { resolvers, asked } = counting({ job: "7", "newest log": "x.html" });
+    expect(
+      await fillPlaceholders("run {job},{job} --background", resolvers),
+    ).toBe("run 7,7 --background");
+    expect([...asked]).toEqual([["job", 1]]);
+  });
+
+  test("leaves a command without placeholders as it is, asking nothing", async () => {
+    const { resolvers, asked } = counting({ job: "7" });
+    expect(await fillPlaceholders("backup --format=count", resolvers)).toBe(
+      "backup --format=count",
+    );
+    expect(asked.size).toBe(0);
+  });
+
+  // Names are matched exactly, so a near miss is refused with the names that would have worked —
+  // including the plugin's own spelling of a flag, which is the likeliest slip of all.
+  for (const text of [
+    "run {jobs}",
+    "run {Job}",
+    "log-show {latest log}",
+    "run {job_id}",
+    "job-activate --job_id={job-id}",
+    "run {job2}",
+    "run { job }",
+    "run {}",
+  ]) {
+    test(`refuses "${text}", naming the placeholders it could have used`, async () => {
+      const { resolvers } = counting({ job: "3", "newest log": "x.html" });
+      await expect(fillPlaceholders(text, resolvers)).rejects.toThrow(
+        /which no step fills\. The placeholders a command may use are \{job\}, \{newest log\}\./,
+      );
+    });
+  }
+
+  // The command is split on whitespace next, so each of these would silently become something else.
+  for (const value of ["", "two words", "it's", "a\\b", "{job}", "a\tb"]) {
+    test(`refuses a value that is not one argument (${JSON.stringify(value)})`, async () => {
+      const { resolvers } = counting({ "download folder": value });
+      await expect(
+        fillPlaceholders("backup-download x.tar {download folder}/", resolvers),
+      ).rejects.toThrow(/cannot travel as a single argument/);
+    });
+  }
+
+  test("passes on a value that could not be found", async () => {
+    const resolvers: PlaceholderResolvers = new Map([
+      ["job", () => Promise.reject(new Error("expected exactly one job"))],
+    ]);
+    await expect(fillPlaceholders("run {job}", resolvers)).rejects.toThrow(
+      "expected exactly one job",
     );
   });
+});
+
+test.describe("refusePathsOffTheSite", () => {
+  // Each would reach a file of another site sharing the host, or of the host itself.
+  for (const text of [
+    "backup-download x.tar /var/www/other/wp-config.php --yes",
+    "job-export --file=/tmp/jobs.json",
+    "log-show ../../../../etc/passwd",
+    "log-delete logs/../../x --yes",
+    "backup-download x.tar {download folder}/../x",
+  ]) {
+    test(`refuses "${text}"`, () => {
+      expect(() => {
+        refusePathsOffTheSite(text);
+      }).toThrow(/a path that leads off the site/);
+    });
+  }
+
+  // A placeholder is judged by the name written, not the value it will be filled with — the suite
+  // proves those on the site, and one of them climbs out of the log folder on purpose.
+  for (const text of [
+    "backup-download {newest backup} {download folder}/existing.tar --yes",
+    "log-show {path from the log folder to the marker file}",
+    "log-delete --older-than=7days --yes",
+    "backup-download x.tar downloads/x.tar",
+    "job --format=count",
+  ]) {
+    test(`lets "${text}" through`, () => {
+      expect(() => {
+        refusePathsOffTheSite(text);
+      }).not.toThrow();
+    });
+  }
 });
 
 test.describe("CliSession", () => {

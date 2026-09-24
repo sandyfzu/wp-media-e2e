@@ -9,7 +9,6 @@ import {
   startJobInBackground,
 } from "../support/backups";
 import { describeCli } from "../support/cli";
-import { parseCommandText } from "../support/cli-session";
 import { readHistory } from "../support/history";
 import {
   readRunState,
@@ -18,6 +17,7 @@ import {
   waitForRunToEnd,
 } from "../support/job-runs";
 import { theScheduledJob } from "../support/job-options";
+import { commandArgv } from "../support/placeholders";
 import type { RunOutcome } from "../support/backups";
 import type { Transport } from "../../../common/config/types";
 
@@ -52,13 +52,21 @@ Given("the scheduled job is running in the background", async ({ site }) => {
 
 /**
  * Runs a command that blocks on the running job — `status` follows it to its end — under a budget
- * of its own, a backup's length, so a job that never ends fails here and says so.
+ * of its own, a backup's length, so a job that never ends fails here and says so. Its text follows
+ * the same rules, placeholders included, as any other command's.
  */
 When(
   "I watch the running backup with the BackWPup command {string}",
-  async ({ cli, $testInfo }, command: string) => {
+  async ({ cli, site, downloads, archives, $testInfo }, command: string) => {
     allowForBackup($testInfo);
-    await cli.run(parseCommandText(command), BACKUP_TIMEOUT_MS);
+    await cli.run(
+      await commandArgv(command, {
+        transport: site.transport,
+        downloads,
+        archives,
+      }),
+      BACKUP_TIMEOUT_MS,
+    );
   },
 );
 

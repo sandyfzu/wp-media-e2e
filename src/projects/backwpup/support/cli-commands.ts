@@ -25,10 +25,10 @@ export interface BackwpupCommand {
   /**
    * The second name it also registers under, from its `@alias` docblock tag.
    *
-   * Recorded, not asserted wholesale: scenarios drive the canonical name, and only the two aliases
+   * Recorded as verified, not asserted: scenarios drive the canonical name, and only the two aliases
    * the baseline suite addressed (`jobs`, `backups`) are exercised, by name, in the CLI feature.
-   * Free's 11 and Pro's 16 all resolved when this was verified; they are kept here so that no
-   * scenario mistakes one for an unregistered name, since WP-CLI's help does not list them.
+   * Free's 11 and Pro's 16 all resolved when this was verified. WP-CLI's help does not list them,
+   * so this is the one place they are written down.
    */
   readonly alias?: string;
   readonly availability: CommandAvailability;
@@ -68,7 +68,7 @@ export const BACKWPUP_COMMANDS: readonly BackwpupCommand[] = [
 ];
 
 /** The commands an edition registers: Pro gets all of them, Free only the shared ones. */
-export function commandsFor(edition: Edition): readonly BackwpupCommand[] {
+function commandsFor(edition: Edition): readonly BackwpupCommand[] {
   if (edition === "pro") return BACKWPUP_COMMANDS;
   return BACKWPUP_COMMANDS.filter((command) => command.availability === "all");
 }
@@ -76,13 +76,6 @@ export function commandsFor(edition: Edition): readonly BackwpupCommand[] {
 /** The canonical names {@link commandsFor} yields. */
 export function commandNamesFor(edition: Edition): readonly string[] {
   return commandsFor(edition).map((command) => command.name);
-}
-
-/** The aliases an edition registers — every command declares one except `version`. */
-export function aliasesFor(edition: Edition): readonly string[] {
-  return commandsFor(edition)
-    .map((command) => command.alias)
-    .filter((alias) => alias !== undefined);
 }
 
 /** The heading above WP-CLI's subcommand list, alone on its own line at column zero. */

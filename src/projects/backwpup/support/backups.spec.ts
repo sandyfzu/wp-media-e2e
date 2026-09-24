@@ -13,6 +13,7 @@ import {
   outcomeOf,
   readLastRunLog,
   readLastRunOutcome,
+  runJobInForeground,
   startJobInBackground,
   waitForBackup,
 } from "./backups";
@@ -74,6 +75,22 @@ case "$WP_STUB_MODE" in
             if [ -f "$WP_STUB_PROBED" ]; then printf '2'; else touch "$WP_STUB_PROBED"; printf '1'; fi ;;
           *) printf '%s' "$WP_STUB_LOG" ;;                   # the run's log entry
         esac ;;
+    esac ;;
+  # A foreground run: the history gains the run's row once \`run\` has been called. Each variant
+  # breaks one thing the verdict rests on.
+  fg-*)
+    case "$1:$2" in
+      backwpup:run)
+        if [ "$WP_STUB_MODE" = "fg-refused" ]; then printf 'Error: A job is already running.' >&2; exit 1; fi
+        touch "$WP_STUB_PROBED" ;;
+      backwpup:log)
+        errors=0; [ "$WP_STUB_MODE" = "fg-errors" ] && errors=1
+        printf '[{"name":"backwpup_log_x.html","job_id":3,"errors":%s,"warnings":0}]' "$errors" ;;
+      eval:*)
+        if [ -f "$WP_STUB_PROBED" ] && [ "$WP_STUB_MODE" != "fg-unrecorded" ]; then
+          trigger=wp-cli; [ "$WP_STUB_MODE" = "fg-wrong" ] && trigger=backup_now_job
+          printf '[{"filename":"a.tar","destination":"FOLDER","job_id":"3","status":"completed","backup_trigger":"%s","logfile":"/l/a.html"}]' "$trigger"
+        else printf '[]'; fi ;;
     esac ;;
   # The first count probe dies the way a dropped SSH connection does; every later one answers.
   flaky-count)
@@ -418,5 +435,42 @@ test.describe("transport plumbing", () => {
   test("uses the transport it is given", async () => {
     process.env.WP_STUB_MODE = "empty";
     expect(await listBackups(transport)).toEqual([]);
+  });
+});
+
+test.describe("runJobInForeground", () => {
+  test("runs the job inside WP-CLI and accepts the clean run it recorded", async () => {
+    process.env.WP_STUB_MODE = "fg-ok";
+    await runJobInForeground(local(), 3);
+  });
+
+  test("passes on a refusal, in the command's own words", async () => {
+    process.env.WP_STUB_MODE = "fg-refused";
+    await expect(runJobInForeground(local(), 3)).rejects.toThrow(
+      /`wp backwpup run 3` exited 1: Error: A job is already running\./,
+    );
+  });
+
+  // The command exits 0 whatever happened, so the history is the only proof a run took place.
+  test("refuses a run the history never recorded", async () => {
+    process.env.WP_STUB_MODE = "fg-unrecorded";
+    await expect(runJobInForeground(local(), 3)).rejects.toThrow(
+      /should have recorded one completed run of its own/,
+    );
+  });
+
+  // A run started some other way is not the one this call made.
+  test("refuses a recorded run that WP-CLI did not start", async () => {
+    process.env.WP_STUB_MODE = "fg-wrong";
+    await expect(runJobInForeground(local(), 3)).rejects.toThrow(
+      /should have recorded one completed run of its own/,
+    );
+  });
+
+  test("refuses a run whose log holds errors", async () => {
+    process.env.WP_STUB_MODE = "fg-errors";
+    await expect(runJobInForeground(local(), 3)).rejects.toThrow(
+      /should not have ended in errors/,
+    );
   });
 });

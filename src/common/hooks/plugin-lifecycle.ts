@@ -9,6 +9,7 @@ import { ensurePluginAbsent, isPluginActive } from "../wp/plugin";
 import { prepareSiteDataDirs, removeSiteResidue } from "../wp/residue";
 import { pluginSitePath } from "../wp/paths";
 import { stageAndInstallPlugin } from "../wp/staging";
+import { getSiteDbResidue, getSiteResidue } from "../config/metadata";
 import { errorMessage } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
 import type { SiteDbResidue } from "../wp/db-residue";
@@ -43,6 +44,17 @@ export interface DeclaredResidue {
 
 /** A product that declares neither kind of leftover; every step below then costs nothing. */
 const NO_RESIDUE: DeclaredResidue = { files: [], db: {} };
+
+/**
+ * What a product says it leaves on a site — paths on disk, rows in the database — from the
+ * per-process registries the config factory filled. One reading for the `@plugin` hooks and for any
+ * step that reinstalls on their behalf, so the two can never sweep different things.
+ *
+ * @param product - the product under test, from the project's routing metadata.
+ */
+export function declaredResidue(product: string): DeclaredResidue {
+  return { files: getSiteResidue(product), db: getSiteDbResidue(product) };
+}
 
 /**
  * Tag that opts a scenario into the plugin lifecycle: the artifact under test is installed and
@@ -180,6 +192,25 @@ export async function installPluginUnderTest(
   // our own mistake, and it should cost the site nothing.
   pluginSitePath(artifact.slug);
   await clearDebugLog(transport);
+  await replacePluginUnderTest(transport, artifact, residue);
+}
+
+/**
+ * {@link installPluginUnderTest} without the log reset — for a scenario that has to reinstall the
+ * plugin part-way, whose `debug.log` is still to be judged whole by the teardown. Clearing it there
+ * would throw away whatever PHP logged before the reinstall, a fatal included.
+ *
+ * @param transport - the target site's transport.
+ * @param artifact - the resolved artifact under test.
+ * @param residue - what this product leaves behind, on disk and in the database.
+ * @throws what {@link installPluginUnderTest} throws, bar the log reset's own failures.
+ */
+export async function replacePluginUnderTest(
+  transport: Transport,
+  artifact: ResolvedArtifact,
+  residue: DeclaredResidue = NO_RESIDUE,
+): Promise<void> {
+  pluginSitePath(artifact.slug);
   await ensurePluginAbsent(transport, artifact.slug);
   await sweepDbResidue(transport, residue.db, "before installing");
   await stageAndInstallPlugin(transport, artifact.zipPath, {

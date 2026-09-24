@@ -4,9 +4,11 @@ import type { TestInfo } from "@playwright/test";
 import { evalPhp } from "../../../common/wp/php";
 import { nextScheduled } from "../../../common/wp/cron";
 import { getOption } from "../../../common/wp/options";
+import { readRouting } from "../../../common/config/metadata";
 import {
   HOOK_TIMEOUT_MS,
-  installPluginUnderTest,
+  declaredResidue,
+  replacePluginUnderTest,
 } from "../../../common/hooks/plugin-lifecycle";
 import {
   JOB_CONTENTS,
@@ -14,8 +16,6 @@ import {
   readStoredJobs,
   scheduledJobs,
 } from "./job-options";
-import { BACKWPUP_SITE_DB_RESIDUE } from "./db-residue";
-import { BACKWPUP_SITE_RESIDUE } from "./residue";
 import { LOCAL_STORAGE } from "../pages/storages";
 import type { JobContents, StoredJob } from "./job-options";
 import type { ResolvedArtifact } from "../../../common/artifacts/types";
@@ -130,9 +130,10 @@ function describeActivation(outcome: ActivationOutcome): string {
  * times in 4 at 300 ms. Two requests together instead both create a placeholder, and because every
  * job write rewrites the whole jobs option from the request's own copy (`BackWPup_Option::update()`),
  * the later one drops the earlier's placeholder flag — leaving a real, scheduled job on a site nobody
- * configured, 5 times in 10. A cell whose cron fires every minute supplies that
- * request by chance, a few installs in a hundred, and nothing on this side can hold it off — so
- * either outcome is redone from a clean install, and reported.
+ * configured: two jobs 7 times in 18, and in each whose flags were read, the first no longer a
+ * placeholder. A cell whose cron fires every minute supplies that request by chance, a few installs
+ * in a hundred, and nothing on this side can hold it off — so either outcome is redone from a clean
+ * install, and reported.
  *
  * @param transport - the freshly installed site.
  * @param reinstall - puts a fresh copy of the plugin under test on the site, the way the `@plugin`
@@ -152,7 +153,8 @@ export async function finishActivation(
   ) {
     console.warn(
       `[backwpup/onboarding] BackWPup's activation left ${describeActivation(outcome)} — what ` +
-        "another request reaching the site while it ran leaves — reinstalling " +
+        "another request reaching the site while it ran leaves, or a leftover the sweep does not " +
+        "know about — reinstalling " +
         `(install ${String(attempt)} of ${String(ACTIVATION_ATTEMPTS)}).`,
     );
     await reinstall();
@@ -187,29 +189,31 @@ async function runActivation(transport: Transport): Promise<ActivationOutcome> {
 }
 
 /**
- * The reinstall {@link finishActivation} performs: exactly the `@plugin` hook's install — the plugin
- * removed with its leftovers swept, then the artifact installed and activated afresh.
+ * The reinstall {@link finishActivation} performs: the `@plugin` hook's install — the plugin removed
+ * with the leftovers the product declares swept, then the artifact installed and activated afresh —
+ * all but its clearing of `debug.log`. The teardown still judges the scenario's whole log, including
+ * whatever the install being replaced left in it.
  *
  * The hook's install ran on a budget of its own; this one runs inside a step, on the scenario's, so
  * it adds the hook's budget first. A scenario with no timeout (`0`) is left alone.
  *
  * @param transport - the scenario's site.
  * @param artifact - the plugin under test, as the `pluginArtifact` fixture resolves it.
- * @param testInfo - the scenario's own test info.
+ * @param testInfo - the scenario's own test info; its project names the product.
  */
 export function reinstallPlugin(
   transport: Transport,
   artifact: ResolvedArtifact,
-  testInfo: Pick<TestInfo, "timeout" | "setTimeout">,
+  testInfo: Pick<TestInfo, "timeout" | "setTimeout"> & {
+    readonly project: Pick<TestInfo["project"], "metadata">;
+  },
 ): () => Promise<void> {
   return async () => {
     if (testInfo.timeout !== 0) {
       testInfo.setTimeout(testInfo.timeout + HOOK_TIMEOUT_MS);
     }
-    await installPluginUnderTest(transport, artifact, {
-      files: BACKWPUP_SITE_RESIDUE,
-      db: BACKWPUP_SITE_DB_RESIDUE,
-    });
+    const { product } = readRouting(testInfo.project.metadata);
+    await replacePluginUnderTest(transport, artifact, declaredResidue(product));
   };
 }
 

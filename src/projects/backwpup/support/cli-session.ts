@@ -15,34 +15,71 @@ import type { Transport } from "../../../common/config/types";
 const QUOTING = /["'\\]/;
 
 /**
- * Where a scenario writes the id of the site's scheduled job, which it cannot know in advance —
- * the plugin allocates it.
+ * A value a scenario cannot spell out in advance, written in braces where it belongs — `run {job}`,
+ * `backup-delete {oldest backup} --yes`. The plugin allocates a job's id and names each archive and
+ * log itself, so a feature can only say *which* one it means. Whatever the braces hold is taken as
+ * the name, so a misspelt one — `{job_id}` for `{job}` — is refused by name rather than sent on as
+ * text, which the plugin would read as job `0`.
  */
-export const JOB_PLACEHOLDER = "{job}";
+const PLACEHOLDER = /\{([^{}]*)\}/;
+
+/** A brace, which no argument of this surface holds once its placeholders are filled. */
+const BRACE = /[{}]/;
+
+/** A value that could not travel as one argument of a command split on whitespace. */
+const NOT_ONE_ARGUMENT = /[\s"'\\{}]/;
 
 /**
- * Anything shaped like a placeholder, resolved or not. No BackWPup argument is a braced word, so
- * one that reaches the split is a placeholder this step cannot fill.
+ * How to find each placeholder's value, by name. Each is asked only when a command uses it, so a
+ * placeholder costs nothing — not even a question to the site — in a command that does not.
  */
-const PLACEHOLDER = /\{[a-z][a-z ]*\}/i;
+export type PlaceholderResolvers = ReadonlyMap<string, () => Promise<string>>;
 
 /**
- * Writes a job's id into the command a scenario wrote, wherever it says {@link JOB_PLACEHOLDER}.
+ * Writes the value of every placeholder a command names into it.
  *
- * @param text - the command as written in the feature, e.g. `run {job} --background`.
- * @param jobId - the id to write in.
+ * Each value is looked up once, however often the command repeats it, and must fit in **one**
+ * argument: the command is split on whitespace next, so a value holding a space, a quote, a
+ * backslash or a brace would silently become something else — two arguments, or a placeholder
+ * again.
+ *
+ * @param text - the command as written in the feature, e.g. `backup-delete {oldest backup} --yes`.
+ * @param resolvers - the placeholders this step can fill.
  * @returns the command with every placeholder filled.
- * @throws {@link Error} if the text has no placeholder — a step that promises to act on a job and
- * then runs a command naming none would be claiming something it did not do.
+ * @throws {@link Error} if the text names a placeholder the step cannot fill (listing those it can),
+ * or a value is empty or could not travel as a single argument.
  */
-export function withJobId(text: string, jobId: number): string {
-  if (!text.includes(JOB_PLACEHOLDER)) {
-    throw new Error(
-      `[backwpup/cli] the command "${text}" does not say where the job goes — write ` +
-        `${JOB_PLACEHOLDER} where its id belongs, e.g. "run ${JOB_PLACEHOLDER} --background".`,
-    );
+export async function fillPlaceholders(
+  text: string,
+  resolvers: PlaceholderResolvers,
+): Promise<string> {
+  const everywhere = new RegExp(PLACEHOLDER.source, "g");
+  const names = new Set(
+    [...text.matchAll(everywhere)].map((match) => match[1] ?? ""),
+  );
+  const values = new Map<string, string>();
+  for (const name of names) {
+    const resolve = resolvers.get(name);
+    if (resolve === undefined) {
+      const known = [...resolvers.keys()].map((key) => `{${key}}`).join(", ");
+      throw new Error(
+        `[backwpup/cli] the command "${text}" names {${name}}, which no step fills. The ` +
+          `placeholders a command may use are ${known || "(none)"}.`,
+      );
+    }
+    const value = await resolve();
+    if (value === "" || NOT_ONE_ARGUMENT.test(value)) {
+      throw new Error(
+        `[backwpup/cli] {${name}} came out as ${JSON.stringify(value)}, which cannot travel as a ` +
+          `single argument of "${text}".`,
+      );
+    }
+    values.set(name, value);
   }
-  return text.replaceAll(JOB_PLACEHOLDER, String(jobId));
+  return text.replace(
+    everywhere,
+    (placeholder, name: string) => values.get(name) ?? placeholder,
+  );
 }
 
 /** Names that mean the caller re-typed a prefix {@link backwpupCli} already supplies. */
@@ -92,14 +129,15 @@ function runGlobalIn(arg: string): string | undefined {
  * Three more refusals keep the text a BackWPup command and nothing else. `wp` and `backwpup` as the
  * first word: {@link backwpupCli} supplies both, and repeating them would run `wp backwpup wp
  * backwpup …`, failing as an unregistered subcommand several lines from the real mistake. Any of
- * {@link RUN_GLOBALS}, which would move the command off the site the scenario is bound to. And a
- * placeholder nobody filled, which the plugin would read as job `0` and answer about a job that
- * does not exist — see {@link withJobId}, which fills {@link JOB_PLACEHOLDER} first.
+ * {@link RUN_GLOBALS}, which would move the command off the site the scenario is bound to. And any
+ * brace — a placeholder nobody filled ({@link fillPlaceholders} runs first) or one left unclosed —
+ * which the plugin would read as a literal, as job `0` for `{job}`, and answer about something that
+ * does not exist.
  *
  * @param text - the command as written in the feature, without `wp backwpup`.
  * @returns the subcommand and its arguments.
  * @throws {@link Error} if the text is empty, quotes anything, repeats the implied prefix, sets a
- * global that decides where the command runs, or still holds a placeholder.
+ * global that decides where the command runs, or still holds a brace.
  */
 export function parseCommandText(text: string): readonly string[] {
   if (QUOTING.test(text)) {
@@ -108,11 +146,10 @@ export function parseCommandText(text: string): readonly string[] {
         "honour — arguments are split on whitespace. Write a step of its own for such a value.",
     );
   }
-  const placeholder = PLACEHOLDER.exec(text)?.[0];
-  if (placeholder !== undefined) {
+  if (BRACE.test(text)) {
     throw new Error(
-      `[backwpup/cli] the command "${text}" still holds ${placeholder}, which this step cannot ` +
-        `fill. A command naming the scheduled job by ${JOB_PLACEHOLDER} runs "on the scheduled job".`,
+      `[backwpup/cli] the command "${text}" still holds a brace, which would reach the plugin as ` +
+        "text — a placeholder is written {name}, and is filled before the command is parsed.",
     );
   }
   const args = text.split(/\s+/).filter((arg) => arg !== "");
@@ -135,6 +172,38 @@ export function parseCommandText(text: string): readonly string[] {
     );
   }
   return args;
+}
+
+/**
+ * Whether one argument, as written, leads off the site: an absolute path, or one climbing out with
+ * `..`. For `--name=value` the value is what is judged.
+ */
+function leadsOffTheSite(arg: string): boolean {
+  const value = arg.startsWith("-") ? arg.slice(arg.indexOf("=") + 1) : arg;
+  return value.startsWith("/") || value.split("/").includes("..");
+}
+
+/**
+ * Refuses a command whose text, as written, names a path off the site — an absolute one, or one that
+ * climbs out with `..`.
+ *
+ * WP-CLI resolves a relative path in the WordPress root, so a command written without either stays
+ * on the site it runs against. With one, a slip in a feature — `backup-download … /var/www/other/
+ * wp-config.php --yes` — would overwrite a file of another site on the same host. A command that
+ * must reach further is handed its path by a placeholder the suite proves on the site, which is why
+ * this judges the text **before** its placeholders are filled.
+ *
+ * @param text - the command as written in the feature.
+ * @throws {@link Error} naming the argument that leads off the site.
+ */
+export function refusePathsOffTheSite(text: string): void {
+  const off = text.split(/\s+/).find(leadsOffTheSite);
+  if (off !== undefined) {
+    throw new Error(
+      `[backwpup/cli] the command "${text}" names "${off}", a path that leads off the site — write ` +
+        "one relative to the WordPress root, or take it from a placeholder.",
+    );
+  }
 }
 
 /**

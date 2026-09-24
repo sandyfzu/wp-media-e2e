@@ -5,9 +5,9 @@ import { expect } from "@playwright/test";
 import { BACKUP_TIMEOUT_MS } from "./backups";
 import { backwpupCli, describeCli } from "./cli";
 import { HISTORY_ROWS_PHP, historyRecords } from "./history";
-import { PROBE_INTERVALS, forgiving } from "./polling";
+import { PROBE_FAILURE_TOLERANCE, PROBE_INTERVALS, forgiving } from "./polling";
 import { evalPhp } from "../../../common/wp/php";
-import { isObject } from "../../../common/guards";
+import { errorMessage, isObject } from "../../../common/guards";
 import type { CliResult } from "./cli";
 import type { HistoryRecord } from "./history";
 import type { Transport } from "../../../common/config/types";
@@ -249,8 +249,61 @@ function workInFlight(state: RunState): string | undefined {
   }
   const unfinished = unfinishedRuns(state);
   if (unfinished.length === 0) return undefined;
-  const jobs = [...new Set(unfinished.map((row) => row.jobId ?? 0))];
-  return `a run of job ${jobs.join(", ")} was still recording its end when the scenario ended`;
+  const jobs = [...new Set(unfinished.map((row) => row.jobId))].map((job) =>
+    job === undefined
+      ? "a job the history does not name"
+      : `job ${String(job)}`,
+  );
+  return `a run of ${jobs.join(", ")} was still recording its end when the scenario ended`;
+}
+
+/**
+ * Reads the run state, absorbing up to {@link PROBE_FAILURE_TOLERANCE} failures in a row with a pause
+ * between tries: the teardown polls a site that may be busy writing an archive, where one lost round
+ * trip is noise rather than an answer.
+ */
+async function readSteadily(
+  transport: Transport,
+  pauseMs: number,
+): Promise<RunState> {
+  for (let failures = 0; ; failures++) {
+    try {
+      return await readRunState(transport);
+    } catch (error) {
+      if (failures >= PROBE_FAILURE_TOLERANCE) throw error;
+      await sleep(pauseMs);
+    }
+  }
+}
+
+/** A stop request's outcome — or why it could not be sent, which the next request may overcome. */
+type StopRequest = CliResult | Error;
+
+/** Tells the site to stop its running job, keeping a request that could not be sent as its error. */
+async function requestStop(transport: Transport): Promise<StopRequest> {
+  try {
+    return await backwpupCli(transport, ["kill"]);
+  } catch (error) {
+    return error instanceof Error ? error : new Error(errorMessage(error));
+  }
+}
+
+/** The failure for a job still running once the stop budget is spent. */
+function stillRunning(
+  found: string,
+  budgets: StopBudgets,
+  lastStop: StopRequest | undefined,
+): Error {
+  const last =
+    lastStop === undefined
+      ? "(none)"
+      : lastStop instanceof Error
+        ? `could not be sent: ${lastStop.message}`
+        : describeCli(lastStop);
+  return new Error(
+    `[backwpup/job-runs] ${found}, and it was still running ${String(budgets.stopMs / 1000)} s ` +
+      `after being told to stop — removing the plugin now would race it. The last stop request: ${last}`,
+  );
 }
 
 /**
@@ -261,56 +314,53 @@ function workInFlight(state: RunState): string | undefined {
  * A job runs in a web request, so it outlives the scenario that started it; uninstalling the plugin
  * underneath it lets that request re-create the options and table the uninstall has just removed,
  * or go on writing an archive into a directory the teardown is clearing. So a running job is told
- * to stop with the plugin's own `wp backwpup kill`, and told again if its marker comes back: the
- * plugin checks for the marker and rewrites it as two separate steps, so by its source an abort
- * landing between them is undone. Then the run is given time to record its end, which is when its
- * request is done.
+ * to stop with the plugin's own `wp backwpup kill`, and told again whenever its marker is still, or
+ * again, there: the plugin checks for the marker and rewrites it as two separate steps, so by its
+ * source an abort landing between them is undone. Then the run is given time to record its end,
+ * which is when its request is done.
  *
  * On an idle site this is a single request. It never throws for having found work, only for work
- * that would not stop.
+ * that would not stop — and a probe or a stop request that fails now and then is retried, not
+ * taken as the answer.
  *
  * @param transport - the site to settle.
  * @param budgets - how long each part may take; the teardown's own by default.
  * @returns what it found and did, or `undefined` when there was nothing to stop.
  * @throws {@link Error} if a job was still running once the stop budget was spent, or if the site
- * could not be asked.
+ * could not be asked {@link PROBE_FAILURE_TOLERANCE} times in a row.
  */
 export async function stopRunningJobs(
   transport: Transport,
   budgets: StopBudgets = STOP_BUDGETS,
 ): Promise<string | undefined> {
-  let state = await readRunState(transport);
+  let state = await readSteadily(transport, budgets.pollMs);
   const found = workInFlight(state);
   if (found === undefined) return undefined;
 
   const stopBy = Date.now() + budgets.stopMs;
-  let lastKill: CliResult | undefined;
-  let lastKillAt = Number.NEGATIVE_INFINITY;
-  while (state.running !== undefined) {
-    if (Date.now() >= stopBy) {
-      throw new Error(
-        `[backwpup/job-runs] ${found}, and it was still running ${String(budgets.stopMs / 1000)} s ` +
-          "after being told to stop — removing the plugin now would race it. The last stop " +
-          `request: ${lastKill === undefined ? "(none)" : describeCli(lastKill)}`,
-      );
-    }
-    if (Date.now() - lastKillAt >= budgets.resendMs) {
-      lastKill = await backwpupCli(transport, ["kill"]);
-      lastKillAt = Date.now();
+  let settleBy: number | undefined;
+  let lastStop: StopRequest | undefined;
+  let lastStopAt = Number.NEGATIVE_INFINITY;
+  for (;;) {
+    if (state.running !== undefined) {
+      settleBy = undefined;
+      if (Date.now() >= stopBy) throw stillRunning(found, budgets, lastStop);
+      if (Date.now() - lastStopAt >= budgets.resendMs) {
+        lastStop = await requestStop(transport);
+        lastStopAt = Date.now();
+      }
+    } else if (unfinishedRuns(state).length === 0) {
+      break;
+    } else {
+      settleBy ??= Date.now() + budgets.settleMs;
+      if (Date.now() >= settleBy) {
+        return `${found}; its run is still recorded as in progress, with nothing left running to finish it.`;
+      }
     }
     await sleep(budgets.pollMs);
-    state = await readRunState(transport);
+    state = await readSteadily(transport, budgets.pollMs);
   }
-
-  const settleBy = Date.now() + budgets.settleMs;
-  while (unfinishedRuns(state).length > 0 && Date.now() < settleBy) {
-    await sleep(budgets.pollMs);
-    state = await readRunState(transport);
-  }
-  if (unfinishedRuns(state).length > 0) {
-    return `${found}; its run is still recorded as in progress, with nothing left running to finish it.`;
-  }
-  return lastKill === undefined
+  return lastStop === undefined
     ? `${found}; it was left to finish before the plugin was removed.`
     : `${found}; it was stopped before the plugin was removed.`;
 }

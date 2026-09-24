@@ -25,6 +25,12 @@ import type {
  * to *run* the command at all — missing binary, unreachable SSH host, killed by a signal —
  * throws, because that is an environment fault, not a command outcome.
  *
+ * **Nothing is ever typed into a command**, so none is handed any input: node-ssh ends the channel's
+ * stdin when given none, `local` ignores it, and `docker exec` without `-i` attaches none. A command
+ * that stops to ask — WP-CLI's `confirm()` behind a `[y/n]` prompt — therefore reads end-of-input and
+ * declines at once, on all three (measured). Left open, as execa leaves it by default, the same
+ * prompt would wait forever on `local`, and on `docker` given `-i` (measured).
+ *
  * **Some housekeeping cannot be done as the transport's user at all**, and that is not a
  * misconfiguration to work around. A plugin writes files as the *web-server* user; when it also
  * creates a directory only that user can write (BackWPup's restore area is `0755 www-data`), nothing
@@ -126,6 +132,7 @@ async function runLocal(
   const result = await execa(command, commandArgs, {
     reject: false,
     cwd: options.cwd ?? transport.rootDir,
+    stdin: "ignore",
   });
   return fromExeca(command, result);
 }
@@ -166,10 +173,12 @@ async function runDocker(
   args: string[],
   elevate: boolean,
 ): Promise<ExecResult> {
+  // Without `-i`, `docker exec` never attaches the client's stdin to the command (`AttachStdin` stays
+  // false); ignoring it here too keeps the client from holding one open for nothing.
   const result = await execa(
     "docker",
     dockerArgv(transport.container, file, args, { asRoot: elevate }),
-    { reject: false },
+    { reject: false, stdin: "ignore" },
   );
   return fromExeca(`docker exec ${transport.container} ${file}`, result);
 }
@@ -273,7 +282,9 @@ async function withConnection<T>(
     if (!(error instanceof Error) || error.message !== NOT_CONNECTED) {
       throw error;
     }
-    // Marks the client disconnected, which is what the pool checks — so it opens a new one.
+    // Marks the client disconnected, which is what the pool checks — so it opens a new one. ssh2
+    // offers no way to close a socket it has stopped writing to, so the old one lingers until the
+    // server's own close reaches it.
     ssh.dispose();
     return work(await connection(transport));
   }

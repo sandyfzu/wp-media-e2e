@@ -64,16 +64,24 @@ const PLACEHOLDER_ONLY = '[{"jobid":1,"tempjob":true}]';
 const refuseReinstall = (): Promise<void> =>
   Promise.reject(new Error("reinstalled a site that did not need it"));
 
-/** The slice of a scenario's test info a reinstall adjusts, starting at `timeout`. */
-function budget(timeout: number): {
+/** The slice of a scenario's test info a reinstall uses: its budget, and its project's routing. */
+function budget(
+  timeout: number,
+  metadata: Record<string, unknown> = {
+    product: "backwpup",
+    cell: "pro@nginx",
+  },
+): {
   timeout: number;
   setTimeout(value: number): void;
+  project: { metadata: Record<string, unknown> };
 } {
   return {
     timeout,
     setTimeout(value) {
       this.timeout = value;
     },
+    project: { metadata },
   };
 }
 
@@ -474,5 +482,12 @@ test.describe("reinstallPlugin", () => {
       reinstallPlugin(local(), unusable, testInfo)(),
     ).rejects.toThrow(/not a usable plugin slug/);
     expect(testInfo.timeout).toBe(0);
+  });
+
+  // The product names the residue the hook's own install sweeps, so it is read the hook's way.
+  test("takes the product from the scenario's project, refusing a project that names none", async () => {
+    await expect(
+      reinstallPlugin(local(), unusable, budget(90_000, {}))(),
+    ).rejects.toThrow(/must carry non-empty string `product` and `cell`/);
   });
 });

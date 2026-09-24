@@ -1,3 +1,5 @@
+import { posix } from "node:path";
+
 import { evalPhp, phpLiteral } from "../../../common/wp/php";
 import { isObject } from "../../../common/guards";
 import { BACKUP_HISTORY_TABLE } from "./db-residue";
@@ -11,6 +13,10 @@ import type { Transport } from "../../../common/config/types";
  * is created, marked `completed` once a destination has it — and is what the dashboard's history
  * reads. Different code, so a scenario testing the command can check it here without comparing the
  * command with itself.
+ *
+ * Each row also names the **log** its run wrote, which is what ties an archive, a log and a run
+ * together without asking any of the commands about either — so a scenario can name "the oldest
+ * run's log" and mean one file, whatever the commands under test report.
  *
  * Single-site, like the rest of this suite: the table is read under the site's own prefix.
  */
@@ -30,6 +36,8 @@ export interface HistoryRecord {
    * `wp-cli` for a foreground `run`.
    */
   readonly trigger: string;
+  /** The absolute path of the log the run wrote, as the plugin recorded it; empty when none. */
+  readonly logfile: string;
 }
 
 /**
@@ -43,7 +51,7 @@ export interface HistoryRecord {
 export const HISTORY_ROWS_PHP = `
 global $wpdb;
 $table = $wpdb->prefix . ${phpLiteral(BACKUP_HISTORY_TABLE)};
-$rows  = $wpdb->get_results( "SELECT filename, destination, job_id, status, backup_trigger FROM \`{$table}\` ORDER BY id", ARRAY_A );
+$rows  = $wpdb->get_results( "SELECT filename, destination, job_id, status, backup_trigger, logfile FROM \`{$table}\` ORDER BY id", ARRAY_A );
 if ( $wpdb->last_error ) {
 	WP_CLI::error( 'reading ' . $table . ' failed: ' . $wpdb->last_error );
 }
@@ -102,7 +110,7 @@ function toHistoryRecord(row: unknown): HistoryRecord {
       `[backwpup/history] expected a row, got ${JSON.stringify(row)}.`,
     );
   }
-  // Of the columns read, the schema lets only `filename` and `job_id` be NULL.
+  // Of the columns read, the schema lets only `filename`, `job_id` and `logfile` be NULL.
   const jobId = integerColumn(row, "job_id");
   return {
     filename: textColumn(row, "filename", true),
@@ -110,6 +118,7 @@ function toHistoryRecord(row: unknown): HistoryRecord {
     ...(jobId === undefined ? {} : { jobId }),
     status: textColumn(row, "status"),
     trigger: textColumn(row, "backup_trigger"),
+    logfile: textColumn(row, "logfile", true),
   };
 }
 
@@ -164,4 +173,83 @@ export async function readHistory(
       "backwpup/history",
     ),
   );
+}
+
+// ── Naming one run ───────────────────────────────────────────────────────────
+
+/** Which end of the history a scenario means: its first run, or its latest. */
+export type RunOrder = "oldest" | "newest";
+
+/**
+ * Reads a scenario's word for which run it means.
+ *
+ * @throws {@link Error} for anything but `oldest` or `newest`, naming both.
+ */
+export function runOrder(word: string): RunOrder {
+  if (word === "oldest" || word === "newest") return word;
+  throw new Error(
+    `[backwpup/history] "${word}" does not say which run is meant — write "oldest" or "newest".`,
+  );
+}
+
+/**
+ * The runs that left an archive, oldest first: `completed` rows that name one.
+ *
+ * A failed or aborted run is recorded too, under the filename it was writing, and leaves no archive
+ * behind — so it is never what "the backup" means.
+ */
+export function archivedRuns(
+  history: readonly HistoryRecord[],
+): readonly HistoryRecord[] {
+  return history.filter(
+    (run) => run.status === "completed" && run.filename !== "",
+  );
+}
+
+/** The runs that wrote a log, oldest first — every run does, however it ended. */
+export function loggedRuns(
+  history: readonly HistoryRecord[],
+): readonly HistoryRecord[] {
+  return history.filter((run) => run.logfile !== "");
+}
+
+/**
+ * The oldest or the newest of `runs`.
+ *
+ * @param runs - the candidates, oldest first, as the history holds them.
+ * @param order - which end.
+ * @param what - what the runs are, for the message, e.g. "run that left an archive".
+ * @throws {@link Error} if there is none, since a command about "the newest run's log" on a site that
+ * recorded no run would otherwise be sent with nothing where the name belongs.
+ */
+export function pickRun(
+  runs: readonly HistoryRecord[],
+  order: RunOrder,
+  what: string,
+): HistoryRecord {
+  const run = order === "oldest" ? runs[0] : runs.at(-1);
+  if (run === undefined) {
+    throw new Error(
+      `[backwpup/history] the backup history records no ${what}, so there is no ${order} one.`,
+    );
+  }
+  return run;
+}
+
+/** The filename of the log a run wrote — the name the log commands take. */
+export function logName(run: HistoryRecord): string {
+  return posix.basename(run.logfile);
+}
+
+/**
+ * The run a scenario means by "the oldest run's log" or "the newest run's log": the first or the
+ * latest run that wrote one.
+ *
+ * @throws {@link Error} if no run did.
+ */
+export function loggedRun(
+  history: readonly HistoryRecord[],
+  order: RunOrder,
+): HistoryRecord {
+  return pickRun(loggedRuns(history), order, "run that wrote a log");
 }

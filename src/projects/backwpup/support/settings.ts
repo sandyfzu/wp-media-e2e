@@ -3,13 +3,14 @@ import { getOption } from "../../../common/wp/options";
 import type { Transport } from "../../../common/config/types";
 
 /**
- * BackWPup's job settings (Settings → Jobs), named by the labels that screen gives them.
+ * BackWPup's job settings (Advanced Settings → Jobs), named by the labels that screen gives them.
  *
- * Only the ones a scenario sets are here, each with the values the screen offers — read off its
- * markup (`parts/sidebar/settings-jobs.php`) and the handler that saves it
- * (`BackWPup_Page_Settings::save_post_form`), which stores each as a whole number in a site option
- * of its own. Writing that option is therefore exactly what saving the screen does for that one
- * field, without the handler's side effect of resetting the screen's other checkboxes.
+ * Only the ones a scenario sets are here, each labelled and valued as the screen offers it — read off
+ * its markup (`parts/sidebar/settings-jobs.php`, the settings panel of the dashboard, whose wording
+ * is kept as it is) and the handler that saves it (`BackWPup_Page_Settings::save_post_form`), which
+ * stores each as a whole number in a site option of its own. Writing that option is therefore
+ * exactly what saving the screen does for that one field, without the handler's side effect of
+ * resetting the screen's other checkboxes.
  */
 
 /** One setting: the site option it lives in, and how a scenario's word becomes its stored value. */
@@ -29,7 +30,7 @@ const SERVER_LOAD: Readonly<Record<string, number>> = {
   maximum: 90_000,
 };
 
-/** The screen's own bound on "Maximum script execution time", in seconds. */
+/** The bound the settings handler keeps the maximum script execution time within, in seconds. */
 const MAX_EXECUTION_SECONDS = 300;
 
 /** The settings a scenario can name, by label. */
@@ -41,7 +42,7 @@ const JOB_SETTINGS: Readonly<Record<string, JobSetting>> = {
   },
   // How long one request may run a job before handing it over to a fresh one. `0` means no maximum:
   // the whole run then stays in a single request.
-  "Maximum script execution time": {
+  "Maximum number script execution time (in seconds)": {
     option: "backwpup_cfg_jobmaxexecutiontime",
     valueOf: (word) =>
       /^\d+$/.test(word) && Number(word) <= MAX_EXECUTION_SECONDS

@@ -20,6 +20,7 @@ function scripted(outcomes: readonly (number | Error)[]) {
   };
 }
 
+/** The `n`th probe failure, numbered so a case can tell which one was re-thrown. */
 const failure = (n: number): Error =>
   new Error(`dropped connection ${String(n)}`);
 

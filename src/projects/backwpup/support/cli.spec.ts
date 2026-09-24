@@ -7,6 +7,7 @@ import {
   backwpupCli,
   describeCli,
   noticesAt,
+  outputLines,
   parseCliNotices,
   parseJsonList,
   readJsonList,
@@ -217,6 +218,27 @@ test.describe("describeCli", () => {
     const described = describeCli(resultOf({ stdout: "x".repeat(5000) }));
     expect(described).toContain("…");
     expect(described.length).toBeLessThan(1100);
+  });
+});
+
+test.describe("outputLines", () => {
+  // How `log-show` printed the tail of a live cell's log, with the blank edges a stream can carry.
+  test("keeps each printed line, trimmed, and drops the blank ones", () => {
+    expect(
+      outputLines(
+        resultOf({
+          stdout:
+            "[2026-09-23 16:32:53 UTC] Archive size is 40.27 MB.\r\n\n  [2026-09-23 16:32:53 UTC] Job done in 1 seconds.  \n",
+        }),
+      ),
+    ).toEqual([
+      "[2026-09-23 16:32:53 UTC] Archive size is 40.27 MB.",
+      "[2026-09-23 16:32:53 UTC] Job done in 1 seconds.",
+    ]);
+  });
+
+  test("reads nothing printed as no lines", () => {
+    expect(outputLines(resultOf({ stdout: "\n  \n" }))).toEqual([]);
   });
 });
 

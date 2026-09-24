@@ -13,6 +13,7 @@ import {
   DATABASE_MARKER_OPTION,
   FILE_MARKER_NAME,
   newMarkerValue,
+  readFileMarker,
   removeMarkers,
   seedMarkers,
 } from "./markers";
@@ -60,6 +61,10 @@ case "$WP_STUB_MODE" in
     printf 'file-remains' ;;
   removefail)
     printf 'Error: boom' >&2; exit 1 ;;
+  present)    printf '"8e2b1c9d0a4f5e6b7c8d9e0f1a2b3c4d"' ;;
+  absent)     printf 'null' ;;
+  unreadable) printf 'false' ;;
+  noisy)      printf 'Warning: x\n"8e2b"' ;;
 esac
 exit 0
 `;
@@ -215,4 +220,30 @@ test.describe("removeMarkers", () => {
     await removeMarkers(local());
     expect(warnings.join(" ")).toMatch(/removing the markers failed/);
   });
+});
+
+test.describe("readFileMarker", () => {
+  test("reads what the file holds, straight from the content directory", async () => {
+    process.env.WP_STUB_MODE = "present";
+    expect(await readFileMarker(local())).toBe(
+      "8e2b1c9d0a4f5e6b7c8d9e0f1a2b3c4d",
+    );
+    expect(readFileSync(capture, "utf8")).toContain("WP_CONTENT_DIR");
+  });
+
+  test("answers undefined once the file is gone", async () => {
+    process.env.WP_STUB_MODE = "absent";
+    expect(await readFileMarker(local())).toBeUndefined();
+  });
+
+  // `file_get_contents()` answers false for a file it could not read, and a notice ahead of the
+  // value would otherwise be compared as though it were one.
+  for (const mode of ["unreadable", "noisy"]) {
+    test(`refuses a reply that is neither the content nor its absence (${mode})`, async () => {
+      process.env.WP_STUB_MODE = mode;
+      await expect(readFileMarker(local())).rejects.toThrow(
+        /could not be read/,
+      );
+    });
+  }
 });

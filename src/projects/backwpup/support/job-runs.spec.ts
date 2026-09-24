@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { HISTORY_ROWS_PHP } from "./history";
+import { PROBE_FAILURE_TOLERANCE } from "./polling";
 import {
   RUN_STATE_PHP,
   parseRunState,
@@ -26,28 +27,42 @@ import type { LocalTransport } from "../../../common/config/types";
  * The running-job reader, the two waits built on it, and the teardown's stop — driven over the real
  * exec layer by a stub `wp` that plays back a script of run states.
  *
- * The script has two halves, because the one thing that changes what a real site reports is being
- * told to stop: `before` is what `eval` answers until `backwpup kill` has been run, `after` what it
- * answers from then on. Each answer is one line of the script, and the last line repeats, which is
- * how a state that never changes is written. Every call is recorded, so a case can count the
- * questions and the stop requests it cost.
+ * There is one script per number of stops the site has been sent, because being told to stop is the
+ * one thing that changes what a real site reports: script 0 is what `eval` answers until the first
+ * `backwpup kill`, script 1 what it answers after it, and so on — the highest script written answers
+ * for every stop after it. Each answer is one line, the last line repeats (which is how a state that
+ * never changes is written), and a line reading `!fail` makes that `eval` fail the way a site that
+ * cannot be reached for a moment does. A stop request is dropped — never reaching the site — while
+ * `kill-drops` holds a number above zero. Every call is recorded, so a case can count the questions
+ * and the stop requests it cost.
  */
 const STUB_WP = `#!/usr/bin/env bash
 if [ "$1" = "backwpup" ] && [ "$2" = "kill" ]; then
   printf 'backwpup kill\\n' >> "$WP_STUB_DIR/calls"
-  touch "$WP_STUB_DIR/killed"
+  drops=$(cat "$WP_STUB_DIR/kill-drops" 2>/dev/null || echo 0)
+  if [ "$drops" -gt 0 ]; then
+    echo $(( drops - 1 )) > "$WP_STUB_DIR/kill-drops"
+    kill -9 $$
+  fi
+  stops=$(cat "$WP_STUB_DIR/stops" 2>/dev/null || echo 0)
+  echo $(( stops + 1 )) > "$WP_STUB_DIR/stops"
   printf 'Success: Job will be terminated.\\n'
   exit 0
 fi
 if [ "$1" = "eval" ]; then
   printf 'eval\\n' >> "$WP_STUB_DIR/calls"
-  phase=before
-  if [ -e "$WP_STUB_DIR/killed" ] && [ -e "$WP_STUB_DIR/after" ]; then phase=after; fi
-  n=$(cat "$WP_STUB_DIR/$phase.count" 2>/dev/null || echo 0)
-  total=$(grep -c '' "$WP_STUB_DIR/$phase")
+  phase=$(cat "$WP_STUB_DIR/stops" 2>/dev/null || echo 0)
+  while [ "$phase" -gt 0 ] && [ ! -e "$WP_STUB_DIR/script.$phase" ]; do phase=$(( phase - 1 )); done
+  n=$(cat "$WP_STUB_DIR/script.$phase.count" 2>/dev/null || echo 0)
+  total=$(grep -c '' "$WP_STUB_DIR/script.$phase")
   line=$(( n < total ? n + 1 : total ))
-  sed -n "\${line}p" "$WP_STUB_DIR/$phase"
-  echo $(( n + 1 )) > "$WP_STUB_DIR/$phase.count"
+  answer=$(sed -n "\${line}p" "$WP_STUB_DIR/script.$phase")
+  echo $(( n + 1 )) > "$WP_STUB_DIR/script.$phase.count"
+  if [ "$answer" = "!fail" ]; then
+    printf 'Error: Error establishing a database connection.' >&2
+    exit 1
+  fi
+  printf '%s\\n' "$answer"
   exit 0
 fi
 exit 0
@@ -82,6 +97,7 @@ test.afterAll(() => {
   rmSync(binDir, { recursive: true, force: true });
 });
 
+/** The stub site, run from this case's own state directory. */
 const local = (): LocalTransport => ({ mode: "local", rootDir: stubDir });
 
 /** A history row as `$wpdb` hands it over — every column a string. */
@@ -92,6 +108,8 @@ function row(status: string, jobId = "3"): Record<string, string> {
     job_id: jobId,
     status,
     backup_trigger: "backup_now_job",
+    logfile:
+      "/site/wp-content/uploads/backwpup/6567c0/logs/backwpup_log_e7c378_2026-09-22_17-47-45.html",
   };
 }
 
@@ -109,9 +127,22 @@ function state(
 
 const NOT_LOADED = JSON.stringify({ loaded: false });
 
-/** Writes one half of the stub's script, one answer per line. */
-function script(phase: "before" | "after", answers: readonly string[]): void {
-  writeFileSync(join(stubDir, phase), `${answers.join("\n")}\n`);
+/** An answer that fails, as a site that cannot be reached for a moment does. */
+const FAIL = "!fail";
+
+/** Writes the script the stub answers from after `stops` stop requests, one answer per line. */
+function script(stops: number, answers: readonly string[]): void {
+  writeFileSync(
+    join(stubDir, `script.${String(stops)}`),
+    `${answers.join("\n")}\n`,
+  );
+}
+
+/** How many answers the script for `stops` stop requests has given. */
+function answered(stops: number): number {
+  return Number(
+    readFileSync(join(stubDir, `script.${String(stops)}.count`), "utf8").trim(),
+  );
 }
 
 /** The calls the stub answered, in order — `eval` or `backwpup kill`. */
@@ -122,6 +153,7 @@ function calls(): string[] {
     : [];
 }
 
+/** How many stop requests were made, whether or not they reached the site. */
 const kills = (): number =>
   calls().filter((call) => call === "backwpup kill").length;
 
@@ -145,6 +177,8 @@ test.describe("parseRunState", () => {
           jobId: 3,
           status: "completed",
           trigger: "backup_now_job",
+          logfile:
+            "/site/wp-content/uploads/backwpup/6567c0/logs/backwpup_log_e7c378_2026-09-22_17-47-45.html",
         },
       ],
     });
@@ -240,13 +274,13 @@ test.describe("runProgress", () => {
 
 test.describe("waitForJobRunning", () => {
   test("returns once the marker names the job", async () => {
-    script("before", [state(), state([], null), state([row("created")], 3)]);
+    script(0, [state(), state([], null), state([row("created")], 3)]);
     await waitForJobRunning(local(), 3, 10_000);
     expect(calls()).toHaveLength(3);
   });
 
   test("does not settle for another job's run", async () => {
-    script("before", [state([row("created", "5")], 5)]);
+    script(0, [state([row("created", "5")], 5)]);
     await expect(waitForJobRunning(local(), 3, 1_000)).rejects.toThrow(
       /job 3 should be running/,
     );
@@ -255,7 +289,7 @@ test.describe("waitForJobRunning", () => {
 
 test.describe("waitForRunToEnd", () => {
   test("waits past a run that is still recording its end", async () => {
-    script("before", [
+    script(0, [
       state([row("created")], 3),
       state([row("created")]),
       state([row("aborted")]),
@@ -265,7 +299,7 @@ test.describe("waitForRunToEnd", () => {
   });
 
   test("names where the run stood when it gives up", async () => {
-    script("before", [state()]);
+    script(0, [state()]);
     await expect(waitForRunToEnd(local(), 3, 1_500)).rejects.toThrow(
       /no run of job 3 is recorded yet/,
     );
@@ -275,20 +309,20 @@ test.describe("waitForRunToEnd", () => {
 test.describe("stopRunningJobs", () => {
   // The common case, paid on every scenario's teardown.
   test("asks one question and stops nothing on an idle site", async () => {
-    script("before", [state([row("completed")])]);
+    script(0, [state([row("completed")])]);
     await expect(stopRunningJobs(local(), QUICK)).resolves.toBeUndefined();
     expect(calls()).toEqual(["eval"]);
   });
 
   test("stops nothing on a site whose plugin is gone", async () => {
-    script("before", [NOT_LOADED]);
+    script(0, [NOT_LOADED]);
     await expect(stopRunningJobs(local(), QUICK)).resolves.toBeUndefined();
     expect(kills()).toBe(0);
   });
 
   test("tells a running job to stop, then waits for its run to record its end", async () => {
-    script("before", [state([row("created")], 3)]);
-    script("after", [
+    script(0, [state([row("created")], 3)]);
+    script(1, [
       state([row("created")]),
       state([row("created")]),
       state([row("aborted")]),
@@ -302,14 +336,14 @@ test.describe("stopRunningJobs", () => {
     );
     expect(kills()).toBe(1);
     // Nothing more was asked once the run had recorded how it ended.
-    expect(readFileSync(join(stubDir, "after.count"), "utf8").trim()).toBe("3");
+    expect(answered(1)).toBe(3);
   });
 
   // The plugin checks for its marker and rewrites it as two separate steps, so a stop that lands
   // between them is undone; asking again is what gets through.
   test("asks again when the job's marker comes back", async () => {
-    script("before", [state([row("created")], 3)]);
-    script("after", [
+    script(0, [state([row("created")], 3)]);
+    script(1, [
       ...Array.from({ length: 20 }, () => state([row("created")], 3)),
       state([row("aborted")]),
     ]);
@@ -320,8 +354,8 @@ test.describe("stopRunningJobs", () => {
   });
 
   test("fails, naming what it found, when the job will not stop", async () => {
-    script("before", [state([row("created")], 3)]);
-    script("after", [state([row("created")], 3)]);
+    script(0, [state([row("created")], 3)]);
+    script(1, [state([row("created")], 3)]);
 
     await expect(
       stopRunningJobs(local(), { ...QUICK, stopMs: 300 }),
@@ -333,7 +367,7 @@ test.describe("stopRunningJobs", () => {
   // Killed moments before the scenario ended: nothing left to stop, but the request is still
   // finishing, and removing the plugin under it is the race this exists to prevent.
   test("waits for a run to record its end even when nothing is running", async () => {
-    script("before", [
+    script(0, [
       state([row("created")]),
       state([row("created")]),
       state([row("aborted")]),
@@ -350,7 +384,7 @@ test.describe("stopRunningJobs", () => {
 
   // Nothing is running to finish it, so the plugin's removal races nothing: reported, not thrown.
   test("reports a run that never records its end, without failing", async () => {
-    script("before", [state([row("created")])]);
+    script(0, [state([row("created")])]);
 
     const stopped = await stopRunningJobs(local(), {
       ...QUICK,
@@ -363,12 +397,78 @@ test.describe("stopRunningJobs", () => {
     expect(kills()).toBe(0);
   });
 
+  // A history row that names no job is not job 0, which no job ever is.
+  test("names a run whose history row records no job as such", async () => {
+    const unnamed = { ...row("created"), job_id: null };
+    script(0, [
+      JSON.stringify({ loaded: true, running: null, history: [unnamed] }),
+      state([row("aborted")]),
+    ]);
+
+    expect(await stopRunningJobs(local(), QUICK)).toMatch(
+      /^a run of a job the history does not name was still recording its end/,
+    );
+  });
+
   test("names a job whose marker could not be read", async () => {
-    script("before", [state([], null)]);
-    script("after", [state([row("aborted")])]);
+    script(0, [state([], null)]);
+    script(1, [state([row("aborted")])]);
 
     expect(await stopRunningJobs(local(), QUICK)).toMatch(
       /^a backup of a job whose marker could not be read was still running/,
     );
+  });
+
+  // The job's own request can revive its marker after the site has been seen idle, so the wait for
+  // the run to record its end keeps watching for it — and stops it again.
+  test("stops a job again when its marker comes back while its run records its end", async () => {
+    script(0, [state([row("created")], 3)]);
+    script(1, [state([row("created")]), state([row("created")], 3)]);
+    script(2, [state([row("aborted")])]);
+
+    const stopped = await stopRunningJobs(local(), { ...QUICK, resendMs: 0 });
+
+    expect(stopped).toMatch(/it was stopped before the plugin was removed\.$/);
+    expect(kills()).toBe(2);
+  });
+
+  // One lost round trip to a site busy writing an archive is noise, as in every wait here.
+  test("absorbs a question the site fails to answer, and still stops the job", async () => {
+    script(0, [FAIL, state([row("created")], 3)]);
+    script(1, [FAIL, state([row("aborted")])]);
+
+    expect(await stopRunningJobs(local(), QUICK)).toMatch(
+      /it was stopped before the plugin was removed\.$/,
+    );
+    expect(kills()).toBe(1);
+  });
+
+  test("gives up, in the site's own words, once it fails to answer too often in a row", async () => {
+    script(0, [FAIL]);
+
+    await expect(stopRunningJobs(local(), QUICK)).rejects.toThrow(
+      /Error establishing a database connection/,
+    );
+    expect(answered(0)).toBe(PROBE_FAILURE_TOLERANCE + 1);
+  });
+
+  test("sends the stop again when a request never reached the site", async () => {
+    writeFileSync(join(stubDir, "kill-drops"), "1");
+    script(0, [state([row("created")], 3)]);
+    script(1, [state([row("aborted")])]);
+
+    const stopped = await stopRunningJobs(local(), { ...QUICK, resendMs: 0 });
+
+    expect(stopped).toMatch(/it was stopped before the plugin was removed\.$/);
+    expect(kills()).toBe(2);
+  });
+
+  test("says the last stop request could not be sent, when none got through", async () => {
+    writeFileSync(join(stubDir, "kill-drops"), "1000");
+    script(0, [state([row("created")], 3)]);
+
+    await expect(
+      stopRunningJobs(local(), { ...QUICK, stopMs: 300, resendMs: 50 }),
+    ).rejects.toThrow(/The last stop request: could not be sent: /);
   });
 });

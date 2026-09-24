@@ -18,6 +18,10 @@ import type { Transport } from "../../../common/config/types";
  * existence: a database-only job must carry the database marker and **not** the file one, and a
  * files-only job the reverse. That is the difference between "a backup happened" and "the backup
  * covered what it was configured to cover".
+ *
+ * The file marker serves one more question: whether a command handed a path out of its own folder
+ * reaches a file it must not. It is the one file outside BackWPup's folders that this suite owns and
+ * knows the content of, so a command that read it or removed it shows as such.
  */
 
 /**
@@ -173,6 +177,41 @@ function relativeToRoot(path: string, root: string): string {
     );
   }
   return path.slice(prefix.length);
+}
+
+/**
+ * What the file marker holds right now, or `undefined` once it is gone — for a scenario asserting
+ * that a command which should never have reached the file left it exactly as planted.
+ *
+ * @param transport - the site holding it.
+ * @throws {@link Error} if the file is there but could not be read, or the reply is neither — a
+ * marker that cannot be read must not pass for one that was left alone.
+ */
+export async function readFileMarker(
+  transport: Transport,
+): Promise<string | undefined> {
+  const php =
+    `$path = WP_CONTENT_DIR . '/' . ${phpLiteral(FILE_MARKER_NAME)};\n` +
+    "echo wp_json_encode( is_file( $path ) ? file_get_contents( $path ) : null );";
+  const reply = await evalPhp(
+    transport,
+    php,
+    "reading the file marker",
+    "backwpup/markers",
+  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(reply);
+  } catch {
+    parsed = undefined;
+  }
+  if (parsed === null) return undefined;
+  if (typeof parsed !== "string") {
+    throw new Error(
+      `[backwpup/markers] the file marker could not be read — the site answered ${reply.slice(0, 300) || "(nothing)"}.`,
+    );
+  }
+  return parsed;
 }
 
 /**

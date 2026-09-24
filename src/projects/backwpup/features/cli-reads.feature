@@ -12,10 +12,11 @@ Feature: Asking BackWPup about a site over WP-CLI
   scenario addresses one by name, and a name that stopped being registered answers with an empty
   list that an assertion about an empty site would happily pass.
 
-  Every count is read back against a source the command has no hand in: the jobs the site stores,
-  the backups its history records, the zip the run installed. The suite this ports asserted a job
-  count by parsing one command's output and comparing it to a number written in the feature, which
-  cannot tell a miscount from a command that was never reached.
+  What a command says the site holds is checked against a source the command has no hand in: the
+  jobs the site stores, the backups its history records, the zip the run installed. A count above
+  zero is checked beside the ids or names of what it counted. The suite this ports compared a job
+  count with a number written in the feature and nothing else, which cannot tell a right count of
+  the wrong jobs from the right answer.
 
   # The install is confirmed fresh before any command runs. BackWPup finishes its own activation in
   # whichever request first loads it, and another request reaching the site at that moment can leave
@@ -57,7 +58,7 @@ Feature: Asking BackWPup about a site over WP-CLI
     When I run the BackWPup command "backup --format=json"
     Then the command succeeds
     And it prints "[]"
-    When I run the BackWPup command "log"
+    When I run the BackWPup command "log --format=json"
     Then the command succeeds
     And it prints "No logs found."
 
@@ -81,10 +82,11 @@ Feature: Asking BackWPup about a site over WP-CLI
     When I run the BackWPup command "job --fields=job_id,type --format=json"
     Then the command succeeds
     And every record it lists carries exactly the fields "job_id,type"
-    # The filter matches a field's value as a substring, whatever the case. The second half is what
-    # makes the first mean something: a filter that matched everything would pass the line above.
-    When I run the BackWPup command "job --type=DBDUMP --format=count"
-    Then it prints "1"
+    # The filter matches a field's value as a substring, whatever the case: the job's type is
+    # "dbdump". The second half is what makes the first mean something: a filter that matched
+    # everything would pass the line above.
+    When I run the BackWPup command "job --type=DUMP --field=job_id"
+    Then the ids it printed are the site's own jobs, with BackWPup's hidden ones left out
     When I run the BackWPup command "job --type=file --format=count"
     Then it prints "0"
 
@@ -97,8 +99,8 @@ Feature: Asking BackWPup about a site over WP-CLI
     Then the command fails
     And it reports the error "Invalid field: nope"
 
-  # The count the suite this ports was written for, on the state it was written against — but taken
-  # against what the site stores rather than against a number typed into the feature twice.
+  # The count the suite this ports was written for, on the state it was written against — each one
+  # checked beside the ids of the jobs it counted, against what the site stores.
   Scenario: The job count follows the jobs a user configured, from the first one to the third
     Given BackWPup is set up to back up the "database" on a schedule
     When I run the BackWPup command "job --format=count"
@@ -116,8 +118,8 @@ Feature: Asking BackWPup about a site over WP-CLI
   # once here and drives the canonical names everywhere else.
   Scenario: The plural aliases for the job and backup lists answer like the commands they name
     Given BackWPup is set up to back up the "database" on a schedule
-    When I run the BackWPup command "jobs --format=count"
-    Then it prints "1"
+    When I run the BackWPup command "jobs --format=ids"
+    Then the ids it printed are the site's own jobs, with BackWPup's hidden ones left out
     When I run the BackWPup command "backups --format=count"
     Then it prints "0"
 

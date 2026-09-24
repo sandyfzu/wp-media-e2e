@@ -46,6 +46,7 @@ test.afterAll(() => {
   rmSync(stubDir, { recursive: true, force: true });
 });
 
+/** The stub site, run from this file's own state directory. */
 const local = (): LocalTransport => ({ mode: "local", rootDir: stubDir });
 
 /** The values the last snippet embedded, decoded the way PHP will decode them. */
@@ -74,23 +75,28 @@ test.describe("jobSettingValue", () => {
   }
 
   test("stores a maximum script execution time as its seconds, 0 included", () => {
-    expect(jobSettingValue("Maximum script execution time", "0")).toEqual({
+    expect(
+      jobSettingValue("Maximum number script execution time (in seconds)", "0"),
+    ).toEqual({
       option: "backwpup_cfg_jobmaxexecutiontime",
       value: 0,
     });
-    expect(jobSettingValue("Maximum script execution time", "300").value).toBe(
-      300,
-    );
+    expect(
+      jobSettingValue(
+        "Maximum number script execution time (in seconds)",
+        "300",
+      ).value,
+    ).toBe(300);
   });
 
   // A value the screen does not offer describes a site no user could have set up.
   for (const [label, word] of [
     ["Reduce server load", "fastest"],
     ["Reduce server load", "Maximum"],
-    ["Maximum script execution time", "301"],
-    ["Maximum script execution time", "-1"],
-    ["Maximum script execution time", "1.5"],
-    ["Maximum script execution time", ""],
+    ["Maximum number script execution time (in seconds)", "301"],
+    ["Maximum number script execution time (in seconds)", "-1"],
+    ["Maximum number script execution time (in seconds)", "1.5"],
+    ["Maximum number script execution time (in seconds)", ""],
   ] as const) {
     test(`refuses "${word}" for "${label}"`, () => {
       expect(() => jobSettingValue(label, word)).toThrow(
@@ -120,7 +126,11 @@ test.describe("setJobSetting", () => {
   test("fails when the site does not hold the value afterwards", async () => {
     process.env.WP_STUB_STORED = "30";
     await expect(
-      setJobSetting(local(), "Maximum script execution time", "0"),
+      setJobSetting(
+        local(),
+        "Maximum number script execution time (in seconds)",
+        "0",
+      ),
     ).rejects.toThrow(
       /should now be stored as 0 in backwpup_cfg_jobmaxexecutiontime, but the site holds "30"/,
     );

@@ -5,7 +5,6 @@ import { join } from "node:path";
 
 import {
   BACKWPUP_COMMANDS,
-  aliasesFor,
   commandNamesFor,
   compareCommands,
   parseSubcommands,
@@ -225,13 +224,22 @@ test.describe("the declared manifest", () => {
         (command) => command.name,
       ),
     ).toEqual(["version"]);
-    expect(aliasesFor("free")).toHaveLength(11);
-    expect(aliasesFor("pro")).toHaveLength(16);
+    const aliased = BACKWPUP_COMMANDS.filter(
+      (command) => command.alias !== undefined,
+    );
+    expect(aliased).toHaveLength(16);
+    expect(
+      aliased.filter((command) => command.availability === "all"),
+    ).toHaveLength(11);
   });
 
   test("never reuses a name as another command's alias", () => {
     const names = new Set(BACKWPUP_COMMANDS.map((command) => command.name));
-    expect(aliasesFor("pro").filter((alias) => names.has(alias))).toEqual([]);
+    expect(
+      BACKWPUP_COMMANDS.filter(
+        (command) => command.alias !== undefined && names.has(command.alias),
+      ),
+    ).toEqual([]);
   });
 });
 

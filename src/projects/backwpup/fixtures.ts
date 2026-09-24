@@ -11,7 +11,9 @@ import { JobRunPanel } from "./pages/job-run.panel";
 import { OnboardingPage } from "./pages/onboarding.page";
 import { StorageSidebar } from "./pages/storage.sidebar";
 import { restorePage } from "./pages/restore.page";
+import { ArchiveSnapshot } from "./support/archive-snapshot";
 import { CliSession } from "./support/cli-session";
+import { DownloadFolder, downloadFolderKey } from "./support/download-folder";
 import { removeMarkers, seedMarkers } from "./support/markers";
 import type { RestorePage } from "./pages/restore.page";
 import type { SiteMarkers } from "./support/markers";
@@ -78,6 +80,17 @@ interface BackWPupFixtures {
    * the site as it found it.
    */
   markers: SiteMarkers;
+  /**
+   * The scenario's own folder on the site for `backup-download` to write into, which a command
+   * names as `{download folder}`. Free to request: nothing is created until a step uses it, and
+   * only then is it removed afterwards, best-effort.
+   */
+  downloads: DownloadFolder;
+  /**
+   * The archives the scenario's backups left, as they were when made — what "still on the site,
+   * byte for byte" is measured against. The steps that make backups record into it.
+   */
+  archives: ArchiveSnapshot;
 }
 
 export const test = base.extend<BackWPupFixtures>({
@@ -118,6 +131,18 @@ export const test = base.extend<BackWPupFixtures>({
     const planted = await seedMarkers(site.transport);
     await use(planted);
     await removeMarkers(site.transport);
+  },
+  downloads: async ({ site }, use, testInfo) => {
+    const folder = new DownloadFolder(
+      site.transport,
+      downloadFolderKey(testInfo),
+    );
+    await use(folder);
+    await folder.release();
+  },
+  // eslint-disable-next-line no-empty-pattern -- Playwright derives deps from this destructuring; this fixture has none.
+  archives: async ({}, use) => {
+    await use(new ArchiveSnapshot());
   },
 });
 

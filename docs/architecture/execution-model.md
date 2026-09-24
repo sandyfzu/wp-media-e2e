@@ -105,7 +105,9 @@ RegExps, which JSON cannot express anyway), the paths it leaves on disk (`regist
 `getSiteDbResidue`) and the function that stops work it may still be running on a site
 (`registerStopRunningWork` / `getStopRunningWork` — a function, so metadata could never carry it).
 The residue declarations *would* fit in metadata and still do not go there: one channel for product
-policy is easier to follow than two. Unlike `getPool`, none of these throws — a product that declares
+policy is easier to follow than two. The hooks read the pair through `declaredResidue(product)`
+(`hooks/plugin-lifecycle.ts`), and so does a product step that reinstalls mid-scenario on their
+behalf, so the two can never sweep different things. Unlike `getPool`, none of these throws — a product that declares
 none is a legitimate state, and the corresponding step then costs no round-trip at all. The residue
 getters answer an empty value, `getStopRunningWork` answers `undefined`, which the teardown reads as
 "nothing to ask".

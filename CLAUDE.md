@@ -158,13 +158,21 @@ shared fixtures:
 
 BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds `onboarding`, `firstBackup`,
 `dashboard`, `dataSelection`, `frequency`, `storages`, `jobRun`, `backupHistory`, `restore`
-(edition-aware), `plugins`, `cli` and `markers`. `cli` runs one `wp backwpup …` subcommand and
-remembers the result for the step that asserts on it — for the feature where the **command is the
-system under test**, so a refusal is returned rather than thrown (`support/cli.ts`); use
-`support/backups.ts` when WP-CLI is only arranging or checking a site, since that one throws.
+(edition-aware), `plugins`, `cli`, `markers`, `archives` and `downloads`. `cli` runs one `wp backwpup …`
+subcommand and remembers the result for the step that asserts on it — for the feature where the
+**command is the system under test**, so a refusal is returned rather than thrown (`support/cli.ts`);
+use `support/backups.ts` when WP-CLI is only arranging or checking a site, since that one throws. A
+command names what the plugin allocates in braces — `{job}`, `{oldest backup}`, `{newest log}`,
+`{download folder}` — filled as it runs, from the site or from the scenario's own record of what it
+made there (`support/placeholders.ts`); a misspelt one is refused by name, and the text as written
+may not name a path off the site.
 `markers` plants a random value in the site's files and another in its database, and removes both
 afterwards, so a scenario can ask an archive what it actually captured. Requesting it _plants_ them,
-so it must be requested before the backup under inspection runs. See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
+so it must be requested before the backup under inspection runs. `archives` records each archive a
+scenario's backups left, with its digest, as it was made — what "byte for byte" and "the oldest
+backup" are measured against; `downloads` is the scenario's own folder in the site's staging area for
+`backup-download` — private to the transport's user, since the web server serves what it can read
+there — removed afterwards only if a step used it. See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
 the pattern, the locator policy, and the locator-contract spec every page object carries.
 
 ## Shared scenario hooks
@@ -190,6 +198,8 @@ module so it is unit-testable without the runtime.
   directories (`ProductConfig.siteResidue`) are created, opened to **both** users sharing the
   docroot and handed to the site's ownership — WP-CLI and the web server are different users on a
   real cell, and whichever writes first would otherwise lock the other out (`prepareSiteDataDirs`).
+  A step that must reinstall part-way uses `replacePluginUnderTest` — the same install without the
+  log reset, so the teardown still judges the scenario's whole log — with `declaredResidue`.
 - **After** — `debug.log` scanned with the product's preset: a **PHP fatal fails the
   scenario** (`DebugLogFatalError`) with the log attached; warnings/notices are logged.
   Then any **work the plugin is still running** is stopped (`ProductConfig.stopRunningWork` — for
@@ -324,7 +334,7 @@ request model, resolution lifecycle, preflight, pre-warm — is in
   limits).
   **MUST — APVM is used only through this Node library, never its `apvm` CLI**, anywhere in the
   repo (suite, scripts, the orchestrator). A capability only the CLI has waits for a library
-  release that exposes it.
+  release that exposes it. AI Agents can still use the CLI in a shell if required, but it must never be used in the repo's codebase.
 - **Consumption:** a scenario reads its zip through the `pluginArtifact` fixture —
   `stageAndInstallPlugin(site.transport, a.zipPath, { activate: true, slug: a.slug })` (where
   `a = pluginArtifact("plugin")`; the `slug` is what restores the plugin's file ownership).
@@ -369,7 +379,9 @@ ssh). Highlights — full reference in
 - Commands are file + args arrays (never shell strings) → no injection.
 - `exec` / `wpCli` return a structured `ExecResult`; callers branch on `exitCode`.
   Every command runs with the WordPress root as its working directory (`rootDir` for
-  `local`/`ssh`, the container `WORKDIR` for `docker`).
+  `local`/`ssh`, the container `WORKDIR` for `docker`), and with no input — nothing is ever typed
+  into one — so a `[y/n]` prompt declines at once, at exit 0 having done nothing, on every
+  transport (measured).
 - **Files must reach the site before `wp` can read them.** `exec.ts` also owns the
   transfer primitives (`wpRootDir`, `copyIntoTarget` → `fs` copy / `docker cp` /
   SFTP), and [`wp/staging.ts`](src/common/wp/staging.ts) builds the per-site
@@ -405,7 +417,11 @@ ssh). Highlights — full reference in
   a budget or a destination slug, is not such a value; the two `${…}` sites that do it say so.)
 - [`wp/files.ts`](src/common/wp/files.ts) reads properties of files on the site. `fileChecksum` is the
   honest proof that a file which travelled arrived intact; size is the tempting substitute and is
-  strictly weaker. Computed on the site, so nothing large moves to answer the question.
+  strictly weaker. `listFiles` lists a directory's files — size, age, whether the transport's user
+  may write each, digests on request — and **refuses a directory that is not there**, which would
+  otherwise list as empty and pass "it was deleted" (`missingAsEmpty` only for one a scenario may
+  never have made); `listLocatedFiles` does the same for a directory only the site can name. `backdateFile` sets a file's age back by the
+  site's own clock. All computed on the site, so nothing large moves to answer the question.
 - [`wp/archive.ts`](src/common/wp/archive.ts) looks **inside** a tar on the site without moving it —
   `findArchiveEntries` (by name or glob) and `readArchiveEntry`. Naming the member keeps the _output_
   small, not the work: without `--occurrence` tar scans to the end regardless, and on a compressed
@@ -645,7 +661,8 @@ Update it when you change anything about:
   `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`).
 - The WP-Cron helpers (`cron.ts`: `nextScheduled`, `triggerScheduledEvent`).
 - The PHP bridge (`php.ts`: `phpLiteral`, `evalPhp`, `EvalPhpOptions`), the file readers (`files.ts`:
-  `fileChecksum`), or archive inspection (`archive.ts`: `findArchiveEntries`, `readArchiveEntry`).
+  `fileChecksum`, `listFiles`, `listLocatedFiles`, `FILE_LIST_PHP`, `backdateFile`), or archive inspection (`archive.ts`:
+  `findArchiveEntries`, `readArchiveEntry`).
 - Any other `wp/` module (`cache.ts`, `db.ts`, `errors.ts`, `teardown.ts`).
 
 ### docs/architecture/plugin-artifacts.md

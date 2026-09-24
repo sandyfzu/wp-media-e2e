@@ -108,6 +108,9 @@ const uploads = new Map<string, Buffer>();
 const configs: Record<string, unknown>[] = [];
 /** Resolves the moment the client has a command's channel open — see {@link runningCommand}. */
 let channelOpened: (() => void) | undefined;
+/** While set, the probing the client is steered to use instead of the transport's own. */
+let keepaliveOverride:
+  { readonly intervalMs: number; readonly countMax: number } | undefined;
 
 /**
  * Answers the three requests an upload makes — open, write, close — keeping what was written in
@@ -222,6 +225,12 @@ test.beforeAll(async () => {
       ...config,
       host: "127.0.0.1",
       port: connectPort,
+      ...(keepaliveOverride === undefined
+        ? {}
+        : {
+            keepaliveInterval: keepaliveOverride.intervalMs,
+            keepaliveCountMax: keepaliveOverride.countMax,
+          }),
     });
   };
   // node-ssh calls `onChannel` right after it stops listening for connection errors itself, which
@@ -239,6 +248,7 @@ test.beforeAll(async () => {
 test.afterEach(() => {
   disposeConnections();
   holdFin = false;
+  keepaliveOverride = undefined;
   connectPort = proxyPort;
   for (const socket of [...links.splice(0), ...upstreams.splice(0)]) {
     socket.destroy();
@@ -253,6 +263,7 @@ test.afterAll(() => {
   rmSync(keyDir, { recursive: true, force: true });
 });
 
+/** A site on the ssh transport; its host is never resolved, since every connection is steered. */
 const transport = (): SshTransport => ({
   mode: "ssh",
   host: "site.test",
@@ -290,6 +301,17 @@ async function halfClose(): Promise<void> {
   const closed = new Promise<void>((resolve) => link?.once("end", resolve));
   serverConnections.at(-1)?.end();
   await closed;
+}
+
+/**
+ * Makes the newest link go silent both ways — nothing reset, nothing delivered — the way a proxy
+ * that stopped forwarding does. What either side sends from then on is discarded.
+ */
+function silence(): void {
+  for (const socket of [links.at(-1), upstreams.at(-1)]) {
+    socket?.unpipe();
+    socket?.on("data", () => undefined);
+  }
 }
 
 /** A local port nothing listens on — found by listening on one and letting it go. */
@@ -365,8 +387,20 @@ test("a connection that cannot be opened fails naming the site it was for", asyn
 });
 
 // A link that goes silent is never reset, so only probing notices it; unprobed, a command on it
-// waits indefinitely.
-test("every connection is probed, so a silent link is given up on within a minute", async () => {
+// waits indefinitely. The probing is shortened here so the mechanism — ssh2's own probes going
+// unanswered, and the transport turning that into the command's failure — runs in well under a
+// second rather than the production forty; the test below pins the production values.
+test("a link that goes silent under a running command fails that command once its probes go unanswered", async () => {
+  keepaliveOverride = { intervalMs: 100, countMax: 2 };
+  const { pending } = await runningCommand();
+  silence();
+
+  await expect(pending).rejects.toThrow(
+    /the connection to site\.test was lost \(Keepalive timeout\) while "sleep" was running/,
+  );
+});
+
+test("every connection is opened with the probing that gives a silent link up within a minute", async () => {
   await exec(transport(), "echo", ["probe"]);
 
   expect(configs.at(-1)).toMatchObject({

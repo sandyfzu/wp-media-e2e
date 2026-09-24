@@ -255,23 +255,27 @@ export async function stageArtifact(
 }
 
 /**
- * Removes the site's staging area, or just one category of it. Idempotent: removing an area that
- * was never created succeeds.
+ * Removes the site's staging area, or one path inside it — a category, or a single entry within
+ * one. Idempotent: removing what was never created succeeds.
+ *
+ * A caller should remove no more than it put there: a staging root declared as an absolute path can
+ * be shared by the sites on one host, so a category can hold another run's files too.
  *
  * Throws on a genuine failure so a site left dirty is visible. A caller wiring this into a
  * teardown hook should treat it as **best-effort** (catch and log), so cleanup can never turn a
  * passing scenario red.
  *
  * @param transport - the target site's transport.
- * @param category - remove only this category; omit to remove the whole area.
- * @throws Error naming the path when the removal fails.
+ * @param path - the category, then any entries below it, one segment each; omit to remove the whole
+ * area. Each is validated as {@link stagingPath} validates it, so nothing outside the area is named.
+ * @throws Error naming the path when the removal fails, or if a segment is not a single safe name.
  */
 export async function cleanSiteStaging(
   transport: Transport,
-  category?: string,
+  ...path: string[]
 ): Promise<void> {
   const root = await siteStagingDir(transport);
-  const target = category === undefined ? root : stagingPath(root, category);
+  const target = stagingPath(root, ...path);
 
   const first = await exec(transport, "rm", ["-rf", target]);
   // The area holds files this suite put there, so the transport's user normally owns them. A plugin

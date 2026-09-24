@@ -6,10 +6,16 @@ import { join } from "node:path";
 import {
   HISTORY_PHP,
   HISTORY_ROWS_PHP,
+  archivedRuns,
   historyRecords,
+  logName,
+  loggedRuns,
   parseHistory,
+  pickRun,
   readHistory,
+  runOrder,
 } from "./history";
+import type { HistoryRecord } from "./history";
 import type { LocalTransport } from "../../../common/config/types";
 
 // What the snippet printed on a live cell after one `run --background`, verbatim. `$wpdb` hands every
@@ -21,6 +27,8 @@ const LIVE = JSON.stringify([
     job_id: "3",
     status: "completed",
     backup_trigger: "backup_now_job",
+    logfile:
+      "/var/www/html/site/wp-content/uploads/backwpup/6567c0/logs/backwpup_log_6a5677_2026-09-22_12-51-15.html",
   },
 ]);
 
@@ -71,6 +79,8 @@ test.describe("parseHistory", () => {
         jobId: 3,
         status: "completed",
         trigger: "backup_now_job",
+        logfile:
+          "/var/www/html/site/wp-content/uploads/backwpup/6567c0/logs/backwpup_log_6a5677_2026-09-22_12-51-15.html",
       },
     ]);
   });
@@ -79,8 +89,8 @@ test.describe("parseHistory", () => {
     expect(parseHistory("[]")).toEqual([]);
   });
 
-  // The two columns the schema lets be NULL.
-  test("reads a NULL filename as empty and a NULL job as absent", () => {
+  // The three columns the schema lets be NULL.
+  test("reads a NULL filename or log as empty and a NULL job as absent", () => {
     const [row] = parseHistory(
       JSON.stringify([
         {
@@ -89,10 +99,12 @@ test.describe("parseHistory", () => {
           job_id: null,
           status: "failed",
           backup_trigger: "",
+          logfile: null,
         },
       ]),
     );
     expect(row?.filename).toBe("");
+    expect(row?.logfile).toBe("");
     expect(row).not.toHaveProperty("jobId");
   });
 
@@ -114,6 +126,9 @@ test.describe("parseHistory", () => {
   test("refuses a row missing a column it should carry", () => {
     expect(() => parseHistory(rowWith("status", undefined))).toThrow(
       /expected "status" to be text/,
+    );
+    expect(() => parseHistory(rowWith("logfile", undefined))).toThrow(
+      /expected "logfile" to be text/,
     );
   });
 
@@ -156,6 +171,11 @@ test.describe("HISTORY_PHP", () => {
     expect(HISTORY_PHP).toContain("$wpdb->prefix");
   });
 
+  // The log is what ties a run to the log commands' file names, so the query must ask for it.
+  test("reads each run's log alongside its archive", () => {
+    expect(HISTORY_ROWS_PHP).toMatch(/SELECT [^"]*\blogfile\b[^"]* FROM/);
+  });
+
   // `$wpdb` answers a missing table with an empty result; only `last_error` says otherwise.
   test("turns a failed query into an error rather than an empty list", () => {
     expect(HISTORY_PHP).toContain("$wpdb->last_error");
@@ -172,5 +192,73 @@ test.describe("readHistory", () => {
   test("reports a table it could not read, rather than an empty history", async () => {
     process.env.WP_STUB_MODE = "missing";
     await expect(readHistory(local())).rejects.toThrow(/doesn't exist/);
+  });
+});
+
+/** A run as {@link parseHistory} maps it, with the fields a case cares about replaced. */
+function run(overrides: Partial<HistoryRecord>): HistoryRecord {
+  return {
+    filename: "2026-09-23_11-32-52_QNSWPQFL03_DBDUMP.tar",
+    destination: "FOLDER",
+    jobId: 3,
+    status: "completed",
+    trigger: "wp-cli",
+    logfile:
+      "/site/wp-content/uploads/backwpup/6567c0/logs/backwpup_log_8cbb38_2026-09-23_11-32-52.html",
+    ...overrides,
+  };
+}
+
+test.describe("naming one run", () => {
+  const first = run({ filename: "first.tar", logfile: "/logs/first.html" });
+  const aborted = run({
+    filename: "aborted.tar",
+    status: "aborted",
+    logfile: "/logs/aborted.html",
+  });
+  const last = run({ filename: "last.tar", logfile: "/logs/last.html" });
+
+  test("reads only oldest or newest as an order", () => {
+    expect(runOrder("oldest")).toBe("oldest");
+    expect(runOrder("newest")).toBe("newest");
+    expect(() => runOrder("latest")).toThrow(/write "oldest" or "newest"/);
+  });
+
+  // An aborted run is recorded under the archive it was writing, which it never finished.
+  test("counts as archived only the runs that completed and name an archive", () => {
+    expect(
+      archivedRuns([
+        first,
+        aborted,
+        run({ filename: "", status: "completed" }),
+        last,
+      ]),
+    ).toEqual([first, last]);
+  });
+
+  test("counts every run that names a log, however it ended", () => {
+    expect(loggedRuns([first, aborted, run({ logfile: "" }), last])).toEqual([
+      first,
+      aborted,
+      last,
+    ]);
+  });
+
+  test("picks either end of the history, in the order it was recorded", () => {
+    expect(pickRun([first, last], "oldest", "run")).toBe(first);
+    expect(pickRun([first, last], "newest", "run")).toBe(last);
+    expect(pickRun([first], "newest", "run")).toBe(first);
+  });
+
+  test("refuses to pick from no runs, naming what was sought", () => {
+    expect(() => pickRun([], "newest", "run that left an archive")).toThrow(
+      "records no run that left an archive, so there is no newest one",
+    );
+  });
+
+  test("names a run's log by the file the log commands take", () => {
+    expect(logName(run({}))).toBe(
+      "backwpup_log_8cbb38_2026-09-23_11-32-52.html",
+    );
   });
 });

@@ -15,12 +15,15 @@ import { join } from "node:path";
 import { DebugLogFatalError, PluginActivationFailedError } from "../wp/errors";
 import { resetOwnershipCaches } from "../wp/ownership";
 import { DEFAULT_STAGING_DIR, PLUGINS_CATEGORY } from "../wp/staging";
+import { registerSiteDbResidue, registerSiteResidue } from "../config/metadata";
 import {
   HOOK_TIMEOUT_MS,
   MAX_ATTACHED_LOG_CHARS,
   boundLogForAttachment,
+  declaredResidue,
   extendedTimeout,
   installPluginUnderTest,
+  replacePluginUnderTest,
   teardownPluginUnderTest,
 } from "./plugin-lifecycle";
 import type { DeclaredResidue, ScenarioReport } from "./plugin-lifecycle";
@@ -272,6 +275,44 @@ test.describe("boundLogForAttachment", () => {
     // The root cause is at the start, which is why the head is what survives.
     expect(bounded).toContain("first and only interesting line");
     expect(bounded).toContain(`of ${String(log.length)} characters`);
+  });
+});
+
+// The reinstall a scenario performs part-way: everything the install does except scoping the log, so
+// what PHP logged before it — a fatal included — is still there for the teardown to judge.
+test.describe("replacePluginUnderTest", () => {
+  test("removes any existing copy and installs the staged zip, never touching debug.log", async () => {
+    seedInstalled();
+    await replacePluginUnderTest(local, artifact());
+    const calls = wpCalls();
+    expect(calls.filter((c) => c.includes("debug.log"))).toEqual([]);
+    const removed = calls.findIndex((c) => c.startsWith("plugin uninstall "));
+    const installed = calls.findIndex((c) => c.startsWith("plugin install "));
+    expect(removed).toBeGreaterThan(-1);
+    expect(installed).toBeGreaterThan(removed);
+    expect(isInstalled()).toBe(true);
+  });
+
+  test("refuses an unusable slug before running anything", async () => {
+    await expect(
+      replacePluginUnderTest(local, artifact("../evil")),
+    ).rejects.toThrow(/not a usable plugin slug/);
+    expect(wpCalls()).toEqual([]);
+  });
+});
+
+test.describe("declaredResidue", () => {
+  test("reads what the config registered for the product, and nothing for one it did not", () => {
+    registerSiteResidue("residue-spec-product", ["wp-content/uploads/x"]);
+    registerSiteDbResidue("residue-spec-product", { tables: ["x_log"] });
+    expect(declaredResidue("residue-spec-product")).toEqual({
+      files: ["wp-content/uploads/x"],
+      db: { tables: ["x_log"] },
+    });
+    expect(declaredResidue("residue-spec-unregistered")).toEqual({
+      files: [],
+      db: {},
+    });
   });
 });
 

@@ -3,6 +3,7 @@ import { expect } from "@playwright/test";
 import { theScheduledJob } from "./job-options";
 import { evalPhp } from "../../../common/wp/php";
 import { parseJsonList } from "./cli";
+import { readHistory } from "./history";
 import { PROBE_INTERVALS, forgiving } from "./polling";
 import { wpCli } from "../../../common/wp/exec";
 import type { TestInfo } from "@playwright/test";
@@ -395,12 +396,13 @@ export function allowForBackup(
 /**
  * Starts a configured job and returns immediately.
  *
- * `--background` is not an optimisation, it is the only correct choice here. Without it the CLI
- * command runs the whole backup **inside the WP-CLI process**, whose PHP is configured nothing like
- * the web server's — on a host where the CLI has no memory limit, the plugin's own
- * "grow the limit as needed" step computes a *finite* one from the current usage and the job then
- * dies against it. With `--background` the command asks the site to run the job over HTTP, which is
- * how every other run of that job happens.
+ * `--background` hands the job to the web server, which is how every scheduled or on-demand run of
+ * it happens — so the backup is made the way a real one is, under the web server's PHP and as its
+ * user. Without it the job runs **inside the WP-CLI process** instead, under the CLI's PHP settings,
+ * which are nothing like the web server's: the plugin grows its memory limit from what it measures,
+ * and a job triggered through WP-CLI's cron runner on a host whose CLI has no limit at all computed
+ * a finite one below its needs and died against it (measured). {@link runJobInForeground} runs one
+ * there on purpose, for the scenarios where who wrote a file matters.
  *
  * Use it to *arrange* a scenario that needs backups to exist. A scenario about starting a backup
  * should drive the product's own controls instead.
@@ -429,6 +431,52 @@ export async function startJobInBackground(
         ((result.stderr || result.stdout).trim() || "(no output)"),
     );
   }
+}
+
+/**
+ * Runs a configured job **inside WP-CLI**, and checks the plugin recorded the run as a clean one.
+ *
+ * The counterpart of {@link startJobInBackground}. Here the backup is made by the WP-CLI process, as
+ * the transport's user, so the archive and the log it writes belong to that user — which is what a
+ * scenario needs when the question is what WP-CLI may do to those files. The small database jobs
+ * the scenarios configure finish there in a couple of seconds on every cell measured.
+ *
+ * The command never reports how the run went: the job ends the WP-CLI process itself, at exit 0,
+ * whatever it logged. So the verdict is read from the plugin's own record — the history must have
+ * gained exactly one row, this job's, `completed` and started by `wp-cli`, and the newest log must
+ * hold no errors.
+ *
+ * @param transport - the site to run on.
+ * @param jobId - the job to run.
+ * @throws {@link Error} if the command refused — another job running, an unknown id — or the run
+ * was not recorded as a clean completion.
+ */
+export async function runJobInForeground(
+  transport: Transport,
+  jobId: number,
+): Promise<void> {
+  const before = (await readHistory(transport)).length;
+  const argv = ["backwpup", "run", String(jobId)];
+  const result = await wpCli(transport, argv);
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `[backwpup/backups] \`wp ${argv.join(" ")}\` exited ${String(result.exitCode)}: ` +
+        ((result.stderr || result.stdout).trim() || "(no output)"),
+    );
+  }
+  const added = (await readHistory(transport)).slice(before);
+  expect(
+    added.map((run) => ({
+      jobId: run.jobId,
+      status: run.status,
+      trigger: run.trigger,
+    })),
+    `\`wp ${argv.join(" ")}\` should have recorded one completed run of its own`,
+  ).toEqual([{ jobId, status: "completed", trigger: "wp-cli" }]);
+  expect(
+    await readLastRunOutcome(transport),
+    "a backup arranged inside WP-CLI should not have ended in errors",
+  ).not.toBe("errors");
 }
 
 /**
