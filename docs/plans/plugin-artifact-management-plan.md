@@ -2,7 +2,7 @@
 
 > **Status:** **All phases 1–5 implemented ✅ and audited** — Phases 1–3 audited 2026-07-27 (§6.1–6.5), Phases 4–5 audited 2026-07-28 (§6.6); every finding fixed and re-verified. Phase 4 landed the design as [plugin-artifacts.md](../architecture/plugin-artifacts.md); Phase 5 landed the site staging & transfer layer, live-verified on **ssh** and **docker**. Remaining obligations are in §5 — chiefly BackWPup's `previous` role and, in the **modernization plan's Phase 6**, wiring the install hooks + `cleanSiteStaging` teardown.
 > **Verified against:** APVM `develop` (npm `3.0.0`), pinned tag `cli/v3.0.0` (confirmed cut 2026-07-14 — see §1.1), `wp-media/backwpup-pro` `gulpfile.ts`, `wp-media/wp-rocket` `wp-rocket.php`, this repo's working tree, Playwright's worker-process contract (probed 2026-07-27 — see §6), and the transports' file-access behavior (verified 2026-07-16 — see §1.4).
-> **Relation to the [modernization plan](e2e-modernization-plan.md):** this designs the artifact source that §4.5's "edition→package install map" and Phase 6's plugin-install hooks consume, and the pre-warm contract Phase 9's orchestrator calls. **Phase 5 here (site staging & transfer) is the mechanism those install hooks use to place a resolved zip onto ssh/docker targets, so it must land before modernization Phase 6.**
+> **Relation to the [modernization plan](e2e-modernization-plan.md):** this designs the artifact source that §4.5's "edition→package install map" and Phase 6's plugin-install hooks consume, and the pre-warm contract the [orchestrator](orchestrator-plan.md) calls. **Phase 5 here (site staging & transfer) is the mechanism those install hooks use to place a resolved zip onto ssh/docker targets, so it must land before modernization Phase 6.**
 
 ## TL;DR
 
@@ -167,7 +167,7 @@ setup:<cell>     ─┴─→ <cell> (BDD)      routing metadata {product, cell,
 Purpose: N cells wanting the same uncached request must not build it N times, and build minutes shouldn't count against test wall-time. `warmCache()` warms without delivering; the later per-cell `build()` is a copy.
 
 - `warmArtifacts(units)` in `src/common/artifacts/warm.ts`: for each `(product, cell)` run `buildRequests()` (same code path — **parity invariant**: warm and build must produce byte-identical `{project, gitRef, version, variants}`, or the warm is wasted), skip `zip`-kind requests, **dedupe** by that tuple, then `apvm.warmCache(request)` **serially**. Failures are collected per request and reported together; the orchestrator decides whether to skip dependent cells or let their own resolution retry/fail visibly.
-- Exposed now as `npm run artifacts:warm [-- --product=<p>] [--cell=<c>]` (root `warm-artifacts.ts`, tsx, like `healthcheck.ts`) — useful standalone (CI pre-step, local prep) long before the orchestrator (modernization Phase 9) exists; the orchestrator later imports the same module before spawning cells.
+- Exposed now as `npm run artifacts:warm [-- --product=<p>] [--cell=<c>]` (root `warm-artifacts.ts`, tsx, like `healthcheck.ts`) — useful standalone (CI pre-step, local prep) long before the [orchestrator](orchestrator-plan.md) exists; the orchestrator later imports the same module before spawning cells.
 - Keyword-ref nuance (accepted): `tag:latest-stable` re-resolves at both warm and run time; a release cut in between means the run builds fresh — correct behavior, just slower for that run.
 
 ### 2.8 Edge cases & failure modes
@@ -187,7 +187,7 @@ Purpose: N cells wanting the same uncached request must not build it N times, an
 | 10 | Placeholder-only cell | Artifacts project skips (§2.6) |
 | 11 | APVM build failure | Error carries `build_failed` reason + last command output lines |
 | 12 | `plugin` and `previous` resolve to the identical request | Allowed, but warned (comparison would be degenerate) |
-| 13 | Two cells running concurrently (orchestrator) | Distinct `.artifacts/<product>/<cell>/` dirs; APVM cache is cross-process safe; duplicate concurrent builds of one request are the waste pre-warming exists to remove (§2.7) |
+| 13 | Two cells running concurrently (orchestrator) | Distinct `.artifacts/<product>/<cell>/` dirs; APVM cache is cross-process safe for writes — a store-wide lock, atomic writes — but two processes that both miss it both build in full ([orchestrator plan](orchestrator-plan.md) V25–V26); duplicate concurrent builds of one request are the waste pre-warming exists to remove (§2.7) |
 | 14 | Relative `E2E_*_ZIP` | Resolved against the repo root (documented; absolute recommended). Must resolve correctly, avoid using process cwd |
 | 15 | Edition missing on an edition-ful product | Sites loader already fails all-or-none; request builder re-asserts (programming error) |
 | 16 | `--no-deps` BDD invocation | Fixture reads whatever the last resolution wrote, **warning** that it came from a different `runId` (never silent); errors if there is none. Documented as unsupported for artifact-consuming scenarios, but kept non-fatal so the fast edit-run loop still works |
@@ -196,7 +196,7 @@ Purpose: N cells wanting the same uncached request must not build it N times, an
 | 19 | Docker WP root unknown (no `rootDir` in config) | Resolved at runtime via `exec(t,"pwd",[])` (= container WORKDIR = `/var/www/html`); an optional `stagingDir` override skips the round-trip |
 | 20 | `.e2e_temp` under the web docroot | Documented exposure on QA sites (sometimes a feature — HTTP-fetchable artifacts); wiped in teardown + optional deny `.htaccess`; stage outside the docroot via the override (§1.4) |
 | 21 | Stale `.e2e_temp` from a crashed run | Wipe-before-stage (overwrite) + teardown `cleanSiteStaging` make staging idempotent (§2.9) |
-| 22 | One host shared by concurrently-running bound sites | Unsupported by the shared `.e2e_temp` (worker↔site is 1:1 within an invocation, so it can't happen there); namespace by `RUN_ID` if an orchestrator ever overlaps pools on a host (deferred, §2.9) |
+| 22 | One host shared by concurrently-running bound sites | Unsupported by the shared `.e2e_temp` (worker↔site is 1:1 within an invocation, so it can't happen there); namespace by `RUN_ID` if an orchestrator ever overlaps pools on a host (deferred, §2.9; re-check: [orchestrator plan](orchestrator-plan.md) 0A.3) |
 | 23 | `E2E_*_ZIP` points inside the cell's `.artifacts/<product>/<cell>/` | **Fail fast before the wipe**, naming the var, the path and the fix. A configuration error like case 1, not an artifact failure — and the only ordering that keeps the operator's file intact (§2.4) |
 | 24 | Whitespace-padded `E2E_*` value (`" develop "`, a trailing space in `.env`/CI YAML) | Trimmed at the reader, so it never reaches APVM as part of a ref or `fs` as part of a path |
 | 25 | Consumed zip deleted after resolution | Fixture throws naming the path, instead of deferring an invisible cause to `wp plugin install` |
@@ -232,7 +232,7 @@ Purpose: N cells wanting the same uncached request must not build it N times, an
 **Lifecycle & safety:**
 
 - **Idempotent** — wipe-before-stage per file (overwrite); `cleanSiteStaging` wipes the whole area in **worker teardown** (wired by modernization Phase 6, beside `disposeConnections`), so a run leaves the site clean. Wipe-before-use also neutralizes stale residue from a crashed prior run.
-- **Concurrency** — worker↔site is 1:1 within an invocation (`boundSite = pool[parallelIndex]`, one cell per invocation), so no two workers write one site's `.e2e_temp` at once. A shared `.e2e_temp` is unsafe only if an orchestrator overlaps pools on one physical host; namespace by `RUN_ID` then (deferred).
+- **Concurrency** — worker↔site is 1:1 within an invocation (`boundSite = pool[parallelIndex]`, one cell per invocation), so no two workers write one site's `.e2e_temp` at once. A shared `.e2e_temp` is unsafe only if an orchestrator overlaps pools on one physical host; namespace by `RUN_ID` then (deferred; re-check: [orchestrator plan](orchestrator-plan.md) 0A.3).
 - **Best-effort cleanup** never masks a test result (same rule as report attachments); **transfer failures throw** with the transport, path, and the override to set.
 
 ---
@@ -375,4 +375,4 @@ Full review of the Phase 4 docs against the shipped code and of the Phase 5 code
 - APVM: [repo](https://github.com/wp-media/automation-plugin-version-manager) · [napi README](https://github.com/wp-media/automation-plugin-version-manager/blob/develop/crates/napi/README.md) · [`index.d.ts`](https://github.com/wp-media/automation-plugin-version-manager/blob/develop/index.d.ts) (types are the source of truth) · builders `crates/core/src/build/plugins/`
 - Identity ground truth: `wp-media/backwpup-pro` `gulpfile.ts` (`compressPackage`, `free`/`pro` tasks); `wp-media/wp-rocket` `wp-rocket.php`
 - Transport transfer (Phase 5, §1.4): [exec.ts](../../src/common/wp/exec.ts) & [log.ts](../../src/common/wp/log.ts) (exec-cwd = WP root); `node-ssh` `putFile`/`mkdir` (`index.d.ts`); `docker cp` + `wordpress:cli` WORKDIR (`docker image inspect`)
-- This repo: [execution-model.md](../architecture/execution-model.md) · [configuration.md](../guides/configuration.md) · [wordpress-automation.md](../architecture/wordpress-automation.md) · [modernization plan](e2e-modernization-plan.md) §3.4/§4.5/Phase 6/Phase 9
+- This repo: [execution-model.md](../architecture/execution-model.md) · [configuration.md](../guides/configuration.md) · [wordpress-automation.md](../architecture/wordpress-automation.md) · [modernization plan](e2e-modernization-plan.md) §4.5/Phase 6 · [orchestrator plan](orchestrator-plan.md)

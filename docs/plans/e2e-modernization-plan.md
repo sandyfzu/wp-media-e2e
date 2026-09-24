@@ -1,6 +1,6 @@
 # E2E Modernization Plan — `wp-rocket-e2e` → `wp-media-projects-e2e`
 
-> **Status:** Phases 0–2 implemented (config foundation, execution model, artifact isolation). Phase 3 partially implemented (multi-file sites loading, pre-flight transport validation). Phases 3–9 planned.
+> **Status:** Phases 0–2 implemented (config foundation, execution model, artifact isolation). Phase 3 partially implemented (multi-file sites loading, pre-flight transport validation). Phases 3–9 planned; Phase 8 (CI on real cells) is dropped, and the orchestrator (Phase 9) has [its own plan](orchestrator-plan.md).
 > **Date:** 2026-06-24
 > **Baseline (reference):** `wp-rocket-e2e` — the legacy suite being superseded.
 > **Target (this repo):** `wp-media-projects-e2e`.
@@ -34,12 +34,14 @@ The execution architecture (§3) is the centerpiece:
   touching code.
 - A **run unit** = one **(product × cell)** = one Playwright invocation = **one report** = a **pool of
   sites** across which that product's scenarios are distributed by Playwright workers.
-- An **orchestrator** (a separate program) discovers run units and spawns them — **all of them by
-  default**, isolated so they never collide. Each run unit keeps its **own** report (no merging).
+- An **orchestrator** — a separate, long-running service on a server — runs cells in the background,
+  each as its own isolated invocation with its **own** report (no merging). Designed in
+  [its own plan](orchestrator-plan.md).
 
 Everything ships in **v1**; a pool may start at size 1 (serial within a cell), and growing it is a
-**data-only** change. The suite is built so the orchestrator can be added **later without modifying
-the E2E project** — cells are runnable manually today with zero conflict.
+**data-only** change. The suite is built so the orchestrator can be added **later without changing
+its run model** — cells are runnable manually today (gaps found since in running cells side by side
+are that plan's Phase 0).
 
 Two findings simplify the migration:
 
@@ -65,7 +67,7 @@ Two findings simplify the migration:
 | D5 | **Server modes: `ssh` (default), `docker`, `local`.** `docker` provides **both Apache and Nginx**; `local` targets whatever web server the user runs. | §7.1; a custom `docker compose` (not `@wordpress/env`, which is Apache-only). |
 | D6 | **Full reporting stack now**: Playwright HTML + embedded Cucumber HTML (dual-mode via `REPORT_MODE`) + **Allure 3**. | §6. |
 | D7 | **Plugin lifecycle covers WP-CLI *and* the WordPress admin UI.** Cleanup hooks remove plugins **idempotently** (already-absent ⇒ no-op); deletion *as the action under test* asserts presence first. | §7.3. |
-| D8 | **The suite is orchestrator-ready from day one.** Cells run manually per (product × cell) with zero conflict; the orchestrator is added later without changing the E2E project. | §3.4, §3.5; Phase 2 establishes isolation, Phase 8 adds the orchestrator. |
+| D8 | **The suite is orchestrator-ready from day one.** Cells run manually per (product × cell); the orchestrator is added later without changing the run model. | §3.5; Phase 2 establishes isolation. The orchestrator has [its own plan](orchestrator-plan.md), whose Phase 0 closes the isolation gaps found since. |
 | D9 | **BackWPup Free & Pro are one product; edition is a per-cell property.** Each cell declares its `edition` (Free/Pro are separate plugin packages); it selects the package to install, the scenario filter (`@free`/`@pro`/untagged), and the POM branch. | §4.5; not separate products (they share ~90%). |
 | D10 | **Site credentials never enter Playwright `metadata`** (which is serialized into reports). Pools reach workers through an in-process registry; `metadata` carries only non-secret routing (`product`, `cell`). | §3.3, §4.4. |
 
@@ -94,8 +96,8 @@ shape of everything else.
 - **Run unit** — **(product × cell)**. Exactly one Playwright invocation, one report, one pool. The
   product is fixed by the chosen config file, so the Playwright **project name is the cell** (e.g.
   `nginx`), selected with `--project=<cell>`.
-- **Orchestrator** — a separate program (not Playwright) that discovers run units and spawns each as
-  an isolated Playwright invocation (§3.4).
+- **Orchestrator** — a separate, long-running service (not Playwright) that runs each run unit as an
+  isolated Playwright invocation ([its own plan](orchestrator-plan.md)).
 
 The two axes behave differently on purpose:
 
@@ -182,59 +184,18 @@ hard-coded** — so adding sites or cells never touches step code.
 
 ### 3.4 The orchestrator
 
-A small **separate** TypeScript program (e.g. `orchestrator/`), independent of the Playwright projects.
-It is responsible only for *discovering* run units and *spawning* them in isolation.
-
-```ts
-// orchestrator/run.ts  (sketch — full design deferred to its phase)
-import { discoverProducts } from "./products";   // reads each product's config + its sites file
-
-const RUN_ID      = process.env.RUN_ID;                              // optional label for this launch's report dirs (§3.5)
-const CONCURRENCY = Number(process.env.CONCURRENCY ?? 0) || Infinity; // default: run them ALL at once
-const want        = parseFilters();                                  // optional --product / --cell
-
-const units = discoverProducts()
-  .filter((p) => want.product(p.name))
-  .flatMap((p) =>
-    Object.entries(p.sites)                       // cell name → SiteConfig[]   (dynamic, extensible)
-      .filter(([cell]) => want.cell(cell))
-      .map(([cell, pool]) => ({ product: p, cell, pool })));
-
-await runWithLimit(units, CONCURRENCY, ({ product, cell, pool }) =>
-  spawn("npx", ["playwright", "test",
-      "--config",  product.configPath,
-      "--project", cell,                          // exactly one cell; the config rejects multi-cell selection fail-fast (§3.2)
-      "--workers", String(pool.length)],          // optional: the config already self-sizes global workers from the selected cell
-    { env: { ...process.env, ...(RUN_ID && { RUN_ID }) } })); // reports accumulate per cell; ephemeral dirs overwrite (§3.5)
-```
-
-Agreed behaviour for v1:
-
-- **Runs all discovered run units by default**; an optional `CONCURRENCY` cap (env or flag) limits how
-  many execute at once, so a busy machine isn't oversubscribed (each unit already uses `pool.length`
-  workers).
-- **No `RUN_ID` needed by default** — distinct cells write to distinct paths; ephemeral build/state dirs
-  overwrite in place while reports accumulate per cell (§3.5). Pass `RUN_ID` only to label a launch's
-  report dirs (e.g. a build number); a later `report:prune` keeps the newest *N*.
-- **No merged report.** Each unit writes its own report folder (§6.3).
-- **Spawn-as-many-as-you-want, isolated** — see §3.5.
-- **Pre-warm the plugin artifacts first.** Call `warmArtifacts` before spawning, so the zips every unit
-  needs are built once into APVM's cache instead of once per cell. Already shipped (`npm run
-  artifacts:warm`); details and the Free/Pro single-build optimization are under Phase 9 (§9).
-
-**Future (planned, not designed here):** a long-running / continuous Auto E2E mode that keeps the
-orchestrator alive (e.g. under **PM2**), with a **CLI** to start/stop/kill individual cells, tail each
-cell's logs separately, and restart on demand. This is **mentioned only**; it will be planned in depth
-at its phase (§9, Phase 8). Crucially, none of it requires changing the E2E project — see §3.5.
+Moved to [its own plan](orchestrator-plan.md): a long-running service that runs cells in the
+background and manages those runs.
 
 ### 3.5 Artifact isolation & lifecycle
 
 Artifacts split into **two lifecycles by whether keeping a history has value** — and that, not a single
 rule, is what governs each path. All paths are keyed by **`<product>/<cell>`**, so different cells never
 share a path: the real concurrency (the orchestrator running *different* cells at once) is isolated by
-construction. The same `(product × cell)` must not run concurrently regardless — a cell's site pool is
-shared WordPress state, so two simultaneous runs of one cell would corrupt each other at the *database*
-level; it is intentionally a singleton.
+construction (two exceptions found since, `bddgen` and the root `test-results/`, are the
+[orchestrator plan](orchestrator-plan.md)'s Phase 0). The same `(product × cell)` must not run
+concurrently regardless — a cell's site pool is shared WordPress state, so two simultaneous runs of one
+cell would corrupt each other at the *database* level; it is intentionally a singleton.
 
 | Artifact | Path | Lifecycle |
 | --- | --- | --- |
@@ -279,11 +240,11 @@ never collapse two cells onto one path.
 
 Reports are **self-contained** (each copies in its own screenshots/video/trace), so overwriting the
 ephemeral `test-results` never harms an older accumulated report. Report accumulation is **intended in
-v1**; it is bounded later by a standalone `report:prune` (keep newest *N* per cell — §9). Cross-run
-**trends** come from Allure (§6.1).
+v1**; it is bounded later by a standalone `report:prune` (keep newest *N* per cell —
+[orchestrator plan](orchestrator-plan.md)). Cross-run **trends** come from Allure (§6.1).
 
-This isolation lives **inside** the E2E project, so the orchestrator later only automates spawning — it
-adds **no** new requirement to the projects. That is the "orchestrator-ready from day one" guarantee (D8).
+This isolation lives **inside** the E2E project, so the orchestrator later only automates running cells —
+it adds **no** new requirement to the run model. That is the "orchestrator-ready from day one" guarantee (D8).
 
 ### 3.6 v1 scope & extensibility
 
@@ -292,8 +253,8 @@ adds **no** new requirement to the projects. That is the "orchestrator-ready fro
   within that cell) — the machinery is identical; only the data is smaller.
 - **Scaling is data-only**: add sites to a pool, add a cell key, or add a product folder. No code
   change, no refactor.
-- **The orchestrator is the only deferred piece**, and the suite is built so it slots in without
-  touching the projects.
+- **The orchestrator is the only deferred piece** ([its own plan](orchestrator-plan.md)); it slots in
+  without changing the run model.
 
 ---
 
@@ -337,8 +298,7 @@ src/
         backwpup.config.ts         # ProductConfig + storage services (S3/FTP/…)
         sites.json                 # GITIGNORED — BackWPup's OWN cells + pools (separate file)
         sites.example.json
-orchestrator/                      # SEPARATE from the test projects (added in a later phase)
-  run.ts  products.ts
+orchestrator/                      # SEPARATE from the test projects (see orchestrator-plan.md)
 ```
 
 The per-product Playwright **config entries live at the repo root** so every glob resolves
@@ -1047,53 +1007,13 @@ checklist confirms no 1:1 carry-over. (Check retries in this phase, maybe 0 retr
 
 **Phase 7 - Tests output.** Display a very good progress in the terminal/console when tests are running, displaying how many tests were run, how many remaining, how many passed, how many failed, etc. And every time a test/scenario fails, display the name of the failed test/scenario + the failed step in the terminal (if not the default by Playwright).
 
-**Phase 8 — CI.** Run units as a CI matrix (one job per product × cell), each uploading its **own**
-report + artifacts and persisting the Allure `history` dir. Pools sized per available infrastructure.
+**Phase 8 — CI. Dropped.** It planned the suite on real cells as a CI matrix (one job per product ×
+cell). Real-cell runs, PRs included, belong to the [orchestrator](orchestrator-plan.md) instead; CI
+keeps its quality, unit and `@noauth` smoke jobs (`.github/workflows/ci.yml`).
 
-**Phase 9 — Orchestrator.** Build the separate orchestrator program (§3.4): discover run units from each
-product's sites file, spawn **all** by default with an optional `CONCURRENCY` cap, isolated per §3.5.
-**Then plan in depth** (separately) the **future continuous Auto E2E**: long-running operation (e.g.
-**PM2**) and a **CLI** to start/stop/kill cells, tail per-cell logs, and restart. A standalone
-**`report:prune`** (keep the newest *N* reports per cell) bounds the accumulating report history and can
-land independently. None of this requires changing the E2E project's run model.
-
-*Plugin artifacts — pre-warm before spawning.* The orchestrator should call `warmArtifacts`
-(`src/common/artifacts/warm.ts`, already shipped and usable standalone as `npm run artifacts:warm`)
-**before** it spawns any cell, so N cells wanting one uncached build do not each build it and build
-minutes never count against test wall-time. It plans through the same request builder the per-cell
-resolver uses, which is what makes a warmed cache entry the one a run actually looks up (the parity
-invariant). Design: [plugin-artifacts.md](../architecture/plugin-artifacts.md).
-
-*Future optimization — one build for Free **and** Pro when the ref matches.* Today a `free@…` and a
-`pro@…` cell of the same product warm as **two independent APVM builds** of the very same commit and
-version, differing only in which package gets packaged — and a cold build is expensive (a real one
-measured **13.7 minutes** of composer/npm). **The identification problem is already solved** — nothing
-new needs discovering:
-
-- `buildArtifactPlan` derives, per `(product × cell)` and role, the exact
-  `{ project, gitRef, version?, variants? }` APVM will be given, from data alone (manifest + the cell's
-  edition + `E2E_*` env) — no clone, no network. So every artifact every cell will build is known
-  up front, refs and versions included.
-- `warm.ts` already **dedupes** on that tuple (`project::gitRef::version::variants`). Free vs Pro of one
-  product therefore produce two entries differing **only** in the `variants` segment whenever the ref
-  and version agree — i.e. the grouping key for this optimization is that same tuple *minus* `variants`.
-
-The change is confined to the warmer: group the deduped build requests by `{project, gitRef, version}`
-and **union their variants** into one `warmCache({ …, variants: ["free", "pro-en"] })` call, so a single
-build request produces both packages instead of two requests repeating the same source preparation
-(APVM reports `origin` per artifact, so a partial build where one variant is cached and the other is
-built is a supported outcome). Measure the actual saving when implementing it — APVM owns how much work
-a multi-variant build shares internally. Note the ids are
-APVM's **variants** (`free`, `pro-en`), not our editions (`free`, `pro`) — the manifest is the mapping.
-Each cell's own per-role `build()` still asks for its single variant afterwards and gets a cache copy:
-APVM's cache is keyed `<project>/commits/<version>/<commit>/` with the **per-variant** zips inside
-(verified on a real cache directory holding `backwpup-…` and `backwpup-pro-en-…` side by side), so a
-subset request hits what a multi-variant warm populated.
-
-Worth it only when Free and Pro cells routinely share a ref (the default `develop`/`develop` case, i.e.
-the common one). **Not required for the initial orchestrator** — the pre-warm above already removes the
-duplicate-build waste *across* cells; this removes the duplicate *clone + install* between editions.
-((planed): Having a live http server/page to control nodes/cells running, start, stop, see logs, reports, etc, like a dashboard, apart from CLI. (idea): Having a way to stream the headless display buffer as a video through the previously mentioned http server/page (expore). (Planed): Having a way to select plugins versions/refs so it can build on next cell's run. (Planed): Having a way to select the plugins to run on the next cell's run, so it can build on next cell's run, and having a way to select "once", "always", etc, so if we select one version/ref (apvm), and we select "once", this will be overriden for one/next run, and the following runs will use the default/previous one selected as "always". (planed): Only one instance of the orchestrator should be running at a time)
+**Phase 9 — Orchestrator → [its own plan](orchestrator-plan.md).** Moved out: it is a long-running
+service with phases of its own. `report:prune`, the pre-warm call and the Free/Pro single-build
+optimization moved with it.
 
 **Phase 10 — Cleanup & validation.** `deps:check` (e.g. `depcheck`) to catch unused deps; ensure no
 dropped dependency reappears; `lint`/`typecheck`/`format:check` green; reports generate. Remove any mention of the Phases in codebase comments, etc.
@@ -1128,7 +1048,7 @@ dropped dependency reappears; `lint`/`typecheck`/`format:check` green; reports g
 | Risk | Likelihood | Mitigation |
 | --- | --- | --- |
 | Parallelism vs shared WP state | High | Each worker is pinned to its **own** isolated site (`pool[parallelIndex]`, §3.3); run units are one-invocation-per-cell so `parallelIndex` stays in range (§3.2). Residual gate is **provisioning isolated sites**, not a refactor. |
-| Artifact growth / concurrent clobbering | Low | Ephemeral build/state dirs (`.features-gen`, `.auth`, `test-results`) **overwrite in place** → never accumulate (§3.5). Reports accumulate per cell **by intent**, bounded later by `report:prune` (newest *N*). Different cells use different paths (concurrent different-cell runs never clash); the same cell must not run concurrently (shared WordPress state). |
+| Artifact growth / concurrent clobbering | Low | Ephemeral build/state dirs (`.features-gen`, `.auth`, `test-results`) **overwrite in place** → never accumulate (§3.5). Reports accumulate per cell **by intent**, bounded later by `report:prune` (newest *N*). Different cells use different paths (concurrent different-cell runs don't clash, except the gaps in the [orchestrator plan](orchestrator-plan.md)'s Phase 0); the same cell must not run concurrently (shared WordPress state). |
 | Shell injection in WP-CLI calls | Med | `execa` **array args** (auto-escaped); never interpolate into a shell string. |
 | Lost SSH/Docker/UI nuance during the port | Med | Characterise with a per-mode smoke test first, then re-implement with modern idioms (coverage preserved). |
 | `storageState` goes stale | Med | The per-cell setup is a **dependency** of the cell's BDD project → re-authenticated each run into its own file; `@noauth` isolates login/logout. |

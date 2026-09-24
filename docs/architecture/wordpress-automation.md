@@ -192,8 +192,9 @@ const zip = await stageAndInstallPlugin(site.transport, artifact.zipPath, {
   visible, but a teardown hook should call it **best-effort** (catch + log) so
   cleanup never fails a passing scenario.
 - **Concurrency** — one worker binds to one site per invocation, so no two workers
-  write one site's staging area. Only an orchestrator overlapping pools on one host
-  would need per-run namespacing.
+  write one site's staging area. Runs on one host can still meet in a shared
+  *absolute* staging root — tracked in the
+  [orchestrator plan](../plans/orchestrator-plan.md) (Phase 0A.3).
 - **Exposure** — on our environments the WP root *is* the web docroot, so
   `.e2e_temp/…` is potentially HTTP-reachable (occasionally useful: an artifact a
   plugin must fetch over HTTP). It is wiped in teardown; stage outside the docroot

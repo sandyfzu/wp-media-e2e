@@ -154,7 +154,9 @@ override to cells they never named).
   aggregated report names every problem at once.
 
 APVM (`apvm-napi`, pinned to a `cli/vX.Y.Z` tag in `package.json`) ships prebuilt
-native binaries — no Rust toolchain, no build step. BackWPup builds from a
+native binaries — no Rust toolchain, no build step. It is driven **only** through
+this Node library, never the `apvm` CLI: a capability only the CLI has waits for a
+library release that exposes it. BackWPup builds from a
 **private** source repo, so it needs a GitHub token (`GITHUB_TOKEN`, `GH_TOKEN`,
 or `gh auth login`); the token is asserted **before** any clone is attempted, and
 every string APVM emits is scrubbed for tokens and URL userinfo before it can
@@ -313,8 +315,8 @@ in between means the run builds fresh — correct, just slower for that run.
   failure class appears; it slots behind the same aggregated report.
 - **Shared-ref multi-variant builds** — when a Free and a Pro cell resolve the
   same ref *and* version, both variants could be built in one APVM call. The
-  mechanism and where it belongs are described in the modernization plan's
-  orchestrator phase.
+  mechanism and where it belongs are described in the
+  [orchestrator plan](../plans/orchestrator-plan.md).
 
 ## References
 

@@ -155,5 +155,6 @@ npm run test:wp-rocket -- --project=apache
 > primes APVM's cache for the cells a run will need, so each `artifacts:<cell>`
 > build becomes a cache copy instead of a fresh build. It plans through the same
 > request builder the resolver uses (the parity invariant), so a warmed entry is
-> always the one the run looks up. A future orchestrator (modernization plan
-> Phase 9) calls the same `warmArtifacts` before spawning cells.
+> always the one the run looks up. The planned orchestrator
+> ([its plan](../plans/orchestrator-plan.md)) calls the same `warmArtifacts` before
+> each run.

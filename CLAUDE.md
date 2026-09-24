@@ -322,6 +322,9 @@ request model, resolution lifecycle, preflight, pre-warm — is in
   **private** source repo, so it needs a GitHub token: set `GITHUB_TOKEN` or run
   `gh auth login`. WP Rocket / Imagify are public (a token there only raises rate
   limits).
+  **MUST — APVM is used only through this Node library, never its `apvm` CLI**, anywhere in the
+  repo (suite, scripts, the orchestrator). A capability only the CLI has waits for a library
+  release that exposes it.
 - **Consumption:** a scenario reads its zip through the `pluginArtifact` fixture —
   `stageAndInstallPlugin(site.transport, a.zipPath, { activate: true, slug: a.slug })` (where
   `a = pluginArtifact("plugin")`; the `slug` is what restores the plugin's file ownership).
@@ -582,6 +585,7 @@ these before starting related work — they hold the current plan, not history:
 - [`docs/plans/plugin-artifact-management-plan.md`](docs/plans/plugin-artifact-management-plan.md) — plugin artifact management.
 - [`docs/plans/phase-6-feature-porting-plan.md`](docs/plans/phase-6-feature-porting-plan.md) — feature porting (BackWPup first); supersedes the parent plan's Phase 6.
 - [`docs/plans/site-file-ownership-plan.md`](docs/plans/site-file-ownership-plan.md) — keeping a site's docroot writable by both WP-CLI's user and the web server.
+- [`docs/plans/orchestrator-plan.md`](docs/plans/orchestrator-plan.md) — the orchestrator: a long-running service that runs and manages cells on a server (supersedes the parent plan's Phase 9).
 
 ## When to update these docs
 
