@@ -58,3 +58,7 @@ src/projects/*/config/sites.*.json
 
 # User provided plugins directory
 plugins
+
+# Claude Code local state (the rest of .claude/ — agents, skills, settings.json — is committed)
+/.claude/worktrees/
+/.claude/settings.local.json

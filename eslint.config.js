@@ -19,6 +19,8 @@ export default defineConfig([
     "build/",
     "coverage/",
     "node_modules/",
+    // Claude Code worktrees (`claude -w`): checkouts of other branches, linted from inside them.
+    ".claude/worktrees/",
   ]),
 
   // Treat unused eslint-disable directives as errors.

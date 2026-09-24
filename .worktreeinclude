@@ -1,0 +1,4 @@
+# Gitignored files Claude Code copies into each new worktree (`claude -w <name>`); .gitignore syntax.
+# The sites files stay out on purpose: a worktree's sites.json is written by hand and lists only its
+# own cells, so its runs can never reach the sites another checkout is testing.
+.env

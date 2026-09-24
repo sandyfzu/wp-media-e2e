@@ -35,3 +35,6 @@ src/projects/*/pages/__fixtures__/*.html
 
 # Husky hook scripts (shell; Prettier has no parser for them)
 .husky/
+
+# Claude Code worktrees (`claude -w`): checkouts of other branches, formatted from inside them
+.claude/worktrees/
