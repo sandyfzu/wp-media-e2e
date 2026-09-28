@@ -60,12 +60,13 @@ import type { CliLevel, CliResult } from "../support/cli";
  */
 When(
   "I run the BackWPup command {string}",
-  async ({ cli, site, downloads, archives }, command: string) => {
+  async ({ cli, site, privateFolder, archives, keys }, command: string) => {
     await cli.run(
       await commandArgv(command, {
         transport: site.transport,
-        downloads,
+        privateFolder,
         archives,
+        keys,
       }),
     );
   },

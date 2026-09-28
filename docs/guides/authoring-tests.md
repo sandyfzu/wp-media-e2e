@@ -108,10 +108,14 @@ log's file name — so it names it in braces, and the value is read when the com
 ([`support/placeholders.ts`](../../src/projects/backwpup/support/placeholders.ts)): `{job}` is the
 scheduled job's id; `{oldest backup}` / `{newest backup}` the archive of the first / latest backup
 the scenario made, fixed as they were made; `{oldest log}` / `{newest log}` the log of the first /
-latest run the backup history records; `{download folder}` a folder of the scenario's own on the
-site, relative to the directory WP-CLI runs in (the WordPress root); and `{path from the log folder
-to the marker file}` a path out of BackWPup's log folder to the `markers` fixture's file, proved on
-the site to lead there. So `When I run the BackWPup command "backup-delete {oldest backup} --yes"`
+latest run the backup history records; `{path to the oldest backup}` / `{path to the newest backup}`
+that same archive as a path from the directory WP-CLI runs in (the WordPress root), which is how
+`backup-encrypt` and `backup-decrypt` take one; `{private folder}` a folder of the scenario's own on
+the site, relative to that directory; `{encryption key}` / `{another encryption key}` two hex keys
+drawn for the scenario, and `{public key file}` / `{private key file}` an RSA pair drawn for it and
+placed in the private folder; and `{path from the log folder to the marker file}` a path out of
+BackWPup's log folder to the `markers` fixture's file, proved on the site to lead there. A `--key=`
+value never appears in a failure message: `describeCli` hides it, in the argv and in the output. So `When I run the BackWPup command "backup-delete {oldest backup} --yes"`
 sends one real file name. Each value is asked for only when a command uses it, and must fit in one
 argument. Whatever sits in braces is read as a placeholder's name, so one no step knows — `{job_id}`
 for `{job}` — is refused, naming the ones it does, and so is a stray brace. And the text as written
@@ -153,14 +157,19 @@ Two more fixtures serve the commands that act on files. **`archives`** records t
 archive a scenario's backups left, the moment they were made, so "still on the site, byte for byte"
 compares against the run's own output and "the oldest backup" means one file for the rest of the
 scenario — the steps that make backups (`Given the scheduled job has made 2 backups inside WP-CLI`,
-or `… through the web server`, which decides who owns the files) record into it. **`downloads`** is
-a folder of the scenario's own inside the site's staging area, for `backup-download` to write into.
-It is created private to the transport's user, because the web server serves anything it can read
-there and the copy is a whole database, and handed to the command by a path worked out on the site
-from where the folder and WP-CLI really are — so a symlink on the way cannot send the copy elsewhere.
-It costs nothing until a step uses it, and is removed after the scenario only if one did
-([`support/archive-snapshot.ts`](../../src/projects/backwpup/support/archive-snapshot.ts),
-[`support/download-folder.ts`](../../src/projects/backwpup/support/download-folder.ts)).
+or `… through the web server`, which decides who owns the files) record into it.
+**`privateFolder`** is a folder of the scenario's own inside the site's staging area, for the files
+a command writes or reads — a download, an export, a key file. It is created private to the
+transport's user, because the web server serves anything it can read there and what lands in it can
+be a whole database, and handed to a command by a path worked out on the site from where the folder
+and WP-CLI really are — so a symlink on the way cannot send a file elsewhere. It costs nothing until
+a step uses it, and is removed after the scenario only if one did. **`keys`** draws the scenario's
+encryption keys when a placeholder first names one, and **`jobExports`** records a digest of the
+site's jobs as each export is arranged, which "the site's backup jobs are as they were" compares
+against ([`support/archive-snapshot.ts`](../../src/projects/backwpup/support/archive-snapshot.ts),
+[`support/private-folder.ts`](../../src/projects/backwpup/support/private-folder.ts),
+[`support/encryption-keys.ts`](../../src/projects/backwpup/support/encryption-keys.ts),
+[`support/job-transfer.ts`](../../src/projects/backwpup/support/job-transfer.ts)).
 
 The last fixture behaves like none of the others: **`markers`** plants a random value in a file
 under the site's content directory and another in a `wp_options` row, so a scenario can ask an

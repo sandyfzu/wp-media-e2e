@@ -222,9 +222,9 @@ test.describe("fillPlaceholders", () => {
   // The command is split on whitespace next, so each of these would silently become something else.
   for (const value of ["", "two words", "it's", "a\\b", "{job}", "a\tb"]) {
     test(`refuses a value that is not one argument (${JSON.stringify(value)})`, async () => {
-      const { resolvers } = counting({ "download folder": value });
+      const { resolvers } = counting({ "private folder": value });
       await expect(
-        fillPlaceholders("backup-download x.tar {download folder}/", resolvers),
+        fillPlaceholders("backup-download x.tar {private folder}/", resolvers),
       ).rejects.toThrow(/cannot travel as a single argument/);
     });
   }
@@ -246,7 +246,7 @@ test.describe("refusePathsOffTheSite", () => {
     "job-export --file=/tmp/jobs.json",
     "log-show ../../../../etc/passwd",
     "log-delete logs/../../x --yes",
-    "backup-download x.tar {download folder}/../x",
+    "backup-download x.tar {private folder}/../x",
   ]) {
     test(`refuses "${text}"`, () => {
       expect(() => {
@@ -258,7 +258,7 @@ test.describe("refusePathsOffTheSite", () => {
   // A placeholder is judged by the name written, not the value it will be filled with — the suite
   // proves those on the site, and one of them climbs out of the log folder on purpose.
   for (const text of [
-    "backup-download {newest backup} {download folder}/existing.tar --yes",
+    "backup-download {newest backup} {private folder}/existing.tar --yes",
     "log-show {path from the log folder to the marker file}",
     "log-delete --older-than=7days --yes",
     "backup-download x.tar downloads/x.tar",

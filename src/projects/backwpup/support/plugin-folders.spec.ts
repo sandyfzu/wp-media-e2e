@@ -10,6 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  backupArchivePhp,
+  backupPathFromWorkingDir,
   isLogFile,
   makeLogReadOnly,
   markerPathFromLogFolder,
@@ -69,6 +71,8 @@ case "$WP_STUB_MODE" in
   inward)     printf 'e2e-backup-marker.txt' ;;
   elsewhere)  printf '../../../../../../etc/passwd' ;;
   no-marker)  printf 'Error: the marker file is not on the site, so there is nothing to lead to — plant it first' >&2; exit 1 ;;
+  located)    printf '%s' '{"path":"/var/www/html/site/wp-content/uploads/backwpup/6567c0/backups/a.tar","cwd":"/var/www/html/site"}' ;;
+  no-archive) printf 'Error: no archive a.tar in /var/www/html/site/wp-content/uploads/backwpup/6567c0/backups/' >&2; exit 1 ;;
 esac
 exit 0
 `;
@@ -193,6 +197,47 @@ test.describe("readBackupFolder", () => {
     await expect(
       readBackupFolder(local(), 3, { digests: true }),
     ).rejects.toThrow(/expected "sha256"/);
+  });
+});
+
+test.describe("backupArchivePhp", () => {
+  test("points at the archive inside the job's own backup folder, and stops when it is not there", () => {
+    const php = backupArchivePhp(3, "a.tar");
+    expect(php).toContain(
+      "$dir = BackWPup_File::get_absolute_path( BackWPup_Option::get( json_decode( base64_decode( 'Mw==' ), true ), 'backupdir' ) );",
+    );
+    expect(php).toContain(
+      "$path = rtrim( $dir, '/' ) . '/' . json_decode( base64_decode( 'ImEudGFyIg==' ), true );",
+    );
+    expect(php).toContain(
+      "if ( ! is_file( $path ) ) {\n\tWP_CLI::error( 'no archive ' . basename( $path ) . ' in ' . $dir );\n}",
+    );
+  });
+
+  // The name is joined onto the folder; anything but one segment would lead out of it.
+  for (const name of ["", "..", "../wp-config.php", "a/b.tar", "a\\b.tar"]) {
+    test(`refuses a name that is not one segment (${JSON.stringify(name)})`, () => {
+      expect(() => backupArchivePhp(3, name)).toThrow(
+        /is not an archive's name/,
+      );
+    });
+  }
+});
+
+test.describe("backupPathFromWorkingDir", () => {
+  test("hands the archive out relative to where WP-CLI runs, as the site located both", async () => {
+    process.env.WP_STUB_MODE = "located";
+    expect(await backupPathFromWorkingDir(local(), 3, "a.tar")).toBe(
+      "wp-content/uploads/backwpup/6567c0/backups/a.tar",
+    );
+    expect(captured()).toContain("BackWPup_Option::get(");
+  });
+
+  test("passes on the site's answer that the folder holds no such archive", async () => {
+    process.env.WP_STUB_MODE = "no-archive";
+    await expect(backupPathFromWorkingDir(local(), 3, "a.tar")).rejects.toThrow(
+      /no archive a.tar in/,
+    );
   });
 });
 

@@ -219,6 +219,71 @@ test.describe("describeCli", () => {
     expect(described).toContain("…");
     expect(described.length).toBeLessThan(1100);
   });
+
+  const KEY = "3f".repeat(32);
+
+  // A failure message is kept in reports; a key in it would outlive the scenario it protected.
+  test("hides a --key value in the command it names", () => {
+    const described = describeCli(
+      resultOf({
+        argv: ["backwpup", "backup-encrypt", "a.tar", `--key=${KEY}`],
+        exitCode: 1,
+        stderr: "Error: boom",
+      }),
+    );
+    expect(described).toBe(
+      "`wp backwpup backup-encrypt a.tar --key=<hidden>` exited 1:\nError: boom",
+    );
+  });
+
+  test("hides a key file's path the same way", () => {
+    expect(
+      describeCli(
+        resultOf({
+          argv: [
+            "backwpup",
+            "backup-decrypt",
+            "a.tar",
+            "--key=.e2e_temp/private/x/private.pem",
+          ],
+        }),
+      ),
+    ).toBe(
+      "`wp backwpup backup-decrypt a.tar --key=<hidden>` exited 0 with no output",
+    );
+  });
+
+  test("hides the key wherever the output repeats it", () => {
+    const described = describeCli(
+      resultOf({
+        argv: ["backwpup", "backup-encrypt", "a.tar", `--key=${KEY}`],
+        stdout: `used ${KEY}`,
+        stderr: `Error: bad key ${KEY}.`,
+      }),
+    );
+    expect(described).not.toContain(KEY);
+    expect(described).toContain("used <hidden>");
+    expect(described).toContain("bad key <hidden>.");
+  });
+
+  // Hidden before the excerpt is cut, so no stretch of the key survives at the cut.
+  test("leaves no part of a key at the point the output is cut", () => {
+    const described = describeCli(
+      resultOf({
+        argv: ["backwpup", "backup-encrypt", "a.tar", `--key=${KEY}`],
+        stdout: `${"x".repeat(990)}${KEY}`,
+      }),
+    );
+    expect(described).not.toContain(KEY.slice(0, 10));
+  });
+
+  test("leaves arguments that only look like a key alone", () => {
+    expect(
+      describeCli(
+        resultOf({ argv: ["backwpup", "job", "--keyring=a", "--key="] }),
+      ),
+    ).toBe("`wp backwpup job --keyring=a --key=` exited 0 with no output");
+  });
 });
 
 test.describe("outputLines", () => {

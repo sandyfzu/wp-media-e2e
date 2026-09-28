@@ -15,7 +15,9 @@ import {
   fileChecksum,
   listFiles,
   listLocatedFiles,
+  locateFromWorkingDir,
   parseFileList,
+  pathFromWorkingDir,
 } from "./files";
 import type { LocalTransport } from "../config/types";
 
@@ -43,6 +45,10 @@ case "$WP_STUB_MODE" in
   backdated) printf '1789317173' ;;
   refused)   printf 'Error: could not set the modification time of /site/a.html (only its owner may): touch(): Utime failed: Operation not permitted' >&2; exit 1 ;;
   no-time)   printf '' ;;
+  # Where the site says a file and WP-CLI are, every symlink resolved.
+  from-cwd)  printf '%s' '{"path":"/srv/data/backups/a.tar","cwd":"/srv/releases/42"}' ;;
+  unresolved) printf '%s' '{"path":false,"cwd":"/site"}' ;;
+  nothing)   printf 'Error: nothing at /site/nope.tar' >&2; exit 1 ;;
 esac
 exit 0
 `;
@@ -327,5 +333,84 @@ test.describe("backdateFile", () => {
     await expect(backdateFile(local(), "/site/a.html", 60)).rejects.toThrow(
       /expected the timestamp/,
     );
+  });
+});
+
+test.describe("pathFromWorkingDir", () => {
+  test("leads from WP-CLI's working directory to the target, down or up", () => {
+    expect(pathFromWorkingDir({ path: "/site/f", cwd: "/site" }, "f")).toBe(
+      "f",
+    );
+    expect(pathFromWorkingDir({ path: "/a/b/f", cwd: "/a/c/d" }, "f")).toBe(
+      "../../b/f",
+    );
+  });
+
+  test("names the working directory itself as the directory, not as nothing", () => {
+    expect(
+      pathFromWorkingDir({ path: "/site", cwd: "/site" }, "the root"),
+    ).toBe(".");
+  });
+
+  // `realpath()` answers false for a path it cannot resolve, and a path worked out from a guess could
+  // lead anywhere.
+  for (const located of [
+    { path: false, cwd: "/site" },
+    { path: "/site/f", cwd: false },
+    { path: "relative/f", cwd: "/site" },
+    { path: "/site/f", cwd: "" },
+    { path: "/site/f" },
+    null,
+    "a string",
+  ]) {
+    test(`refuses what does not say where both are (${JSON.stringify(located)})`, () => {
+      expect(() => pathFromWorkingDir(located, "the archive")).toThrow(
+        /could not say where the archive is from the directory WP-CLI runs in/,
+      );
+    });
+  }
+});
+
+test.describe("locateFromWorkingDir", () => {
+  // A root and a folder each reached through a symlink: only the site's own answers lead there.
+  test("works the path out from where the site says the target and WP-CLI really are", async () => {
+    process.env.WP_STUB_MODE = "from-cwd";
+    expect(
+      await locateFromWorkingDir(local(), "$path = '/x';\n", "the archive"),
+    ).toBe("../../data/backups/a.tar");
+  });
+
+  test("runs the caller's locate first, then refuses a path with nothing at it", async () => {
+    process.env.WP_STUB_MODE = "from-cwd";
+    await locateFromWorkingDir(local(), "$path = '/x';\n", "the archive");
+    const php = readFileSync(capture, "utf8");
+    expect(php.startsWith("$path = '/x';\nclearstatcache();\n")).toBe(true);
+    expect(php).toContain(
+      "if ( ! file_exists( $path ) ) {\n\tWP_CLI::error( 'nothing at ' . $path );\n}",
+    );
+    expect(php).toContain(
+      "echo wp_json_encode( [ 'path' => realpath( $path ), 'cwd' => getcwd() ] );",
+    );
+  });
+
+  test("passes on the site's refusal", async () => {
+    process.env.WP_STUB_MODE = "nothing";
+    await expect(
+      locateFromWorkingDir(local(), "$path = '/x';\n", "the archive"),
+    ).rejects.toThrow(/nothing at \/site\/nope.tar/);
+  });
+
+  test("refuses a target the site could not resolve", async () => {
+    process.env.WP_STUB_MODE = "unresolved";
+    await expect(
+      locateFromWorkingDir(local(), "$path = '/x';\n", "the archive"),
+    ).rejects.toThrow(/could not say where the archive is/);
+  });
+
+  test("refuses a reply that is not JSON", async () => {
+    process.env.WP_STUB_MODE = "garbled";
+    await expect(
+      locateFromWorkingDir(local(), "$path = '/x';\n", "the archive"),
+    ).rejects.toThrow(/locating the archive did not come back as JSON/);
   });
 });

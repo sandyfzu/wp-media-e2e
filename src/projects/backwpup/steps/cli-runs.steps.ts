@@ -57,13 +57,17 @@ Given("the scheduled job is running in the background", async ({ site }) => {
  */
 When(
   "I watch the running backup with the BackWPup command {string}",
-  async ({ cli, site, downloads, archives, $testInfo }, command: string) => {
+  async (
+    { cli, site, privateFolder, archives, keys, $testInfo },
+    command: string,
+  ) => {
     allowForBackup($testInfo);
     await cli.run(
       await commandArgv(command, {
         transport: site.transport,
-        downloads,
+        privateFolder,
         archives,
+        keys,
       }),
       BACKUP_TIMEOUT_MS,
     );

@@ -13,8 +13,10 @@ import { StorageSidebar } from "./pages/storage.sidebar";
 import { restorePage } from "./pages/restore.page";
 import { ArchiveSnapshot } from "./support/archive-snapshot";
 import { CliSession } from "./support/cli-session";
-import { DownloadFolder, downloadFolderKey } from "./support/download-folder";
+import { ScenarioKeys } from "./support/encryption-keys";
+import { JobExports } from "./support/job-transfer";
 import { removeMarkers, seedMarkers } from "./support/markers";
+import { PrivateFolder, privateFolderKey } from "./support/private-folder";
 import type { RestorePage } from "./pages/restore.page";
 import type { SiteMarkers } from "./support/markers";
 
@@ -81,11 +83,23 @@ interface BackWPupFixtures {
    */
   markers: SiteMarkers;
   /**
-   * The scenario's own folder on the site for `backup-download` to write into, which a command
-   * names as `{download folder}`. Free to request: nothing is created until a step uses it, and
-   * only then is it removed afterwards, best-effort.
+   * The scenario's own folder on the site, private to the transport's user, for the files a command
+   * writes or reads there — a download, an export, a key — which a command names as
+   * `{private folder}`. Free to request: nothing is created until a step uses it, and only then is it
+   * removed afterwards, best-effort.
    */
-  downloads: DownloadFolder;
+  privateFolder: PrivateFolder;
+  /**
+   * The keys the scenario encrypts and decrypts with — drawn for it, named in a command only by a
+   * placeholder, the key pair's files placed in {@link BackWPupFixtures.privateFolder}. Free to
+   * request: nothing is drawn until a placeholder asks.
+   */
+  keys: ScenarioKeys;
+  /**
+   * The job exports the scenario arranged, each with a digest of the site's jobs when it was made —
+   * what "the site's jobs are as they were" is measured against.
+   */
+  jobExports: JobExports;
   /**
    * The archives the scenario's backups left, as they were when made — what "still on the site,
    * byte for byte" is measured against. The steps that make backups record into it.
@@ -132,13 +146,20 @@ export const test = base.extend<BackWPupFixtures>({
     await use(planted);
     await removeMarkers(site.transport);
   },
-  downloads: async ({ site }, use, testInfo) => {
-    const folder = new DownloadFolder(
+  privateFolder: async ({ site }, use, testInfo) => {
+    const folder = new PrivateFolder(
       site.transport,
-      downloadFolderKey(testInfo),
+      privateFolderKey(testInfo),
     );
     await use(folder);
     await folder.release();
+  },
+  keys: async ({ privateFolder }, use) => {
+    await use(new ScenarioKeys(privateFolder));
+  },
+  // eslint-disable-next-line no-empty-pattern -- Playwright derives deps from this destructuring; this fixture has none.
+  jobExports: async ({}, use) => {
+    await use(new JobExports());
   },
   // eslint-disable-next-line no-empty-pattern -- Playwright derives deps from this destructuring; this fixture has none.
   archives: async ({}, use) => {

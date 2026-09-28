@@ -71,6 +71,12 @@ const ANSI = /\u001B\[[0-9;]*m/g;
 /** How much command output a failure message carries before it stops being readable. */
 const OUTPUT_EXCERPT = 1000;
 
+/** A `--key=` argument: `backup-encrypt`'s and `backup-decrypt`'s key, or the file holding one. */
+const KEY_ARGUMENT = /^--key=(.+)$/;
+
+/** What a key reads as in a description. */
+const HIDDEN_KEY = "<hidden>";
+
 /**
  * Pulls WP-CLI's status lines out of one stream.
  *
@@ -178,22 +184,33 @@ export function outputLines(result: CliResult): readonly string[] {
 /**
  * One line naming the command, its exit code and what it printed — for assertion messages.
  *
- * **Embeds the argv and the raw output**, so it is not for a command carrying a secret: `job-export
- * --passwords` prints storage credentials, and `backup-encrypt --key=<hex>` puts its key in the
- * argv. A failure message is one of the few places a scenario's output is kept, so a caller passing
- * either must describe the command itself rather than call this. Nothing does today.
+ * **A `--key=` value never appears in it**: the argument reads `--key=<hidden>`, and every occurrence
+ * of the value in the output is hidden the same way before the excerpt is cut, so no part of a key is
+ * left at the cut either. A failure message is one of the few places a scenario's output is kept.
+ * Output is otherwise quoted as it came — so this is not for `job-export --passwords`, which prints
+ * stored credentials, and which nothing here runs.
  */
 export function describeCli(result: CliResult): string {
-  const output = [result.stdout, result.stderr]
-    .map((stream) => stream.trim())
-    .filter((stream) => stream !== "")
-    .join("\n");
+  const keys = result.argv.flatMap((arg) => {
+    const key = KEY_ARGUMENT.exec(arg)?.[1];
+    return key === undefined ? [] : [key];
+  });
+  const argv = result.argv.map((arg) =>
+    KEY_ARGUMENT.test(arg) ? `--key=${HIDDEN_KEY}` : arg,
+  );
+  const output = keys.reduce(
+    (text, key) => text.split(key).join(HIDDEN_KEY),
+    [result.stdout, result.stderr]
+      .map((stream) => stream.trim())
+      .filter((stream) => stream !== "")
+      .join("\n"),
+  );
   const excerpt =
     output.length > OUTPUT_EXCERPT
       ? `${output.slice(0, OUTPUT_EXCERPT)}…`
       : output;
   return (
-    `\`wp ${result.argv.join(" ")}\` exited ${String(result.exitCode)}` +
+    `\`wp ${argv.join(" ")}\` exited ${String(result.exitCode)}` +
     (excerpt === "" ? " with no output" : `:\n${excerpt}`)
   );
 }

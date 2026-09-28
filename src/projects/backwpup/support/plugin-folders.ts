@@ -1,7 +1,11 @@
 import { posix } from "node:path";
 
 import { FILE_MARKER_NAME } from "./markers";
-import { listLocatedFiles } from "../../../common/wp/files";
+import {
+  listLocatedFiles,
+  locateFromWorkingDir,
+} from "../../../common/wp/files";
+import { isPathSegment } from "../../../common/wp/paths";
 import { evalPhp, phpLiteral } from "../../../common/wp/php";
 import type { SiteDirectory } from "../../../common/wp/files";
 import type { Transport } from "../../../common/config/types";
@@ -46,8 +50,15 @@ export function isLogFile(name: string): boolean {
 }
 
 /**
- * What a job's backup folder holds — the job's own `backupdir`, which is where the Website Server
- * destination writes its archives.
+ * PHP setting `$dir` to a job's backup folder — the job's own `backupdir`, made absolute the plugin's
+ * way — which is where the Website Server destination writes its archives.
+ */
+function backupFolderPhp(jobId: number): string {
+  return `${PLUGIN_LOADED_PHP}$dir = BackWPup_File::get_absolute_path( BackWPup_Option::get( ${phpLiteral(jobId)}, 'backupdir' ) );\n`;
+}
+
+/**
+ * What a job's backup folder holds.
  *
  * @param transport - the site to ask.
  * @param jobId - the job whose folder to read.
@@ -59,12 +70,56 @@ export async function readBackupFolder(
   jobId: number,
   options: { readonly digests?: boolean } = {},
 ): Promise<SiteDirectory> {
-  const locate = `${PLUGIN_LOADED_PHP}$dir = BackWPup_File::get_absolute_path( BackWPup_Option::get( ${phpLiteral(jobId)}, 'backupdir' ) );\n`;
   return listLocatedFiles(
     transport,
-    locate,
+    backupFolderPhp(jobId),
     `job ${String(jobId)}'s backup folder`,
     { digests: options.digests === true },
+  );
+}
+
+/**
+ * PHP setting `$path` to one archive in a job's backup folder, and stopping when the folder holds no
+ * such file — for a snippet asking something of that archive.
+ *
+ * @param jobId - the job whose folder holds the archive.
+ * @param name - the archive's filename, as its run recorded it.
+ * @throws {@link Error} if the name is not a single path segment, which no archive's name is.
+ */
+export function backupArchivePhp(jobId: number, name: string): string {
+  if (!isPathSegment(name)) {
+    throw new Error(
+      `[backwpup/plugin-folders] "${name}" is not an archive's name: it must be a single path segment.`,
+    );
+  }
+  return (
+    `${backupFolderPhp(jobId)}$path = rtrim( $dir, '/' ) . '/' . ${phpLiteral(name)};\n` +
+    "if ( ! is_file( $path ) ) {\n" +
+    "\tWP_CLI::error( 'no archive ' . basename( $path ) . ' in ' . $dir );\n" +
+    "}\n"
+  );
+}
+
+/**
+ * An archive in a job's backup folder as a command run in WP-CLI's working directory reaches it —
+ * which is how `backup-encrypt` and `backup-decrypt` take an archive, where the other commands take
+ * its name.
+ *
+ * @param transport - the site holding the archive.
+ * @param jobId - the job whose folder holds it.
+ * @param name - the archive's filename.
+ * @throws {@link Error} if the name is not a single segment, BackWPup is not loaded, the folder holds
+ * no such file, or the site could not say where it or WP-CLI is.
+ */
+export function backupPathFromWorkingDir(
+  transport: Transport,
+  jobId: number,
+  name: string,
+): Promise<string> {
+  return locateFromWorkingDir(
+    transport,
+    backupArchivePhp(jobId, name),
+    `the archive ${name}`,
   );
 }
 

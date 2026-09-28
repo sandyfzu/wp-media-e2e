@@ -17,7 +17,7 @@ Feature: Deleting and downloading BackWPup backups over WP-CLI
 
   A download lands on the site, and a relative destination is resolved against the directory WP-CLI
   runs in — here the WordPress root. Each scenario downloads into a folder of its own there, which
-  `{download folder}` names relative to that root: private to WP-CLI's user, since the web server
+  `{private folder}` names relative to that root: private to WP-CLI's user, since the web server
   serves anything it can read in the docroot, and removed afterwards. `{oldest backup}` and
   `{newest backup}` are the archives of the first and the latest backup the scenario made. The job
   backs up the database only, the smallest real backup a site can make.
@@ -54,18 +54,18 @@ Feature: Deleting and downloading BackWPup backups over WP-CLI
 
   Scenario: Downloading a backup writes a byte-for-byte copy of it on the site, and replaces a file already there only with --yes
     Given the scheduled job has made 1 backup through the web server
-    And the download folder already holds a file named "existing.tar"
-    When I run the BackWPup command "backup-download {newest backup} {download folder}/"
+    And the private folder already holds a file named "existing.tar"
+    When I run the BackWPup command "backup-download {newest backup} {private folder}/"
     Then the command succeeds
     And it reports the success "Backup file downloaded successfully."
-    And the download folder holds a byte-for-byte copy of the newest backup
-    When I run the BackWPup command "backup-download {newest backup} {download folder}/existing.tar"
+    And the private folder holds a byte-for-byte copy of the newest backup
+    When I run the BackWPup command "backup-download {newest backup} {private folder}/existing.tar"
     Then the command succeeds
     And it asks "already exists. Overwrite it?"
-    And the file "existing.tar" in the download folder is still the one placed there
-    When I run the BackWPup command "backup-download {newest backup} {download folder}/existing.tar --yes"
+    And the file "existing.tar" in the private folder is still the one placed there
+    When I run the BackWPup command "backup-download {newest backup} {private folder}/existing.tar --yes"
     Then the command succeeds
-    And the file "existing.tar" in the download folder is a byte-for-byte copy of the newest backup
+    And the file "existing.tar" in the private folder is a byte-for-byte copy of the newest backup
     And the newest backup is still on the site, byte for byte
 
   # The backup is one WP-CLI may delete, so its surviving the storage filter is the filter's doing.
@@ -78,10 +78,10 @@ Feature: Deleting and downloading BackWPup backups over WP-CLI
     Then the command fails
     And it reports the error "found for deletion."
     And the newest backup is still on the site, byte for byte
-    When I run the BackWPup command "backup-download 2000-01-01_00-00-00_NOSUCHBACK_DBDUMP.tar {download folder}/"
+    When I run the BackWPup command "backup-download 2000-01-01_00-00-00_NOSUCHBACK_DBDUMP.tar {private folder}/"
     Then the command fails
     And it reports the error "Backup file not found."
-    When I run the BackWPup command "backup-download {newest backup} {download folder}/ --storage=ftp"
+    When I run the BackWPup command "backup-download {newest backup} {private folder}/ --storage=ftp"
     Then the command fails
     And it reports the error "Backup file not found in storage ftp."
     And nothing was downloaded

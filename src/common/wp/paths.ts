@@ -104,6 +104,24 @@ function sitePathRejection(path: string): string | undefined {
 }
 
 /**
+ * Whether a name is one path segment and nothing more: not empty, not `.` or `..`, and free of `/`
+ * and `\`.
+ *
+ * The rule every name this layer joins onto a directory must pass — a plugin slug, a staging
+ * category, a file in a folder of the suite's own — since `posix.join` would otherwise resolve `..`
+ * back out of that directory, and a backslash is a separator to some consumers of the path.
+ */
+export function isPathSegment(name: string): boolean {
+  return (
+    name !== "" &&
+    name !== "." &&
+    name !== ".." &&
+    !name.includes("/") &&
+    !name.includes("\\")
+  );
+}
+
+/**
  * Where a plugin's own files live, relative to the WordPress root.
  *
  * One place for the literal, because two different operations need it — installing a plugin and
@@ -117,7 +135,7 @@ function sitePathRejection(path: string): string | undefined {
  * @throws Error if `slug` is not a single path segment.
  */
 export function pluginSitePath(slug: string): string {
-  if (slug === "" || slug.includes("/") || slug === "." || slug === "..") {
+  if (!isPathSegment(slug)) {
     throw new Error(
       `[wp/paths] "${slug}" is not a usable plugin slug: it must be a single path segment, ` +
         'e.g. "backwpup-pro".',

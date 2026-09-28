@@ -3,7 +3,8 @@ import { getOption } from "../../../common/wp/options";
 import type { Transport } from "../../../common/config/types";
 
 /**
- * BackWPup's job settings (Advanced Settings → Jobs), named by the labels that screen gives them.
+ * BackWPup's settings, stored as its own screens store them: the job settings (Advanced Settings →
+ * Jobs), named by the labels that screen gives them, and the Pro Encryption panel's key.
  *
  * Only the ones a scenario sets are here, each labelled and valued as the screen offers it — read off
  * its markup (`parts/sidebar/settings-jobs.php`, the settings panel of the dashboard, whose wording
@@ -107,6 +108,90 @@ export async function setJobSetting(
     throw new Error(
       `[backwpup/settings] "${label}" should now be stored as ${String(value)} in ${option}, ` +
         `but the site holds ${JSON.stringify(stored)}.`,
+    );
+  }
+}
+
+// ── Encryption (Pro) ─────────────────────────────────────────────────────────
+
+/** The Encryption panel's site options, as `EncryptionSettingUpdater` names them (BackWPup Pro). */
+export const ENCRYPTION_OPTIONS = {
+  type: "backwpup_cfg_encryption",
+  key: "backwpup_cfg_encryptionkey",
+  archiveEncryption: "backwpup_archiveencryption",
+} as const;
+
+/** A key as the Encryption panel generates one: 64 hex characters, AES-256. */
+const PANEL_KEY = /^[0-9a-f]{64}$/;
+
+/**
+ * Saves an encryption key in BackWPup's settings, as saving the Encryption panel does with a
+ * symmetric key given and the jobs' own archive encryption left off.
+ *
+ * The panel's handler (`EncryptionSettingUpdater::update()`) stores three site options: the type,
+ * `backwpup_archiveencryption` — whether every job encrypts its own archives — and the key, hex, cut
+ * to 64 characters. Archive encryption is stored **off**: on, each job would encrypt what it makes
+ * with this key, so a scenario's backup would arrive encrypted already — and foreground runs have
+ * been measured dying of a memory limit the job sets itself while it is on. All three are read back
+ * by a second request, since the one that wrote them answers from its own cache; the key is compared
+ * on the site, and no message ever quotes it. They go with the plugin's footprint.
+ *
+ * @param transport - the site to configure. BackWPup Pro must be installed and past activation.
+ * @param key - the key to save: 64 lower-case hex characters.
+ * @throws {@link Error} if the key is not one the panel would save as it is, if PHP failed, or if
+ * the site does not hold all three afterwards.
+ */
+export async function saveEncryptionKey(
+  transport: Transport,
+  key: string,
+): Promise<void> {
+  if (!PANEL_KEY.test(key)) {
+    throw new Error(
+      "[backwpup/settings] an encryption key is 64 lower-case hex characters, as the Encryption " +
+        "panel generates one — the key given is not.",
+    );
+  }
+  await evalPhp(
+    transport,
+    `update_site_option( ${phpLiteral(ENCRYPTION_OPTIONS.type)}, 'symmetric' );\n` +
+      `update_site_option( ${phpLiteral(ENCRYPTION_OPTIONS.archiveEncryption)}, false );\n` +
+      `update_site_option( ${phpLiteral(ENCRYPTION_OPTIONS.key)}, ${phpLiteral(key)} );`,
+    "saving an encryption key in BackWPup's settings",
+    "backwpup/settings",
+  );
+  const reply = await evalPhp(
+    transport,
+    `echo wp_json_encode( [\n` +
+      `\t'type' => get_site_option( ${phpLiteral(ENCRYPTION_OPTIONS.type)} ),\n` +
+      `\t'archive_encryption' => (bool) get_site_option( ${phpLiteral(ENCRYPTION_OPTIONS.archiveEncryption)} ),\n` +
+      `\t'key' => hash_equals( ${phpLiteral(key)}, (string) get_site_option( ${phpLiteral(ENCRYPTION_OPTIONS.key)} ) ),\n` +
+      "] );",
+    "reading BackWPup's encryption settings back",
+    "backwpup/settings",
+  );
+  expectSavedKey(reply);
+}
+
+/**
+ * Checks what the read-back reported: the type symmetric, archive encryption off, the key the one
+ * saved.
+ *
+ * @throws {@link Error} naming what the site does not hold, without the key.
+ */
+function expectSavedKey(reply: string): void {
+  let saved: unknown;
+  try {
+    saved = JSON.parse(reply);
+  } catch {
+    throw new Error(
+      `[backwpup/settings] reading the encryption settings back did not come back as JSON: ${reply.slice(0, 300) || "(empty)"}`,
+    );
+  }
+  const expected = { type: "symmetric", archive_encryption: false, key: true };
+  if (JSON.stringify(saved) !== JSON.stringify(expected)) {
+    throw new Error(
+      "[backwpup/settings] the site should now hold a symmetric encryption type, archive encryption " +
+        `off and the key saved (key matching: true), but it holds ${JSON.stringify(saved)}.`,
     );
   }
 }

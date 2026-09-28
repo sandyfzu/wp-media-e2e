@@ -207,7 +207,7 @@ const zip = await stageAndInstallPlugin(site.transport, artifact.zipPath, {
   served (200), while one inside a folder only the transport's user may enter is not
   (404), and the directories themselves are not listed (403). Occasionally useful (an
   artifact a plugin must fetch over HTTP); for anything sensitive, stage it in such a
-  folder, as BackWPup's download folder does, or outside the docroot via the override.
+  folder, as BackWPup's private folder does, or outside the docroot via the override.
   The area is wiped in teardown.
 
 ## Plugin lifecycle ([`wp/plugin.ts`](../../src/common/wp/plugin.ts))
@@ -620,6 +620,9 @@ normalisation all validate through them.
   permissions as a backstop.
 - `pluginSitePath(slug)` composes `wp-content/plugins/<slug>` and requires a **single segment**,
   because `posix.join` would otherwise resolve `..` back out into a directory WordPress owns.
+- `isPathSegment(name)` is that one-segment rule itself — not empty, not `.` or `..`, no `/` or
+  `\` — which `pluginSitePath`, the staging area's categories and filenames, and a product's own
+  joined names (an archive in a backup folder, say) all pass through, so the rule has one copy.
 
 Both **guards** take the caller's own message builder, so a failure reads in the vocabulary of what
 was being attempted and names the remedy that caller can offer; `pluginSitePath` throws its own fixed
@@ -788,6 +791,14 @@ listing in the suite goes through one of the two; the fragment they run is `FILE
 something that judges files by age. It counts back from the **site's** clock, the one such a
 judgement uses, verifies the time it set by reading it back, and works only on a file the
 transport's user owns — only a file's owner may set its time.
+
+`locateFromWorkingDir(transport, locate, what)` answers the path a command run in WP-CLI's working
+directory (the WordPress root) reaches a file or directory by — `locate` is PHP that sets `$path` —
+and `pathFromWorkingDir(located, what)` works that path out of a reply holding the site's own two
+answers, `realpath()` of the target and `getcwd()`. Both ends have every symlink resolved, so each
+step of the path is a real directory: worked out from the configured paths instead, a path climbing
+out of a root reached through a symlink would climb out of the link's target. A target the site
+cannot resolve throws rather than yielding a guessed path.
 
 ## Looking inside an archive ([`archive.ts`](../../src/common/wp/archive.ts))
 

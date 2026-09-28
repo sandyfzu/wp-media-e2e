@@ -8,13 +8,13 @@ import {
   runJobInForeground,
   runScheduledBackup,
 } from "../support/backups";
-import { PLACED_FILE_CONTENT } from "../support/download-folder";
+import { PLACED_FILE_CONTENT } from "../support/private-folder";
 import { archivedRuns, readHistory, runOrder } from "../support/history";
 import { theScheduledJob } from "../support/job-options";
 import { waitForRunToEnd } from "../support/job-runs";
 import { readBackupFolder } from "../support/plugin-folders";
 import type { ArchiveSnapshot } from "../support/archive-snapshot";
-import type { DownloadFolder } from "../support/download-folder";
+import type { PrivateFolder } from "../support/private-folder";
 import type { SiteDirectory, SiteFile } from "../../../common/wp/files";
 import type { Transport } from "../../../common/config/types";
 
@@ -174,29 +174,29 @@ Then(
   },
 );
 
-// ── Downloads ────────────────────────────────────────────────────────────────
+// ── The private folder: downloads, and files a command reads ─────────────────
 
-/** A file in the scenario's download folder, read with its digest, if it is there. */
-async function downloaded(
-  downloads: DownloadFolder,
+/** A file in the scenario's private folder, read with its digest, if it is there. */
+async function inPrivateFolder(
+  folder: PrivateFolder,
   name: string,
 ): Promise<{ readonly file?: SiteFile; readonly dir: string }> {
-  const dir = await downloads.absolutePath();
-  const file = (await downloads.list()).find(
+  const dir = await folder.absolutePath();
+  const file = (await folder.list()).find(
     (candidate) => candidate.name === name,
   );
   return file === undefined ? { dir } : { file, dir };
 }
 
-/** That a file in the download folder is a byte-for-byte copy of a backup the scenario made. */
+/** That a file in the private folder is a byte-for-byte copy of a backup the scenario made. */
 async function expectCopyOf(
-  downloads: DownloadFolder,
+  folder: PrivateFolder,
   archives: ArchiveSnapshot,
   fileName: string,
   which: string,
 ): Promise<void> {
   const backup = archives.named(runOrder(which));
-  const { file, dir } = await downloaded(downloads, fileName);
+  const { file, dir } = await inPrivateFolder(folder, fileName);
   expect(file, `${dir} should hold ${fileName}`).toBeDefined();
   expect(
     file?.sha256,
@@ -209,24 +209,35 @@ async function expectCopyOf(
  * step can tell it apart from the backup that might replace it.
  */
 Given(
-  "the download folder already holds a file named {string}",
-  async ({ downloads }, name: string) => {
-    await downloads.place(name);
+  "the private folder already holds a file named {string}",
+  async ({ privateFolder }, name: string) => {
+    await privateFolder.place(name);
   },
 );
 
 /**
- * That the download folder holds the backup under the backup's own name — where a download lands
+ * A file of the scenario's own making for a command to read — one that is not what the command
+ * expects, say — holding exactly the text given.
+ */
+Given(
+  "the private folder holds a file named {string} reading {string}",
+  async ({ privateFolder }, name: string, content: string) => {
+    await privateFolder.place(name, content);
+  },
+);
+
+/**
+ * That the private folder holds the backup under the backup's own name — where a download lands
  * when its destination is a folder — as a byte-for-byte copy.
  *
  * The folder was handed to the command relative to the WordPress root and is read back here by its
  * absolute path, so the copy being there is also what proves which directory the command wrote to.
  */
 Then(
-  "the download folder holds a byte-for-byte copy of the {word} backup",
-  async ({ downloads, archives }, which: string) => {
+  "the private folder holds a byte-for-byte copy of the {word} backup",
+  async ({ privateFolder, archives }, which: string) => {
     await expectCopyOf(
-      downloads,
+      privateFolder,
       archives,
       archives.named(runOrder(which)),
       which,
@@ -234,19 +245,19 @@ Then(
   },
 );
 
-/** That a named file in the download folder is now a byte-for-byte copy of a backup. */
+/** That a named file in the private folder is now a byte-for-byte copy of a backup. */
 Then(
-  "the file {string} in the download folder is a byte-for-byte copy of the {word} backup",
-  async ({ downloads, archives }, name: string, which: string) => {
-    await expectCopyOf(downloads, archives, name, which);
+  "the file {string} in the private folder is a byte-for-byte copy of the {word} backup",
+  async ({ privateFolder, archives }, name: string, which: string) => {
+    await expectCopyOf(privateFolder, archives, name, which);
   },
 );
 
-/** That a file placed in the download folder still holds exactly what was placed there. */
+/** That a file placed in the private folder still holds exactly what was placed there. */
 Then(
-  "the file {string} in the download folder is still the one placed there",
-  async ({ downloads }, name: string) => {
-    const { file, dir } = await downloaded(downloads, name);
+  "the file {string} in the private folder is still the one placed there",
+  async ({ privateFolder }, name: string) => {
+    const { file, dir } = await inPrivateFolder(privateFolder, name);
     expect(file, `${dir} should still hold ${name}`).toBeDefined();
     expect(file?.sha256, `${name} should hold what was placed there`).toBe(
       createHash("sha256").update(PLACED_FILE_CONTENT).digest("hex"),
@@ -255,13 +266,13 @@ Then(
 );
 
 /**
- * That nothing was written to the download folder — which a refused download must leave as it found
+ * That nothing was written to the private folder — which a refused download must leave as it found
  * it, not holding an empty or half-written file.
  */
-Then("nothing was downloaded", async ({ downloads }) => {
-  const dir = await downloads.absolutePath();
+Then("nothing was downloaded", async ({ privateFolder }) => {
+  const dir = await privateFolder.absolutePath();
   expect(
-    (await downloads.list()).map((file) => file.name),
+    (await privateFolder.list()).map((file) => file.name),
     `what ${dir} holds`,
   ).toEqual([]);
 });

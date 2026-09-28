@@ -97,6 +97,8 @@ export function describeJobContents(type: readonly string[]): string {
 /** One configured backup job, as BackWPup stores it. */
 export interface StoredJob {
   readonly jobId: number;
+  /** The job's name, as the dashboard shows it; `""` when none is stored. */
+  readonly name: string;
   /** Contents, in the plugin's own uppercase job-type slugs — e.g. `["FILE","DBDUMP","WPPLUGIN"]`. */
   readonly type: readonly string[];
   /** Destination slugs the job writes to — e.g. `["FOLDER"]`. */
@@ -115,7 +117,7 @@ export interface StoredJob {
   readonly tempJob: boolean;
   /**
    * True for the throwaway job a "Backup now" run creates. Hidden from `wp backwpup job` exactly
-   * like {@link tempJob}, and excluded by {@link scheduledJobs} for the same reason.
+   * like {@link StoredJob.tempJob}, and excluded by {@link scheduledJobs} for the same reason.
    */
   readonly backupNow: boolean;
   /** Per-area include flags **actually stored** on the job; an area never configured is absent. */
@@ -173,6 +175,7 @@ function toStoredJob(value: unknown): StoredJob | undefined {
   if (!Number.isInteger(jobId) || jobId <= 0) return undefined;
   return {
     jobId,
+    name: text(value, "name"),
     type: stringList(value, "type"),
     destinations: stringList(value, "destinations"),
     cron: text(value, "cron"),
