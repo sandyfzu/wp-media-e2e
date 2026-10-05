@@ -415,6 +415,7 @@ test.describe("isPristineActivation", () => {
   function job(jobId: number, tempJob: boolean): StoredJob {
     return {
       jobId,
+      name: "",
       type: [],
       destinations: [],
       cron: "",

@@ -14,16 +14,21 @@ Feature: Watching and aborting a running BackWPup job over WP-CLI
   and for that moment the job has no process of its own — an abort landing then has nothing to stop,
   and may never be recorded.
 
+  A database backup updates its progress once per table, so how long the paced one runs is the site's
+  table count: a site with 18 tables ran it in 3.5 s, barely longer than a command takes to land once
+  the job is seen running. The site's database is padded with empty tables of the scenario's own, to
+  100, so the paced backup runs about 11 s on every site; they are removed afterwards.
+
   Background:
     Given BackWPup is set up to back up the "database" on a schedule
     And BackWPup's "Reduce server load" setting is "maximum"
     And BackWPup's "Maximum number script execution time (in seconds)" setting is "0"
+    And the site's database holds at least 100 tables
     And the scheduled job is running in the background
 
   # The command checks for a running job before it looks at its arguments, so both forms are refused
-  # alike — and the run already going must come out of it untouched, as the only run recorded. Each
-  # form gets a backup of its own: on the smaller cell the paced one runs about five seconds once it
-  # is seen, room for one refusal (measured: more than 2 s to spare) and not for two.
+  # alike — and the run already going must come out of it untouched, as the only run recorded. The
+  # refusal lands about 3 s into the paced backup's 11 s (measured on both cells).
   Scenario: Running a job in the foreground while a backup is running is refused, and the backup in progress still completes
     When I run the BackWPup command "run {job}"
     Then the command fails

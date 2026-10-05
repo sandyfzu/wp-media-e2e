@@ -12,7 +12,8 @@ import { join } from "node:path";
 
 import { ArchiveSnapshot } from "./archive-snapshot";
 import { fillPlaceholders } from "./cli-session";
-import { DownloadFolder } from "./download-folder";
+import { ScenarioKeys } from "./encryption-keys";
+import { PrivateFolder } from "./private-folder";
 import { commandArgv, commandPlaceholders } from "./placeholders";
 import type { LocalTransport } from "../../../common/config/types";
 
@@ -58,19 +59,22 @@ const FOLDER = JSON.stringify({
 });
 
 /**
- * A stub `wp` answering the jobs option, the history, the backup folder, the download folder's
- * preparation and the marker path — counting every call.
+ * A stub `wp` answering the jobs option, the history, an archive's location, the backup folder, the
+ * private folder's preparation, a file placed in it and the marker path — counting every call.
  */
 const STUB_WP = `#!/usr/bin/env bash
 printf 'x\\n' >> "$WP_STUB_CALLS"
+printf '%s' "$2" > "$WP_STUB_CALLS.last"
 if [ "$1" = "option" ]; then
   printf '%s' '{"1":{"jobid":1,"tempjob":true,"type":[],"destinations":[]},"3":{"jobid":3,"type":["DBDUMP"],"destinations":["FOLDER"],"activetype":"wpcron"}}'
   exit 0
 fi
 case "$2" in
   *backup_trigger*)  printf '%s' '${HISTORY}' ;;
+  *"'path' => realpath( \\$path )"*) printf '{"path":"%s/wp-content/uploads/backwpup/x/backups/last.tar","cwd":"%s"}' "$WP_STUB_ROOT" "$WP_STUB_ROOT" ;;
   *backupdir*)       printf '%s' '${FOLDER}' ;;
-  *"mkdir( \\$dir, 0700 )"*) printf '{"mode":"700","path":"%s/.e2e_temp/downloads/abc-r0","cwd":"%s"}' "$WP_STUB_ROOT" "$WP_STUB_ROOT" ;;
+  *"mkdir( \\$dir, 0700 )"*) printf '{"mode":"700","path":"%s/.e2e_temp/private/abc-r0","cwd":"%s"}' "$WP_STUB_ROOT" "$WP_STUB_ROOT" ;;
+  *"file_put_contents( \\$path, \\$content )"*) printf 'placed' ;;
   *"str_repeat( '../'"*) printf '../../../../../site/wp-content/e2e-backup-marker.txt' ;;
 esac
 exit 0
@@ -108,18 +112,36 @@ test.afterAll(() => {
 
 const local = (): LocalTransport => ({ mode: "local", rootDir });
 
-/** Fills one command the way the generic step does, with `archives` as the scenario recorded them. */
-function fill(text: string, archives = new ArchiveSnapshot()): Promise<string> {
+/** The scope the generic step hands over, for one scenario. */
+function scopeOf(archives = new ArchiveSnapshot()) {
   const transport = local();
-  return fillPlaceholders(
-    text,
-    commandPlaceholders({
-      transport,
-      downloads: new DownloadFolder(transport, "abc-r0"),
-      archives,
-    }),
-  );
+  const privateFolder = new PrivateFolder(transport, "abc-r0");
+  return {
+    transport,
+    privateFolder,
+    archives,
+    keys: new ScenarioKeys(privateFolder),
+  };
 }
+
+/** Fills one command the way the generic step does, with `archives` as the scenario recorded them. */
+function fill(
+  text: string,
+  scope: ReturnType<typeof scopeOf> = scopeOf(),
+): Promise<string> {
+  return fillPlaceholders(text, commandPlaceholders(scope));
+}
+
+/** The values the last snippet embedded, decoded the way PHP will decode them. */
+const namesSent = (): unknown[] =>
+  [
+    ...readFileSync(`${calls}.last`, "utf8").matchAll(
+      /base64_decode\( '([^']+)' \)/g,
+    ),
+  ].map(
+    (match) =>
+      JSON.parse(Buffer.from(match[1] ?? "", "base64").toString()) as unknown,
+  );
 
 /** How many times the site was asked anything. */
 const asked = (): number =>
@@ -135,11 +157,61 @@ test.describe("commandPlaceholders", () => {
   test("names the oldest and newest backup the scenario made", async () => {
     const archives = new ArchiveSnapshot();
     await archives.record(local());
-    expect(await fill("backup-delete {oldest backup} --yes", archives)).toBe(
+    const scope = scopeOf(archives);
+    expect(await fill("backup-delete {oldest backup} --yes", scope)).toBe(
       "backup-delete first.tar --yes",
     );
-    expect(await fill("backup-delete {newest backup} --yes", archives)).toBe(
+    expect(await fill("backup-delete {newest backup} --yes", scope)).toBe(
       "backup-delete last.tar --yes",
+    );
+  });
+
+  // The encryption commands take a path, which the site works out for the archive it holds — the
+  // one asked for, by name.
+  test("names the newest backup as a path from where WP-CLI runs", async () => {
+    const archives = new ArchiveSnapshot();
+    await archives.record(local());
+    expect(
+      await fill(
+        "backup-encrypt {path to the newest backup}",
+        scopeOf(archives),
+      ),
+    ).toBe("backup-encrypt wp-content/uploads/backwpup/x/backups/last.tar");
+    expect(namesSent()).toContain("last.tar");
+    await fill("backup-encrypt {path to the oldest backup}", scopeOf(archives));
+    expect(namesSent()).toContain("first.tar");
+  });
+
+  test("refuses a path to a backup the scenario never made", async () => {
+    await expect(
+      fill("backup-encrypt {path to the oldest backup}"),
+    ).rejects.toThrow(/no backup was recorded/);
+  });
+
+  // Drawn for the scenario, the same wherever it is named again, and never the same as the other.
+  test("names the scenario's two hex keys, each the same every time it is named", async () => {
+    const scope = scopeOf();
+    const first = await fill(
+      "backup-encrypt a.tar --key={encryption key}",
+      scope,
+    );
+    expect(first).toMatch(/^backup-encrypt a\.tar --key=[0-9a-f]{64}$/);
+    expect(
+      await fill("backup-decrypt a.tar --key={encryption key}", scope),
+    ).toBe(first.replace("backup-encrypt", "backup-decrypt"));
+    expect(
+      await fill("backup-decrypt a.tar --key={another encryption key}", scope),
+    ).not.toBe(first.replace("backup-encrypt", "backup-decrypt"));
+  });
+
+  test("names the key pair's files inside the scenario's private folder", async () => {
+    expect(
+      await fill(
+        "backup-encrypt a.tar --key={public key file} {private key file}",
+        scopeOf(),
+      ),
+    ).toBe(
+      "backup-encrypt a.tar --key=.e2e_temp/private/abc-r0/scenario-public.pem .e2e_temp/private/abc-r0/scenario-private.pem",
     );
   });
 
@@ -159,9 +231,9 @@ test.describe("commandPlaceholders", () => {
     );
   });
 
-  test("names the download folder relative to the directory WP-CLI runs in", async () => {
-    expect(await fill("backup-download x.tar {download folder}/")).toBe(
-      "backup-download x.tar .e2e_temp/downloads/abc-r0/",
+  test("names the private folder relative to the directory WP-CLI runs in", async () => {
+    expect(await fill("backup-download x.tar {private folder}/")).toBe(
+      "backup-download x.tar .e2e_temp/private/abc-r0/",
     );
   });
 
@@ -179,15 +251,7 @@ test.describe("commandPlaceholders", () => {
 });
 
 test.describe("commandArgv", () => {
-  /** The scope the generic step hands over. */
-  const scope = () => {
-    const transport = local();
-    return {
-      transport,
-      downloads: new DownloadFolder(transport, "abc-r0"),
-      archives: new ArchiveSnapshot(),
-    };
-  };
+  const scope = () => scopeOf();
 
   test("fills a command's placeholders, then splits it into its arguments", async () => {
     expect(await commandArgv("run {job} --background", scope())).toEqual([

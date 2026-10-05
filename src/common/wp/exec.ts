@@ -25,6 +25,11 @@ import type {
  * to *run* the command at all — missing binary, unreachable SSH host, killed by a signal —
  * throws, because that is an environment fault, not a command outcome.
  *
+ * **No error quotes a command's arguments** — it names the program and why it failed. The argv is
+ * where this suite puts what must never reach a report: a `--key=` value, and every value a `wp eval`
+ * snippet embeds (`phpLiteral`'s base64 is an encoding, not a cipher). execa's own messages hold the
+ * whole command line, so none is passed on, nor attached as a `cause`; ssh2's hold none.
+ *
  * **Nothing is ever typed into a command**, so none is handed any input: node-ssh ends the channel's
  * stdin when given none, `local` ignores it, and `docker exec` without `-i` attaches none. A command
  * that stops to ask — WP-CLI's `confirm()` behind a `[y/n]` prompt — therefore reads end-of-input and
@@ -82,39 +87,128 @@ function stripFinalNewline(text: string): string {
   return text.replace(/\r?\n$/, "");
 }
 
-/** Maps an execa result (run with `reject: false`) to an {@link ExecResult}, or throws if it never ran. */
+/**
+ * What an execa result says about how a run ended — the only fields {@link fromExeca} may read.
+ *
+ * Those that hold the command line (`message`, `shortMessage`, `command`, `escapedCommand`) are left
+ * out on purpose, so quoting one is a type error rather than a leak.
+ */
+export interface ExecaOutcome {
+  readonly stdout: string;
+  readonly stderr: string;
+  /** Absent when the process could not be started or was killed. */
+  readonly exitCode?: number;
+  /** Node's code for a process that could not be started — `ENOENT`, `EACCES`. */
+  readonly code?: string;
+  readonly signal?: string;
+  /** execa's plain-words name for {@link signal}, e.g. `Termination`. */
+  readonly signalDescription?: string;
+  readonly isMaxBuffer?: boolean;
+}
+
+/** A Node.js error code: the one part of a spawn failure quoted as it came. */
+const ERROR_CODE = /^[A-Z][A-Z0-9_]*$/;
+
+/**
+ * Why a run reached no exit code, in words that never include its arguments.
+ *
+ * `ENOENT` is ambiguous, and both readings are named: Node reports it for a program missing from the
+ * `PATH` and for a working directory that does not exist alike (measured).
+ *
+ * @param outcome - the execa result.
+ * @param cwd - the working directory the run was given, if it was given one.
+ * @returns a phrase completing `"<program>" …`.
+ */
+export function whyItDidNotExit(outcome: ExecaOutcome, cwd?: string): string {
+  if (outcome.signal !== undefined) {
+    const description =
+      outcome.signalDescription === undefined
+        ? ""
+        : ` (${outcome.signalDescription})`;
+    return `was killed by ${outcome.signal}${description} before it exited`;
+  }
+  const code =
+    outcome.code !== undefined && ERROR_CODE.test(outcome.code)
+      ? outcome.code
+      : undefined;
+  if (code === "ENOENT") {
+    return cwd === undefined
+      ? "could not be started (ENOENT): no such program on this machine"
+      : `could not be started (ENOENT): no such program on this machine, or no directory "${cwd}" to run it in`;
+  }
+  return code === undefined
+    ? "ended without an exit code, and execa gave no reason"
+    : `could not be started (${code})`;
+}
+
+/**
+ * Maps an execa result (run with `reject: false`) to an {@link ExecResult}, or throws if it never ran
+ * or its output was cut.
+ *
+ * @param label - the program, as a message names it: `wp`, `sudo rm`, `docker exec <container> wp`.
+ * @param result - the execa result.
+ * @param cwd - the working directory the run was given, if any — named when it may be what is missing.
+ * @throws Error naming `label` and the reason, never the arguments.
+ */
 function fromExeca(
   label: string,
-  result: {
-    stdout: string;
-    stderr: string;
-    exitCode?: number;
-    shortMessage?: string;
-    isMaxBuffer?: boolean;
-  },
+  result: ExecaOutcome,
+  cwd?: string,
 ): ExecResult {
-  if (typeof result.exitCode !== "number") {
-    throw new Error(
-      `[wp/exec] "${label}" did not run: ${result.shortMessage ?? "the process failed to start or was terminated by a signal"}`,
-    );
-  }
   // execa caps captured output (100 MB of characters by default) and still reports **the child's own
   // exit code** — measured: `isMaxBuffer` with `exitCode` 0, 1 and 2 alike. A capped success is the
   // dangerous shape: the caller would read a silently shortened stdout as the whole answer, and an
   // assertion about what is *not* in it would pass. So it is raised rather than returned: the command
   // ran, but its answer cannot be trusted, which is "could not ask at all" and not an outcome.
+  // Checked first, because a command that keeps writing is ended by the broken pipe (measured:
+  // `yes` reports SIGPIPE), and naming the signal would hide the cause.
   // Applies to `local` and `docker` only — the ssh transport accumulates output with no cap at all.
   if (result.isMaxBuffer === true) {
     throw new Error(
-      `[wp/exec] "${label}" produced more output than can be captured, so its result was truncated: ` +
-        (result.shortMessage ?? "output exceeded the buffer limit"),
+      `[wp/exec] "${label}" produced more output than can be captured, so its result was ` +
+        "truncated and cannot be trusted.",
     );
+  }
+  if (typeof result.exitCode !== "number") {
+    throw new Error(`[wp/exec] "${label}" ${whyItDidNotExit(result, cwd)}.`);
   }
   return {
     stdout: result.stdout,
     stderr: result.stderr,
     exitCode: result.exitCode,
   };
+}
+
+/**
+ * Runs `file args…` through execa and maps the outcome with {@link fromExeca}.
+ *
+ * execa checks its arguments before starting anything, and throws even with `reject: false` — quoting
+ * the argument it refused (`Arguments cannot contain null bytes ("\0"): --key=…`, measured). Such a
+ * throw is replaced by one naming `label` only.
+ *
+ * @param label - the program, as {@link fromExeca} names it.
+ * @param file - the binary to run.
+ * @param args - its arguments.
+ * @param options - `cwd` for a local run; `stdin: "ignore"` for one that must never wait on input.
+ * @throws Error naming `label`, if execa refused the call, the process never ran, or its output was cut.
+ */
+async function runExeca(
+  label: string,
+  file: string,
+  args: readonly string[],
+  options: { readonly cwd?: string; readonly stdin?: "ignore" },
+): Promise<ExecResult> {
+  let result: ExecaOutcome;
+  try {
+    result = await execa(file, args, { reject: false, ...options });
+  } catch (error) {
+    const kind = error instanceof Error ? ` (${error.name})` : "";
+    // eslint-disable-next-line preserve-caught-error -- the caught error quotes the argv; leaving it off is the point.
+    throw new Error(
+      `[wp/exec] "${label}" could not be started: execa refused the call${kind}.`,
+    );
+  }
+  return fromExeca(label, result, options.cwd);
 }
 
 // ── local & docker: execa (array args ⇒ no shell, no injection) ──────────────
@@ -126,15 +220,13 @@ async function runLocal(
   options: ExecOptions,
   elevate: boolean,
 ): Promise<ExecResult> {
-  const [command, commandArgs] = elevate
-    ? ["sudo", sudoArgv(file, args)]
-    : [file, args];
-  const result = await execa(command, commandArgs, {
-    reject: false,
+  const [command, commandArgs, label] = elevate
+    ? ["sudo", sudoArgv(file, args), `sudo ${file}`]
+    : [file, args, file];
+  return runExeca(label, command, commandArgs, {
     cwd: options.cwd ?? transport.rootDir,
     stdin: "ignore",
   });
-  return fromExeca(command, result);
 }
 
 /**
@@ -175,12 +267,12 @@ async function runDocker(
 ): Promise<ExecResult> {
   // Without `-i`, `docker exec` never attaches the client's stdin to the command (`AttachStdin` stays
   // false); ignoring it here too keeps the client from holding one open for nothing.
-  const result = await execa(
+  return runExeca(
+    `docker exec ${transport.container} ${file}`,
     "docker",
     dockerArgv(transport.container, file, args, { asRoot: elevate }),
-    { reject: false, stdin: "ignore" },
+    { stdin: "ignore" },
   );
-  return fromExeca(`docker exec ${transport.container} ${file}`, result);
 }
 
 // ── ssh: node-ssh, with a per-host connection cache reused across calls ───────
@@ -336,13 +428,43 @@ async function runSsh(
   });
 }
 
-function dispatch(
+/**
+ * Refuses a command whose program or argument holds a NUL byte, before any transport sees it.
+ *
+ * No program can be handed one — an argv is NUL-terminated — and each transport refused it its own
+ * way (measured): execa throws, quoting the argument, and ssh2's request fails as a bare `Unable to
+ * exec`. Refused here, every transport says the same thing, naming the argument by position only.
+ *
+ * @throws Error naming the program (unless its own name is the offender) and the argument's position.
+ */
+function refuseNulBytes(file: string, args: readonly string[]): void {
+  if (file.includes("\0")) {
+    throw new Error(
+      "[wp/exec] refusing to run a program whose name holds a NUL byte.",
+    );
+  }
+  const position = args.findIndex((arg) => arg.includes("\0"));
+  if (position !== -1) {
+    throw new Error(
+      `[wp/exec] refusing to run "${file}": argument ${String(position + 1)} holds a NUL byte, ` +
+        "which no program can be handed.",
+    );
+  }
+}
+
+/**
+ * Runs `file args…` on the transport's target, elevated or not.
+ *
+ * `async` so that {@link refuseNulBytes} arrives as a rejection like every other failure here.
+ */
+async function dispatch(
   transport: Transport,
   file: string,
   args: string[],
   options: ExecOptions,
   elevate: boolean,
 ): Promise<ExecResult> {
+  refuseNulBytes(file, args);
   switch (transport.mode) {
     case "local":
       return runLocal(transport, file, args, options, elevate);
@@ -778,14 +900,11 @@ export async function copyIntoTarget(
       });
       return;
     case "docker": {
-      const result = await execa(
+      const { exitCode, stderr } = await runExeca(
+        `docker cp ${localAbs} ${transport.container}:${targetAbs}`,
         "docker",
         dockerCpArgv(transport.container, localAbs, targetAbs),
-        { reject: false },
-      );
-      const { exitCode, stderr } = fromExeca(
-        `docker cp ${localAbs} ${transport.container}:${targetAbs}`,
-        result,
+        {},
       );
       if (exitCode !== 0) {
         throw new Error(

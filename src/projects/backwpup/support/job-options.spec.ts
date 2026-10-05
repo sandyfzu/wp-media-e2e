@@ -151,6 +151,11 @@ test.describe("readStoredJobs", () => {
     });
   });
 
+  test("reads a job's name, and an unnamed one as empty", async () => {
+    const jobs = await read("packed");
+    expect(jobs.map((job) => job.name)).toEqual(["First backup", ""]);
+  });
+
   // The distinction the whole reader rests on: an area the user never touched has no stored value
   // and must not be reported as included, or a scenario would "confirm" a plugin default it never
   // observed.

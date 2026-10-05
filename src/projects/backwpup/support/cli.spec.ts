@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
   backwpupCli,
+  commandLine,
   describeCli,
   noticesAt,
   outputLines,
@@ -219,6 +220,71 @@ test.describe("describeCli", () => {
     expect(described).toContain("…");
     expect(described.length).toBeLessThan(1100);
   });
+
+  const KEY = "3f".repeat(32);
+
+  // A failure message is kept in reports; a key in it would outlive the scenario it protected.
+  test("hides a --key value in the command it names", () => {
+    const described = describeCli(
+      resultOf({
+        argv: ["backwpup", "backup-encrypt", "a.tar", `--key=${KEY}`],
+        exitCode: 1,
+        stderr: "Error: boom",
+      }),
+    );
+    expect(described).toBe(
+      "`wp backwpup backup-encrypt a.tar --key=<hidden>` exited 1:\nError: boom",
+    );
+  });
+
+  test("hides a key file's path the same way", () => {
+    expect(
+      describeCli(
+        resultOf({
+          argv: [
+            "backwpup",
+            "backup-decrypt",
+            "a.tar",
+            "--key=.e2e_temp/private/x/private.pem",
+          ],
+        }),
+      ),
+    ).toBe(
+      "`wp backwpup backup-decrypt a.tar --key=<hidden>` exited 0 with no output",
+    );
+  });
+
+  test("hides the key wherever the output repeats it", () => {
+    const described = describeCli(
+      resultOf({
+        argv: ["backwpup", "backup-encrypt", "a.tar", `--key=${KEY}`],
+        stdout: `used ${KEY}`,
+        stderr: `Error: bad key ${KEY}.`,
+      }),
+    );
+    expect(described).not.toContain(KEY);
+    expect(described).toContain("used <hidden>");
+    expect(described).toContain("bad key <hidden>.");
+  });
+
+  // Hidden before the excerpt is cut, so no stretch of the key survives at the cut.
+  test("leaves no part of a key at the point the output is cut", () => {
+    const described = describeCli(
+      resultOf({
+        argv: ["backwpup", "backup-encrypt", "a.tar", `--key=${KEY}`],
+        stdout: `${"x".repeat(990)}${KEY}`,
+      }),
+    );
+    expect(described).not.toContain(KEY.slice(0, 10));
+  });
+
+  test("leaves arguments that only look like a key alone", () => {
+    expect(
+      describeCli(
+        resultOf({ argv: ["backwpup", "job", "--keyring=a", "--key="] }),
+      ),
+    ).toBe("`wp backwpup job --keyring=a --key=` exited 0 with no output");
+  });
 });
 
 test.describe("outputLines", () => {
@@ -244,7 +310,7 @@ test.describe("outputLines", () => {
 
 test.describe("parseJsonList", () => {
   test("parses a JSON array", () => {
-    expect(parseJsonList('[{"job_id":3}]', "backwpup job")).toEqual([
+    expect(parseJsonList('[{"job_id":3}]', ["backwpup", "job"])).toEqual([
       { job_id: 3 },
     ]);
   });
@@ -252,19 +318,58 @@ test.describe("parseJsonList", () => {
   // Some commands print nothing rather than `[]` for an empty result, and from out here the two
   // are the same answer. A scenario that needs the literal reply asserts on stdout.
   test("reads an empty string as an empty list", () => {
-    expect(parseJsonList("   ", "backwpup job")).toEqual([]);
+    expect(parseJsonList("   ", ["backwpup", "job"])).toEqual([]);
   });
 
   // Returning [] here would turn a broken command into a passing "nothing there yet".
   test("refuses output that is not JSON", () => {
-    expect(() => parseJsonList("No logs found.", "backwpup log")).toThrow(
+    expect(() => parseJsonList("No logs found.", ["backwpup", "log"])).toThrow(
       /did not return JSON/,
     );
   });
 
   test("refuses JSON that is not a list", () => {
-    expect(() => parseJsonList('{"job_id":3}', "backwpup job")).toThrow(
+    expect(() => parseJsonList('{"job_id":3}', ["backwpup", "job"])).toThrow(
       /expected a JSON array/,
+    );
+  });
+
+  // Named as `describeCli` names it: a key hidden in the command, and where the output repeats it.
+  test("hides a --key value in the command it names and the output it quotes", () => {
+    const key = "7c".repeat(32);
+    const parse = (): unknown =>
+      parseJsonList(`Error: bad key ${key}`, [
+        "backwpup",
+        "backup-decrypt",
+        `--key=${key}`,
+      ]);
+    expect(parse).toThrow(
+      "`wp backwpup backup-decrypt --key=<hidden>` did not return JSON. Output was: Error: bad " +
+        "key <hidden>",
+    );
+    expect(parse).not.toThrow(key);
+  });
+});
+
+test.describe("commandLine", () => {
+  test("names the command as WP-CLI runs it", () => {
+    expect(commandLine(["backwpup", "job", "--format=count"])).toBe(
+      "wp backwpup job --format=count",
+    );
+  });
+
+  test("hides a --key value, and leaves what only looks like one alone", () => {
+    expect(
+      commandLine([
+        "backwpup",
+        "backup-encrypt",
+        "a.tar",
+        "--key=.e2e_temp/private/x/public.pem",
+        "--keyring=a",
+        "--key=",
+      ]),
+    ).toBe(
+      "wp backwpup backup-encrypt a.tar --key=<hidden> --keyring=a --key=",
     );
   });
 });

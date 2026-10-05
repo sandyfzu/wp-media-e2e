@@ -158,21 +158,29 @@ shared fixtures:
 
 BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds `onboarding`, `firstBackup`,
 `dashboard`, `dataSelection`, `frequency`, `storages`, `jobRun`, `backupHistory`, `restore`
-(edition-aware), `plugins`, `cli`, `markers`, `archives` and `downloads`. `cli` runs one `wp backwpup …`
+(edition-aware), `plugins`, `cli`, `markers`, `archives`, `privateFolder`, `keys`, `jobExports` and `tablePadding`. `cli` runs one `wp backwpup …`
 subcommand and remembers the result for the step that asserts on it — for the feature where the
 **command is the system under test**, so a refusal is returned rather than thrown (`support/cli.ts`);
 use `support/backups.ts` when WP-CLI is only arranging or checking a site, since that one throws. A
 command names what the plugin allocates in braces — `{job}`, `{oldest backup}`, `{newest log}`,
-`{download folder}` — filled as it runs, from the site or from the scenario's own record of what it
-made there (`support/placeholders.ts`); a misspelt one is refused by name, and the text as written
-may not name a path off the site.
+`{path to the newest backup}`, `{private folder}`, `{encryption key}`, `{public key file}` — filled as
+it runs, from the site or from the scenario's own record of what it made there
+(`support/placeholders.ts`); a misspelt one is refused by name, and the text as written may not name
+a path off the site. A `--key=` value never appears in a message naming the command (`commandLine` hides it — `describeCli`, time limits, parse errors).
 `markers` plants a random value in the site's files and another in its database, and removes both
 afterwards, so a scenario can ask an archive what it actually captured. Requesting it _plants_ them,
 so it must be requested before the backup under inspection runs. `archives` records each archive a
 scenario's backups left, with its digest, as it was made — what "byte for byte" and "the oldest
-backup" are measured against; `downloads` is the scenario's own folder in the site's staging area for
-`backup-download` — private to the transport's user, since the web server serves what it can read
-there — removed afterwards only if a step used it. See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
+backup" are measured against; `privateFolder` is the scenario's own folder in the site's staging
+area for the files a command writes or reads — a download, an export, a key — private to the
+transport's user, since the web server serves what it can read there, and removed afterwards only if
+a step used it. `keys` draws the scenario's encryption keys (two hex keys, an RSA pair placed in that
+folder) the first time a placeholder names one; `jobExports` records a digest of the site's jobs as
+each export is arranged, what "as they were" is measured against; `tablePadding` pads the site's
+database with empty tables of its own (`<prefix>e2e_pace_NNN`) so a paced backup, which pauses once
+per table, lasts as long on every site — removed after the `@plugin` teardown, only if a step padded.
+Padding can never pile up (fixed names, and every padding drops the last first), and what a killed run
+left is dropped when the next BackWPup run's worker starts (`leftoverPaddingSweep`, automatic). See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
 the pattern, the locator policy, and the locator-contract spec every page object carries.
 
 ## Shared scenario hooks
@@ -377,6 +385,10 @@ ssh). Highlights — full reference in
 **[docs/architecture/wordpress-automation.md](docs/architecture/wordpress-automation.md)**:
 
 - Commands are file + args arrays (never shell strings) → no injection.
+- **An exec error names the program and the reason, never the arguments** — on every transport,
+  since the argv carries `--key=` values and every value a snippet embeds. Never pass on execa's
+  `message`/`shortMessage`/`command`, nor attach its error as a `cause`; name a BackWPup command
+  through `commandLine` (`support/cli.ts`), which hides a `--key=` value.
 - `exec` / `wpCli` return a structured `ExecResult`; callers branch on `exitCode`.
   Every command runs with the WordPress root as its working directory (`rootDir` for
   `local`/`ssh`, the container `WORKDIR` for `docker`), and with no input — nothing is ever typed
@@ -422,6 +434,9 @@ ssh). Highlights — full reference in
   otherwise list as empty and pass "it was deleted" (`missingAsEmpty` only for one a scenario may
   never have made); `listLocatedFiles` does the same for a directory only the site can name. `backdateFile` sets a file's age back by the
   site's own clock. All computed on the site, so nothing large moves to answer the question.
+  `locateFromWorkingDir` / `pathFromWorkingDir` give the path a command run in WP-CLI's working
+  directory reaches a site path by, from the site's own `realpath()` and `getcwd()` — never from the
+  configured paths, which a symlinked root would send somewhere else.
 - [`wp/archive.ts`](src/common/wp/archive.ts) looks **inside** a tar on the site without moving it —
   `findArchiveEntries` (by name or glob) and `readArchiveEntry`. Naming the member keeps the _output_
   small, not the work: without `--occurrence` tar scans to the end regardless, and on a compressed
@@ -446,7 +461,8 @@ ssh). Highlights — full reference in
   `stageAndInstallPlugin` does it for you when given the plugin's `slug` — pass it.
 - [`wp/paths.ts`](src/common/wp/paths.ts) holds the guards that stand between a typo and a
   privileged command on a real system path — `normaliseSitePath`, `assertSafeElevatedTarget`,
-  `pluginSitePath` — in one place, because a copied guard is a guard that drifts. Every operation
+  `pluginSitePath`, and `isPathSegment`, the one-segment rule every joined name passes — in one
+  place, because a copied guard is a guard that drifts. Every operation
   that builds an elevated target out of a site's `rootDir` (residue removal, data-directory
   preparation, ownership normalisation) validates through them. Those guards are **lexical**, so
   where a path really leads is checked separately: `assertResolvedInsideRoot` resolves the target and
@@ -663,7 +679,8 @@ Update it when you change anything about:
   `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`).
 - The WP-Cron helpers (`cron.ts`: `nextScheduled`, `triggerScheduledEvent`).
 - The PHP bridge (`php.ts`: `phpLiteral`, `evalPhp`, `EvalPhpOptions`), the file readers (`files.ts`:
-  `fileChecksum`, `listFiles`, `listLocatedFiles`, `FILE_LIST_PHP`, `backdateFile`), or archive inspection (`archive.ts`:
+  `fileChecksum`, `listFiles`, `listLocatedFiles`, `FILE_LIST_PHP`, `backdateFile`, `pathFromWorkingDir`,
+  `locateFromWorkingDir`), or archive inspection (`archive.ts`:
   `findArchiveEntries`, `readArchiveEntry`).
 - Any other `wp/` module (`cache.ts`, `db.ts`, `errors.ts`, `teardown.ts`).
 

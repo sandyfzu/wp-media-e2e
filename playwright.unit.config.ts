@@ -14,5 +14,8 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "src",
   testMatch: /\.spec\.ts$/,
+  // A folder of its own: Playwright empties its output folder as a run starts, and the default —
+  // `test-results/` — holds a live cell run's results too, which a unit run beside it would wipe.
+  outputDir: "test-results/unit",
   reporter: [["list"]],
 });

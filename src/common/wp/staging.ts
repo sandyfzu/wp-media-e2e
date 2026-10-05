@@ -11,7 +11,7 @@ import {
   wpRootDir,
 } from "./exec";
 import { normalizeOwnership } from "./ownership";
-import { pluginSitePath } from "./paths";
+import { isPathSegment, pluginSitePath } from "./paths";
 import { installPlugin } from "./plugin";
 import type { InstallPluginOptions } from "./plugin";
 import type { Transport } from "../config/types";
@@ -89,13 +89,7 @@ export function stagingPath(root: string, ...segments: string[]): string {
 
 /** @throws Error unless `segment` is a single, non-empty, non-traversing path segment. */
 function assertSegment(segment: string): void {
-  const invalid =
-    segment === "" ||
-    segment === "." ||
-    segment === ".." ||
-    segment.includes("/") ||
-    segment.includes("\\");
-  if (invalid) {
+  if (!isPathSegment(segment)) {
     throw new Error(
       `[wp/staging] "${segment}" is not a valid staging path segment: it must be a single ` +
         'non-empty name, without "/" or "\\", and not "." or "..".',

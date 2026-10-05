@@ -28,7 +28,8 @@ import type { SshTransport } from "../config/types";
 // The few parts of ssh2's server API used here — the package ships no type declarations.
 interface ExecStream {
   write(data: string): void;
-  exit(code: number): void;
+  /** A number is an exit status; a string, the signal the command was killed by. */
+  exit(statusOrSignal: number | string): void;
   end(): void;
 }
 interface SftpSession {
@@ -175,6 +176,12 @@ test.beforeAll(async () => {
           // A command that never answers, standing in for a long backup: the test breaks the
           // connection underneath it.
           if (info.command.includes("sleep")) return;
+          // A command killed by a signal before it could exit.
+          if (info.command.includes("kill-me")) {
+            stream.exit("TERM");
+            stream.end();
+            return;
+          }
           stream.write("answered\n");
           stream.exit(0);
           stream.end();
@@ -398,6 +405,28 @@ test("a link that goes silent under a running command fails that command once it
   await expect(pending).rejects.toThrow(
     /the connection to site\.test was lost \(Keepalive timeout\) while "sleep" was running/,
   );
+});
+
+// The argv carries what must never reach a report — a `--key=` value, a snippet's embedded values.
+test("a command killed by a signal names the program and the signal, never its arguments", async () => {
+  const failure = exec(transport(), "kill-me", ["--key=SECRET-ssh-planted"]);
+
+  await expect(failure).rejects.toThrow(
+    '[wp/exec] "kill-me" on site.test was terminated by signal SIGTERM before exiting.',
+  );
+  await expect(failure).rejects.not.toThrow(/SECRET/);
+});
+
+// Refused before a connection is even opened, in the words every transport uses.
+test("an argument holding a NUL byte is refused before anything is sent", async () => {
+  const opened = configs.length;
+
+  await expect(
+    exec(transport(), "echo", ["--key=SECRET-ssh-planted\0x"]),
+  ).rejects.toThrow(
+    '[wp/exec] refusing to run "echo": argument 1 holds a NUL byte, which no program can be handed.',
+  );
+  expect(configs.length).toBe(opened);
 });
 
 test("every connection is opened with the probing that gives a silent link up within a minute", async () => {

@@ -13,8 +13,11 @@ import { StorageSidebar } from "./pages/storage.sidebar";
 import { restorePage } from "./pages/restore.page";
 import { ArchiveSnapshot } from "./support/archive-snapshot";
 import { CliSession } from "./support/cli-session";
-import { DownloadFolder, downloadFolderKey } from "./support/download-folder";
+import { ScenarioKeys } from "./support/encryption-keys";
+import { JobExports } from "./support/job-transfer";
 import { removeMarkers, seedMarkers } from "./support/markers";
+import { PrivateFolder, privateFolderKey } from "./support/private-folder";
+import { TablePadding, sweepPaddingLeftovers } from "./support/table-padding";
 import type { RestorePage } from "./pages/restore.page";
 import type { SiteMarkers } from "./support/markers";
 
@@ -81,11 +84,29 @@ interface BackWPupFixtures {
    */
   markers: SiteMarkers;
   /**
-   * The scenario's own folder on the site for `backup-download` to write into, which a command
-   * names as `{download folder}`. Free to request: nothing is created until a step uses it, and
-   * only then is it removed afterwards, best-effort.
+   * The scenario's own folder on the site, private to the transport's user, for the files a command
+   * writes or reads there — a download, an export, a key — which a command names as
+   * `{private folder}`. Free to request: nothing is created until a step uses it, and only then is it
+   * removed afterwards, best-effort.
    */
-  downloads: DownloadFolder;
+  privateFolder: PrivateFolder;
+  /**
+   * The keys the scenario encrypts and decrypts with — drawn for it, named in a command only by a
+   * placeholder, the key pair's files placed in {@link BackWPupFixtures.privateFolder}. Free to
+   * request: nothing is drawn until a placeholder asks.
+   */
+  keys: ScenarioKeys;
+  /**
+   * Empty tables of the scenario's own in this site's database, so a paced database backup lasts as
+   * long on every site. Free to request: nothing is created until a step pads, and only then are they
+   * removed afterwards — after the `@plugin` teardown, so no backup is still dumping them.
+   */
+  tablePadding: TablePadding;
+  /**
+   * The job exports the scenario arranged, each with a digest of the site's jobs when it was made —
+   * what "the site's jobs are as they were" is measured against.
+   */
+  jobExports: JobExports;
   /**
    * The archives the scenario's backups left, as they were when made — what "still on the site,
    * byte for byte" is measured against. The steps that make backups record into it.
@@ -93,7 +114,24 @@ interface BackWPupFixtures {
   archives: ArchiveSnapshot;
 }
 
-export const test = base.extend<BackWPupFixtures>({
+interface BackWPupWorkerFixtures {
+  /**
+   * Automatic, once per worker before its first scenario: drops any padding tables an earlier run
+   * left on the bound site — one killed before its teardown, or whose removal failed. Best-effort,
+   * like the shared `releaseBoundSite`.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- Playwright's type for a fixture that produces no value.
+  leftoverPaddingSweep: void;
+}
+
+export const test = base.extend<BackWPupFixtures, BackWPupWorkerFixtures>({
+  leftoverPaddingSweep: [
+    async ({ boundSite }, use) => {
+      await sweepPaddingLeftovers(boundSite);
+      await use();
+    },
+    { scope: "worker", auto: true, box: true },
+  ],
   onboarding: async ({ page }, use) => {
     await use(new OnboardingPage(page));
   },
@@ -132,13 +170,25 @@ export const test = base.extend<BackWPupFixtures>({
     await use(planted);
     await removeMarkers(site.transport);
   },
-  downloads: async ({ site }, use, testInfo) => {
-    const folder = new DownloadFolder(
+  privateFolder: async ({ site }, use, testInfo) => {
+    const folder = new PrivateFolder(
       site.transport,
-      downloadFolderKey(testInfo),
+      privateFolderKey(testInfo),
     );
     await use(folder);
     await folder.release();
+  },
+  keys: async ({ privateFolder }, use) => {
+    await use(new ScenarioKeys(privateFolder));
+  },
+  tablePadding: async ({ site }, use) => {
+    const padding = new TablePadding(site.transport);
+    await use(padding);
+    await padding.release();
+  },
+  // eslint-disable-next-line no-empty-pattern -- Playwright derives deps from this destructuring; this fixture has none.
+  jobExports: async ({}, use) => {
+    await use(new JobExports());
   },
   // eslint-disable-next-line no-empty-pattern -- Playwright derives deps from this destructuring; this fixture has none.
   archives: async ({}, use) => {

@@ -108,10 +108,15 @@ log's file name — so it names it in braces, and the value is read when the com
 ([`support/placeholders.ts`](../../src/projects/backwpup/support/placeholders.ts)): `{job}` is the
 scheduled job's id; `{oldest backup}` / `{newest backup}` the archive of the first / latest backup
 the scenario made, fixed as they were made; `{oldest log}` / `{newest log}` the log of the first /
-latest run the backup history records; `{download folder}` a folder of the scenario's own on the
-site, relative to the directory WP-CLI runs in (the WordPress root); and `{path from the log folder
-to the marker file}` a path out of BackWPup's log folder to the `markers` fixture's file, proved on
-the site to lead there. So `When I run the BackWPup command "backup-delete {oldest backup} --yes"`
+latest run the backup history records; `{path to the oldest backup}` / `{path to the newest backup}`
+that same archive as a path from the directory WP-CLI runs in (the WordPress root), which is how
+`backup-encrypt` and `backup-decrypt` take one; `{private folder}` a folder of the scenario's own on
+the site, relative to that directory; `{encryption key}` / `{another encryption key}` two hex keys
+drawn for the scenario, and `{public key file}` / `{private key file}` an RSA pair drawn for it and
+placed in the private folder; and `{path from the log folder to the marker file}` a path out of
+BackWPup's log folder to the `markers` fixture's file, proved on the site to lead there. A `--key=`
+value never appears in a message about the command — a failed assertion (`describeCli`), a time
+limit, a JSON parse error: each names it through `commandLine`, and hides it in the output too. So `When I run the BackWPup command "backup-delete {oldest backup} --yes"`
 sends one real file name. Each value is asked for only when a command uses it, and must fit in one
 argument. Whatever sits in braces is read as a placeholder's name, so one no step knows — `{job_id}`
 for `{job}` — is refused, naming the ones it does, and so is a stray brace. And the text as written
@@ -147,20 +152,36 @@ of BackWPup's own settings first (`Given BackWPup's "…" setting is "…"`, whi
 Settings screen does not offer): **Reduce server load** at `maximum` stretches the run to several
 seconds, and a **Maximum number script execution time (in seconds)** — the screen's own words — of
 `0` keeps it in one request, since the plugin otherwise hands a long run to a fresh request midway
-and a command landing in that handover is answered about a job that is briefly not there.
+and a command landing in that handover is answered about a job that is briefly not there. The pause
+is paid once per **table**, so the paced run's length is the site's table count — 3.5 s on a site
+with 18, barely longer than a command takes to land. `Given the site's database holds at least 100
+tables` pads the database with empty tables of the scenario's own (`<prefix>e2e_pace_NNN`), which
+makes it about 11 s on every cell; the **`tablePadding`** fixture removes them after the `@plugin`
+teardown, so no backup is still dumping them ([`support/table-padding.ts`](../../src/projects/backwpup/support/table-padding.ts)).
+A run killed before that teardown leaves them behind, so every BackWPup worker drops leftover padding
+before its first scenario (`leftoverPaddingSweep`, an automatic worker fixture) and says how many it
+removed; and since the names are fixed and each padding drops the last one first, a site never holds
+more than one padding's worth. The snippets are run against a fake `$wpdb` in
+[`table-padding.php.spec.ts`](../../src/projects/backwpup/support/table-padding.php.spec.ts),
+which skips where PHP is not installed.
 
 Two more fixtures serve the commands that act on files. **`archives`** records the digest of every
 archive a scenario's backups left, the moment they were made, so "still on the site, byte for byte"
 compares against the run's own output and "the oldest backup" means one file for the rest of the
 scenario — the steps that make backups (`Given the scheduled job has made 2 backups inside WP-CLI`,
-or `… through the web server`, which decides who owns the files) record into it. **`downloads`** is
-a folder of the scenario's own inside the site's staging area, for `backup-download` to write into.
-It is created private to the transport's user, because the web server serves anything it can read
-there and the copy is a whole database, and handed to the command by a path worked out on the site
-from where the folder and WP-CLI really are — so a symlink on the way cannot send the copy elsewhere.
-It costs nothing until a step uses it, and is removed after the scenario only if one did
-([`support/archive-snapshot.ts`](../../src/projects/backwpup/support/archive-snapshot.ts),
-[`support/download-folder.ts`](../../src/projects/backwpup/support/download-folder.ts)).
+or `… through the web server`, which decides who owns the files) record into it.
+**`privateFolder`** is a folder of the scenario's own inside the site's staging area, for the files
+a command writes or reads — a download, an export, a key file. It is created private to the
+transport's user, because the web server serves anything it can read there and what lands in it can
+be a whole database, and handed to a command by a path worked out on the site from where the folder
+and WP-CLI really are — so a symlink on the way cannot send a file elsewhere. It costs nothing until
+a step uses it, and is removed after the scenario only if one did. **`keys`** draws the scenario's
+encryption keys when a placeholder first names one, and **`jobExports`** records a digest of the
+site's jobs as each export is arranged, which "the site's backup jobs are as they were" compares
+against ([`support/archive-snapshot.ts`](../../src/projects/backwpup/support/archive-snapshot.ts),
+[`support/private-folder.ts`](../../src/projects/backwpup/support/private-folder.ts),
+[`support/encryption-keys.ts`](../../src/projects/backwpup/support/encryption-keys.ts),
+[`support/job-transfer.ts`](../../src/projects/backwpup/support/job-transfer.ts)).
 
 The last fixture behaves like none of the others: **`markers`** plants a random value in a file
 under the site's content directory and another in a `wp_options` row, so a scenario can ask an
@@ -367,4 +388,7 @@ locator contract is covered by the same command. They run with **no external
 environment**: the WP-CLI layer is exercised through a stub `wp` on `PATH`, and page
 objects against `page.setContent()` fixtures. They are kept separate from the BDD product
 configs, whose generated specs live in `.features-gen/` (outside `src/`). Add a
-`*.spec.ts` next to any non-trivial module you add.
+`*.spec.ts` next to any non-trivial module you add. A snippet whose PHP must be run to be trusted —
+one that drops tables, say — can be driven against a fake `$wpdb` with the local `php`
+([`table-padding.php.spec.ts`](../../src/projects/backwpup/support/table-padding.php.spec.ts));
+such a spec skips where PHP is not installed, as in CI.

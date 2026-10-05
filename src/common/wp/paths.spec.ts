@@ -3,6 +3,7 @@ import { test, expect } from "@playwright/test";
 import {
   PROTECTED_SITE_PATHS,
   assertSafeElevatedTarget,
+  isPathSegment,
   normaliseSitePath,
   pluginSitePath,
 } from "./paths";
@@ -84,6 +85,27 @@ test.describe("normaliseSitePath", () => {
   });
 });
 
+test.describe("isPathSegment", () => {
+  test("accepts one plain name, dots and all", () => {
+    for (const name of [
+      "backwpup-pro",
+      "job.json",
+      ".htaccess",
+      "a..b",
+      "...",
+    ]) {
+      expect(isPathSegment(name), name).toBe(true);
+    }
+  });
+
+  // Each of these would lead somewhere other than a name inside the directory it is joined onto.
+  test("refuses nothing, the directory itself, its parent, and anything holding a separator", () => {
+    for (const name of ["", ".", "..", "a/b", "/a", "a/", "a\\b", "..\\evil"]) {
+      expect(isPathSegment(name), name).toBe(false);
+    }
+  });
+});
+
 test.describe("pluginSitePath", () => {
   test("composes the path a plugin's files live at", () => {
     expect(pluginSitePath("backwpup-pro")).toBe(
@@ -94,7 +116,15 @@ test.describe("pluginSitePath", () => {
   // The result is composed into a path a privileged `chown -R` acts on, and `posix.join` would
   // resolve `..` straight back out into a directory WordPress owns.
   test("refuses a slug that is not a single segment", () => {
-    for (const bad of ["", ".", "..", "a/b", "../evil", "wp-content/plugins"]) {
+    for (const bad of [
+      "",
+      ".",
+      "..",
+      "a/b",
+      "../evil",
+      "wp-content/plugins",
+      "a\\b",
+    ]) {
       expect(() => pluginSitePath(bad), bad).toThrow(
         /not a usable plugin slug/,
       );

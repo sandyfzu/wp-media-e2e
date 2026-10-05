@@ -1,6 +1,6 @@
 # Phase 6 — Feature porting: BackWPup first
 
-> **Status:** in progress — **6A, 6B, 6C, 6D and 6E are done**; 6F in progress (**6F.0–6F.3 done**; 6F.4 next), 6G–6J planned;
+> **Status:** in progress — **6A, 6B, 6C, 6D, 6E, 6F and 6G.0 are done** (6G.0 shipped, §2.25, §4.6G.0); **6G next**; 6G–6K planned (6K — restore from `.zip` and `.tar.gz` — added 2026-10-05, last in the sequence and required to close the phase);
 > **6H.2 deferred** (needs storage credentials — see §4.6H.2).
 > **Date:** 2026-07-28; revised 2026-07-30 (§2.3 re-verification at the ref; storage split),
 > 2026-07-31 (§2.5 — post-implementation audit of 6B; four corrections, all verified live),
@@ -45,22 +45,45 @@
 > 2026-09-24 (§2.21, §4.6J — **6J planned**: the staging area stays where and as it is, and the web
 > server is told not to serve it — a `.htaccess` written with it, an nginx include for operators, and
 > a pre-flight probe that measures the result; **V142–V145** added, both guards measured on the
-> docker env's own Apache and nginx images).
+> docker env's own Apache and nginx images) and 2026-09-24 (§2.22 — **6F.4 measured before it is
+> built**; **V146–V167** added. `backup-encrypt` without a key, on a site that never saved one, destroys
+> the archive and reports success — and so does every scheduled backup whose settings name RSA without a
+> key; a wrong-length key crashes it; encrypting twice cannot be undone; decrypt cuts bytes it takes for
+> padding, though never from the plugin's own archives; `--passwords` exports the site's database
+> password, and importing it stores the password in clear; an import overwrite is a merge, and an import
+> that fails part-way keeps what it wrote; with archive encryption on, foreground runs die of a memory
+> limit the job set itself. Two source-read predictions refuted; **§4.6F.4 revised** against it all)
+> and 2026-09-27 (§2.23, §4.6F.4 — **6F.4 shipped and audited**; **V168–V175** added. `develop`
+> moved to `af1ab5c`, vendored libraries only, and every fact 6F.4 rests on was measured again
+> there; the audit found the export scenario passing an export that carried nothing but its job's
+> id — now held both ways — and a key-length rule that was the suite's choice, not the plugin's;
+> the full `pro@nginx` run met V122's race in a new form, a PHP fatal in the host's own cron
+> request) and 2026-09-28 (§2.24, §4.6G.0 — **6G.0 planned**, to ship before 6G; **V176–V179** added.
+> On `local` and `docker` a command that cannot start, is killed or overflows its output cap throws
+> an error quoting its whole argv, keys included; `ssh` never does) and 2026-09-29 (§2.25, §4.6G.0 —
+> **6G.0 shipped**; **V180–V184** added. Exec errors name the program and the reason, never the
+> arguments, on every transport; a NUL byte is refused before any transport; `parseJsonList` hides a key too) and 2026-09-30 (§2.26 — **V184 fixed**;
+> **V185–V187** added. A paced database backup pauses once per table, so `cli-running-job.feature`'s
+> window was each site's table count — 3.5 s on `pro@apache`; its database is now padded to 100 tables)
+> and 2026-10-05 (§2.26 — **V188**: a killed run's padding is swept by the next BackWPup run) and
+> 2026-10-05 (§2.27, §4.6G, §4.6K — **6G widened, 6K added**; **V189–V192** added. 6G now also restores
+> backups *made* files-only or database-only, and asserts the half a partial restore skips is untouched;
+> `.zip` and `.tar.gz` restores — each unpacked by different code, in the UI and the CLI alike — are 6K).
 > **Parent:** [e2e-modernization-plan.md](e2e-modernization-plan.md) §9, Phase 6 — this doc supersedes
 > that phase's summary. Phases 0–5 are done; Phase 6 is **feature content on finished rails**.
 > **Baseline (reference only):** `wp-rocket-e2e/src/backwpup/` — 12 feature files, 28 scenarios, ~1.6k LoC.
 
 ## TL;DR
 
-Phase 6 splits into **eleven sub-phases**, of which 6F is broken down further (6F.0–6F.4). **6A** lands the shared rails every product needs (plugin
+Phase 6 splits into **thirteen sub-phases**, of which 6F is broken down further (6F.0–6F.4). **6A** lands the shared rails every product needs (plugin
 install/cleanup hooks, the debug-log gate, `@mobile`, an anti-pattern lint gate). **6B–6I** port
 BackWPup — **page objects first (6B)**, then onboarding → backup & history → plugin deletion →
 WP-CLI → restore → the storage credential surface → Free-edition coverage + the parity gate. The
 storage *round-trips* are carved out as **6H.2** and **deferred** until credentials exist, so no
 other sub-phase waits on them. **6J** is shared rails again, product-agnostic like 6A: it keeps the
-staging area off the web. WP Rocket reuses 6A and gets its own breakdown afterwards (§6).
+staging area off the web. **6K** closes the restore work: `.zip` and `.tar.gz` archives, after 6G's `.tar`. WP Rocket reuses 6A and gets its own breakdown afterwards (§6).
 
-**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → **6F** (6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → 6F.3 ✅ → 6F.4) → 6G → 6H → 6I → 6J → *(later)* 6H.2. 6J depends on nothing and can be pulled forward.
+**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → 6F ✅ (6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → 6F.3 ✅ → 6F.4 ✅) → 6G.0 ✅ → **6G** → 6H → 6I → 6J → 6K → *(later)* 6H.2. 6J depends on nothing and can be pulled forward; 6K needs only 6G.
 
 Every artifact follows **Understand → Improve → Adapt → Port** (§1): read the baseline for *intent*,
 verify the plugin's real contract in source, pick the strongest signal Playwright/WP-CLI offers, then
@@ -586,7 +609,7 @@ was left as found. A row read from source rather than provoked says so.
 | V109 | **The history records which context ran a job**: `backup_trigger` `wp-cli` for a foreground run, `backup_now_job` for `--background`. A foreground database run finishes inside WP-CLI in ~2 s on `pro@nginx` and ~1.5 s on `free@nginx`, although both CLIs have `memory_limit = -1`. | Measured, both cells; `get_backup_trigger()` maps `runcli` → `wp-cli`, `runnow` → `backup_now_job`. | V82 holds on both nginx cells; V41's memory death belongs to `wp cron event run`, not to `run`. The two triggers are what the foreground and background scenarios assert. |
 | V110 | **`run`'s refusals, all exit 1**: no argument → `No job ID(s) or pram specified!`; `--background` with several ids → `Background job run not works with more than one job_id!`, decided on the count before any id is looked up; an unknown id in the foreground → `Job ID does not exist!` — also the answer for the hidden first-backup placeholder; and while a job runs, **both** forms → `A job is already running.`, checked before the arguments are read. | Measured, both cells (the wording, slips included, is the plugin's). `src/Cli/Commands/Run.php`. | Pinned by two scenarios. V107's `Wrong BackWPup JobID` is unreachable from `run`, which refuses an unknown id first. |
 | V111 | **`run <unknown id> --background` reports success**: `Success: Job "" runs now in background.`, exit 0 — the name is `BackWPup_Option::get( <id>, 'name' )`, `null` for a job that does not exist — and the site's `start_http()` then drops the request with an admin message. No log, no history row, nothing runs. | Measured on `pro@nginx`: log and history counts unchanged, nothing running 8 s later. | A plugin bug worth reporting upstream. Not pinned — a scenario asserting it would fail the day it is fixed. `startJobInBackground`'s TSDoc and the generic success step name it. |
-| V112 | **A database backup takes about a second — less than one WP-CLI round trip (~1.3 s over SSH).** Dispatch → marker → `completed`: 0.9 s on `pro@nginx`, 1.1 s on `free@nginx`. With "Reduce server load" at maximum (a 90 ms pause on every progress update) the same job takes ~10 s and ~6.5 s. A files-and-database job is still archiving 6 s in on both cells. | Sampler timelines, both cells. The setting's values are the Settings screen's (`parts/sidebar/settings-jobs.php`): 0, 10 000, 30 000, 90 000 µs. | No command sent after a start can find an unpaced database job still running, so `status`, `kill` and the "already running" refusal need a job arranged to last — `cli-running-job.feature` paces it with the plugin's own setting. |
+| V112 | **A database backup takes about a second — less than one WP-CLI round trip (~1.3 s over SSH).** Dispatch → marker → `completed`: 0.9 s on `pro@nginx`, 1.1 s on `free@nginx`. With "Reduce server load" at maximum (a 90 ms pause on every progress update) the same job takes ~10 s and ~6.5 s. **Refined by V185**: the pause is paid once per table, so these are each site's table count. A files-and-database job is still archiving 6 s in on both cells. | Sampler timelines, both cells. The setting's values are the Settings screen's (`parts/sidebar/settings-jobs.php`): 0, 10 000, 30 000, 90 000 µs. | No command sent after a start can find an unpaced database job still running, so `status`, `kill` and the "already running" refusal need a job arranged to last — `cli-running-job.feature` paces it with the plugin's own setting. |
 | V113 | **The plugin hands a long run to a fresh request midway** — after any step once the request has run over 3 s (measured), and, by its source, about 27 s into a long step (the default maximum execution time is 30 s). During the handover the marker holds pid 0 for ~0.3–0.4 s. A `kill` landing there finds no process: it either loses the abort (its own `update_working_data()` returns early when the last update is under a second old, so no `end()` ever runs and the row stays `created`), or runs the job's `end()` inside the `kill` process, which then exits without its success line. A **maximum script execution time of 0** — "0 means no maximum" on the Settings screen — keeps a run in one request. | Pid-0 windows measured: `pro@nginx` 9.40→9.83 s and 6.63→7.00 s, `free@nginx` 5.87→6.20 s; one pid from start to end with the setting at 0, both cells. The kill-in-a-handover outcomes are **read from source** (`user_abort()`, `update_working_data()`, `start_http( 'restart' )` in `inc/class-job.php`), not provoked. | `cli-running-job.feature` sets it to 0, so no command it sends can land in a handover. An abort that can be lost is worth reporting upstream. |
 | V114 | **`kill` against a running job**: the marker goes at once, the run notices within ~1 s, logs `Backup aborted!` and ends — history row `aborted`, log 0 errors and 2 warnings (the abort, and the "finished with warnings" summary it causes), no archive. The row still reads `created` for ~0.4–1 s after the kill. | 7 aborts, paced database and files-and-database jobs, both cells. | "Nothing is running" is not "the run has ended". The abort scenario and the teardown's stop both wait for the row to leave `created` — the signal the dashboard's own abort handler polls (`job-abort-status`). |
 | V115 | **`status` reports `Job finished.` for a run that was aborted under it.** Its loop ends the moment the marker disappears, which `kill` causes, and it reads the log header about a second before the job logs the abort. Watched to its natural end it is right: it blocked ~6.8 s (`free@nginx`) and ~9.9 s (`pro@nginx`) and returned after the row was `completed`. | Measured on `pro@nginx`: blocked 8.2 s, then `Success: Job finished.` at exit 0 for a row `aborted` with 2 warnings in its log. `src/Cli/Commands/Status.php` — the verdict is read after the `while` loop. | A plugin bug worth reporting upstream; not pinned. The `status` scenario watches a natural end, and its feature says why. |
@@ -790,6 +813,117 @@ drafts, exactly as written there.
 | V144 | **nginx applies the include wherever it sits in `server {}`.** It picks the longest matching prefix before any regex, and `^~` on that prefix skips the regexes. Placed *after* the vhost's `\.php$` and static-asset regexes, it still denied `.php` and `.css` under the root and the normalised forms `/%2ee2e_temp/…` and `/x/../.e2e_temp/…`; the `.htaccess` — served as a plain file without the include — was denied too. | nginx's `ngx_http_core_module` docs (`location`); measured as above. | Operators can include it anywhere in the site's server block, and the file says so. |
 | V145 | **The nginx cells name themselves, and sometimes go unanswered.** Both send `server: nginx/1.24.0 (Ubuntu)`. A missing file under `.e2e_temp/` answers WordPress's own 404 page (404, `text/html`, 52–59 KB, ~1 s). Several requests in a row then got no answer for 15–60 s, and both cells answered again minutes later. | `curl` from the runner. | The `Server` header is there to show, never to branch on; the probe's verdict is its own content, never a status; and its wait is bounded, with no answer reported as *could not check*. |
 
+### 2.22 Facts established measuring 6F.4 before building it (live, on `pro@nginx`, at `develop@f1ebfd0`)
+
+`develop` was still `f1ebfd05` (GitHub: identical, 0 commits ahead), and the zip the cell installs is
+APVM's cached build byte for byte. A scratch driver installed BackWPup Pro with the lifecycle's own
+`installPluginUnderTest` and `finishActivation`, onboarded one database job (`.tar`, monthly) with
+`completeOnboarding`, made each archive with `runJobInForeground` — once with `startJobInBackground` —
+and drove the four Pro-only commands through their round trips, refusals and edges, every archive's
+SHA-256 read before anything touched it and its folder read afterwards for temporary files. Secrets were
+compared on the site and never printed; the throwaway RSA pair sat in a `0700` folder. Two claims were
+also reproduced locally, with the plugin's own classes on PHP 8.1 (V146's coercion, V149's exception
+class). The site was left as found: plugin absent, no `backwpup`/`bwpup` option or table, no BackWPup
+uploads, no staging area. Its `debug.log` (242 bytes, not read) was cleared by the first install, as
+every `@plugin` scenario clears it. Follow-up runs the same day (V163–V167) — an import of a
+`--passwords` export, an overwrite from an edited export, the Encryption panel's settings and the jobs'
+own archive encryption — each started from a fresh install and ended with the site verified clean, on
+WordPress 7.1.2 and PHP 8.3.33 (CLI). **Two of the predictions this pass was built to check were wrong**
+(V149's exit code, V153's reach), and a crash first taken for the jobs' encryption failing was a memory
+limit (V167) — which is why each was measured.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V146 | **`backup-encrypt` without `--key`, on a site whose encryption settings were never saved, destroys the archive and reports success.** The command reads `backwpup_cfg_encryption` with no default, gets `false`, and takes the RSA branch with `backwpup_cfg_publickey` — also `false`, which its non-strict file hands to `EncryptionStream` as `''` — so the stream falls back to AES under the `Random::string( 32 )` key the command generated and never keeps. It prints `Asymmetric encryption will be used for the archive.`, then `Success: Archive has been successfully encrypted.` | Live, twice: all three settings absent; exit 0; the header written is `BACKWPUP`, version 2, type **1** (symmetric), +26 bytes; no option added, changed or removed (snapshot between the backup and the command); `backup-decrypt` then answers `No Key provided or stored in settings for decryption!` without a key and `Archive could not be decrypted. Maybe wrong key!` with one, the file unchanged. `src/Cli/Commands/BackupEncrypt.php`; the coercion reproduced locally. This call is the command's own first help example. | The most serious plugin bug the port has found, and the one to report upstream first: §2.16's exit-0 failure at its worst, a success that loses the backup. No scenario sends it — it would pin data loss. The settings path is covered with the settings saved (V148). |
+| V147 | **The symmetric round trip, measured.** A key of 32, 48 or 64 hex characters (AES-128/192/256) encrypts in place: `Symmetric encryption will be used for the archive.`, exit 0, the header `BACKWPUP`, version 2, type 1 and a 16-byte IV (+26 bytes, and up to 15 bytes of padding when the size is not a multiple of 16), and GNU tar no longer reads it (`This does not look like a tar archive`); `backup` still lists it under its name with the new size. `backup-decrypt` with the same key restores it byte for byte and leaves no temporary file. The archive is named by a **path**: relative to WP-CLI's working directory (the WordPress root) or absolute; its bare name is `Archive file that should be encrypted can't be found!` / `…decrypted can't be found!`. | Live: 42 284 544 → 42 284 570 → 42 284 544 bytes, SHA-256 equal; the same pair through `wp-content/uploads/backwpup/<hash>/backups/<archive>`; 32- and 48-hex round trips; encrypting an encrypted file added 26 + 6 bytes. | The round trip is asserted by digest, with the header and "no longer a tar" as the witness that encryption happened. 6F.4 needs a placeholder for the archive's path from WP-CLI's working directory, worked out on the site as `{download folder}` is (V135) — `{newest backup}` is a name, which the command refuses. |
+| V148 | **The settings path and RSA key files are self-contained round trips too.** With `backwpup_cfg_encryption = symmetric` and a saved `backwpup_cfg_encryptionkey`, both commands work without `--key`. `--key=<file>` switches both to RSA: a public key file (PEM, SPKI) → `Asymmetric…`, type 2, +284 bytes for RSA-2048; the private key file (PKCS#8) restores it byte for byte. Given the public key instead, decrypt answers `Cannot decrypt: The key that was loaded was not a private key`; given a hex key, `Cannot decrypt: Unable to read key`. | Live, each byte for byte or unchanged as stated, no temporary file left; the settings removed again afterwards. | Candidate scenarios beyond `--key=<hex>`; none needs storage credentials. The settings path writes `backwpup_cfg_*` options, which the footprint sweep already covers (`backwpup`). |
+| V149 | **A hex key of the wrong length crashes `backup-encrypt`** — at exit **1**, not the 255 predicted from source. `EncryptionStream`'s own check (`!$key && strlen( $key ) !== 32`) fires only on an empty key, so phpseclib's `AES::setKey()` throws `LengthException`, which the command's `catch ( \InvalidArgumentException )` does not catch; WordPress's fatal-error handler then answers `Error: There has been a critical error on this website.` The fatal lands in `debug.log`, the archive is untouched, and an **empty `<archive>.encrypted`** is left beside it — opened before the key is used. The next successful encrypt appends to that empty file and leaves nothing behind. | Live: 4 and 40 hex characters, the fatal and its trace on stderr, `debug.log` holding both; the class reproduced locally. | A plugin bug worth reporting. Never a scenario: the debug-log gate fails a fatal, rightly, and the scenario would pin a crash (as V128). Keys are 32, 48 or 64 hex characters. |
+| V150 | **A wrong-length key on decrypt is caught, but leaves an empty `<archive>.decrypted`.** `Cannot decrypt: Key of size 2 not supported by this algorithm. Only keys of sizes 16, 24 or 32 supported`, exit 1, the archive unchanged; the exception path skips the cleanup the wrong-key path does. The next decrypt removes it. | Live, `--key=abcd`. | A refusal that writes; not a scenario. V151 is the refusal to cover. |
+| V151 | **A wrong key of the right length is refused, and the encrypted archive survives byte for byte.** The decrypter cannot recognise a wrong key: it decrypts into `<archive>.decrypted` and replaces the archive only if the result lists as a valid archive, deleting it otherwise. `Archive could not be decrypted. Maybe wrong key!`, exit 1, no temporary file, nothing in `debug.log`; the right key afterwards restores the original byte for byte. | Live. `vendor/inpsyde/backwpup-restore-shared/src/Api/Module/Decryption/Decrypter.php` (`test()`, then `unlink` and `rename`). | The refusal §4.6F.4 lacks, and the one that guards the only copy of a backup. |
+| V152 | **Encrypting twice is not refused, and the plugin cannot undo it.** Both runs exit 0 with `Success:`; decrypting with the right key then answers `Archive could not be decrypted. Maybe wrong key!` every time and leaves the file unchanged, because the first layer's plaintext is itself encrypted and fails the archive check. | Live: 42 285 568 → 42 285 594 → 42 285 626 bytes; two decrypts, both refused. | A plugin bug worth reporting — encrypt could ask `isEncrypted()`, as decrypt does. Not pinned; no scenario encrypts twice. |
+| V153 | **Decrypt strips padding that encrypt never added — but never from the plugin's own archives.** Encrypt pads only a size that is not a multiple of 16; decrypt always drops the last *N* bytes when the final byte *N* is 1–16. A valid single-member `.tar.gz` of the kind `gzip` makes, 17 440 bytes, ending in `0x01` (the top byte of its size field), came back from the round trip one byte short under `Success: Archive has been successfully decrypted.` — `gzip -t`: `unexpected end of file`. The plugin's own formats all end in `0x00`: a `.tar` in its 1 024-byte end-of-archive; a `.tar.gz` too, since the plugin gzips every write as its own member and the end-of-archive is the last (size field 1 024); a `.zip` in an end-of-central-directory record with an empty comment. | Crafted file staged and run through both commands; a real `.tar.gz` backup whose size was a multiple of 16 (4 744 688 bytes) and a real `.zip`, each byte for byte. `inc/class-create-archive.php` (`fwrite()` → `gzencode()`, `close()` → `pack( 'a1024', '' )`). | A plugin bug for files it did not make — `backup-encrypt` takes any path. No 6F.4 scenario is exposed; the digest assertion would catch it if a format changed. The source-read guess that a large `.tar.gz` was at risk is refuted. |
+| V154 | **An archive the web server wrote encrypts and decrypts all the same, and comes back WP-CLI's.** It was `www-data 644` and not writable by WP-CLI; the folder is `0777`, so the command's unlink-and-rename went through, and the result is `ubuntu 664` — still after decrypting, byte for byte. | Live, `startJobInBackground`, `is_writable()` 0 before and 1 after. | No ownership split to cover, unlike `backup-delete` (V84). An encrypt hands the archive to the transport's user, so a `backup-delete` refused before would then succeed; nothing depends on that, and nothing pins it. |
+| V155 | **Encrypt and decrypt refusals, measured.** `--key=xyz`, `--key=` and the help's own example key (`ABCDEFGHIJKLMNOPQRSTUVWXYZ123456`) → `Key must be a string of hexadecimal characters!`; a missing file → `Archive file that should be encrypted can't be found!` / `…decrypted can't be found!`; a plain archive → `Archive not needs decryption.`; decrypt with no key on an unconfigured site → `No Key provided or stored in settings for decryption!`; no argument → WP-CLI's `usage:` line and no status line. | Live: all exit 1, the archive byte for byte, no temporary file. | V85's list, confirmed and extended. The help's example key being refused is a docs bug. |
+| V156 | **`job-export`'s shape and what it leaves out.** All jobs export as a JSON **object keyed by the jobs option's own index** (`"2"`, `"3"` for jobs 3 and 4), not by job id; one job exports the same way, under one key. `--file` resolves against WP-CLI's working directory, written as WP-CLI's user (`664`); a missing folder is a PHP warning (also in `debug.log`), then `Error: Could not write to file.`, exit 1. Of the 136 stored keys it left out 43 — the nine the source lists, every empty string (33) and every encrypted value (`dbdumpdbpassword`) — and every value it carried equals the stored one. An unknown id and the hidden placeholder print `[]` at exit 0; with `--file`, `[]` is written under `Success: Job exported successfully.` | Live, compared key by key with the stored record. `src/Cli/Commands/JobExport.php`. | An export is judged against the stored record, on the keys it carries. "Nothing to export" is a success with an empty list, not an error. |
+| V157 | **`--passwords` writes the site's database password in clear.** Every job the plugin makes stores `dbdumpdbpassword` — the site's own `DB_PASSWORD`, encrypted — including the hidden placeholder, even with "use WordPress's database settings" on; so does `defaults_job()`. Without the flag the key is left out; with it, the file and stdout both carry the plaintext. An export always carries the database host, name and user. | Live: all six jobs on the site and the default decrypt to `DB_PASSWORD`; the exported value equals it — `hash_equals` on the site for the file, digests compared for stdout; never printed. `inc/Pro/class-jobtype-dbdump.php` L29 is the default. | An export is a credentials-bearing file: 6F.4 writes exports only into the scenario's private folder and removes them. Importing a `--passwords` file stores the password back **unencrypted** (V163). §4.6F.4 does not cover `--passwords`. |
+| V158 | **`job-import` without `--job_id` appends a faithful, unscheduled copy.** The new job takes `max( ids ) + 1` (`Success: Job "Database" with ID 5 imported successfully.`) and equals the original on every key but the id, `activ` (`false`) and `activetype` (`''`) — so no `backwpup_cron` event — the run history (`lastrun`, `lastruntime`, `backup_ids` absent; `logfile`, `lastbackupdownloadurl` empty), and `dbdumpdbpassword`, taken from `defaults_job()` and so the site's own again (V157). Every key dropped as empty came back `''`. The original and its schedule are untouched. A `--job_id` the file holds but the site does not appends too, under a new id, never the one asked for (77 → 6). | Live, key by key against the stored records. `src/Cli/Commands/JobImport.php`. | The append scenario asserts the copy against the original's stored record, the new id, the missing schedule and the untouched original — never the success line. |
+| V159 | **`job-import --job_id=<n>` merges; it does not replace.** Only the keys the file carries are written over job *n*. After renaming job 3, switching its format to `.zip` and filling `fileexclude` (empty at export, so absent from the file), the import restored the name and the format and **kept** `fileexclude`; `activetype`, its cron event, `lastrun` and `logfile` were untouched, and no job was added. | Live. V86's check had re-imported unchanged data, so the overwrite had never been observed. | The overwrite scenario must change an exported field between the export and the import; a field the export dropped stays as it was, and that is correct. |
+| V160 | **`job-import`'s refusals — and a refusal that keeps what it wrote.** `No file provided or file can't be found!` for no argument and a missing path (positional or `--file`); `File is not a valid JSON file!` for non-JSON **and for `[]`**, the empty export (V156); `File is not a valid BackWPup job export file!` for `{"a":1}` and a job whose `type` is not a list; `{}` and `42` add PHP warnings (in `debug.log`) before `No job with ID 0 found!`; `--job_id=4` against a file without job 4 → `No job with ID 4 found!`, although the site holds it. All exit 1 and leave the jobs option byte for byte. But each job is validated inside the loop that writes it: `[<valid job>, {"jobid":"x"}]` imports the first (`Success: … with ID 7 imported successfully.`), then refuses, exit 1 — **and job 7 stays**. | Live, the jobs option's digest before and after each. | Refusal scenarios use one-job or non-job files and assert the jobs unchanged. The partial import is a plugin bug worth reporting; not pinned. |
+| V161 | **The edition filter works by generation, not by skipping.** A temporary feature holding a `@pro`, a `@free` and an untagged scenario, generated with the product's own `bddgen`: `free@nginx`'s spec holds the free and untagged ones and no trace of the `@pro` one; `pro@nginx`'s the reverse. A `@pro` on the `Feature:` line works the same: `free@nginx` generates no spec file for it at all. `--list` agrees. No feature in the suite is tagged `@pro` or `@free` yet. | Local, both placements; the features removed and the specs regenerated, the tree clean. | §4.6F.4's "skipped by tag on `free@nginx`" describes a mechanism the suite does not use: a `@pro` scenario never exists on a Free cell. The check is that `free@nginx`'s `--list` holds none of them — and 6F.4 is the first feature to rely on it. |
+| V162 | **Four sites now share the nginx host.** `pro@nginx` (`simple.e2e`), `free@nginx` (`bwu.e2e`), and the orchestrator worktree's two cells (`bwu2.e2e`, `bwu3.e2e`) all resolve to one SSH host and one disk — 97 GB, 17 GB free (84 % used) before and after this pass. | The two checkouts' sites files, hosts only. | V72's one-cell-at-a-time rule now reaches across checkouts: a live run in either must check the other is idle. This pass made database backups only — about 42 MB each, at most about fifteen on disk at once. |
+| V163 | **`job-import` stores a `--passwords` export's secrets in clear.** The copy's `dbdumpdbpassword` is not `$BackWPup$…` but `DB_PASSWORD` itself, and the raw `backwpup_jobs` row holds it verbatim. Nothing breaks, because `BackWPup_Encryption::decrypt()` hands an unprefixed value back unchanged — which is what hides it. | Live: the row held no `DB_PASSWORD` before the import, did after, and did not once the copy was deleted; compared on the site. `JobImport.php` L94 and L116 write values as they are; `JobExport.php` L103–L105 decrypted them. | A `--passwords` round trip would put the site's database password into its options table in clear — a second reason §4.6F.4 leaves the flag out. A plugin bug worth reporting (security). |
+| V164 | **An edited export drives the overwrite, and the job keeps its schedule.** Export job 3, rename it inside the file (decoded and re-encoded on the site; the object keyed by the option's index stays an object), then `job-import <file> --job_id=3` → `Success: Job "Renamed by the import" with ID 3 imported successfully.` Job 3 takes the name, no job is added, and its `activetype`, `activ` and `backwpup_cron` event are as they were; every key the file carries equals the file; `wp backwpup job` lists the new name. | Live. | The overwrite scenario edits the file — what a user migrating jobs does — so no job-editing path is needed, and the kept schedule is what makes V159's merge observable on a key the file does not carry. |
+| V165 | **Saving the Encryption panel stores three options, one of them the jobs' own encryption switch.** `EncryptionSettingUpdater::update()` saves the type (`symmetric`/`asymmetric`) and `backwpup_archiveencryption` (the panel's "encryption activated"), then the symmetric key — hex, cut to 64 characters — and the public key, each only when given. `backwpup_archiveencryption` makes every job encrypt its archive (`inc/class-job.php` L515). Stored with it off, a job's backup is plain and both commands round-trip without `--key`, byte for byte. | `inc/Pro/Settings/EncryptionSettingUpdater.php`; live round trip. | The settings scenario stores archive encryption off — otherwise the Background's own backup would arrive encrypted and the scenario's encrypt would be V152's second layer — and it never turns it on (V166, V167). |
+| V166 | **The jobs' own archive encryption shares V146's fallback.** With archive encryption on and the type saved as `asymmetric` but no public key — a state the handler saves, since it requires no key — a run completes at exit 0 and logs `Encrypted 40.38 MB of data.` / `Archive has been successfully encrypted.`; the archive is `BACKWPUP`, version 2, type **1**, +26 bytes; `backup-decrypt` refuses it with and without a key; no option holds a key. With no type saved at all, the run logs `No encryption key was provided. Aborting encryption.` and keeps a plain archive. | Live, two fresh installs (header and decrypt checked on the second). `inc/class-job.php` L2625–L2632 and L2675–L2683, no `strict_types`. The panel template marks no field required; its JavaScript was not traced. | Every scheduled backup made in that state is unrecoverable and reported as encrypted — the same root cause as V146, reported with it. No scenario turns archive encryption on. |
+| V167 | **With archive encryption on, a foreground run can die against a memory limit the job set itself.** The CLI's `memory_limit` is `-1`, so `WP_MAX_MEMORY_LIMIT` is too; the job sets that, and then `need_free_memory( '10M' )`, called on every progress update, reads `-1` as a number and lowers the limit to usage + ~11 MB. With archive encryption on, 4 of 8 foreground runs failed — 3 with `Allowed memory size of 79691776 bytes exhausted (tried to allocate 3858872 bytes)` in `inc/class-mysqldump.php` L760, 1 at exit 255 with its output not kept — a valid symmetric key included; with it off, 0 of 19. Each crash left its history row `created` and the running marker behind until `kill`. | Live, three fresh installs. `inc/class-job.php` L1471, L1523–L1531, L1541–L1553, L2214–L2222. Why encryption raises the odds was **not** isolated: the fatal is in the dump, before any encryption step. | Refines V109: V41's memory death is not only `wp cron event run`'s. The suite's foreground Givens are safe — nothing turns archive encryption on — and 6F.4 keeps it that way. A plugin bug worth reporting. |
+
+### 2.23 Facts established building and auditing 6F.4 (live, on `pro@nginx`, at `develop@af1ab5c`)
+
+`develop` moved while 6F.4 was being built (V168), so the build was verified at the ref the cells now
+install, and the facts it rests on were measured again there (V169). V172–V175 are the audit's. Each
+run used the repo's own modules or the suite itself, and the site was verified clean after each.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V168 | **`develop` moved to `af1ab5c` (2026-09-25) — its vendored libraries only.** The commits change `composer.json` and `composer.lock`: phpseclib 3.0.52 → 3.0.57, pear/archive_tar 1.6.0 → 1.6.1, backwpup-archiver 0.6 → 0.6.1 (zip-extraction path-traversal fixes), backwpup-restore-shared 0.20.10 → 0.20.11 (no PHP change), monolog 2.11.0 → 2.11.1, inpsyde/assert to 1.0.0. Every BackWPup file 6F.4 rests on is byte-identical: the four commands, `EncryptionStream`, the `Decrypter`, `class-job.php`, `class-create-archive.php`, `EncryptionSettingUpdater`, the database job's defaults. | GitHub compares of the plugin (`f1ebfd05...develop`) and of both BackWPup packages by tag; the two builds unpacked and diffed — 54 files differ, all vendored but the translation template and the autoloader. The versions read back on the site through `Composer\InstalledVersions`. | The code under test is unchanged, but the libraries it calls are not — so every fact that depends on them was measured again (V169) rather than carried over. |
+| V169 | **At `af1ab5c` every §2.22 fact the scenarios do not cover holds as measured.** V146: no `--key` on an unconfigured site — `Asymmetric…` and `Success`, a symmetric header, nothing decrypts it. V149/V150: a 4-hex key — the `LengthException` fatal at exit 1 with an empty `.encrypted` left; decrypt's refusal with an empty `.decrypted`. V152: a second encrypt succeeds, and decryption is then refused. V153: the crafted 17 440-byte file came back 17 439 bytes under `Success`. V163: an imported `--passwords` export is stored in clear. V166: the jobs' own encryption with `asymmetric` and no public key logs success over a symmetric header nothing decrypts. V167: with archive encryption on, 3 of 6 foreground runs died of the same fatal, with the same two numbers. | Two scratch drivers, one fresh install each, both torn down clean. | What §2.22 found worth reporting upstream still holds at `af1ab5c`. |
+| V170 | **A unit run beside a live run wiped the live run's results.** Playwright empties its output folder as a run starts, and the unit config left it at the default, `test-results/` — which holds every cell's `test-results/<product>/<cell>/`. The first live attempt failed writing its own attachment (`ENOENT … test-results/.playwright-artifacts-1/…zip`) while a unit spec ran. | After the fix, a marker in a cell's folder survived a unit run. CI uploads all of `test-results/`, the unit folder included. | `playwright.unit.config.ts` writes to `test-results/unit`. |
+| V171 | **The revision's three unmeasured predictions held live.** A `--job_id` in neither the file nor the site is refused as `No job with ID 999 found!`; a key file named relative to WP-CLI's working directory works for both commands (V148 had used absolute paths); and every setting an export carries compares equal to the stored job's on the site — no empty object turned into a list on the way. | The two features, 9 of 9 on `pro@nginx` at `af1ab5c`. | Nothing to change. |
+| V172 | **A hex key of 31, 47 or 63 characters is not a wrong length.** Both commands turn the key into bytes with `pack( 'H*' )`, which completes an odd count of digits with a `0`, so these come out as 16, 24 or 32 bytes: the round trip works, and the key with a `0` appended decrypts it too — the two name the same bytes. A count that packs to any other size — 33 characters, 17 bytes — crashes `backup-encrypt` as V149's 4 and 40 did. | Live on `pro@nginx`: 63, 31 and 47 characters each round-tripped byte for byte twice — the second time decrypted with the key plus `0` — leaving nothing beside the archive; 33 died of `LengthException: Key of size 17 …` at exit 1, the archive unchanged, an `<archive>.encrypted` beside it and the fatal in `debug.log`. The plugin's own classes, run locally, gave the same. | V149's "keys are 32, 48 or 64 hex characters" is the suite's choice, not the plugin's rule. `support/encryption-keys.ts` said otherwise and is corrected, as is what goes upstream about key lengths. |
+| V173 | **The export scenario passed an export carrying nothing but its job's id.** Each of its four checks held what the file carries to the job, or what it leaves out; none held the job to the file, so a regression that dropped settings from the export would have passed. `job-export` leaves a setting out only when it is one of the nine stripped keys, an empty string, or an encrypted value (`JobExport.php` L88–L109) — so everything else the job holds must be in the file. | The audit. Live on `pro@nginx`: nothing missing from a real export, and nothing differing; with one setting (`dbcheckrepair`) removed from the file, the new check named it. | `settingsMissingFromExport` and its step (`every setting the scheduled job holds is in the export file {string}, except its schedule, run history, secrets and empty ones`); the scenario now holds the file and the job equal both ways. |
+| V174 | **V122's race can also end in a PHP fatal, failing a scenario before its first step.** In the full `pro@nginx` run, the host's per-minute `wp-cron.php` request re-entered BackWPup's activation while the `@plugin` hook's own install was under way, found a job holding `cron` but no `type`, and died in `BackWPup_Migrate::organize_jobs_by_type()` — `sort( null )`, `inc/class-migrate.php` L174. The debug-log gate failed the scenario; the install hook, 107 s in by then, also ran out of its 120 s (the whole install and activation took 40 s in the audit's lab, 75 minutes later). | The scenario's `debug.log`: `Undefined array key "type"` (L173), then the fatal at 05:48:01 UTC, a minute boundary, stack `wp-cron.php` → `BackWPup_Install::activate()` → `BackWPup_Migrate::migrate()`. The plugin writes a job one key per write of the whole jobs option, with no lock, and two of its paths leave a job with `cron` but no `type` for a while: V122's lost update, and `convert_jobs()` itself, which writes a job's `cron` (`handle_single_job()`, L301) before its `type` (L241, L255). Which of the two it was is not established; `create_default_jobs()` is not it, since it writes `type` first. The link was slow around it: five minutes later a `wp eval` took 1.9 s against the 1.3 s measured before, and the scenario before it had taken 4.9 min against 1.8 min in the 6F.4 run; the runner never slept. The same run met the race three more times, each recovered by a reinstall as designed — four in 61 scenarios, against V122's ~3 % — and the `free@nginx` run none in 52. In the next run of its feature, after the audit, the scenario passed. | Not 6F.4's: its steps never ran. The retry policy absorbs it as flaky; with retries off it fails, as it should — the fatal is real. The plugin bug V122 records (re-entrant activation, the jobs option written without a lock) now has a fatal among its outcomes. A slow link widens the window: the activation routine runs in the first request after the install (V122), and the suite's own next command is then longer coming. |
+| V175 | **The nginx host is the team's QA host, not four sites'.** `/var/www/html` holds 28 docroots — `bwu4`–`bwu9` created 2026-09-25/26 — several changed the same day; the disk is 97 GB, 16 GB free. | Read on the host, 2026-09-27. | "The host's other sites idle" (V162) can only mean this suite's own runs: they stay one at a time; other people's load shows as slower scenarios (V174). |
+
+### 2.24 Facts established scoping 6G.0 (2026-09-28)
+
+Measured through the repo's own `exec` and `CliSession` (execa 10.0.1), each failing case carrying a
+fake secret in its argv; the `ssh` cases on `pro@nginx`.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V176 | **On `local` and `docker`, a command that cannot start, is killed by a signal, or overflows its output cap throws an error quoting its whole argv.** `fromExeca` passes on execa's `shortMessage`, which holds the command line: `Command failed with ENOENT: no-such-binary-e2e eval '--key=SECRET-enoent-1'`; `Command was killed with SIGTERM (Termination): sh -c 'kill -TERM $$' sh '--key=SECRET-signal-2'`; `Command's stdout was larger than 100000000 characters: sh -c … '--key=SECRET-buffer-3'`; and, with no `docker` on `PATH`, `Command failed with ENOENT: docker exec no-such-container wp eval '--key=SECRET-docker-4'`. | The four cases through `exec`: the secret in the message 4 of 4, and no `cause` attached. execa's result says why without the argv — `code` (`ENOENT`), `signal` and `signalDescription` (`SIGTERM`, `Termination`), `isMaxBuffer` — while the argv is in `message`, `shortMessage`, `command` and `escapedCommand`. | Every `--key=` and every value a snippet embeds travels in the argv, and `phpLiteral`'s base64 hides nothing, so a report of such a failure carries them: "credentials never enter reports" (CLAUDE.md) and 6F.4's acceptance do not hold on these two transports. |
+| V177 | **`ssh` quotes no argument.** A command killed by a signal reads `"sh" on <host> was terminated by signal SIGTERM before exiting.`; a missing program is an exit-127 result whose output names only the program. | Both on `pro@nginx`, a secret planted in each argv: in neither. | The cells are not exposed; 6G.0 brings `local` and `docker` to what `ssh` already does. |
+| V178 | **`CliSession`'s time-limit message quotes its command unmasked, on every transport.** `withinBudget` names `` `wp backwpup ${args.join(" ")}` `` — the argv with its placeholders filled — so a `--key=` that `describeCli` hides reaches it: `` `wp backwpup backup-encrypt a.tar --key=SECRET-budget-7` had not answered after 0.3 s. `` | A stub `wp` sleeping past a 300 ms budget. Only `I watch the running backup with the BackWPup command {string}` passes a budget (`cli-running-job.feature`, ten minutes), and no command there carries a key today. | The same class as V176, one layer up. |
+| V179 | **6G puts nothing secret in an argv.** `wp backwpup restore` takes a file, `--yes` and `--pre-backup` (`src/Cli/Commands/Restore.php`); 6F.4's keys are drawn per scenario and thrown away; 6H.2 plans its credentials through the UI (§4.6H.2), where traces already carry what `fill()` types (CLAUDE.md). | Source at `af1ab5c`; this plan. | Nothing in 6G forces the fix. What does is that the suite claims a property it does not have on two transports, and that the fix is two functions. |
+
+### 2.25 Facts established building 6G.0 (2026-09-29)
+
+Measured through the repo's own `exec` (execa 10.0.1) with a secret planted in each argv; the `ssh`
+cases on `pro@nginx`. Each is pinned in `exec.spec.ts` or `exec.ssh.spec.ts`.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V180 | **`ENOENT` means a missing program or a missing working directory**, and `code` cannot tell them apart. Only execa's own message does (`The "cwd" option is invalid: …`), and that message quotes the argv. | `exec(local, "sh", […], { cwd: "/nonexistent" })` and a missing binary: `code` `ENOENT` both times. | The message names both readings, with the directory the run was given: `could not be started (ENOENT): no such program on this machine, or no directory "<cwd>" to run it in`. |
+| V181 | **Output that never stops ends killed, with no exit code.** `yes` over the cap reports `signal` `SIGPIPE`, `isMaxBuffer` true, `exitCode` undefined (1.5 s). Output that stops over the cap keeps its exit code (`exit 3`, and `0`). | Both through execa, with the default cap. | `fromExeca` checks the overflow **before** the missing exit code: in the other order the message would blame `SIGPIPE` and hide the cause. |
+| V182 | **execa throws when an argument holds a NUL byte, even with `reject: false`, and the error quotes that argument:** `Arguments cannot contain null bytes ("\0"): --key=SECRET x`. Its other argument checks interpolate the argv too (`lib/methods/parameters.js`). Over `ssh` the same argv is refused as a bare `Unable to exec`, with nothing quoted. | Local through execa; `ssh` on `pro@nginx`, `printf` and `sh` each handed `a\0b`. | `exec` refuses a NUL byte before any transport sees it, naming the argument by position, so all three say the same thing. Any other execa throw is replaced by `"<program>" could not be started: execa refused the call (<ErrorName>)`, with no `cause`. |
+| V183 | **One argv-quoting message could carry a key: `readJsonList`'s parse error.** It names `cli.last`, which is a scenario's own command, and it quoted both the argv and the output unmasked. The rest name fixed commands, job ids, option names and paths: `backups.ts`, `options.ts`, `residue.ts`, and `cron.ts` through `evalPhp`, which quotes its `what` and the site's output, never the snippet. | The audit, reading each site. | `parseJsonList` takes the argv and names it through `commandLine`, the mask `describeCli` and the time-limit message use, and hides a key in the output it quotes. |
+| V184 | **`cli-running-job.feature` loses its race on `pro@apache`**, with or without 6G.0. The step `the scheduled job is running in the background` sees the job running, but the paced backup has ended before the next command lands. `run {job}` and `run {job} --background` then run or dispatch a fresh backup and exit 0, where the scenario expects `A job is already running.`, and `kill` sometimes finds nothing to abort. The margin in the feature's comment ("more than 2 s to spare") was measured on the nginx cells, and every 6F verification ran on `pro@nginx` and `free@nginx` only — apache was AutoE2E's. | `E2E_RETRIES=0`, the `af1ab5c` zip: with 6G.0, 1/4 (the `status` scenario passed); with 6G.0 stashed, 2/4, the two `run` scenarios failing identically. The same feature passed 4/4 on `pro@nginx` in the same hour. | Not 6G.0's: its change is to failure messages, and these are exit-code assertions that fail at the baseline too. ~~Open.~~ **Fixed 2026-09-30** — the cause and the fix are V185–V187. |
+
+### 2.26 Facts established fixing V184 (2026-09-30)
+
+Measured live on `pro@apache` and `pro@nginx` with the `af1ab5c` Pro zip, from inside each site: a
+`wp eval` sampling BackWPup's running marker and newest history row every 20 ms, and the scenario's
+own steps timed against the server's clock.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V185 | **A paced database backup pauses once per table, so its length is the site's table count.** "Reduce server load" is a `usleep` in `update_working_data()` (honoured up to 500 000 µs; the screen offers 90 000 at most), and the dump calls that once per table, over every table in the database (`SHOW FULL TABLES`), less the job's exclusions — none for the onboarding job. `pro@apache` holds 18 tables and ran it in **3.5 s**; `pro@nginx` holds 85 and ran it in **10.2 s**. | `inc/class-job.php` `update_working_data()`; `inc/Pro/class-jobtype-dbdump.php` `db_dump()`; `inc/class-mysqldump.php`. Three sampled runs per cell, 0.1 s apart at most. | V112's "~10 s" was one cell's table count. The window cannot be widened by the setting, which is already at the screen's maximum. |
+| V186 | **The command under test lands 2.3–3.2 s after the marker appears** — the job is seen 0.9–1.6 s in, and one WP-CLI command takes about 1.5 s more. On `pro@apache` that left 0.3–0.7 s; the suite's runs lost it. | The same runs: `waitForJobRunning` then `wp backwpup run <job>`, timed against the server's clock (offset from a `date` round trip). | Any site with fewer than about 30 tables loses the race some of the time. |
+| V187 | **Padded to 100 tables, the window is the same on both cells**: 11.1 s on `pro@apache` (82 empty tables added) and 11.6 s on `pro@nginx` (15 added), with the command back by 2.9 s. Creating 82 tables took 1.8 s. A test fixture is torn down after every `afterEach` — where playwright-bdd runs `After` hooks — including when the test failed. | The same sampler; a scratch Playwright test for the order. | `Given the site's database holds at least 100 tables` and the `tablePadding` fixture (`support/table-padding.ts`): empty `<prefix>e2e_pace_NNN` tables, earlier padding dropped first, the result read back, removed after the `@plugin` teardown has stopped the job and removed the plugin. |
+| V188 | **A killed run's padding outlived it, and only `cli-running-job.feature` would ever remove it.** SIGKILLed once its padding existed, a run on `pro@nginx` left 15 tables; a later run of another feature removed the plugin, its footprint, the staging area and the data folders, and kept all 15. They never piled up — the names are fixed and every padding drops the last one first — but nothing else would ever drop them. | Live on `pro@nginx`, the run's process group killed the moment the site held padding. | Every BackWPup worker now drops leftover padding before its first scenario (`leftoverPaddingSweep`, `sweepPaddingLeftovers`) and says how many. Re-verified: the other feature's run then removed the 15; two runs killed back to back each saw the last one's 15 gone 23 s in, padded their own (new creation times) and left 15 — one set; the next full run swept them and passed 4/4. The snippets now also run against a fake `$wpdb` in `table-padding.php.spec.ts`, killed runs replayed included. |
+
+### 2.27 Facts established widening 6G's coverage (2026-10-05, source at `af1ab5c`)
+
+Source only, both editions' zips at `af1ab5c` — to be confirmed live by 6G's measurement pass, per
+the usual rule. Every file cited below is byte-identical in Free and Pro.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V189 | **The restore screen offers only the strategies the archive can serve.** It reads the job types from the backup's `manifest.json`: *Database Only* needs `DBDUMP`, *Files Only* needs any other type, *Full Restore* needs both. Onboarding's files job is `FILE` + `WPPLUGIN` and its database job is `DBDUMP`, so a files-only backup offers **only** *Files Only*, a database-only backup **only** *Database Only*, and a mixed backup all three. | `views/restore/steps/step2_action.php:12-56`; `vendor/inpsyde/backwpup-restore-shared/src/Api/Module/Manifest/ManifestFile.php:183-198`; `inc/class-page-onboarding.php:12,19`. | Restoring a files-only or database-only **backup** is a different journey from choosing a strategy on a mixed one: other buttons, and an archive missing half the site. 6G covers both (§4.6G), and each asserts the strategies it is offered. |
+| V190 | **Three archive formats exist: `.tar` (the default), `.tar.gz` and `.zip`.** `.tar.bz2` is no longer offered: a stored one is read back as `.tar.gz`, and the restore refuses a bzip2 archive outright. | `inc/class-install.php:15-22` (default `.tar`); `inc/class-admin.php:902-907` (anything else falls back to `.tar`); `inc/class-option.php:392`; `Decompressor.php:387-396`; `src/Cli/Commands/Restore.php:17`. | Every 6D–6F backup is `.tar`, and onboarding can make nothing else, so a `.zip` or `.tar.gz` backup needs the job's format switched after onboarding. 6G restores `.tar` only; `.zip` and `.tar.gz` are 6K. `.tar.bz2` is out of scope: it cannot be made any more. |
+| V191 | **Each format is extracted by different code, and the UI and the CLI do not share it.** UI: `.tar` → `PharData`, `.tar.gz` → PEAR `Archive_Tar`, `.zip` → its own file-by-file extractor with progress events. CLI: `.zip` → `ZipArchive`, `.tar.gz` → `PharData::decompress` then extract, `.tar` → `PharData`. | `Decompressor.php:244-311,379-402`; `src/Cli/Helpers/CommandsRestoreHelpersTrait.php:50-100`. | A `.tar` restore proves nothing about the other two, in either entry path, so the format axis is real (6K). The content axis is not: the extractor is chosen by extension and never by contents, so 6K restores mixed backups only and does not multiply by contents. |
+| V192 | **CLI `--type=full\|db\|file` is the strategy choice of the UI screen**, defaulting to `full`. | `src/Cli/Commands/Restore.php:90-94`. | 6G's CLI scenarios use it the way the UI ones use the strategy buttons. |
+
 ---
 
 ## 3. Coverage & tagging decisions
@@ -839,8 +973,8 @@ Nearly every ported scenario carries it; the exceptions are scenarios that asser
 
 Each is independently shippable and ends with the standard gates (typecheck / lint / format /
 `test:unit`) plus a green real-cell run. 6A is a prerequisite for everything and 6B for every feature
-phase; 6C–6H are otherwise independent of each other and can be reordered by need. **6H.2 is
-deferred out of the sequence** — nothing downstream waits on it.
+phase; 6C–6H are otherwise independent of each other and can be reordered by need. **6G.0 must
+ship before 6G**, and **6G before 6K**. **6H.2 is deferred out of the sequence** — nothing downstream waits on it.
 
 ### 6A — Shared rails *(product-agnostic; unblocks BackWPup **and** WP Rocket)* — **DONE**
 
@@ -1537,7 +1671,7 @@ out to rest on is now written down instead of implied: the option match needs a 
 collation, because the plugin stores one transient under a capital-B name (V67).
 
 
-### 6F — WP-CLI surface
+### 6F — WP-CLI surface — **DONE**
 
 Ports `wp-cli/list-jobs.feature` (2) and widens it to the commands that actually exist (V3/V4,
 re-verified live as V80–V89). The baseline drove the browser through onboarding twice to establish a
@@ -1554,7 +1688,7 @@ commands that create the conditions it is judged under. Splitting per command wo
 across a dozen near-identical Backgrounds; splitting per edition would put `backup-delete`'s two
 outcomes (V84) in different phases.
 
-**Order:** 6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → 6F.3 ✅ → 6F.4 — each arranges its own state, and
+**Order:** 6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → 6F.3 ✅ → 6F.4 ✅ — each arranges its own state, and
 none depends on another's scenarios.
 
 #### 6F.0 — CLI rails *(no feature files)* — **DONE**
@@ -1742,6 +1876,17 @@ No SSH connection loss occurred. Both sites were left as found: plugin absent, n
 directories, no staging area. Unit suite 821 → 910 across 6F.2 and its audit; **60 mutations**, all
 caught, the file restored byte for byte each time.
 
+**Revised 2026-09-30 (V184–V187).** `cli-running-job.feature` lost its race on `pro@apache`, whose 18
+tables gave the paced backup 3.5 s — and it had only ever run on the nginx cells. The Background now
+pads the database to 100 tables (`tablePadding`, `support/table-padding.ts`), which makes the window
+about 11 s on every cell. Verified with `E2E_RETRIES=0` and the `af1ab5c` zips: **12/12 on
+`pro@apache`** over three runs (5 of 8 had failed before), **4/4 on `pro@nginx`** and **4/4 on `free@nginx`**;
+every site left as found, no padding table included. Unit suite 1191 → 1222; **13 mutations**, 12
+caught and one equivalent (an unescaped `LIKE`, which the exact-name filter after it makes
+harmless); both snippets through `php -l` and a behavioural harness against a fake `$wpdb`. **Revised
+2026-10-05 (V188)**: a killed run's padding is swept when the next BackWPup worker starts; unit suite
+1222 → 1241, with the PHP spec; **11 more mutations**, all caught.
+
 #### 6F.3 — Backups and logs on disk *(untagged)* — **DONE**
 
 **Shipped 2026-09-23.** Two features, all untagged — `cli-backups.feature` (4 scenarios: both sides
@@ -1816,25 +1961,162 @@ after those runs, so `cli-backups` was run again on both cells: **6/6 on each**,
 tests were strengthened, each a real weakness: the missing-directory guard was pinned by its
 condition alone, and an ordering check compared against `indexOf`'s `-1`.
 
-#### 6F.4 — Pro-only round-trips *(`@pro`)*
+#### 6F.4 — Pro-only round-trips *(`@pro`)* — **DONE**
 
-`job-export` / `job-import`, `backup-encrypt` / `backup-decrypt`. **`restore` is deliberately not
-here** — the CLI restore ships with 6G, beside the journey it serves.
+**Shipped 2026-09-27**, as revised on 2026-09-24 against §2.22. Two features, both `@pro @plugin` —
+`cli-job-transfer.feature` (4 scenarios: an export and what it leaves out; an import over its own job;
+an import as a copy; the refusals) and `cli-backup-encryption.feature` (5: a hex key; RSA key files;
+the key saved in the settings; the wrong key; the refusals) — on rails grown out of 6F.3's download
+folder. The facts are §2.22 (V146–V167) and §2.23 (V168–V175). The two decisions stand: no
+`--passwords` scenario, and one round trip each for the settings key and the RSA key files.
 
-The only edition-gated sub-phase, so `@pro` lives in exactly one place; Free's side of the same fact
-is 6F.1's absence assertion.
+What shipped:
 
-- **Export → import, both behaviours** (V86): without `--job_id` the import **appends** a job with a
-  new id; with it, it **overwrites** that job. Asserted on the job record, not on the success line.
-  Refusals: a missing path, and a file that is not JSON.
-- **Encrypt → decrypt** (V85): `--key=<hex>` makes the pair self-contained — no `backwpup_cfg_*`
-  settings and no credentials, which is why it ships long before 6H. Encryption happens **in place
-  under the same filename**, so the round-trip is provable only by checksum: encrypt changes the
-  archive, decrypt restores it byte for byte. Refusals: a non-hex key, a missing archive, and
-  decrypting an archive that was never encrypted.
+- **`support/private-folder.ts`** and the **`privateFolder`** fixture — 6F.3's `DownloadFolder`,
+  generalised as planned: `place( name, content )`, `{private folder}`, the category `private`; the
+  folder still `0700`, randomly named and removed only if used. `cli-backups.feature` and its four
+  step texts were renamed with it.
+- **`common/wp/files.ts`**: `pathFromWorkingDir` / `locateFromWorkingDir` — the path a command run in
+  WP-CLI's working directory reaches a site path by, from the site's own `realpath()` and `getcwd()`.
+  The private folder and `{path to the oldest backup}` / `{path to the newest backup}`
+  (`backupPathFromWorkingDir`, `support/plugin-folders.ts`) share it.
+- **`common/wp/paths.ts`**: `isPathSegment`, the one-segment rule, used by `pluginSitePath`, the
+  staging area's segments and an archive's name in a backup folder.
+- **`support/encryption-keys.ts`** and the **`keys`** fixture — `{encryption key}` and
+  `{another encryption key}`, 64 random hex characters each and never equal; `{public key file}` /
+  `{private key file}`, an RSA-2048 pair (SPKI / PKCS#8 PEM) made with `node:crypto` and placed in the
+  private folder the first time either is named.
+- **`support/encryption.ts`** — an archive's header read on the site (`BACKWPUP`, the version, the key
+  type — or not encrypted), and the commands' temporary files beside an archive.
+- **`support/settings.ts`**: `saveEncryptionKey` — the Encryption panel's three options as its handler
+  stores them, archive encryption **off**, read back by a second request with the key compared on the
+  site.
+- **`support/job-transfer.ts`** and the **`jobExports`** fixture — an export file held to the stored job
+  on the site and answered in key names: the file's jobs and keys, the settings that differ, the
+  settings missing, the encrypted values, the stripped keys; a digest of the jobs option's row; the
+  job renamed in the file; the arranging export. `StoredJob` gains `name`.
+- **`describeCli`** hides every `--key=` value.
+- **Vocabulary** as planned, but for the step texts below.
 
-**Acceptance** — every scenario runs on `pro@nginx` and is skipped by tag on `free@nginx`; both
-round-trips are asserted by checksum or by job record, never by the command's own success message.
+**Deliberate revisions** against this section as revised, each for a reason:
+
+- **The steps name the export file** — `the export file {string} …`, `… the job exported to {string}
+  …`, `… as they were when {string} was exported` — and the copy steps say "the copy of the job
+  exported to …" and "the job itself" rather than "the copy" and "the original": a step text stands
+  alone, and a scenario may hold more than one export.
+- **The export is held to the job both ways** (V173, found by the audit). As planned, every check held
+  what the file carries to the job, or what it leaves out — and an export carrying nothing but the
+  job's id passed them all. `every setting the scheduled job holds is in the export file {string},
+  except its schedule, run history, secrets and empty ones` closes it.
+- **"No longer what its run wrote" is the header**: a plain archive never starts with `BACKWPUP`, so
+  the header check implies it; and the wrong-key scenario is what catches a pair of commands that only
+  add and strip a header.
+- **The refusals are checked after each** — byte for byte after every refusal, and nothing beside the
+  backup at the end, which covers them all: no command there removes a temporary file.
+- **`describeCli` also hides a key wherever the output repeats it**, before the excerpt is cut, so no
+  stretch of a key survives at the cut either.
+- **One segment rule**: `pluginSitePath` and the staging area each had their own copy, and an
+  archive's name needed it too, so it moved to `paths.ts` for all three. `pluginSitePath` now also
+  refuses a backslash, as the staging area already did.
+- **`playwright.unit.config.ts` writes to `test-results/unit`** (V170): a unit run beside a live one
+  had wiped the live run's results.
+
+**Acceptance met** — every scenario runs on `pro@nginx` and none is generated for `free@nginx`; each
+round trip is judged by digest (encryption) or by the stored jobs and the jobs option's digest
+(transfer), never by a success line; no scenario sends a command this section steers clear of, and
+none turns archive encryption on; no assertion message, log line or report attachment carries a
+secret, a key or an export's values; the sites were left as found.
+
+**Verified 2026-09-27** at `develop@af1ab5c` (V168), with `E2E_RETRIES=0` on a runner kept awake:
+the two features **9/9 on `pro@nginx`** before the audit and **9/9** after it (14.3 min with the
+setups); the full BackWPup suite **62/63 on `pro@nginx`** (1.5 h) — its one failure V122's race in a
+new form, a fatal in the host's cron request during an install (V174), the scenario passing in the
+re-run — then **54/54 on `free@nginx`** (1.1 h), one cell after the other; `free@nginx`'s `--list`
+holds 54 tests, none of 6F.4's. Both sites were left as found: plugin absent, no footprint, no data
+folders, no staging area, no cron event. Unit suite **1069 → 1173** passed (8 skipped, unchanged);
+**38 mutations**, all caught; each of the 13 new PHP snippets through `php -l` and a behavioural
+harness. The audit's live measurements are V172 and V173.
+
+### 6G.0 — Errors that never quote a command's arguments *(product-agnostic; before 6G)* — **DONE**
+
+**Shipped 2026-09-29**, as planned below, on the facts in §2.24 (V176–V179) and §2.25 (V180–V184).
+
+What shipped:
+
+- **`common/wp/exec.ts`** — `fromExeca` reads only `ExecaOutcome`, execa's fields that say how a run
+  ended without the command line, so quoting `shortMessage` is a type error. It checks the overflow
+  first (V181), then `whyItDidNotExit` names the signal, or the start failure by its `code` (an
+  identifier only), with both readings of `ENOENT` (V180). Every execa call goes through `runExeca`,
+  which replaces execa's own throw (V182). No execa error is attached as a `cause`.
+- **`support/cli.ts`** — `commandLine`, the one `--key=` mask. `describeCli`, `parseJsonList` and the
+  time-limit message name a command through it. `backwpupArgv` is the namespace `backwpupCli`
+  supplies.
+- **`support/cli-session.ts`** — `withinBudget` names the command through `commandLine`.
+
+**Deliberate revisions**, each for a reason:
+
+- **A NUL byte in the argv is refused before any transport** (`refuseNulBytes`, by position): execa's
+  refusal quoted the argument, and ssh2's was a bare `Unable to exec` (V182).
+- **`parseJsonList` takes the argv, not a joined string** (V183): `readJsonList` hands it a scenario's
+  own command, so it names it through `commandLine` and hides a key in the output it quotes. The
+  audit found no secret in the other messages that quote an argv (`backups.ts`, `options.ts`,
+  `residue.ts`, `cron.ts`), and they are unchanged.
+- **The elevated local label is `sudo <program>`**, not `sudo`, matching `docker exec <container>
+  <program>`: both name the program run and what it was run under.
+- **The `ssh` side is pinned too** — a signal-killed command and a NUL byte, each with a secret in the
+  argv, against ssh2's in-process server. Its messages are unchanged.
+
+**Acceptance met** — a secret planted in the argv of each failing case appears in no message on any
+transport, and none of them attaches a `cause`; each message names the program and the reason; the
+`ssh` messages are unchanged.
+
+**Verified 2026-09-29.** The four gates pass; unit suite **1173 → 1191** passed (8 skipped,
+unchanged). **11 mutations**, all caught: quoting `shortMessage`, overflow checked after the exit
+code, passing on or attaching execa's refusal, no NUL check, an unchecked `code`, `ENOENT` without the
+directory, `ssh` naming its arguments, a raw budget message, no `commandLine` mask, and unmasked parse
+output. The V176–V178 probes were re-run: the secret is in none of the five messages. Live, with
+`E2E_RETRIES=0` and the cached `af1ab5c` Pro zip (`E2E_PLUGIN_ZIP`), since github.com timed out from
+the runner twice, and `develop` (now `59b6fd9`) could not be built: `cli-running-job.feature`
+**4/4 on `pro@nginx`** (6.5 min with the setups). On `pro@apache` it failed 3/4, and 2/4 with 6G.0
+stashed — V184, a race the feature lost on that cell, fixed since (§2.26). Both sites were left as found.
+
+**Must ship before 6G.** On `local` and `docker`, a command that cannot start, is killed or overflows
+its output cap throws an error quoting its whole argv (V176), and the CLI session's time-limit message
+does the same on every transport (V178). The argv is where this suite puts what it must not print — a
+`--key=` value, and every value a snippet embeds, since `phpLiteral`'s base64 is an encoding, not a
+cipher. The guarantee CLAUDE.md states and 6F.4's acceptance therefore hold only on `ssh` (V177).
+6G itself adds no secret to an argv (V179).
+
+**The rule:** an error names the program and why it failed — never its arguments. `ssh` already does.
+
+- **`common/wp/exec.ts` — `fromExeca`** composes both of its messages from execa's own fields, which
+  say why without the argv (V176): `code` for a program that could not start, `signal` and
+  `signalDescription` for one that was killed, `isMaxBuffer` for one whose output was cut — plus its
+  label, which names the program only (`wp`, `sudo`, `docker exec <container> wp`; `docker cp`'s
+  label adds the suite's own paths). Never `shortMessage`, `message`, `command` or `escapedCommand`.
+- **`support/cli-session.ts` — `withinBudget`** names the command as `describeCli` does, `--key=`
+  hidden, through one helper in `support/cli.ts` rather than a second copy of the mask.
+- **The other messages that quote an argv** — in `backups.ts`, `options.ts`, `residue.ts`, `cron.ts`
+  and `cli.ts`'s `parseJsonList` call — carry job ids, option names and paths, never a secret. They
+  stay; the audit confirms each.
+
+**Unit specs** — `exec.spec.ts`: the four V176 cases through stub programs (one missing, a shell that
+kills itself, output over the cap, and `docker` absent from `PATH`), each asserting that the message
+names the program and the reason and holds no argument; `cli-session.spec.ts`: the budget message
+with a `--key=` in the argv. Mutation checks on both.
+
+**Docs** — `wordpress-automation.md` (what an exec error says, and why) and one clause in CLAUDE.md's
+automation section.
+
+**Acceptance** — a secret planted in the argv of each failing case appears in no message, on any
+transport; each message still names the program and the reason; the `ssh` messages are unchanged.
+
+**Verification** — the four gates and the mutations; the V176–V178 probes again, the secret in none
+of their messages; then `cli-running-job.feature` on `pro@nginx`, the one feature that passes a
+budget — the cells run `ssh`, which the change leaves as it is.
+
+**Not covered, stated:** while a command runs, its argv is visible in the host's process list —
+inherent to arguments, and to the plugin's own `--key=`.
 
 ### 6G — Restore
 
@@ -1867,16 +2149,48 @@ Scenario: Restore by uploading the backup file
 - The **`@free`** path must assert the inverse — the history action lands on the bare restore page
   with no `restore_file`, so an upload is unavoidable. That negative assertion is what stops a future
   regression from silently downgrading Pro to the Free journey.
-- **Restore scope** (full / database-only / files-only) is orthogonal to entry path — cover it once,
-  on the cheaper `@pro` in-place path, rather than multiplying both journeys by three.
-- **CLI restore** (`@pro`, V4): `wp backwpup restore <file> --yes --type=full|db|file`, with
+- **Restore strategy** (*Full Restore* / *Database Only* / *Files Only*, chosen on the restore screen
+  from a **mixed** backup) is orthogonal to entry path — cover it once, on the cheaper `@pro` in-place
+  path, rather than multiplying both journeys by three.
+- **Backup contents** — restoring a backup that was *made* files-only or database-only is a separate
+  journey from choosing a strategy on a mixed one (V189): the screen offers only the one strategy the
+  archive can serve, and half the site is simply not in it. One `@pro` in-place scenario each, and
+  each asserts the strategies it is offered — exactly one — so a screen that offered *Full Restore*
+  on half a backup fails.
+- **The marker drifts on both sides, every time.** The Background changes the file marker *and* the
+  option marker, and every scenario asserts both: the side the restore covers is back, the side it
+  does not is **still drifted**. Without the second half, a restore that silently does everything,
+  or the wrong half, passes every partial scenario.
+- **CLI restore** (`@pro`, V4): `wp backwpup restore <file> --yes --type=full|db|file` (V192), with
   `--pre-backup` on one scenario. A restore that fails midway exits 0 with a warning — and, after a
   successful rollback, ends on `Success:` (V105) — so the marker is the verdict, never the exit code.
+- **Archive format: `.tar` only**, the default every backup so far has used. `.zip` and `.tar.gz` are
+  extracted by different code in both entry paths (V191) and are **6K**, deliberately split out, not
+  dropped.
 - Tag `@slow`; a restore rewrites the site, so it must run on a worker-bound site and re-authenticate
   afterwards if the restore rolls the session back.
 
+**Coverage** (`.tar` throughout):
+
+| Scenario | Backup | Restored with | Entry | Edition |
+| --- | --- | --- | --- | --- |
+| Full restore in place | mixed | *Full Restore* | history deep link | `@pro` |
+| Database-only restore of a mixed backup | mixed | *Database Only* | history deep link | `@pro` |
+| Files-only restore of a mixed backup | mixed | *Files Only* | history deep link | `@pro` |
+| Restore a database-only backup | database only | *Database Only* (the only one offered) | history deep link | `@pro` |
+| Restore a files-only backup | files only | *Files Only* (the only one offered) | history deep link | `@pro` |
+| Restore by uploading the backup file | mixed | *Full Restore* | download, then upload | `@free` |
+| CLI restore, each `--type` | mixed | `--type=full\|db\|file` | `wp backwpup restore` | `@pro` |
+| CLI restore with a safety snapshot | mixed | `--pre-backup` | `wp backwpup restore` | `@pro` |
+
+**Before building:** a measurement pass on `pro@nginx` (§2's rule) — drive one in-place and one
+upload restore by hand, then record whether a restore ends the admin session, how long each takes,
+and that V189–V192 hold live.
+
 **Acceptance** — a restore scenario **fails** if the marker is not restored (the property the
-baseline never had); each edition's scenario fails if it is served the *other* edition's entry path.
+baseline never had), and a partial one also fails if the half it does not cover was restored; each
+contents scenario fails if offered any strategy beyond its own; each edition's scenario fails if it
+is served the *other* edition's entry path.
 
 ### 6H — Storage credential surface *(no credentials needed to build it)*
 
@@ -2085,6 +2399,44 @@ own random content came back, and no answer is never reported as safe; the banne
 docker cells and present on an unprotected one, with the URL, the server's own name and every remedy;
 the two guard files cannot drift apart silently.
 
+### 6K — Restore from every archive format *(`@pro`; after 6G; last in the sequence)*
+
+**Required to close Phase 6, not deferred** — it is last only because it reuses 6G's steps whole.
+6G restores `.tar`, the default; BackWPup also writes `.zip` and `.tar.gz` (V190), and each is
+unpacked by different code — three extractors in the UI, three more in the CLI (V191). A `.tar`
+restore says nothing about the other two.
+
+- **One axis, not a matrix.** The extractor is chosen by extension, never by what the archive holds
+  (V191), so every scenario restores a **mixed** backup — the only one that sends files *and* a
+  database dump through the extractor — with a full restore. Contents and strategy stay 6G's.
+- **The `.zip` / `.tar.gz` backup is made after onboarding.** Onboarding can only produce `.tar`: it
+  offers no format, and its save reads three keys, none of them the format (V39), so the job is
+  created as `.tar` (V190). The setup therefore onboards as 6G does, **switches the onboarded job's
+  archive format**, and only then runs the backup that the scenario restores. Measure first which
+  route switches it the way the plugin does — the job's settings screen, or 6F.4's `job-import`, which
+  merged a format change (V159) — and assert the backup that results really carries the extension
+  asked for: a fallback to `.tar` (`inc/class-admin.php:902-907`) would otherwise pass every scenario
+  as a `.tar` restore.
+- **Both entry paths, both formats** — the UI and the CLI do not share an extractor:
+
+| Scenario | Format | Entry |
+| --- | --- | --- |
+| Restore a `.zip` backup in place | `.zip` | history deep link |
+| Restore a `.tar.gz` backup in place | `.tar.gz` | history deep link |
+| Restore a `.zip` backup over WP-CLI | `.zip` | `wp backwpup restore` |
+| Restore a `.tar.gz` backup over WP-CLI | `.tar.gz` | `wp backwpup restore` |
+
+- **No `@free` format scenarios.** Free's upload journey ends in the same extractor (byte-identical,
+  V191), so the format adds nothing to it that the `@pro` scenarios do not already prove. Revisit only
+  if the measurement shows the upload step itself treats a format differently.
+- **Out of scope, stated:** `.tar.bz2` — no longer offered, and the restore refuses it (V190).
+  Archive inspection (`wp/archive.ts`) stays tar-only: these scenarios read the restored markers, never
+  the archive, so `.zip` needs nothing there.
+
+**Acceptance** — each of the four restores the marker on both sides; each fails if the backup it
+restored was not made in its format; the restore steps are 6G's, reused unchanged — only the setup
+differs, by the format switch.
+
 ---
 
 ## 5. Definition of done (phase-level)
@@ -2092,7 +2444,8 @@ the two guard files cannot drift apart silently.
 - Every §2.1 intent is ported, superseded, explicitly declined, or **explicitly deferred** in writing.
   Exactly one deferral is open: the 11 storage round-trips of **6H.2**, blocked on credentials. Phase 6
   may close with it outstanding *only* because 6H ships the config, the skip gate and the isolation
-  helper, so 6H.2 adds scenarios and nothing structural.
+  helper, so 6H.2 adds scenarios and nothing structural. **6K is not a deferral**: Phase 6 does not
+  close until a backup in every archive format the plugin writes (V190) has been restored.
 - Both `pro@nginx` and `free@nginx` cells green; `@pro`/`@free` scenarios run only on their edition's
   cells.
 - The 6A lint gate is green — no `waitForTimeout` / `networkidle` / `waitForSelector` / `page.type`
@@ -2127,7 +2480,7 @@ is done — deliberately **not** guessed here.
 | Restore rewrites the site under test | `@slow`, worker-bound site, re-auth after restore, run last in its cell. |
 | Backup jobs are genuinely slow | `@slow` for CI splitting; real barriers (`startbackup`, `job-abort-status`) instead of long fixed timeouts, so the wait is as short as the job allows. |
 | **Archives accumulate on the site under test** | **Realised, then fixed in the shared rails (2026-08-05).** BackWPup's uninstall keeps every archive it made, and a full backup of the `pro@nginx` site is ~340 MB, so each scenario left one behind — the cell reached **6.8 GB across 28 per-install directories**. The `@plugin` teardown now clears what a product declares it leaves (`ProductConfig.siteResidue` → `wp/residue.ts`), independently of whether the uninstall succeeded. Verified live: one scenario reclaimed **7 GB**, and a scenario that runs a real backup now leaves no archive behind. **One caveat, reported not failed:** the plugin creates `uploads/backwpup-restore` as `755 www-data`, which the ssh transport's user cannot unlink inside — it is ~24 KB and does not accumulate, so the sweep warns (with the fix in the message) rather than failing the run. Making it removable on a cell is an ownership change there, not a code change here. |
-| **A fresh install that is not fresh** | **Two causes, both closed.** (V46, V122) WP-CLI's activation does not fire `init`, so BackWPup's activation routine runs in whichever request reaches it first — in this suite the `@plugin` hook's own active-state check — and a second request racing it sends a never-onboarded site down the plugin's upgrade path, which deletes the onboarding flag. Nothing here can hold the second request off, so `finishActivation()` detects a lost race and redoes the install, up to three installs, each reported. (V47) The plugin's `wp_bwpup_backups` table can also outlive an uninstall under concurrency and then block the next install; 6E's database sweep (`ProductConfig.siteDbResidue`) removes it before every install. Both are worth reporting upstream: a plugin's activation should not be re-entrant, and its uninstall should be the last word on its own table. |
+| **A fresh install that is not fresh** | **Two causes, both handled; one can still end in a fatal (V174).** (V46, V122) WP-CLI's activation does not fire `init`, so BackWPup's activation routine runs in whichever request reaches it first — in this suite the `@plugin` hook's own active-state check — and a second request racing it sends a never-onboarded site down the plugin's upgrade path, which deletes the onboarding flag. Nothing here can hold the second request off, so `finishActivation()` detects a lost race and redoes the install, up to three installs, each reported. (V174) The race can also crash the request that loses it, in the plugin's migration; the debug-log gate then fails the scenario, rightly, whatever the recovery does, and the retry policy absorbs it. (V47) The plugin's `wp_bwpup_backups` table can also outlive an uninstall under concurrency and then block the next install; 6E's database sweep (`ProductConfig.siteDbResidue`) removes it before every install. Both are worth reporting upstream: a plugin's activation should not be re-entrant, and its uninstall should be the last word on its own table. |
 | **Staged files served by the web server** | **6J.** A guard written with the staging area covers every server that honours `.htaccess`, and fails closed wherever it cannot be applied (V143). nginx needs the include in the site's vhost — an operator change the suite can report on every run but never make — so until then the nginx cells keep serving the area, and pre-flight says so each time. |
 | Scope creep from "improve" | The improvement budget is §1.1 plus the V-facts. Anything else is a follow-up issue, not this phase. |
 

@@ -71,6 +71,12 @@ const ANSI = /\u001B\[[0-9;]*m/g;
 /** How much command output a failure message carries before it stops being readable. */
 const OUTPUT_EXCERPT = 1000;
 
+/** A `--key=` argument: `backup-encrypt`'s and `backup-decrypt`'s key, or the file holding one. */
+const KEY_ARGUMENT = /^--key=(.+)$/;
+
+/** What a key reads as in a description. */
+const HIDDEN_KEY = "<hidden>";
+
 /**
  * Pulls WP-CLI's status lines out of one stream.
  *
@@ -129,6 +135,14 @@ export function parseCliNotices(
 }
 
 /**
+ * The WP-CLI argv for a `wp backwpup …` subcommand — the namespace {@link backwpupCli} supplies, so
+ * a message can name a command before it has answered.
+ */
+export function backwpupArgv(args: readonly string[]): readonly string[] {
+  return ["backwpup", ...args];
+}
+
+/**
  * Runs a `wp backwpup …` subcommand and reports everything it said.
  *
  * The `backwpup` namespace is supplied here rather than by the caller: every command in this
@@ -145,7 +159,7 @@ export async function backwpupCli(
   transport: Transport,
   args: readonly string[],
 ): Promise<CliResult> {
-  const argv = ["backwpup", ...args];
+  const argv = backwpupArgv(args);
   const result = await wpCli(transport, [...argv]);
   return {
     ...result,
@@ -176,24 +190,58 @@ export function outputLines(result: CliResult): readonly string[] {
 }
 
 /**
+ * How a message names a command: `wp …`, with a `--key=` value read as `--key=<hidden>`.
+ *
+ * The one place that mask lives, so every message naming a command of this surface — a failure, a
+ * time limit, a parse error — hides a key the same way. A failure message is one of the few places a
+ * scenario's words are kept.
+ *
+ * @param argv - the WP-CLI argv, without `wp`.
+ */
+export function commandLine(argv: readonly string[]): string {
+  const shown = argv.map((arg) =>
+    KEY_ARGUMENT.test(arg) ? `--key=${HIDDEN_KEY}` : arg,
+  );
+  return `wp ${shown.join(" ")}`;
+}
+
+/**
+ * A command's output with every `--key=` value its argv carries hidden, wherever it appears — before
+ * any excerpt is cut, so no part of a key is left at the cut.
+ */
+function hideKeys(output: string, argv: readonly string[]): string {
+  const keys = argv.flatMap((arg) => {
+    const key = KEY_ARGUMENT.exec(arg)?.[1];
+    return key === undefined ? [] : [key];
+  });
+  return keys.reduce((text, key) => text.split(key).join(HIDDEN_KEY), output);
+}
+
+/** At most {@link OUTPUT_EXCERPT} characters of `text`, marked when cut. */
+function excerptOf(text: string): string {
+  return text.length > OUTPUT_EXCERPT
+    ? `${text.slice(0, OUTPUT_EXCERPT)}…`
+    : text;
+}
+
+/**
  * One line naming the command, its exit code and what it printed — for assertion messages.
  *
- * **Embeds the argv and the raw output**, so it is not for a command carrying a secret: `job-export
- * --passwords` prints storage credentials, and `backup-encrypt --key=<hex>` puts its key in the
- * argv. A failure message is one of the few places a scenario's output is kept, so a caller passing
- * either must describe the command itself rather than call this. Nothing does today.
+ * **A `--key=` value never appears in it** — not in the command ({@link commandLine}), and not where
+ * the output repeats it. Output is otherwise quoted as it came — so this is not for `job-export
+ * --passwords`, which prints stored credentials, and which nothing here runs.
  */
 export function describeCli(result: CliResult): string {
-  const output = [result.stdout, result.stderr]
-    .map((stream) => stream.trim())
-    .filter((stream) => stream !== "")
-    .join("\n");
-  const excerpt =
-    output.length > OUTPUT_EXCERPT
-      ? `${output.slice(0, OUTPUT_EXCERPT)}…`
-      : output;
+  const output = hideKeys(
+    [result.stdout, result.stderr]
+      .map((stream) => stream.trim())
+      .filter((stream) => stream !== "")
+      .join("\n"),
+    result.argv,
+  );
+  const excerpt = excerptOf(output);
   return (
-    `\`wp ${result.argv.join(" ")}\` exited ${String(result.exitCode)}` +
+    `\`${commandLine(result.argv)}\` exited ${String(result.exitCode)}` +
     (excerpt === "" ? " with no output" : `:\n${excerpt}`)
   );
 }
@@ -209,12 +257,13 @@ export function describeCli(result: CliResult): string {
  * silence) asserts on `stdout` instead, where the difference survives.
  *
  * @param stdout - the command's standard output.
- * @param command - the argv, without `wp`, for the failure message.
+ * @param argv - the WP-CLI argv, without `wp`, for the failure message — named as {@link commandLine}
+ * names it, so a key is hidden there and in the output quoted.
  * @throws {@link Error} if the output is neither empty nor a JSON array.
  */
 export function parseJsonList(
   stdout: string,
-  command: string,
+  argv: readonly string[],
 ): readonly unknown[] {
   const trimmed = stdout.trim();
   if (trimmed === "") return [];
@@ -223,12 +272,13 @@ export function parseJsonList(
     parsed = JSON.parse(trimmed);
   } catch {
     throw new Error(
-      `[backwpup/cli] \`wp ${command}\` did not return JSON. Output was: ${trimmed.slice(0, OUTPUT_EXCERPT)}`,
+      `[backwpup/cli] \`${commandLine(argv)}\` did not return JSON. Output was: ` +
+        excerptOf(hideKeys(trimmed, argv)),
     );
   }
   if (!Array.isArray(parsed)) {
     throw new Error(
-      `[backwpup/cli] \`wp ${command}\` returned ${typeof parsed}, expected a JSON array.`,
+      `[backwpup/cli] \`${commandLine(argv)}\` returned ${typeof parsed}, expected a JSON array.`,
     );
   }
   return parsed;
@@ -248,5 +298,5 @@ export function readJsonList(result: CliResult): readonly unknown[] {
       `[backwpup/cli] cannot read JSON from a command that failed — ${describeCli(result)}`,
     );
   }
-  return parseJsonList(result.stdout, result.argv.join(" "));
+  return parseJsonList(result.stdout, result.argv);
 }

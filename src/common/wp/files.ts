@@ -1,10 +1,12 @@
+import { posix } from "node:path";
+
 import { evalPhp, phpLiteral } from "./php";
 import { isObject } from "../guards";
 import type { Transport } from "../config/types";
 
 /**
  * Reading properties of files that live on the site — and setting the one a scenario may need to
- * arrange, a file's age.
+ * arrange, a file's age — and the path a command run in WP-CLI's working directory reaches one by.
  *
  * Asked through `wp eval` rather than a shell utility so the answer is the same on every transport
  * and does not depend on which of `sha256sum` / `shasum`, or which `stat` or `touch` dialect, a host
@@ -328,4 +330,79 @@ export async function backdateFile(
     );
   }
   return time;
+}
+
+// ── Reaching a path from where WP-CLI runs ───────────────────────────────────
+
+/**
+ * The path a command run in WP-CLI's working directory reaches a file or directory by, from the
+ * site's own two answers: where the target really is (`realpath()`) and where WP-CLI really runs
+ * (`getcwd()`).
+ *
+ * WP-CLI resolves a relative argument against its working directory — the WordPress root, on every
+ * transport this suite drives. Both answers have every symlink resolved, so each step of the path, up
+ * or down, is a real directory. Worked out from the paths this suite configures instead, a path
+ * climbing out of a root reached through a symlink would climb out of the link's target, and lead
+ * somewhere else.
+ *
+ * @param located - the decoded reply: `path`, the target's `realpath()`, and `cwd`, `getcwd()`.
+ * @param what - the target in words, for messages.
+ * @returns the relative path; `.` for the working directory itself.
+ * @throws {@link Error} if either answer is not an absolute path — `realpath()` answers `false` for a
+ * path it cannot resolve, and a path worked out from a guess could lead anywhere.
+ */
+export function pathFromWorkingDir(located: unknown, what: string): string {
+  const { path, cwd } = isObject(located) ? located : {};
+  if (
+    typeof path !== "string" ||
+    !posix.isAbsolute(path) ||
+    typeof cwd !== "string" ||
+    !posix.isAbsolute(cwd)
+  ) {
+    // Held as `unknown`: `JSON.stringify` answers `undefined` for `undefined`, whatever its type says.
+    const shown: unknown = JSON.stringify(located);
+    throw new Error(
+      `[wp/files] the site could not say where ${what} is from the directory WP-CLI runs in: ` +
+        (typeof shown === "string" ? shown.slice(0, 300) : "nothing"),
+    );
+  }
+  return posix.relative(cwd, path) || ".";
+}
+
+/**
+ * {@link pathFromWorkingDir} for a target only the site can name, located and answered in one
+ * request.
+ *
+ * @param transport - the site holding the target.
+ * @param locate - PHP that sets `$path` to the target's absolute path, or stops with `WP_CLI::error`
+ * when it cannot.
+ * @param what - the target in words, for messages — e.g. `the newest backup`.
+ * @returns the path a command run in WP-CLI's working directory reaches the target by.
+ * @throws {@link Error} if the snippet stopped, nothing is at the path, or the site could not say
+ * where the target or WP-CLI is.
+ */
+export async function locateFromWorkingDir(
+  transport: Transport,
+  locate: string,
+  what: string,
+): Promise<string> {
+  const reply = await evalPhp(
+    transport,
+    `${locate}clearstatcache();\n` +
+      "if ( ! file_exists( $path ) ) {\n" +
+      "\tWP_CLI::error( 'nothing at ' . $path );\n" +
+      "}\n" +
+      "echo wp_json_encode( [ 'path' => realpath( $path ), 'cwd' => getcwd() ] );",
+    `locating ${what}`,
+    "wp/files",
+  );
+  let located: unknown;
+  try {
+    located = JSON.parse(reply);
+  } catch {
+    throw new Error(
+      `[wp/files] locating ${what} did not come back as JSON: ${reply.slice(0, 300) || "(empty)"}`,
+    );
+  }
+  return pathFromWorkingDir(located, what);
 }
