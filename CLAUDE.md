@@ -602,6 +602,7 @@ these before starting related work — they hold the current plan, not history:
 - [`docs/plans/phase-6-feature-porting-plan.md`](docs/plans/phase-6-feature-porting-plan.md) — feature porting (BackWPup first); supersedes the parent plan's Phase 6.
 - [`docs/plans/site-file-ownership-plan.md`](docs/plans/site-file-ownership-plan.md) — keeping a site's docroot writable by both WP-CLI's user and the web server.
 - [`docs/plans/orchestrator-plan.md`](docs/plans/orchestrator-plan.md) — the orchestrator: a long-running service that runs and manages cells on a server (supersedes the parent plan's Phase 9).
+- [`docs/plans/orchestrator-phase-0-plan.md`](docs/plans/orchestrator-phase-0-plan.md) — the orchestrator's Phase 0: what the suite must change first, with verified findings and recommended solutions.
 
 ## When to update these docs
 

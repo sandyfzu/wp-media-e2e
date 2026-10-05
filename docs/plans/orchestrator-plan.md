@@ -1,8 +1,10 @@
 # Orchestrator Plan
 
 > **Status:** concept agreed — tasks and runs, provided zips, builds, events, reports, controls (§2–§3);
-> APVM additions filed upstream (Q1). **Phase 0 — make the suite ready
-> (0A–0F) — defined, not started**: it runs when approved. Later phases are not planned yet.
+> APVM additions filed upstream (Q1); stack decided (§3). **Phase 0 — make the suite ready
+> (0A–0F) — investigated, not implemented**: findings and recommended solutions are in the
+> [Phase 0 plan](orchestrator-phase-0-plan.md); it is implemented when approved. Later phases are not
+> planned yet.
 > **Date:** 2026-09-24
 > **Replaces:** §3.4 and Phase 9 of the [modernization plan](e2e-modernization-plan.md).
 > **Name:** orchestrator — it lives in this repo, unlike today's separate AutoE2E tool. "AutoE2E" may
@@ -195,6 +197,26 @@ report dir names its run and still sorts by time.
 
 ## 3. Planned
 
+**Stack** — decided 2026-10-05.
+
+| Layer | Choice | Why |
+| --- | --- | --- |
+| Host | A **separate runner server**, reaching the sites over SSH (the suite's `ssh` transport) | Keeps browsers and builds off the WordPress servers. How many instances share it is Q2. |
+| Language | TypeScript on Node 24, run with `tsx` | The suite's 518 extension-less relative imports don't resolve under Node's own type stripping (V110); `tsx` already runs `healthcheck`. |
+| State | SQLite through `node:sqlite`, one file in the state directory; plain SQL, numbered migrations, no ORM | Built in, no native addon; "Release candidate" in Node 24.21, no warning (V111). `better-sqlite3` is the fallback behind the same repository layer. |
+| API | Hono + `@hono/node-server`: one app on a Unix socket (command) and on HTTP (dashboard) | Its typed client (`hc`) gives both clients the server's types — parity by construction; SSE and static serving built in (V112). |
+| Validation | zod 4 | One schema per input — task, config, API body — typing server, command and dashboard alike. |
+| Command | commander, colour through `node:util` `styleText` | ~40 subcommands are too many for `parseArgs`. |
+| Scheduling | croner for calendar triggers; our own timer for loops and cooldowns | Time zones and DST handled for calendar triggers; loop timing is a small pure function. |
+| Run supervision | `node:child_process` `spawn` with `detached` (own process group) | Phase 0C signals the **group** (stop file, one SIGINT, then SIGKILL; never SIGTERM); execa's `kill()` signals one pid. |
+| Logs | pino for the orchestrator's log (its `redact` masks secrets); plain text per run | |
+| Dashboard | React + Vite + Tailwind + shadcn/ui, built to static files the orchestrator serves | One process and one origin: the API, the dashboard and the reports share it. |
+| Auth | `node:crypto` (scrypt passwords, hashed scoped API tokens); no login on the loopback listener (SSH tunnel); a login and session cookie only on a separate listener for other modes (the dashboard, below); TLS, when off a private network, from a reverse proxy | No auth dependency. Only the SSH tunnel is a confirmed way in (VPN, Tailscale unconfirmed). |
+| Tests | The repo's unit runner (`*.spec.ts`); Playwright for the dashboard later | Same conventions as the suite. |
+
+Versions are taken at implementation time (2026-10-05: hono 4.13, @hono/node-server 2.1, zod 4.6,
+commander 15, croner 10, pino 10, react 19.3, vite 8.3, tailwindcss 4.3).
+
 - **systemd keeps the orchestrator alive.** It is already on the server (PM2's own boot start is a
   systemd unit it generates, V14), and it tracks every process the orchestrator starts, so no run
   outlives a crash unseen. `KillMode=mixed` sends the stop signal to the orchestrator alone, which
@@ -207,9 +229,29 @@ report dir names its run and still sorts by time.
   remove), notifications (list, send a test), cells (busy or free, and their tasks), the orchestrator
   itself (status, stop), and a `watch` view.
 - **The dashboard** — the same features in a polished web UI, plus opening reports and uploading zips.
-  Bind: local only (reached over an SSH tunnel), local network (VPN, Tailscale), or remote. Beyond
-  local only it requires authentication, and TLS off a private network — reports and traces carry
-  site passwords.
+  Bind: local only (reached over an SSH tunnel), local network (VPN, Tailscale), or remote. Only the
+  **SSH tunnel is confirmed** (2026-10-05), so it is the default and the mode built first; VPN and
+  Tailscale are unconfirmed. Off a private network it requires TLS — reports and traces carry site
+  passwords. Over the tunnel (`ssh -L 8080:127.0.0.1:<port> runner`, then `http://localhost:8080`):
+  - **Bind `127.0.0.1`** on the runner, and name `127.0.0.1` in `-L` — `localhost` there may resolve
+    to `::1`.
+  - **No login** (decided 2026-10-05): reaching the runner's loopback — an SSH login, or an account
+    on the runner — is the access control.
+  - **Decided by listener, never by client address.** The loopback listener has no login; any other
+    mode is a **separate** listener that always requires it. A reverse proxy on the runner connects
+    from `127.0.0.1` too, so "no login from 127.0.0.1" would wave every remote visitor through; it
+    must point at the authenticated listener.
+  - **`Origin` and `Host` are checked**, since no cookie stands in the way: any web page the user
+    has open can send a request to `http://localhost:8080`. Every state-changing request needs an
+    `Origin` equal to its own origin (plain form posts included), and `Host` must be `localhost`,
+    `127.0.0.1` or `[::1]` on any port (the local port is the user's) — against DNS rebinding.
+  - **When a login exists** (the authenticated listener), its cookie is `Secure` only on HTTPS:
+    WebKit (Safari) drops a `Secure` cookie on `http://localhost`; Chromium and Firefox keep it
+    (V113). Always `HttpOnly`, `SameSite=Strict`, a name of our own.
+  - **Relative links only** inside the dashboard, so any local port works; links sent out (Slack,
+    events) use a configured `dashboardUrl`, defaulting to the documented tunnel's
+    `http://localhost:8080`.
+  - **SSE** passes through the tunnel unchanged; a comment line every ~15 s keeps idle streams alive.
 - **Parity** between the command and the dashboard: whatever one offers, the other does too, unless it
   makes no sense there — viewing an HTML report is the dashboard's; the command prints its path.
 - **One API behind both** — the command over a local socket, the dashboard over HTTP — so their
@@ -257,8 +299,12 @@ report dir names its run and still sorts by time.
 | # | Question | Notes |
 | --- | --- | --- |
 | Q1 | APVM additions (ours) | (a) **Cancel / timeout** for a build — it has neither (V15, V27): [APVM #2](https://github.com/wp-media/automation-plugin-version-manager/issues/2). (b) **Coordinate identical builds**: two processes that both miss the cache both build in full; the store itself is already locked and atomic (V25, V26): [APVM #3](https://github.com/wp-media/automation-plugin-version-manager/issues/3). (c) **Cache clean in the Node library** — not there even in 3.2.0 (V19); being planned in APVM for a 3.3.0, which cache retention waits for (§3): expose the storage crate's `ArtifactStore::clean` (e.g. `cleanCache({ olderThan, project, target, dryRun })` returning its `CleanReport`), so builds and cleaning share one dependency, one version and one cache handle. `apvm-napi` is updated only once that release is tagged. |
+| Q2 | Instances on the runner server | One orchestrator instance per WordPress server (nginx, apache): do both run on the one runner server (two state directories, two systemd units, a combined cap on browsers), or on one runner each? Decide before the service is built. |
 
-## 6. Phase 0 — Make the suite ready (not started; runs when approved)
+## 6. Phase 0 — Make the suite ready (investigated; implemented when approved)
+
+Each item's verified findings, recommended solution and alternatives are in the
+[Phase 0 plan](orchestrator-phase-0-plan.md); this section keeps the list.
 
 The orchestrator relies on the suite behaving under it, so this comes first. **Done when** every item
 is implemented — or, where the suite needs no change, its solution is decided and recorded here —
@@ -277,11 +323,15 @@ verified live where possible, with its evidence in §7.
   traces and videos of every running cell. Low risk for the orchestrator (it only runs
   `--project=<cell>`), real on any shared machine.
 - **0A.3 — cells that share a server.** Side-by-side runs on one host share its CPU, disk, MySQL and
-  PHP-FPM, and backups are disk-heavy. The dev cells `pro@nginx` and `free@nginx` share a host (V4);
-  the AutoE2E cells' hosts are unchecked (V5). Operator's estimate: two runs at once on one server are
-  fine, four or more sites backing up at once may not be (backups are about 130 MB, a few seconds
-  each). Measure it (V6) and set a per-host cap from that — a group already keeps cells apart
-  (§2 Groups). Also re-check the artifact plan's
+  PHP-FPM, and backups are disk-heavy. There are two WordPress servers: the nginx one holds the dev
+  cells (V4) and AutoE2E's two nginx cells, the apache one AutoE2E's two apache cells (V5). "One
+  server, one orchestrator" means one orchestrator *instance* per machine: cells on different sites of
+  one server may run at once — the operator's estimate is that up to about four parallel suites per
+  server are fine. Files backups of the dev sites with `bigFiles` are about 3 GB each (phase-6 V50), so
+  disk still binds. The orchestrator **never limits runs per server** — the user decides — but
+  **warns** (command, dashboard, events) once a server reaches its threshold of running cells:
+  default 4, configurable (decided 2026-10-05). Measure it (V6) to tune that default — a group already
+  keeps cells apart (§2 Groups). Also re-check the artifact plan's
   deferred remedy for sites sharing an absolute staging root (its §2.8 case 22).
 - **0A.4 — two runs on one site.** Only the orchestrator uses the AutoE2E sites (§1), so its own guard
   suffices for now: never two runs of one cell, and no site listed by two cells of any product (the
@@ -333,17 +383,17 @@ orchestrator runs, writing JSON lines.
 
 | # | Claim | Status | Evidence |
 | --- | --- | --- | --- |
-| V1 | `parallelIndex` is global per invocation, so one cell per run | ✅ | Playwright docs + maintainers (microsoft/playwright#38953); guarded in `project.ts` (modernization §3.2) |
-| V2 | `bddgen` regenerates every cell of a product, deleting before writing | ✅ source · ⏳ live impact | playwright-bdd 9.2.0: `dist/cli/commands/test.js` generates every registered config; `dist/generate/index.js:36` `clearOutputDir()` then `saveFiles()` |
-| V3 | A run clears only its *selected* projects' output dirs; the setup projects and the unit config use the root `test-results/` | ✅ source · ⏳ live impact | Playwright 1.62.1 `lib/runner/index.js` `createRemoveOutputDirsTask` (`filteredProjects`, dependencies excluded); none of those configs sets `outputDir` |
-| V4 | The dev cells `pro@nginx` and `free@nginx` share one host | ✅ | `src/projects/backwpup/config/sites.json` |
-| V5 | Which AutoE2E cells share a host | ⏳ | 0A.3 |
-| V6 | Side-by-side runs on one host stay reliable | ⏳ measure | 0A.3 |
+| V1 | `parallelIndex` is global per invocation, so one cell per run | ✅ | Playwright docs + maintainers (microsoft/playwright#38953); guarded in `project.ts` (modernization §3.2). Rechecked in 1.63.0's `TestInfo.parallelIndex` docs: `0` to `workers - 1`, never shared by workers running at once |
+| V2 | `bddgen` regenerates every cell of a product, deleting before writing | ✅ source + measured; its effect on running cells measured in the Phase 0 plan (V29, V30) | playwright-bdd 9.2.1, as in 9.2.0: `dist/cli/commands/test.js` generates every registered config, the first in the main thread and the rest in parallel worker threads; `dist/generate/index.js:36` `clearOutputDir()` (`rm` of every `*.spec.js` in the cell's output dir), then `:37` `saveFiles()`. Measured 2026-09-24: one `bddgen --config playwright.backwpup.config.ts` gave all 10 specs of both cells new inodes (deleted, then written); the folder of a cell no longer registered was left alone |
+| V3 | A run clears only its *selected* projects' output dirs; the setup projects and the unit config use the root `test-results/` | ✅ source + measured | Playwright 1.63.0, as in 1.62.1: `lib/runner/index.js` `createRemoveOutputDirsTask` removes each of `filteredProjects`' output dirs; `filterProjects` returns the projects named (wildcards allowed), never their dependencies, and every project without `--project`; `preserveOutputDir` is set only by the test server's `runTests` (UI and watch mode), never by the CLI. None of those configs sets `outputDir` (`project.ts:136`, `:145`; `playwright.unit.config.ts`). Measured 2026-09-24 with marker files: `--project=<cell>` deleted only its own folder; the unit config, `--project=artifacts:<cell>` and a run without `--project` each deleted all of `test-results/`, other products' cells included |
+| V4 | The dev cells `pro@nginx` and `free@nginx` share one host | ✅ | `src/projects/backwpup/config/sites.json`. Orchestrator development runs the same two cells on two more sites of that host, `bwu2.e2e…` (Free) and `bwu3.e2e…` (Pro): four BackWPup docroots (3.6, 2.6, 0.16 and 2.9 GB) on a volume 84 % full with 17 GB free (2026-09-24; phase-6 V72 had 20 GB) |
+| V5 | Which AutoE2E cells share a host | ✅ 2026-09-28 (the operator) | Two WordPress servers: `backwpup@nginx` and `wp-rocket@nginx` on the nginx one, `backwpup@apache` and `wp-rocket@apache` on the apache one. Site details on request, later |
+| V6 | Side-by-side runs on one host stay reliable | ⏳ measure | 0A.3 — allowed up to about four parallel suites per server (the operator, 2026-09-28) |
 | V7 | A mid-scenario kill leaves the plugin installed and the next run recovers; killing only the Playwright parent lets the worker finish teardown | ✅ live (`pro@apache`, `pro@nginx`) | Phase 6 plan V53, V61 |
-| V8 | What Playwright runs on SIGINT/SIGTERM (After hooks, fixture teardown), and on a second signal | ⏳ | 0C |
+| V8 | What Playwright runs on SIGINT/SIGTERM (After hooks, fixture teardown), and on a second signal | ✅ source + lab + live | Phase 0 plan V40–V47, V51, V73–V75 |
 | V9 | A cold BackWPup build takes minutes: 13.7 min once, 5.4 min for `pro-en` alone | ✅ measured | an earlier real build; 2026-09-23, `develop` @ `f1ebfd0`, twice (V17, V20) |
 | V10 | A multi-variant warm serves each cell's single-variant `build()` from cache | ✅ 2026-07-28 | real cache: per-variant zips side by side under `<project>/commits/<version>/<commit>/`; APVM's `origin` reports partial builds |
-| V11 | APVM's cache stays consistent after a build killed mid-way | ⏳ | Concurrent writers are covered by V25–V26 |
+| V11 | APVM's cache stays consistent after a build killed mid-way | ✅ 2026-09-25 (Phase 0 plan V76–V78) | Concurrent writers are covered by V25–V26 |
 | V12 | A blank `E2E_*` var in a run's env keeps the `.env` value out and reads as "product default" | ✅ Node 24.21 | `process.loadEnvFile()` fills only missing keys (blank stays `""`, unset takes `.env`'s value); `readArtifactEnv` reads `""` as unset |
 | V13 | systemd `KillMode=mixed`: the stop signal goes to the main process only; the kill stage signals the whole cgroup | ✅ source | systemd `unit_kill_context()` (via Context7) |
 | V14 | PM2 stops with SIGINT, then SIGKILL after 1.6 s by default; `pm2 startup` generates a systemd unit | ✅ docs | pm2.keymetrics.io (via Context7) |
@@ -361,3 +411,12 @@ orchestrator runs, writing JSON lines.
 | V26 | Two processes building the same thing at once both run the full build; the store stays consistent | ✅ 2026-09-24 | Throwaway cache, two `build()`s (`develop`, `pro-en`) started together in two processes: both missed the cache at 1 s and both cloned, checked out and ran composer; one finished in 278 s (`built`), the other died in `composer install` (exit 28) while GitHub connectivity was flaky (V21), so that failure proves nothing. A third build then came from the cache in 2.5 s with the finished build's zip (same SHA-256); the cache held one entry |
 | V27 | tokio's `Command::kill_on_drop` defaults to false, and APVM's step runner sets neither it nor a timeout, so dropping a build leaves its processes running | ✅ docs + source | docs.rs `tokio::process::Command::get_kill_on_drop` ("Defaults to false"); APVM `crates/core/src/build/runner.rs:184–198` (`sh -c … .output().await`) |
 | V28 | The site's own PHP version comes from Site Health → Info, not WP-CLI and not `X-Powered-By` | ✅ live 2026-09-24 | Logged in, the "Copy site info" button's `data-clipboard-text` (debug format, stable keys) gave `php_version` 8.5.10 on `pro@nginx` and `free@nginx` — where `wp eval "echo PHP_VERSION;"` answers 8.3.33 — and 8.3.33 on `pro@apache`, where the two agree; `php_sapi` `fpm-fcgi` everywhere; nginx 1.24.0 / Apache 2.4.58, WordPress 7.1.2 (WP-CLI agrees), MySQL 8.0.46 / MariaDB 10.11.14. `X-Powered-By` is absent on all three. About 1–1.3 s after login; read-only |
+
+Rows V29–V109 — Phase 0 — are in the [Phase 0 plan](orchestrator-phase-0-plan.md)'s §11.
+
+| # | Claim | Status | Evidence |
+| --- | --- | --- | --- |
+| V110 | Node 24.21 strips types natively, but not for the suite's modules: their relative imports carry no extension | ✅ 2026-10-05 | 0 relative imports with `.ts`, 518 without, under `src/`; a standalone `.ts` ran under `node`, an extension-less `import "./b"` failed `ERR_MODULE_NOT_FOUND`; `typescript.md` at v24.21.0: "Stability: 2 - Stable" |
+| V111 | `node:sqlite` works on Node 24.21 without a flag or warning; documented "Release candidate" | ✅ 2026-10-05 | `DatabaseSync(":memory:")` create/insert/select, SQLite 3.53.4, nothing on stderr; `sqlite.md` at v24.21.0: "Stability: 1.2 - Release candidate" |
+| V112 | `@hono/node-server` listens on a Unix socket (`createAdaptorServer(app).listen(path)`) and serves static files (`serveStatic`) | ✅ docs | honojs/node-server README and API reference (via Context7) |
+| V113 | Over plain `http://localhost` / `http://127.0.0.1` (what an SSH tunnel gives the browser), Chromium and Firefox keep a `Secure` (and `__Host-`) cookie; WebKit drops it and keeps only the non-`Secure` one. All three report a secure context | ✅ 2026-10-05 | Playwright on a Node server bound to `127.0.0.1`: Chromium 153, Firefox 155, WebKit 26.6, both hostnames, cookies echoed back by the server. Browser side only — an end-to-end tunnel to the runner is checked when the dashboard exists |
