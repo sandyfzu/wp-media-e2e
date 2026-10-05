@@ -3,8 +3,9 @@
 > **Status:** concept agreed — tasks and runs, provided zips, builds, events, reports, controls (§2–§3);
 > APVM additions filed upstream (Q1); stack decided (§3). **Phase 0 — make the suite ready
 > (0A–0F) — investigated, not implemented**: findings and recommended solutions are in the
-> [Phase 0 plan](orchestrator-phase-0-plan.md); it is implemented when approved. Later phases are not
-> planned yet.
+> [Phase 0 plan](orchestrator-phase-0-plan.md); it is implemented when approved. **Phase 0.5 — the
+> minimal orchestrator — planned** in the [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) (§7). Later
+> phases are not planned yet.
 > **Date:** 2026-09-24
 > **Replaces:** §3.4 and Phase 9 of the [modernization plan](e2e-modernization-plan.md).
 > **Name:** orchestrator — it lives in this repo, unlike today's separate AutoE2E tool. "AutoE2E" may
@@ -172,7 +173,8 @@ report dir names its run and still sorts by time.
 **Events** — the orchestrator announces what happens, and any part of it can subscribe.
 
 - **The events:** a run queued, started and finished; a build started, finished and failed; a task or
-  group created, changed or removed; the orchestrator started and stopping.
+  group created, changed or removed; a new suite version found, an update started, finished and failed
+  (§3 Updating the suite); the orchestrator started and stopping.
 - **`run.finished`** fires once per run, whatever the outcome (`error`, `stopped` and `killed`
   included), carrying everything about it: task, run id and name, trigger; product, cell, edition; the
   plugin (ref and commit, or zip name and SHA-256) and version; the site's WordPress and PHP versions;
@@ -265,6 +267,25 @@ commander 15, croner 10, pino 10, react 19.3, vite 8.3, tailwindcss 4.3).
   outlives *X*, but only up to *Y* — configurable, default **6 months** — and any report can be removed
   by hand (command, dashboard). A run's summary record stays (it is small), so history and trends
   survive. The same pruning runs by hand on a dev machine, per cell (Phase 0F).
+- **Updating the suite** — decided 2026-10-05: **stop, update, resume**. One checkout serves every
+  cell, and a run reads its files while it runs (`bddgen`, step files, `node_modules`), so nothing is
+  updated under a running cell. Until this exists, the suite is updated by hand while the orchestrator
+  is stopped (Phase 0.5, D3).
+  - **A new version is announced.** The orchestrator checks the suite's branch (default `develop`) for
+    a new commit; the dashboard and the command warn about it, naming the current and the new commit,
+    and an event fires.
+  - **Auto-update**, a setting: when on, a new commit is applied by itself — no new run starts, the
+    running ones finish, then the update, then everything resumes.
+  - **Update now** — a dashboard button, or the command — first says that every run will be stopped,
+    and asks: **y/N** in the command, a **Continue / Cancel** modal in the dashboard. On confirming,
+    every run stops gracefully (0C), the update runs, and everything resumes.
+  - **Scheduled update** — *deferred*: a third choice in the same prompt, "at 04:00 UTC" (the time
+    configurable), stopping everything then and updating. The first version offers y/N and
+    Continue / Cancel only.
+  - **The update**: a fast-forward pull of the branch, then `npm ci` (its `postinstall` also installs
+    the matching Chromium), then the orchestrator restarts, since its own code lives in the checkout.
+  - **To iterate**: how often to check, auto-update's default, a failed pull or install, the command's
+    name, and what the y/N does without a terminal.
 - **APVM cache retention** — *deferred until APVM's Node library can clean (Q1c; being planned in APVM, for a 3.3.0)*.
   The orchestrator will periodically remove cache entries unused for longer than *X* — configurable,
   default **10 days** — and log what it removed. Every cache hit refreshes an entry's last use (V18),
@@ -291,7 +312,6 @@ commander 15, croner 10, pino 10, react 19.3, vite 8.3, tailwindcss 4.3).
 - **Run the orchestrator in a container** (e.g. the Playwright image: pinned browser and system
   packages, deterministic `@visual` rendering).
 - **Retention of Allure history** (reports, run logs and APVM's cache are planned, §3).
-- **Updating the suite on the server** (pull + install) without disturbing running cells.
 - **Where "AutoE2E" appears** (outputs, dashboard).
 
 ## 5. Open questions
@@ -308,7 +328,7 @@ Each item's verified findings, recommended solution and alternatives are in the
 
 The orchestrator relies on the suite behaving under it, so this comes first. **Done when** every item
 is implemented — or, where the suite needs no change, its solution is decided and recorded here —
-verified live where possible, with its evidence in §7.
+verified live where possible, with its evidence in §8.
 
 **0A — Running side by side**
 
@@ -373,13 +393,28 @@ define stop (graceful), kill (hard), and what runs do when the orchestrator stop
 
 **0E — Machine-readable results.** A stream of each scenario's result — feature, name, tags, status,
 retries, duration, first failing step's message — and the final totals, for live progress and
-`run.finished` (§2 Output and logs, Events), from a small reporter in the suite, on only for
-orchestrator runs, writing JSON lines.
+`run.finished` (§2 Output and logs, Events), from a small reporter in the suite, always on (decided:
+the Phase 0 plan's P4), writing JSON lines.
 
 **0F — Report pruning.** The pruning module the orchestrator's retention uses (§3), plus
 `npm run report:prune` for dev machines: age-based, each cell's newest report kept up to the cap.
 
-## 7. Verification
+## 7. Phase 0.5 — The minimal orchestrator (planned)
+
+Detailed in the [Phase 0.5 plan](orchestrator-phase-0.5-plan.md): verified findings, the design, the
+its decisions (D1–D6, all taken), rows V114–V127. It comes after Phase 0, which it relies on (all but 0B.2),
+and before Phase 1.
+
+The smallest orchestrator that replaces AutoE2E's BackWPup instances: one foreground command,
+`npm run orchestrator -- start`, kept in `tmux`, that **cycles** one or more cells — `loop` tasks only
+— from a fixed JSON config. Each run builds its own plugin through the suite (no warm, no pin), runs
+under Phase 0's run contract and stops through 0C's drain. One event, `run.finished` (this plan's §2
+payload), reaches two subscribers: Slack, one message per run, and Datator, AutoE2E's payload for runs
+that tested. Everything here is the first version of a piece §2–§3 plan, in the shape later phases
+extend: the task fields, run ids, the event, the run contract, the stop. Out: systemd, the API, the
+dashboard, other task types, groups, provided zips, the orchestrator's own builds.
+
+## 8. Verification
 
 | # | Claim | Status | Evidence |
 | --- | --- | --- | --- |
@@ -405,14 +440,15 @@ orchestrator runs, writing JSON lines.
 | V20 | A plain `build()` through the Node library fills the cache by itself — no `warmCache`, no CLI | ✅ 2026-09-23 | Throwaway cache, the same `build()` twice: `release:latest-stable` (5.7.6) downloaded, then from cache in 0.48 s; `develop` @ `f1ebfd0` built in 324 s, then from cache in 1.0 s |
 | V21 | A build that can't reach GitHub throws `GenericFailure` carrying git's own message | ✅ observed 2026-09-23 | `git clone` / `git ls-remote` failed after the 75 s connect timeout: one GitHub address (`140.82.114.4`) was unreachable from the runner |
 | V22 | Reports record the ref and commit only inside the artifacts setup's `artifacts-resolution.json` attachment — in the Playwright HTML and Allure reports, not the Cucumber one — with the short commit; a provided zip gets no digest | ✅ 2026-09-24 | Real `pro@nginx` / `free@nginx` reports: attachment present in Allure results and in the Playwright report's embedded data, absent from `cucumber/index.html`; the HTML report's top-level metadata holds only `actualWorkers`; `resolve.ts:324` records `output.commitShort`; `ResolvedArtifact` has no digest field |
-| V23 | AutoE2E posts one Slack message per cycle through an incoming webhook — ✅/❌, counts, failed "Feature - Scenario" names, `WordPress: x \| PHP: y` (WP-CLI over SSH: `wp core version`, `wp eval "echo PHP_VERSION;"`), an `scp` command for the Cucumber HTML, an optional `AUTO_E2E_INSTANCE_NAME` prefix, and "❌ Auto E2E Script Error!" when a cycle crashes — and posts each run to Datator (`X-API-Key`: product, suite, start time, counts, full commit, duration, per test feature / name / status / error) | ✅ source | [`wp-media/auto-e2e`](https://github.com/wp-media/auto-e2e) @ `be4ed43`: `auto-e2e.js` (`sendSlackMessage`, `getSiteVersions`, `sendDataToDatator`, `analyzeCucumberReport`), `.env.example`, README |
+| V23 | AutoE2E posts one Slack message per cycle through an incoming webhook — ✅/❌, counts, failed "Feature - Scenario" names, `WordPress: x \| PHP: y` (WP-CLI over SSH: `wp core version`, `wp eval "echo PHP_VERSION;"`), an `scp` command for the Cucumber HTML, an optional `AUTO_E2E_INSTANCE_NAME` prefix, and "❌ Auto E2E Script Error!" when a cycle crashes — and posts each run to Datator (`X-API-Key`: product, suite, start time, counts, full commit, duration, per test feature / name / status / error) | ✅ source | [`wp-media/auto-e2e`](https://github.com/wp-media/auto-e2e) @ `be4ed43`: `auto-e2e.js` (`sendSlackMessage`, `getSiteVersions`, `sendDataToDatator`, `analyzeCucumberReport`), `.env.example`, README README. Since `fa0a5b6` (2026-10-02) it also sends `website_url` (Phase 0.5 plan, V115) |
 | V24 | A provided zip (`E2E_PLUGIN_ZIP`) is copied, not built, after checks (a `.zip`, exists, a file, not inside the cell's `.artifacts/` dir); it passes the same identity check as a build; the warm skips it; a version set alongside is ignored with a warning | ✅ code | `request.ts` (ref XOR zip), `resolve.ts` (`validateZipSource`, `assertZipsSurviveWipe`, `resolveZipRequest`), `warm.ts`, `verify.ts` (`verifyArtifact`, exported) |
 | V25 | APVM's store serializes writes across processes — `StoreLock`, a blocking `flock` on `<cache>/.apvm.lock`, held by `store()`, `delete_build()`, release storage and maintenance; writes go through temp files + `persist`; SQLite in WAL with a 5 s busy timeout and upserts — but nothing is held from the cache lookup to `store()` | ✅ source | APVM `cli/v3.2.0`: `crates/storage/src/{lock.rs, store.rs:157, store.rs:398, fsx.rs, db/builds.rs}`; lookup in `crates/core/src/commands/build.rs:353` (`find_by_commit`), store at `:2158` |
 | V26 | Two processes building the same thing at once both run the full build; the store stays consistent | ✅ 2026-09-24 | Throwaway cache, two `build()`s (`develop`, `pro-en`) started together in two processes: both missed the cache at 1 s and both cloned, checked out and ran composer; one finished in 278 s (`built`), the other died in `composer install` (exit 28) while GitHub connectivity was flaky (V21), so that failure proves nothing. A third build then came from the cache in 2.5 s with the finished build's zip (same SHA-256); the cache held one entry |
 | V27 | tokio's `Command::kill_on_drop` defaults to false, and APVM's step runner sets neither it nor a timeout, so dropping a build leaves its processes running | ✅ docs + source | docs.rs `tokio::process::Command::get_kill_on_drop` ("Defaults to false"); APVM `crates/core/src/build/runner.rs:184–198` (`sh -c … .output().await`) |
 | V28 | The site's own PHP version comes from Site Health → Info, not WP-CLI and not `X-Powered-By` | ✅ live 2026-09-24 | Logged in, the "Copy site info" button's `data-clipboard-text` (debug format, stable keys) gave `php_version` 8.5.10 on `pro@nginx` and `free@nginx` — where `wp eval "echo PHP_VERSION;"` answers 8.3.33 — and 8.3.33 on `pro@apache`, where the two agree; `php_sapi` `fpm-fcgi` everywhere; nginx 1.24.0 / Apache 2.4.58, WordPress 7.1.2 (WP-CLI agrees), MySQL 8.0.46 / MariaDB 10.11.14. `X-Powered-By` is absent on all three. About 1–1.3 s after login; read-only |
 
-Rows V29–V109 — Phase 0 — are in the [Phase 0 plan](orchestrator-phase-0-plan.md)'s §11.
+Rows V29–V109 — Phase 0 — are in the [Phase 0 plan](orchestrator-phase-0-plan.md)'s §11; V114–V127 —
+Phase 0.5 — in the [Phase 0.5 plan](orchestrator-phase-0.5-plan.md)'s §11.
 
 | # | Claim | Status | Evidence |
 | --- | --- | --- | --- |

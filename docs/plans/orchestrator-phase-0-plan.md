@@ -914,6 +914,9 @@ on `bwu2`/`bwu3`, one cell at a time.
 
 0A.3, 0A.4 and 0A.5 belong to the orchestrator: no suite change but the optional loader check.
 
+The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrator — relies on every item but
+0B.2 (its §3).
+
 ## 10. Open questions
 
 | # | Question |

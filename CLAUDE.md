@@ -603,6 +603,7 @@ these before starting related work — they hold the current plan, not history:
 - [`docs/plans/site-file-ownership-plan.md`](docs/plans/site-file-ownership-plan.md) — keeping a site's docroot writable by both WP-CLI's user and the web server.
 - [`docs/plans/orchestrator-plan.md`](docs/plans/orchestrator-plan.md) — the orchestrator: a long-running service that runs and manages cells on a server (supersedes the parent plan's Phase 9).
 - [`docs/plans/orchestrator-phase-0-plan.md`](docs/plans/orchestrator-phase-0-plan.md) — the orchestrator's Phase 0: what the suite must change first, with verified findings and recommended solutions.
+- [`docs/plans/orchestrator-phase-0.5-plan.md`](docs/plans/orchestrator-phase-0.5-plan.md) — the orchestrator's Phase 0.5: the minimal orchestrator (cycling cells, Slack, Datator) that replaces AutoE2E's BackWPup instances.
 
 ## When to update these docs
 
