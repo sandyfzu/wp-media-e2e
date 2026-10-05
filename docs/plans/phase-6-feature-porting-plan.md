@@ -1,6 +1,6 @@
 # Phase 6 — Feature porting: BackWPup first
 
-> **Status:** in progress — **6A, 6B, 6C, 6D, 6E, 6F and 6G.0 are done** (6G.0 shipped, §2.25, §4.6G.0); **6G next**; 6G–6J planned;
+> **Status:** in progress — **6A, 6B, 6C, 6D, 6E, 6F and 6G.0 are done** (6G.0 shipped, §2.25, §4.6G.0); **6G next**; 6G–6K planned (6K — restore from `.zip` and `.tar.gz` — added 2026-10-05, last in the sequence and required to close the phase);
 > **6H.2 deferred** (needs storage credentials — see §4.6H.2).
 > **Date:** 2026-07-28; revised 2026-07-30 (§2.3 re-verification at the ref; storage split),
 > 2026-07-31 (§2.5 — post-implementation audit of 6B; four corrections, all verified live),
@@ -65,22 +65,25 @@
 > arguments, on every transport; a NUL byte is refused before any transport; `parseJsonList` hides a key too) and 2026-09-30 (§2.26 — **V184 fixed**;
 > **V185–V187** added. A paced database backup pauses once per table, so `cli-running-job.feature`'s
 > window was each site's table count — 3.5 s on `pro@apache`; its database is now padded to 100 tables)
-> and 2026-10-05 (§2.26 — **V188**: a killed run's padding is swept by the next BackWPup run).
+> and 2026-10-05 (§2.26 — **V188**: a killed run's padding is swept by the next BackWPup run) and
+> 2026-10-05 (§2.27, §4.6G, §4.6K — **6G widened, 6K added**; **V189–V192** added. 6G now also restores
+> backups *made* files-only or database-only, and asserts the half a partial restore skips is untouched;
+> `.zip` and `.tar.gz` restores — each unpacked by different code, in the UI and the CLI alike — are 6K).
 > **Parent:** [e2e-modernization-plan.md](e2e-modernization-plan.md) §9, Phase 6 — this doc supersedes
 > that phase's summary. Phases 0–5 are done; Phase 6 is **feature content on finished rails**.
 > **Baseline (reference only):** `wp-rocket-e2e/src/backwpup/` — 12 feature files, 28 scenarios, ~1.6k LoC.
 
 ## TL;DR
 
-Phase 6 splits into **eleven sub-phases**, of which 6F is broken down further (6F.0–6F.4). **6A** lands the shared rails every product needs (plugin
+Phase 6 splits into **thirteen sub-phases**, of which 6F is broken down further (6F.0–6F.4). **6A** lands the shared rails every product needs (plugin
 install/cleanup hooks, the debug-log gate, `@mobile`, an anti-pattern lint gate). **6B–6I** port
 BackWPup — **page objects first (6B)**, then onboarding → backup & history → plugin deletion →
 WP-CLI → restore → the storage credential surface → Free-edition coverage + the parity gate. The
 storage *round-trips* are carved out as **6H.2** and **deferred** until credentials exist, so no
 other sub-phase waits on them. **6J** is shared rails again, product-agnostic like 6A: it keeps the
-staging area off the web. WP Rocket reuses 6A and gets its own breakdown afterwards (§6).
+staging area off the web. **6K** closes the restore work: `.zip` and `.tar.gz` archives, after 6G's `.tar`. WP Rocket reuses 6A and gets its own breakdown afterwards (§6).
 
-**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → 6F ✅ (6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → 6F.3 ✅ → 6F.4 ✅) → 6G.0 ✅ → **6G** → 6H → 6I → 6J → *(later)* 6H.2. 6J depends on nothing and can be pulled forward.
+**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → 6F ✅ (6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → 6F.3 ✅ → 6F.4 ✅) → 6G.0 ✅ → **6G** → 6H → 6I → 6J → 6K → *(later)* 6H.2. 6J depends on nothing and can be pulled forward; 6K needs only 6G.
 
 Every artifact follows **Understand → Improve → Adapt → Port** (§1): read the baseline for *intent*,
 verify the plugin's real contract in source, pick the strongest signal Playwright/WP-CLI offers, then
@@ -909,6 +912,18 @@ own steps timed against the server's clock.
 | V187 | **Padded to 100 tables, the window is the same on both cells**: 11.1 s on `pro@apache` (82 empty tables added) and 11.6 s on `pro@nginx` (15 added), with the command back by 2.9 s. Creating 82 tables took 1.8 s. A test fixture is torn down after every `afterEach` — where playwright-bdd runs `After` hooks — including when the test failed. | The same sampler; a scratch Playwright test for the order. | `Given the site's database holds at least 100 tables` and the `tablePadding` fixture (`support/table-padding.ts`): empty `<prefix>e2e_pace_NNN` tables, earlier padding dropped first, the result read back, removed after the `@plugin` teardown has stopped the job and removed the plugin. |
 | V188 | **A killed run's padding outlived it, and only `cli-running-job.feature` would ever remove it.** SIGKILLed once its padding existed, a run on `pro@nginx` left 15 tables; a later run of another feature removed the plugin, its footprint, the staging area and the data folders, and kept all 15. They never piled up — the names are fixed and every padding drops the last one first — but nothing else would ever drop them. | Live on `pro@nginx`, the run's process group killed the moment the site held padding. | Every BackWPup worker now drops leftover padding before its first scenario (`leftoverPaddingSweep`, `sweepPaddingLeftovers`) and says how many. Re-verified: the other feature's run then removed the 15; two runs killed back to back each saw the last one's 15 gone 23 s in, padded their own (new creation times) and left 15 — one set; the next full run swept them and passed 4/4. The snippets now also run against a fake `$wpdb` in `table-padding.php.spec.ts`, killed runs replayed included. |
 
+### 2.27 Facts established widening 6G's coverage (2026-10-05, source at `af1ab5c`)
+
+Source only, both editions' zips at `af1ab5c` — to be confirmed live by 6G's measurement pass, per
+the usual rule. Every file cited below is byte-identical in Free and Pro.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V189 | **The restore screen offers only the strategies the archive can serve.** It reads the job types from the backup's `manifest.json`: *Database Only* needs `DBDUMP`, *Files Only* needs any other type, *Full Restore* needs both. Onboarding's files job is `FILE` + `WPPLUGIN` and its database job is `DBDUMP`, so a files-only backup offers **only** *Files Only*, a database-only backup **only** *Database Only*, and a mixed backup all three. | `views/restore/steps/step2_action.php:12-56`; `vendor/inpsyde/backwpup-restore-shared/src/Api/Module/Manifest/ManifestFile.php:183-198`; `inc/class-page-onboarding.php:12,19`. | Restoring a files-only or database-only **backup** is a different journey from choosing a strategy on a mixed one: other buttons, and an archive missing half the site. 6G covers both (§4.6G), and each asserts the strategies it is offered. |
+| V190 | **Three archive formats exist: `.tar` (the default), `.tar.gz` and `.zip`.** `.tar.bz2` is no longer offered: a stored one is read back as `.tar.gz`, and the restore refuses a bzip2 archive outright. | `inc/class-install.php:15-22` (default `.tar`); `inc/class-admin.php:902-907` (anything else falls back to `.tar`); `inc/class-option.php:392`; `Decompressor.php:387-396`; `src/Cli/Commands/Restore.php:17`. | Every 6D–6F backup is `.tar`, and onboarding can make nothing else, so a `.zip` or `.tar.gz` backup needs the job's format switched after onboarding. 6G restores `.tar` only; `.zip` and `.tar.gz` are 6K. `.tar.bz2` is out of scope: it cannot be made any more. |
+| V191 | **Each format is extracted by different code, and the UI and the CLI do not share it.** UI: `.tar` → `PharData`, `.tar.gz` → PEAR `Archive_Tar`, `.zip` → its own file-by-file extractor with progress events. CLI: `.zip` → `ZipArchive`, `.tar.gz` → `PharData::decompress` then extract, `.tar` → `PharData`. | `Decompressor.php:244-311,379-402`; `src/Cli/Helpers/CommandsRestoreHelpersTrait.php:50-100`. | A `.tar` restore proves nothing about the other two, in either entry path, so the format axis is real (6K). The content axis is not: the extractor is chosen by extension and never by contents, so 6K restores mixed backups only and does not multiply by contents. |
+| V192 | **CLI `--type=full\|db\|file` is the strategy choice of the UI screen**, defaulting to `full`. | `src/Cli/Commands/Restore.php:90-94`. | 6G's CLI scenarios use it the way the UI ones use the strategy buttons. |
+
 ---
 
 ## 3. Coverage & tagging decisions
@@ -959,7 +974,7 @@ Nearly every ported scenario carries it; the exceptions are scenarios that asser
 Each is independently shippable and ends with the standard gates (typecheck / lint / format /
 `test:unit`) plus a green real-cell run. 6A is a prerequisite for everything and 6B for every feature
 phase; 6C–6H are otherwise independent of each other and can be reordered by need. **6G.0 must
-ship before 6G.** **6H.2 is deferred out of the sequence** — nothing downstream waits on it.
+ship before 6G**, and **6G before 6K**. **6H.2 is deferred out of the sequence** — nothing downstream waits on it.
 
 ### 6A — Shared rails *(product-agnostic; unblocks BackWPup **and** WP Rocket)* — **DONE**
 
@@ -2134,16 +2149,48 @@ Scenario: Restore by uploading the backup file
 - The **`@free`** path must assert the inverse — the history action lands on the bare restore page
   with no `restore_file`, so an upload is unavoidable. That negative assertion is what stops a future
   regression from silently downgrading Pro to the Free journey.
-- **Restore scope** (full / database-only / files-only) is orthogonal to entry path — cover it once,
-  on the cheaper `@pro` in-place path, rather than multiplying both journeys by three.
-- **CLI restore** (`@pro`, V4): `wp backwpup restore <file> --yes --type=full|db|file`, with
+- **Restore strategy** (*Full Restore* / *Database Only* / *Files Only*, chosen on the restore screen
+  from a **mixed** backup) is orthogonal to entry path — cover it once, on the cheaper `@pro` in-place
+  path, rather than multiplying both journeys by three.
+- **Backup contents** — restoring a backup that was *made* files-only or database-only is a separate
+  journey from choosing a strategy on a mixed one (V189): the screen offers only the one strategy the
+  archive can serve, and half the site is simply not in it. One `@pro` in-place scenario each, and
+  each asserts the strategies it is offered — exactly one — so a screen that offered *Full Restore*
+  on half a backup fails.
+- **The marker drifts on both sides, every time.** The Background changes the file marker *and* the
+  option marker, and every scenario asserts both: the side the restore covers is back, the side it
+  does not is **still drifted**. Without the second half, a restore that silently does everything,
+  or the wrong half, passes every partial scenario.
+- **CLI restore** (`@pro`, V4): `wp backwpup restore <file> --yes --type=full|db|file` (V192), with
   `--pre-backup` on one scenario. A restore that fails midway exits 0 with a warning — and, after a
   successful rollback, ends on `Success:` (V105) — so the marker is the verdict, never the exit code.
+- **Archive format: `.tar` only**, the default every backup so far has used. `.zip` and `.tar.gz` are
+  extracted by different code in both entry paths (V191) and are **6K**, deliberately split out, not
+  dropped.
 - Tag `@slow`; a restore rewrites the site, so it must run on a worker-bound site and re-authenticate
   afterwards if the restore rolls the session back.
 
+**Coverage** (`.tar` throughout):
+
+| Scenario | Backup | Restored with | Entry | Edition |
+| --- | --- | --- | --- | --- |
+| Full restore in place | mixed | *Full Restore* | history deep link | `@pro` |
+| Database-only restore of a mixed backup | mixed | *Database Only* | history deep link | `@pro` |
+| Files-only restore of a mixed backup | mixed | *Files Only* | history deep link | `@pro` |
+| Restore a database-only backup | database only | *Database Only* (the only one offered) | history deep link | `@pro` |
+| Restore a files-only backup | files only | *Files Only* (the only one offered) | history deep link | `@pro` |
+| Restore by uploading the backup file | mixed | *Full Restore* | download, then upload | `@free` |
+| CLI restore, each `--type` | mixed | `--type=full\|db\|file` | `wp backwpup restore` | `@pro` |
+| CLI restore with a safety snapshot | mixed | `--pre-backup` | `wp backwpup restore` | `@pro` |
+
+**Before building:** a measurement pass on `pro@nginx` (§2's rule) — drive one in-place and one
+upload restore by hand, then record whether a restore ends the admin session, how long each takes,
+and that V189–V192 hold live.
+
 **Acceptance** — a restore scenario **fails** if the marker is not restored (the property the
-baseline never had); each edition's scenario fails if it is served the *other* edition's entry path.
+baseline never had), and a partial one also fails if the half it does not cover was restored; each
+contents scenario fails if offered any strategy beyond its own; each edition's scenario fails if it
+is served the *other* edition's entry path.
 
 ### 6H — Storage credential surface *(no credentials needed to build it)*
 
@@ -2352,6 +2399,44 @@ own random content came back, and no answer is never reported as safe; the banne
 docker cells and present on an unprotected one, with the URL, the server's own name and every remedy;
 the two guard files cannot drift apart silently.
 
+### 6K — Restore from every archive format *(`@pro`; after 6G; last in the sequence)*
+
+**Required to close Phase 6, not deferred** — it is last only because it reuses 6G's steps whole.
+6G restores `.tar`, the default; BackWPup also writes `.zip` and `.tar.gz` (V190), and each is
+unpacked by different code — three extractors in the UI, three more in the CLI (V191). A `.tar`
+restore says nothing about the other two.
+
+- **One axis, not a matrix.** The extractor is chosen by extension, never by what the archive holds
+  (V191), so every scenario restores a **mixed** backup — the only one that sends files *and* a
+  database dump through the extractor — with a full restore. Contents and strategy stay 6G's.
+- **The `.zip` / `.tar.gz` backup is made after onboarding.** Onboarding can only produce `.tar`: it
+  offers no format, and its save reads three keys, none of them the format (V39), so the job is
+  created as `.tar` (V190). The setup therefore onboards as 6G does, **switches the onboarded job's
+  archive format**, and only then runs the backup that the scenario restores. Measure first which
+  route switches it the way the plugin does — the job's settings screen, or 6F.4's `job-import`, which
+  merged a format change (V159) — and assert the backup that results really carries the extension
+  asked for: a fallback to `.tar` (`inc/class-admin.php:902-907`) would otherwise pass every scenario
+  as a `.tar` restore.
+- **Both entry paths, both formats** — the UI and the CLI do not share an extractor:
+
+| Scenario | Format | Entry |
+| --- | --- | --- |
+| Restore a `.zip` backup in place | `.zip` | history deep link |
+| Restore a `.tar.gz` backup in place | `.tar.gz` | history deep link |
+| Restore a `.zip` backup over WP-CLI | `.zip` | `wp backwpup restore` |
+| Restore a `.tar.gz` backup over WP-CLI | `.tar.gz` | `wp backwpup restore` |
+
+- **No `@free` format scenarios.** Free's upload journey ends in the same extractor (byte-identical,
+  V191), so the format adds nothing to it that the `@pro` scenarios do not already prove. Revisit only
+  if the measurement shows the upload step itself treats a format differently.
+- **Out of scope, stated:** `.tar.bz2` — no longer offered, and the restore refuses it (V190).
+  Archive inspection (`wp/archive.ts`) stays tar-only: these scenarios read the restored markers, never
+  the archive, so `.zip` needs nothing there.
+
+**Acceptance** — each of the four restores the marker on both sides; each fails if the backup it
+restored was not made in its format; the restore steps are 6G's, reused unchanged — only the setup
+differs, by the format switch.
+
 ---
 
 ## 5. Definition of done (phase-level)
@@ -2359,7 +2444,8 @@ the two guard files cannot drift apart silently.
 - Every §2.1 intent is ported, superseded, explicitly declined, or **explicitly deferred** in writing.
   Exactly one deferral is open: the 11 storage round-trips of **6H.2**, blocked on credentials. Phase 6
   may close with it outstanding *only* because 6H ships the config, the skip gate and the isolation
-  helper, so 6H.2 adds scenarios and nothing structural.
+  helper, so 6H.2 adds scenarios and nothing structural. **6K is not a deferral**: Phase 6 does not
+  close until a backup in every archive format the plugin writes (V190) has been restored.
 - Both `pro@nginx` and `free@nginx` cells green; `@pro`/`@free` scenarios run only on their edition's
   cells.
 - The 6A lint gate is green — no `waitForTimeout` / `networkidle` / `waitForSelector` / `page.type`
