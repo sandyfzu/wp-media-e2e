@@ -158,7 +158,7 @@ shared fixtures:
 
 BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds `onboarding`, `firstBackup`,
 `dashboard`, `dataSelection`, `frequency`, `storages`, `jobRun`, `backupHistory`, `restore`
-(edition-aware), `plugins`, `cli`, `markers`, `archives`, `privateFolder`, `keys` and `jobExports`. `cli` runs one `wp backwpup …`
+(edition-aware), `plugins`, `cli`, `markers`, `archives`, `privateFolder`, `keys`, `jobExports` and `tablePadding`. `cli` runs one `wp backwpup …`
 subcommand and remembers the result for the step that asserts on it — for the feature where the
 **command is the system under test**, so a refusal is returned rather than thrown (`support/cli.ts`);
 use `support/backups.ts` when WP-CLI is only arranging or checking a site, since that one throws. A
@@ -166,7 +166,7 @@ command names what the plugin allocates in braces — `{job}`, `{oldest backup}`
 `{path to the newest backup}`, `{private folder}`, `{encryption key}`, `{public key file}` — filled as
 it runs, from the site or from the scenario's own record of what it made there
 (`support/placeholders.ts`); a misspelt one is refused by name, and the text as written may not name
-a path off the site. A `--key=` value never appears in a failure message (`describeCli` hides it).
+a path off the site. A `--key=` value never appears in a message naming the command (`commandLine` hides it — `describeCli`, time limits, parse errors).
 `markers` plants a random value in the site's files and another in its database, and removes both
 afterwards, so a scenario can ask an archive what it actually captured. Requesting it _plants_ them,
 so it must be requested before the backup under inspection runs. `archives` records each archive a
@@ -176,7 +176,11 @@ area for the files a command writes or reads — a download, an export, a key �
 transport's user, since the web server serves what it can read there, and removed afterwards only if
 a step used it. `keys` draws the scenario's encryption keys (two hex keys, an RSA pair placed in that
 folder) the first time a placeholder names one; `jobExports` records a digest of the site's jobs as
-each export is arranged, what "as they were" is measured against. See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
+each export is arranged, what "as they were" is measured against; `tablePadding` pads the site's
+database with empty tables of its own (`<prefix>e2e_pace_NNN`) so a paced backup, which pauses once
+per table, lasts as long on every site — removed after the `@plugin` teardown, only if a step padded.
+Padding can never pile up (fixed names, and every padding drops the last first), and what a killed run
+left is dropped when the next BackWPup run's worker starts (`leftoverPaddingSweep`, automatic). See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
 the pattern, the locator policy, and the locator-contract spec every page object carries.
 
 ## Shared scenario hooks
@@ -381,6 +385,10 @@ ssh). Highlights — full reference in
 **[docs/architecture/wordpress-automation.md](docs/architecture/wordpress-automation.md)**:
 
 - Commands are file + args arrays (never shell strings) → no injection.
+- **An exec error names the program and the reason, never the arguments** — on every transport,
+  since the argv carries `--key=` values and every value a snippet embeds. Never pass on execa's
+  `message`/`shortMessage`/`command`, nor attach its error as a `cause`; name a BackWPup command
+  through `commandLine` (`support/cli.ts`), which hides a `--key=` value.
 - `exec` / `wpCli` return a structured `ExecResult`; callers branch on `exitCode`.
   Every command runs with the WordPress root as its working directory (`rootDir` for
   `local`/`ssh`, the container `WORKDIR` for `docker`), and with no input — nothing is ever typed

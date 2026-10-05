@@ -115,7 +115,8 @@ the site, relative to that directory; `{encryption key}` / `{another encryption 
 drawn for the scenario, and `{public key file}` / `{private key file}` an RSA pair drawn for it and
 placed in the private folder; and `{path from the log folder to the marker file}` a path out of
 BackWPup's log folder to the `markers` fixture's file, proved on the site to lead there. A `--key=`
-value never appears in a failure message: `describeCli` hides it, in the argv and in the output. So `When I run the BackWPup command "backup-delete {oldest backup} --yes"`
+value never appears in a message about the command — a failed assertion (`describeCli`), a time
+limit, a JSON parse error: each names it through `commandLine`, and hides it in the output too. So `When I run the BackWPup command "backup-delete {oldest backup} --yes"`
 sends one real file name. Each value is asked for only when a command uses it, and must fit in one
 argument. Whatever sits in braces is read as a placeholder's name, so one no step knows — `{job_id}`
 for `{job}` — is refused, naming the ones it does, and so is a stray brace. And the text as written
@@ -151,7 +152,18 @@ of BackWPup's own settings first (`Given BackWPup's "…" setting is "…"`, whi
 Settings screen does not offer): **Reduce server load** at `maximum` stretches the run to several
 seconds, and a **Maximum number script execution time (in seconds)** — the screen's own words — of
 `0` keeps it in one request, since the plugin otherwise hands a long run to a fresh request midway
-and a command landing in that handover is answered about a job that is briefly not there.
+and a command landing in that handover is answered about a job that is briefly not there. The pause
+is paid once per **table**, so the paced run's length is the site's table count — 3.5 s on a site
+with 18, barely longer than a command takes to land. `Given the site's database holds at least 100
+tables` pads the database with empty tables of the scenario's own (`<prefix>e2e_pace_NNN`), which
+makes it about 11 s on every cell; the **`tablePadding`** fixture removes them after the `@plugin`
+teardown, so no backup is still dumping them ([`support/table-padding.ts`](../../src/projects/backwpup/support/table-padding.ts)).
+A run killed before that teardown leaves them behind, so every BackWPup worker drops leftover padding
+before its first scenario (`leftoverPaddingSweep`, an automatic worker fixture) and says how many it
+removed; and since the names are fixed and each padding drops the last one first, a site never holds
+more than one padding's worth. The snippets are run against a fake `$wpdb` in
+[`table-padding.php.spec.ts`](../../src/projects/backwpup/support/table-padding.php.spec.ts),
+which skips where PHP is not installed.
 
 Two more fixtures serve the commands that act on files. **`archives`** records the digest of every
 archive a scenario's backups left, the moment they were made, so "still on the site, byte for byte"
@@ -376,4 +388,7 @@ locator contract is covered by the same command. They run with **no external
 environment**: the WP-CLI layer is exercised through a stub `wp` on `PATH`, and page
 objects against `page.setContent()` fixtures. They are kept separate from the BDD product
 configs, whose generated specs live in `.features-gen/` (outside `src/`). Add a
-`*.spec.ts` next to any non-trivial module you add.
+`*.spec.ts` next to any non-trivial module you add. A snippet whose PHP must be run to be trusted —
+one that drops tables, say — can be driven against a fake `$wpdb` with the local `php`
+([`table-padding.php.spec.ts`](../../src/projects/backwpup/support/table-padding.php.spec.ts));
+such a spec skips where PHP is not installed, as in CI.

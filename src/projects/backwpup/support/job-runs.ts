@@ -181,7 +181,8 @@ export async function waitForJobRunning(
         message:
           `job ${String(jobId)} should be running — it was just started, and BackWPup's running ` +
           "marker never named it. A run short enough can end before anything sees it; slow it " +
-          'with BackWPup\'s "Reduce server load" setting.',
+          'with BackWPup\'s "Reduce server load" setting, which pauses a database dump once per ' +
+          "table, and give the dump more tables to pause on.",
         timeout: timeoutMs,
         intervals: [250],
       },

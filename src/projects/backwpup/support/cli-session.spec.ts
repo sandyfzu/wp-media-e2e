@@ -334,4 +334,19 @@ test.describe("CliSession", () => {
     );
     expect(() => session.last).toThrow(/no BackWPup command has answered/);
   });
+
+  // The message outlives the scenario in its report, as a failed assertion's `describeCli` does.
+  test("hides a --key value in the command a time limit names", async () => {
+    process.env.WP_STUB_MODE = "slow";
+    const key = "5e".repeat(32);
+    const run = new CliSession(local()).run(
+      ["backup-encrypt", "a.tar", `--key=${key}`],
+      200,
+    );
+
+    await expect(run).rejects.toThrow(
+      "`wp backwpup backup-encrypt a.tar --key=<hidden>` had not answered after 0.2 s.",
+    );
+    await expect(run).rejects.not.toThrow(key);
+  });
 });

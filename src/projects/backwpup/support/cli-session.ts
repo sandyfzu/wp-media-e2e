@@ -1,4 +1,4 @@
-import { backwpupCli } from "./cli";
+import { backwpupArgv, backwpupCli, commandLine } from "./cli";
 import type { CliResult } from "./cli";
 import type { Transport } from "../../../common/config/types";
 
@@ -211,6 +211,12 @@ export function refusePathsOffTheSite(text: string): void {
  *
  * The command itself cannot be stopped from here — the exec layer has no way to — so it is left to
  * finish on its own; racing it still turns "it never came back" into a failure that says so.
+ *
+ * @param work - the command, running.
+ * @param budgetMs - how long it may take.
+ * @param args - the subcommand and its arguments, named as {@link commandLine} names them — a
+ * `--key=` value hidden.
+ * @throws {@link Error} naming the command, if the budget ran out first.
  */
 async function withinBudget<T>(
   work: Promise<T>,
@@ -222,7 +228,7 @@ async function withinBudget<T>(
     timer = setTimeout(() => {
       reject(
         new Error(
-          `[backwpup/cli] \`wp backwpup ${args.join(" ")}\` had not answered after ` +
+          `[backwpup/cli] \`${commandLine(backwpupArgv(args))}\` had not answered after ` +
             `${String(budgetMs / 1000)} s.`,
         ),
       );

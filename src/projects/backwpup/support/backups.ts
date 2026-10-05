@@ -125,7 +125,7 @@ async function readList<T>(
         (result.stderr.trim() || "(no stderr)"),
     );
   }
-  return parseJsonList(result.stdout, argv.join(" ")) as readonly T[];
+  return parseJsonList(result.stdout, argv) as readonly T[];
 }
 
 /**
@@ -309,7 +309,7 @@ export async function readLastRunLog(transport: Transport): Promise<RunLog> {
   const out = result.stdout.trim();
   const [newest] = NO_LOGS.test(out)
     ? []
-    : (parseJsonList(out, argv.join(" ")) as readonly {
+    : (parseJsonList(out, argv) as readonly {
         readonly name?: unknown;
         readonly job_id?: unknown;
         readonly errors?: unknown;

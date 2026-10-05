@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
   backwpupCli,
+  commandLine,
   describeCli,
   noticesAt,
   outputLines,
@@ -309,7 +310,7 @@ test.describe("outputLines", () => {
 
 test.describe("parseJsonList", () => {
   test("parses a JSON array", () => {
-    expect(parseJsonList('[{"job_id":3}]', "backwpup job")).toEqual([
+    expect(parseJsonList('[{"job_id":3}]', ["backwpup", "job"])).toEqual([
       { job_id: 3 },
     ]);
   });
@@ -317,19 +318,58 @@ test.describe("parseJsonList", () => {
   // Some commands print nothing rather than `[]` for an empty result, and from out here the two
   // are the same answer. A scenario that needs the literal reply asserts on stdout.
   test("reads an empty string as an empty list", () => {
-    expect(parseJsonList("   ", "backwpup job")).toEqual([]);
+    expect(parseJsonList("   ", ["backwpup", "job"])).toEqual([]);
   });
 
   // Returning [] here would turn a broken command into a passing "nothing there yet".
   test("refuses output that is not JSON", () => {
-    expect(() => parseJsonList("No logs found.", "backwpup log")).toThrow(
+    expect(() => parseJsonList("No logs found.", ["backwpup", "log"])).toThrow(
       /did not return JSON/,
     );
   });
 
   test("refuses JSON that is not a list", () => {
-    expect(() => parseJsonList('{"job_id":3}', "backwpup job")).toThrow(
+    expect(() => parseJsonList('{"job_id":3}', ["backwpup", "job"])).toThrow(
       /expected a JSON array/,
+    );
+  });
+
+  // Named as `describeCli` names it: a key hidden in the command, and where the output repeats it.
+  test("hides a --key value in the command it names and the output it quotes", () => {
+    const key = "7c".repeat(32);
+    const parse = (): unknown =>
+      parseJsonList(`Error: bad key ${key}`, [
+        "backwpup",
+        "backup-decrypt",
+        `--key=${key}`,
+      ]);
+    expect(parse).toThrow(
+      "`wp backwpup backup-decrypt --key=<hidden>` did not return JSON. Output was: Error: bad " +
+        "key <hidden>",
+    );
+    expect(parse).not.toThrow(key);
+  });
+});
+
+test.describe("commandLine", () => {
+  test("names the command as WP-CLI runs it", () => {
+    expect(commandLine(["backwpup", "job", "--format=count"])).toBe(
+      "wp backwpup job --format=count",
+    );
+  });
+
+  test("hides a --key value, and leaves what only looks like one alone", () => {
+    expect(
+      commandLine([
+        "backwpup",
+        "backup-encrypt",
+        "a.tar",
+        "--key=.e2e_temp/private/x/public.pem",
+        "--keyring=a",
+        "--key=",
+      ]),
+    ).toBe(
+      "wp backwpup backup-encrypt a.tar --key=<hidden> --keyring=a --key=",
     );
   });
 });

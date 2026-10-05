@@ -1,6 +1,6 @@
 # Phase 6 — Feature porting: BackWPup first
 
-> **Status:** in progress — **6A, 6B, 6C, 6D, 6E and 6F are done** (6F.4 shipped and audited, §2.23); **6G.0 next — it must ship before 6G** (§4.6G.0); 6G–6J planned;
+> **Status:** in progress — **6A, 6B, 6C, 6D, 6E, 6F and 6G.0 are done** (6G.0 shipped, §2.25, §4.6G.0); **6G next**; 6G–6J planned;
 > **6H.2 deferred** (needs storage credentials — see §4.6H.2).
 > **Date:** 2026-07-28; revised 2026-07-30 (§2.3 re-verification at the ref; storage split),
 > 2026-07-31 (§2.5 — post-implementation audit of 6B; four corrections, all verified live),
@@ -60,7 +60,12 @@
 > the full `pro@nginx` run met V122's race in a new form, a PHP fatal in the host's own cron
 > request) and 2026-09-28 (§2.24, §4.6G.0 — **6G.0 planned**, to ship before 6G; **V176–V179** added.
 > On `local` and `docker` a command that cannot start, is killed or overflows its output cap throws
-> an error quoting its whole argv, keys included; `ssh` never does).
+> an error quoting its whole argv, keys included; `ssh` never does) and 2026-09-29 (§2.25, §4.6G.0 —
+> **6G.0 shipped**; **V180–V184** added. Exec errors name the program and the reason, never the
+> arguments, on every transport; a NUL byte is refused before any transport; `parseJsonList` hides a key too) and 2026-09-30 (§2.26 — **V184 fixed**;
+> **V185–V187** added. A paced database backup pauses once per table, so `cli-running-job.feature`'s
+> window was each site's table count — 3.5 s on `pro@apache`; its database is now padded to 100 tables)
+> and 2026-10-05 (§2.26 — **V188**: a killed run's padding is swept by the next BackWPup run).
 > **Parent:** [e2e-modernization-plan.md](e2e-modernization-plan.md) §9, Phase 6 — this doc supersedes
 > that phase's summary. Phases 0–5 are done; Phase 6 is **feature content on finished rails**.
 > **Baseline (reference only):** `wp-rocket-e2e/src/backwpup/` — 12 feature files, 28 scenarios, ~1.6k LoC.
@@ -75,7 +80,7 @@ storage *round-trips* are carved out as **6H.2** and **deferred** until credenti
 other sub-phase waits on them. **6J** is shared rails again, product-agnostic like 6A: it keeps the
 staging area off the web. WP Rocket reuses 6A and gets its own breakdown afterwards (§6).
 
-**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → 6F ✅ (6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → 6F.3 ✅ → 6F.4 ✅) → **6G.0** → 6G → 6H → 6I → 6J → *(later)* 6H.2. 6J depends on nothing and can be pulled forward.
+**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → 6F ✅ (6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → 6F.3 ✅ → 6F.4 ✅) → 6G.0 ✅ → **6G** → 6H → 6I → 6J → *(later)* 6H.2. 6J depends on nothing and can be pulled forward.
 
 Every artifact follows **Understand → Improve → Adapt → Port** (§1): read the baseline for *intent*,
 verify the plugin's real contract in source, pick the strongest signal Playwright/WP-CLI offers, then
@@ -601,7 +606,7 @@ was left as found. A row read from source rather than provoked says so.
 | V109 | **The history records which context ran a job**: `backup_trigger` `wp-cli` for a foreground run, `backup_now_job` for `--background`. A foreground database run finishes inside WP-CLI in ~2 s on `pro@nginx` and ~1.5 s on `free@nginx`, although both CLIs have `memory_limit = -1`. | Measured, both cells; `get_backup_trigger()` maps `runcli` → `wp-cli`, `runnow` → `backup_now_job`. | V82 holds on both nginx cells; V41's memory death belongs to `wp cron event run`, not to `run`. The two triggers are what the foreground and background scenarios assert. |
 | V110 | **`run`'s refusals, all exit 1**: no argument → `No job ID(s) or pram specified!`; `--background` with several ids → `Background job run not works with more than one job_id!`, decided on the count before any id is looked up; an unknown id in the foreground → `Job ID does not exist!` — also the answer for the hidden first-backup placeholder; and while a job runs, **both** forms → `A job is already running.`, checked before the arguments are read. | Measured, both cells (the wording, slips included, is the plugin's). `src/Cli/Commands/Run.php`. | Pinned by two scenarios. V107's `Wrong BackWPup JobID` is unreachable from `run`, which refuses an unknown id first. |
 | V111 | **`run <unknown id> --background` reports success**: `Success: Job "" runs now in background.`, exit 0 — the name is `BackWPup_Option::get( <id>, 'name' )`, `null` for a job that does not exist — and the site's `start_http()` then drops the request with an admin message. No log, no history row, nothing runs. | Measured on `pro@nginx`: log and history counts unchanged, nothing running 8 s later. | A plugin bug worth reporting upstream. Not pinned — a scenario asserting it would fail the day it is fixed. `startJobInBackground`'s TSDoc and the generic success step name it. |
-| V112 | **A database backup takes about a second — less than one WP-CLI round trip (~1.3 s over SSH).** Dispatch → marker → `completed`: 0.9 s on `pro@nginx`, 1.1 s on `free@nginx`. With "Reduce server load" at maximum (a 90 ms pause on every progress update) the same job takes ~10 s and ~6.5 s. A files-and-database job is still archiving 6 s in on both cells. | Sampler timelines, both cells. The setting's values are the Settings screen's (`parts/sidebar/settings-jobs.php`): 0, 10 000, 30 000, 90 000 µs. | No command sent after a start can find an unpaced database job still running, so `status`, `kill` and the "already running" refusal need a job arranged to last — `cli-running-job.feature` paces it with the plugin's own setting. |
+| V112 | **A database backup takes about a second — less than one WP-CLI round trip (~1.3 s over SSH).** Dispatch → marker → `completed`: 0.9 s on `pro@nginx`, 1.1 s on `free@nginx`. With "Reduce server load" at maximum (a 90 ms pause on every progress update) the same job takes ~10 s and ~6.5 s. **Refined by V185**: the pause is paid once per table, so these are each site's table count. A files-and-database job is still archiving 6 s in on both cells. | Sampler timelines, both cells. The setting's values are the Settings screen's (`parts/sidebar/settings-jobs.php`): 0, 10 000, 30 000, 90 000 µs. | No command sent after a start can find an unpaced database job still running, so `status`, `kill` and the "already running" refusal need a job arranged to last — `cli-running-job.feature` paces it with the plugin's own setting. |
 | V113 | **The plugin hands a long run to a fresh request midway** — after any step once the request has run over 3 s (measured), and, by its source, about 27 s into a long step (the default maximum execution time is 30 s). During the handover the marker holds pid 0 for ~0.3–0.4 s. A `kill` landing there finds no process: it either loses the abort (its own `update_working_data()` returns early when the last update is under a second old, so no `end()` ever runs and the row stays `created`), or runs the job's `end()` inside the `kill` process, which then exits without its success line. A **maximum script execution time of 0** — "0 means no maximum" on the Settings screen — keeps a run in one request. | Pid-0 windows measured: `pro@nginx` 9.40→9.83 s and 6.63→7.00 s, `free@nginx` 5.87→6.20 s; one pid from start to end with the setting at 0, both cells. The kill-in-a-handover outcomes are **read from source** (`user_abort()`, `update_working_data()`, `start_http( 'restart' )` in `inc/class-job.php`), not provoked. | `cli-running-job.feature` sets it to 0, so no command it sends can land in a handover. An abort that can be lost is worth reporting upstream. |
 | V114 | **`kill` against a running job**: the marker goes at once, the run notices within ~1 s, logs `Backup aborted!` and ends — history row `aborted`, log 0 errors and 2 warnings (the abort, and the "finished with warnings" summary it causes), no archive. The row still reads `created` for ~0.4–1 s after the kill. | 7 aborts, paced database and files-and-database jobs, both cells. | "Nothing is running" is not "the run has ended". The abort scenario and the teardown's stop both wait for the row to leave `created` — the signal the dashboard's own abort handler polls (`job-abort-status`). |
 | V115 | **`status` reports `Job finished.` for a run that was aborted under it.** Its loop ends the moment the marker disappears, which `kill` causes, and it reads the log header about a second before the job logs the abort. Watched to its natural end it is right: it blocked ~6.8 s (`free@nginx`) and ~9.9 s (`pro@nginx`) and returned after the row was `completed`. | Measured on `pro@nginx`: blocked 8.2 s, then `Success: Job finished.` at exit 0 for a row `aborted` with 2 warnings in its log. `src/Cli/Commands/Status.php` — the verdict is read after the `while` loop. | A plugin bug worth reporting upstream; not pinned. The `status` scenario watches a natural end, and its feature says why. |
@@ -877,6 +882,32 @@ fake secret in its argv; the `ssh` cases on `pro@nginx`.
 | V177 | **`ssh` quotes no argument.** A command killed by a signal reads `"sh" on <host> was terminated by signal SIGTERM before exiting.`; a missing program is an exit-127 result whose output names only the program. | Both on `pro@nginx`, a secret planted in each argv: in neither. | The cells are not exposed; 6G.0 brings `local` and `docker` to what `ssh` already does. |
 | V178 | **`CliSession`'s time-limit message quotes its command unmasked, on every transport.** `withinBudget` names `` `wp backwpup ${args.join(" ")}` `` — the argv with its placeholders filled — so a `--key=` that `describeCli` hides reaches it: `` `wp backwpup backup-encrypt a.tar --key=SECRET-budget-7` had not answered after 0.3 s. `` | A stub `wp` sleeping past a 300 ms budget. Only `I watch the running backup with the BackWPup command {string}` passes a budget (`cli-running-job.feature`, ten minutes), and no command there carries a key today. | The same class as V176, one layer up. |
 | V179 | **6G puts nothing secret in an argv.** `wp backwpup restore` takes a file, `--yes` and `--pre-backup` (`src/Cli/Commands/Restore.php`); 6F.4's keys are drawn per scenario and thrown away; 6H.2 plans its credentials through the UI (§4.6H.2), where traces already carry what `fill()` types (CLAUDE.md). | Source at `af1ab5c`; this plan. | Nothing in 6G forces the fix. What does is that the suite claims a property it does not have on two transports, and that the fix is two functions. |
+
+### 2.25 Facts established building 6G.0 (2026-09-29)
+
+Measured through the repo's own `exec` (execa 10.0.1) with a secret planted in each argv; the `ssh`
+cases on `pro@nginx`. Each is pinned in `exec.spec.ts` or `exec.ssh.spec.ts`.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V180 | **`ENOENT` means a missing program or a missing working directory**, and `code` cannot tell them apart. Only execa's own message does (`The "cwd" option is invalid: …`), and that message quotes the argv. | `exec(local, "sh", […], { cwd: "/nonexistent" })` and a missing binary: `code` `ENOENT` both times. | The message names both readings, with the directory the run was given: `could not be started (ENOENT): no such program on this machine, or no directory "<cwd>" to run it in`. |
+| V181 | **Output that never stops ends killed, with no exit code.** `yes` over the cap reports `signal` `SIGPIPE`, `isMaxBuffer` true, `exitCode` undefined (1.5 s). Output that stops over the cap keeps its exit code (`exit 3`, and `0`). | Both through execa, with the default cap. | `fromExeca` checks the overflow **before** the missing exit code: in the other order the message would blame `SIGPIPE` and hide the cause. |
+| V182 | **execa throws when an argument holds a NUL byte, even with `reject: false`, and the error quotes that argument:** `Arguments cannot contain null bytes ("\0"): --key=SECRET x`. Its other argument checks interpolate the argv too (`lib/methods/parameters.js`). Over `ssh` the same argv is refused as a bare `Unable to exec`, with nothing quoted. | Local through execa; `ssh` on `pro@nginx`, `printf` and `sh` each handed `a\0b`. | `exec` refuses a NUL byte before any transport sees it, naming the argument by position, so all three say the same thing. Any other execa throw is replaced by `"<program>" could not be started: execa refused the call (<ErrorName>)`, with no `cause`. |
+| V183 | **One argv-quoting message could carry a key: `readJsonList`'s parse error.** It names `cli.last`, which is a scenario's own command, and it quoted both the argv and the output unmasked. The rest name fixed commands, job ids, option names and paths: `backups.ts`, `options.ts`, `residue.ts`, and `cron.ts` through `evalPhp`, which quotes its `what` and the site's output, never the snippet. | The audit, reading each site. | `parseJsonList` takes the argv and names it through `commandLine`, the mask `describeCli` and the time-limit message use, and hides a key in the output it quotes. |
+| V184 | **`cli-running-job.feature` loses its race on `pro@apache`**, with or without 6G.0. The step `the scheduled job is running in the background` sees the job running, but the paced backup has ended before the next command lands. `run {job}` and `run {job} --background` then run or dispatch a fresh backup and exit 0, where the scenario expects `A job is already running.`, and `kill` sometimes finds nothing to abort. The margin in the feature's comment ("more than 2 s to spare") was measured on the nginx cells, and every 6F verification ran on `pro@nginx` and `free@nginx` only — apache was AutoE2E's. | `E2E_RETRIES=0`, the `af1ab5c` zip: with 6G.0, 1/4 (the `status` scenario passed); with 6G.0 stashed, 2/4, the two `run` scenarios failing identically. The same feature passed 4/4 on `pro@nginx` in the same hour. | Not 6G.0's: its change is to failure messages, and these are exit-code assertions that fail at the baseline too. ~~Open.~~ **Fixed 2026-09-30** — the cause and the fix are V185–V187. |
+
+### 2.26 Facts established fixing V184 (2026-09-30)
+
+Measured live on `pro@apache` and `pro@nginx` with the `af1ab5c` Pro zip, from inside each site: a
+`wp eval` sampling BackWPup's running marker and newest history row every 20 ms, and the scenario's
+own steps timed against the server's clock.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V185 | **A paced database backup pauses once per table, so its length is the site's table count.** "Reduce server load" is a `usleep` in `update_working_data()` (honoured up to 500 000 µs; the screen offers 90 000 at most), and the dump calls that once per table, over every table in the database (`SHOW FULL TABLES`), less the job's exclusions — none for the onboarding job. `pro@apache` holds 18 tables and ran it in **3.5 s**; `pro@nginx` holds 85 and ran it in **10.2 s**. | `inc/class-job.php` `update_working_data()`; `inc/Pro/class-jobtype-dbdump.php` `db_dump()`; `inc/class-mysqldump.php`. Three sampled runs per cell, 0.1 s apart at most. | V112's "~10 s" was one cell's table count. The window cannot be widened by the setting, which is already at the screen's maximum. |
+| V186 | **The command under test lands 2.3–3.2 s after the marker appears** — the job is seen 0.9–1.6 s in, and one WP-CLI command takes about 1.5 s more. On `pro@apache` that left 0.3–0.7 s; the suite's runs lost it. | The same runs: `waitForJobRunning` then `wp backwpup run <job>`, timed against the server's clock (offset from a `date` round trip). | Any site with fewer than about 30 tables loses the race some of the time. |
+| V187 | **Padded to 100 tables, the window is the same on both cells**: 11.1 s on `pro@apache` (82 empty tables added) and 11.6 s on `pro@nginx` (15 added), with the command back by 2.9 s. Creating 82 tables took 1.8 s. A test fixture is torn down after every `afterEach` — where playwright-bdd runs `After` hooks — including when the test failed. | The same sampler; a scratch Playwright test for the order. | `Given the site's database holds at least 100 tables` and the `tablePadding` fixture (`support/table-padding.ts`): empty `<prefix>e2e_pace_NNN` tables, earlier padding dropped first, the result read back, removed after the `@plugin` teardown has stopped the job and removed the plugin. |
+| V188 | **A killed run's padding outlived it, and only `cli-running-job.feature` would ever remove it.** SIGKILLed once its padding existed, a run on `pro@nginx` left 15 tables; a later run of another feature removed the plugin, its footprint, the staging area and the data folders, and kept all 15. They never piled up — the names are fixed and every padding drops the last one first — but nothing else would ever drop them. | Live on `pro@nginx`, the run's process group killed the moment the site held padding. | Every BackWPup worker now drops leftover padding before its first scenario (`leftoverPaddingSweep`, `sweepPaddingLeftovers`) and says how many. Re-verified: the other feature's run then removed the 15; two runs killed back to back each saw the last one's 15 gone 23 s in, padded their own (new creation times) and left 15 — one set; the next full run swept them and passed 4/4. The snippets now also run against a fake `$wpdb` in `table-padding.php.spec.ts`, killed runs replayed included. |
 
 ---
 
@@ -1830,6 +1861,17 @@ No SSH connection loss occurred. Both sites were left as found: plugin absent, n
 directories, no staging area. Unit suite 821 → 910 across 6F.2 and its audit; **60 mutations**, all
 caught, the file restored byte for byte each time.
 
+**Revised 2026-09-30 (V184–V187).** `cli-running-job.feature` lost its race on `pro@apache`, whose 18
+tables gave the paced backup 3.5 s — and it had only ever run on the nginx cells. The Background now
+pads the database to 100 tables (`tablePadding`, `support/table-padding.ts`), which makes the window
+about 11 s on every cell. Verified with `E2E_RETRIES=0` and the `af1ab5c` zips: **12/12 on
+`pro@apache`** over three runs (5 of 8 had failed before), **4/4 on `pro@nginx`** and **4/4 on `free@nginx`**;
+every site left as found, no padding table included. Unit suite 1191 → 1222; **13 mutations**, 12
+caught and one equivalent (an unescaped `LIKE`, which the exact-name filter after it makes
+harmless); both snippets through `php -l` and a behavioural harness against a fake `$wpdb`. **Revised
+2026-10-05 (V188)**: a killed run's padding is swept when the next BackWPup worker starts; unit suite
+1222 → 1241, with the PHP spec; **11 more mutations**, all caught.
+
 #### 6F.3 — Backups and logs on disk *(untagged)* — **DONE**
 
 **Shipped 2026-09-23.** Two features, all untagged — `cli-backups.feature` (4 scenarios: both sides
@@ -1980,7 +2022,48 @@ folders, no staging area, no cron event. Unit suite **1069 → 1173** passed (8 
 **38 mutations**, all caught; each of the 13 new PHP snippets through `php -l` and a behavioural
 harness. The audit's live measurements are V172 and V173.
 
-### 6G.0 — Errors that never quote a command's arguments *(product-agnostic; before 6G)* — **planned 2026-09-28**
+### 6G.0 — Errors that never quote a command's arguments *(product-agnostic; before 6G)* — **DONE**
+
+**Shipped 2026-09-29**, as planned below, on the facts in §2.24 (V176–V179) and §2.25 (V180–V184).
+
+What shipped:
+
+- **`common/wp/exec.ts`** — `fromExeca` reads only `ExecaOutcome`, execa's fields that say how a run
+  ended without the command line, so quoting `shortMessage` is a type error. It checks the overflow
+  first (V181), then `whyItDidNotExit` names the signal, or the start failure by its `code` (an
+  identifier only), with both readings of `ENOENT` (V180). Every execa call goes through `runExeca`,
+  which replaces execa's own throw (V182). No execa error is attached as a `cause`.
+- **`support/cli.ts`** — `commandLine`, the one `--key=` mask. `describeCli`, `parseJsonList` and the
+  time-limit message name a command through it. `backwpupArgv` is the namespace `backwpupCli`
+  supplies.
+- **`support/cli-session.ts`** — `withinBudget` names the command through `commandLine`.
+
+**Deliberate revisions**, each for a reason:
+
+- **A NUL byte in the argv is refused before any transport** (`refuseNulBytes`, by position): execa's
+  refusal quoted the argument, and ssh2's was a bare `Unable to exec` (V182).
+- **`parseJsonList` takes the argv, not a joined string** (V183): `readJsonList` hands it a scenario's
+  own command, so it names it through `commandLine` and hides a key in the output it quotes. The
+  audit found no secret in the other messages that quote an argv (`backups.ts`, `options.ts`,
+  `residue.ts`, `cron.ts`), and they are unchanged.
+- **The elevated local label is `sudo <program>`**, not `sudo`, matching `docker exec <container>
+  <program>`: both name the program run and what it was run under.
+- **The `ssh` side is pinned too** — a signal-killed command and a NUL byte, each with a secret in the
+  argv, against ssh2's in-process server. Its messages are unchanged.
+
+**Acceptance met** — a secret planted in the argv of each failing case appears in no message on any
+transport, and none of them attaches a `cause`; each message names the program and the reason; the
+`ssh` messages are unchanged.
+
+**Verified 2026-09-29.** The four gates pass; unit suite **1173 → 1191** passed (8 skipped,
+unchanged). **11 mutations**, all caught: quoting `shortMessage`, overflow checked after the exit
+code, passing on or attaching execa's refusal, no NUL check, an unchecked `code`, `ENOENT` without the
+directory, `ssh` naming its arguments, a raw budget message, no `commandLine` mask, and unmasked parse
+output. The V176–V178 probes were re-run: the secret is in none of the five messages. Live, with
+`E2E_RETRIES=0` and the cached `af1ab5c` Pro zip (`E2E_PLUGIN_ZIP`), since github.com timed out from
+the runner twice, and `develop` (now `59b6fd9`) could not be built: `cli-running-job.feature`
+**4/4 on `pro@nginx`** (6.5 min with the setups). On `pro@apache` it failed 3/4, and 2/4 with 6G.0
+stashed — V184, a race the feature lost on that cell, fixed since (§2.26). Both sites were left as found.
 
 **Must ship before 6G.** On `local` and `docker`, a command that cannot start, is killed or overflows
 its output cap throws an error quoting its whole argv (V176), and the CLI session's time-limit message

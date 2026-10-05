@@ -37,6 +37,21 @@ import type { Transport } from "../../../common/config/types";
 // ── Starting state ───────────────────────────────────────────────────────────
 
 /**
+ * Pads the site's database with empty tables of the scenario's own until it holds at least `count`,
+ * removed when the scenario ends.
+ *
+ * A paced database backup pauses once per table, so the site's table count decides how long it runs:
+ * 18 tables gave a run shorter than a command takes to land once the run is seen. Padding makes it
+ * the same on every site. The scheduled job excludes no table, so every one of them is dumped.
+ */
+Given(
+  "the site's database holds at least {int} tables",
+  async ({ tablePadding }, count: number) => {
+    await tablePadding.padTo(count);
+  },
+);
+
+/**
  * The site's scheduled job, started in the background and seen running.
  *
  * An arrangement, so it goes through the instrumenting runner, which throws if the plugin refuses:

@@ -17,6 +17,7 @@ import { ScenarioKeys } from "./support/encryption-keys";
 import { JobExports } from "./support/job-transfer";
 import { removeMarkers, seedMarkers } from "./support/markers";
 import { PrivateFolder, privateFolderKey } from "./support/private-folder";
+import { TablePadding, sweepPaddingLeftovers } from "./support/table-padding";
 import type { RestorePage } from "./pages/restore.page";
 import type { SiteMarkers } from "./support/markers";
 
@@ -96,6 +97,12 @@ interface BackWPupFixtures {
    */
   keys: ScenarioKeys;
   /**
+   * Empty tables of the scenario's own in this site's database, so a paced database backup lasts as
+   * long on every site. Free to request: nothing is created until a step pads, and only then are they
+   * removed afterwards — after the `@plugin` teardown, so no backup is still dumping them.
+   */
+  tablePadding: TablePadding;
+  /**
    * The job exports the scenario arranged, each with a digest of the site's jobs when it was made —
    * what "the site's jobs are as they were" is measured against.
    */
@@ -107,7 +114,24 @@ interface BackWPupFixtures {
   archives: ArchiveSnapshot;
 }
 
-export const test = base.extend<BackWPupFixtures>({
+interface BackWPupWorkerFixtures {
+  /**
+   * Automatic, once per worker before its first scenario: drops any padding tables an earlier run
+   * left on the bound site — one killed before its teardown, or whose removal failed. Best-effort,
+   * like the shared `releaseBoundSite`.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- Playwright's type for a fixture that produces no value.
+  leftoverPaddingSweep: void;
+}
+
+export const test = base.extend<BackWPupFixtures, BackWPupWorkerFixtures>({
+  leftoverPaddingSweep: [
+    async ({ boundSite }, use) => {
+      await sweepPaddingLeftovers(boundSite);
+      await use();
+    },
+    { scope: "worker", auto: true, box: true },
+  ],
   onboarding: async ({ page }, use) => {
     await use(new OnboardingPage(page));
   },
@@ -156,6 +180,11 @@ export const test = base.extend<BackWPupFixtures>({
   },
   keys: async ({ privateFolder }, use) => {
     await use(new ScenarioKeys(privateFolder));
+  },
+  tablePadding: async ({ site }, use) => {
+    const padding = new TablePadding(site.transport);
+    await use(padding);
+    await padding.release();
   },
   // eslint-disable-next-line no-empty-pattern -- Playwright derives deps from this destructuring; this fixture has none.
   jobExports: async ({}, use) => {

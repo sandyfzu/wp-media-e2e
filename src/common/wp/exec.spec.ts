@@ -21,6 +21,7 @@ import {
   resetElevationCaches,
   sudoArgv,
   targetKey,
+  whyItDidNotExit,
   wpRootDir,
 } from "./exec";
 import type {
@@ -140,6 +141,148 @@ test.describe("exec — local transport", () => {
     } finally {
       clearTimeout(timer);
     }
+  });
+});
+
+/**
+ * A command that fails before it has an exit code names the program and the reason — never its
+ * arguments, where the suite carries `--key=` values and every value a `wp eval` snippet embeds.
+ * Each case plants a secret in the argv; execa's own message would quote it in every one (measured).
+ */
+test.describe("exec — a failure never quotes the command's arguments", () => {
+  const SECRET = "SECRET-6G0-planted";
+  const ARG = `--key=${SECRET}`;
+
+  /** The message `run` rejects with, after checking it holds no trace of the secret. */
+  async function failureOf(run: Promise<unknown>): Promise<string> {
+    const error: unknown = await run.then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(Error);
+    const { message, cause } = error as Error;
+    expect(message).not.toContain(SECRET);
+    // A cause is printed with the error, and execa's holds the whole command line.
+    expect(cause).toBeUndefined();
+    return message;
+  }
+
+  test("a program that is not there", async () => {
+    expect(
+      await failureOf(exec(local, "no-such-program-e2e", ["eval", ARG])),
+    ).toBe(
+      `[wp/exec] "no-such-program-e2e" could not be started (ENOENT): no such program on this ` +
+        `machine, or no directory "${workDir}" to run it in.`,
+    );
+  });
+
+  // Node reports a missing working directory as ENOENT too, which is why that message names both.
+  test("a working directory that is not there", async () => {
+    const gone = join(workDir, "no-such-dir");
+    expect(
+      await failureOf(exec(local, "sh", ["-c", "true", ARG], { cwd: gone })),
+    ).toBe(
+      `[wp/exec] "sh" could not be started (ENOENT): no such program on this machine, or no ` +
+        `directory "${gone}" to run it in.`,
+    );
+  });
+
+  test("a command killed by a signal", async () => {
+    expect(
+      await failureOf(exec(local, "sh", ["-c", "kill -TERM $$", "sh", ARG])),
+    ).toBe(
+      '[wp/exec] "sh" was killed by SIGTERM (Termination) before it exited.',
+    );
+  });
+
+  // The capped output is the reason, even though the process ended at an exit code of its own.
+  test("output over the capture cap, from a command that then exits", async () => {
+    expect(
+      await failureOf(
+        exec(local, "sh", ["-c", "yes | head -c 100000001", "sh", ARG]),
+      ),
+    ).toBe(
+      '[wp/exec] "sh" produced more output than can be captured, so its result was truncated ' +
+        "and cannot be trusted.",
+    );
+  });
+
+  // A command that never stops writing is ended by the broken pipe, so it has a signal and no exit
+  // code; naming SIGPIPE would hide the cause.
+  test("output over the capture cap, from a command that never stops", async () => {
+    expect(await failureOf(exec(local, "yes", [ARG]))).toBe(
+      '[wp/exec] "yes" produced more output than can be captured, so its result was truncated ' +
+        "and cannot be trusted.",
+    );
+  });
+
+  test("a docker transport with no docker on the PATH", async () => {
+    const emptyBin = mkdtempSync(join(tmpdir(), "wp-no-docker-"));
+    const original = process.env.PATH;
+    process.env.PATH = emptyBin;
+    try {
+      const docker: DockerTransport = { mode: "docker", container: "c-e2e" };
+      expect(await failureOf(exec(docker, "wp", ["eval", ARG]))).toBe(
+        '[wp/exec] "docker exec c-e2e wp" could not be started (ENOENT): no such program on this ' +
+          "machine.",
+      );
+    } finally {
+      process.env.PATH = original;
+      rmSync(emptyBin, { recursive: true, force: true });
+    }
+  });
+
+  // execa refuses one before starting anything, quoting it; ssh2 refuses it as a bare "Unable to
+  // exec". Refused ahead of both, every transport says the same thing.
+  test("an argument holding a NUL byte is refused by position, before any transport", async () => {
+    expect(
+      await failureOf(exec(local, "sh", ["-c", "true", `${ARG}\0x`])),
+    ).toBe(
+      '[wp/exec] refusing to run "sh": argument 3 holds a NUL byte, which no program can be handed.',
+    );
+  });
+
+  // The one execa call no argument check stands in front of: its own refusal is replaced, not quoted.
+  test("a call execa itself refuses", async () => {
+    const docker: DockerTransport = { mode: "docker", container: "c-e2e" };
+    const source = join(workDir, "cp-source.txt");
+    writeFileSync(source, "x");
+    const message = await failureOf(
+      copyIntoTarget(docker, source, "/var/www/html/a\0.zip"),
+    );
+    expect(message).toMatch(
+      /could not be started: execa refused the call \(TypeError\)\.$/,
+    );
+    expect(message).not.toContain("null bytes");
+  });
+});
+
+test.describe("whyItDidNotExit", () => {
+  const streams = { stdout: "", stderr: "" };
+
+  test("names a signal without a description as it came", () => {
+    expect(whyItDidNotExit({ ...streams, signal: "SIGUSR2" })).toBe(
+      "was killed by SIGUSR2 before it exited",
+    );
+  });
+
+  test("names any other start failure by its code", () => {
+    expect(whyItDidNotExit({ ...streams, code: "EACCES" }, "/srv/wp")).toBe(
+      "could not be started (EACCES)",
+    );
+  });
+
+  // Only an identifier is quoted as it came: a code is copied from whatever error execa caught.
+  test("leaves out a code that is not an error code", () => {
+    expect(whyItDidNotExit({ ...streams, code: "eval --key=abc" })).toBe(
+      "ended without an exit code, and execa gave no reason",
+    );
+  });
+
+  test("says so when execa gave no reason at all", () => {
+    expect(whyItDidNotExit(streams)).toBe(
+      "ended without an exit code, and execa gave no reason",
+    );
   });
 });
 

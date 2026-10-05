@@ -25,6 +25,19 @@ Key design points:
   thrown errors.
 - A failure to *run the command at all* (missing binary, unreachable host, killed
   by signal) **throws** — that is an environment fault, not a command outcome.
+- **An exec error names the program and why it failed — never its arguments.** The argv carries
+  what must not reach a report: a `--key=` value, and every value a `wp eval` snippet embeds
+  (`phpLiteral`'s base64 is an encoding, not a cipher). execa's own messages quote the whole
+  command line, so on `local`/`docker` the message is built from its fields that don't:
+  `isMaxBuffer` (checked first — output that never stops arrives killed by `SIGPIPE`), `signal`, and
+  `code` (`ENOENT` names both a missing program and a missing working directory, which Node reports
+  alike). The label is the program only — `wp`, `sudo rm`, `docker exec <container> wp`; `docker
+  cp`'s adds the suite's own paths. No execa error rides along as a `cause`, and a call execa
+  refuses outright is re-raised naming the program only. An argument holding a NUL byte is refused
+  before any transport sees it, by position: execa's refusal quotes it, and ssh2's is a bare
+  `Unable to exec`. `ssh` already quoted nothing — its messages are unchanged. Pinned in
+  `exec.spec.ts` and `exec.ssh.spec.ts`, each case with a secret planted in the argv. Not covered:
+  while a command runs, its argv is visible in the host's process list.
 - `wpCli(transport, args, opts?)` is the primary entry point: it runs `wp …`
   through the transport.
 - **Every command runs with the WordPress root as its working directory** on all
