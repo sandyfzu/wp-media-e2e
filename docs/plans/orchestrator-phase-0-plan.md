@@ -588,7 +588,7 @@ staging area, `debug.log`, `wp` processes).
 | --- | --- | --- |
 | Control | none | pass; the site as found |
 | L1 | one SIGINT to the runner | exit 130; the After hook stops the job and removes everything; the site as found; reports complete |
-| L3 | SIGKILL to the group | the plugin, footprint, staging zip and perhaps the job left; the next normal run recovers them (V50's gap is visible there) |
+| L3 | SIGKILL to the group | the plugin, footprint, staging zip, the scenario's padding tables and perhaps the job left; the next normal run recovers them, the padding as its worker starts (phase-6 V188; V50's gap is visible there) |
 | L4 | one SIGINT inside the After hook | a teardown cut short; one normal run restores the site |
 | L2 | the drain, once built | the scenario in flight finishes, the next is skipped as stopped; exit 0/1; the site as found |
 
