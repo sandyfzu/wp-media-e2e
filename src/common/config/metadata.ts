@@ -1,7 +1,13 @@
 import { isNonEmptyString, isObject } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
 import type { SiteDbResidue } from "../wp/db-residue";
-import type { Edition, SiteConfig, StopRunningWork } from "./types";
+import type {
+  Edition,
+  ResolveSiteDataDirs,
+  SiteConfig,
+  SiteResidue,
+  StopRunningWork,
+} from "./types";
 
 /**
  * Owns the project-metadata contract and the per-process registries that back it.
@@ -10,12 +16,13 @@ import type { Edition, SiteConfig, StopRunningWork } from "./types";
  * never carry secrets — and it can only carry JSON. We put only non-secret routing
  * (`product`, `cell`, `edition`) in metadata and hand everything else to workers through
  * in-memory registries: the credential-bearing site pool (secrets), the product's debug-log
- * preset (RegExps, which JSON cannot express), its residue declarations and the function that stops
- * its background work. The residue paths *would* fit in metadata, and still do not go there — the
- * registry is also how **product policy reaches the shared hooks without those hooks importing
- * product code**, and one channel for that is easier to follow than two. All are populated as a side effect of building the config
- * (`createProductConfig`), which Playwright re-executes in every worker process, so each worker
- * resolves them locally — never from a report-bound channel.
+ * preset and residue declarations (RegExps, which JSON cannot express), its database footprint,
+ * and the functions that resolve its runtime-named data directories and stop its background work.
+ * The registry is also how **product policy reaches the shared hooks without those hooks importing
+ * product code**, so even what JSON could carry goes this way: one channel is easier to follow than
+ * two. All are populated as a side effect of building the config (`createProductConfig`), which
+ * Playwright re-executes in every worker process, so each worker resolves them locally — never from
+ * a report-bound channel.
  */
 
 /** Non-secret routing carried in a project's `metadata`. */
@@ -121,7 +128,7 @@ export function getDebugLogOptions(product: string): ScanDebugLogOptions {
 }
 
 // Per-process registry: product -> the paths it leaves on the site after being uninstalled.
-const siteResidue = new Map<string, readonly string[]>();
+const siteResidue = new Map<string, readonly SiteResidue[]>();
 
 /**
  * Registers the paths a product leaves on the site's filesystem, for the shared teardown to clear.
@@ -130,7 +137,7 @@ const siteResidue = new Map<string, readonly string[]>();
  */
 export function registerSiteResidue(
   product: string,
-  paths: readonly string[] | undefined,
+  paths: readonly SiteResidue[] | undefined,
 ): void {
   if (paths === undefined) return;
   siteResidue.set(product, paths);
@@ -142,7 +149,7 @@ export function registerSiteResidue(
  * Never throws: unlike a missing site pool, "this product leaves nothing behind" is a legitimate
  * state — WP Rocket declares none today — and the teardown then does nothing at all.
  */
-export function getSiteResidue(product: string): readonly string[] {
+export function getSiteResidue(product: string): readonly SiteResidue[] {
   return siteResidue.get(product) ?? [];
 }
 
@@ -171,6 +178,33 @@ export function registerSiteDbResidue(
  */
 export function getSiteDbResidue(product: string): SiteDbResidue {
   return siteDbResidue.get(product) ?? {};
+}
+
+// Per-process registry: product -> how to ask its installed plugin for the data directories it names
+// at runtime. A function, so it could never ride project metadata either.
+const siteDataDirResolvers = new Map<string, ResolveSiteDataDirs>();
+
+/**
+ * Registers how a product resolves the data directories its plugin names at runtime, for the shared
+ * install to prepare. Called while building the config, in each process. A product whose data
+ * directories all have fixed names is not registered.
+ */
+export function registerSiteDataDirResolver(
+  product: string,
+  resolve: ResolveSiteDataDirs | undefined,
+): void {
+  if (resolve === undefined) return;
+  siteDataDirResolvers.set(product, resolve);
+}
+
+/**
+ * How a product resolves its runtime-named data directories, or `undefined` when it declares none —
+ * the install then has nothing to ask. Never throws, for the same reason as {@link getSiteResidue}.
+ */
+export function getSiteDataDirResolver(
+  product: string,
+): ResolveSiteDataDirs | undefined {
+  return siteDataDirResolvers.get(product);
 }
 
 // Per-process registry: product -> how to stop the work it may still be doing on a site. A function,

@@ -15,7 +15,11 @@ import { join } from "node:path";
 import { DebugLogFatalError, PluginActivationFailedError } from "../wp/errors";
 import { resetOwnershipCaches } from "../wp/ownership";
 import { DEFAULT_STAGING_DIR, PLUGINS_CATEGORY } from "../wp/staging";
-import { registerSiteDbResidue, registerSiteResidue } from "../config/metadata";
+import {
+  registerSiteDataDirResolver,
+  registerSiteDbResidue,
+  registerSiteResidue,
+} from "../config/metadata";
 import {
   HOOK_TIMEOUT_MS,
   MAX_ATTACHED_LOG_CHARS,
@@ -314,7 +318,24 @@ test.describe("declaredResidue", () => {
       db: {},
     });
   });
+
+  test("carries the product's resolver for its runtime-named directories", () => {
+    const resolve = (): Promise<readonly string[]> => Promise.resolve([]);
+    registerSiteDataDirResolver("resolver-spec-product", resolve);
+    expect(declaredResidue("resolver-spec-product").resolveDataDirs).toBe(
+      resolve,
+    );
+    expect(
+      declaredResidue("residue-spec-unregistered").resolveDataDirs,
+    ).toBeUndefined();
+  });
 });
+
+/** BackWPup's restore working directories, as a family. */
+const RESTORE_FAMILY = {
+  parent: "wp-content/uploads",
+  name: /^backwpup-restore-[0-9a-f]{20}$/,
+};
 
 test.describe("installPluginUnderTest", () => {
   test("clears the log, removes any existing copy, then installs the staged zip", async () => {
@@ -416,6 +437,96 @@ test.describe("installPluginUnderTest", () => {
     expect(
       existsSync(join(wpRoot, "wp-content/uploads/backwpup-restore")),
     ).toBe(true);
+  });
+
+  /**
+   * A directory the plugin names at runtime has no declaration to create it from, so the install asks
+   * the product — after the plugin is in place, since only the installed plugin can name it — and
+   * prepares what it answers like a declared one.
+   */
+  test("prepares the data directories the installed plugin names, once it is installed", async () => {
+    let installedWhenAsked: boolean | undefined;
+    await installPluginUnderTest(local, artifact(), {
+      files: [RESTORE_FAMILY],
+      db: {},
+      resolveDataDirs: () => {
+        installedWhenAsked = isActive();
+        return Promise.resolve([
+          "wp-content/uploads/backwpup-restore-0123456789abcdef0123",
+        ]);
+      },
+    });
+    expect(installedWhenAsked).toBe(true);
+    const dir = join(
+      wpRoot,
+      "wp-content/uploads/backwpup-restore-0123456789abcdef0123",
+    );
+    expect((statSync(dir).mode & 0o777).toString(8)).toBe("777");
+  });
+
+  // Prepared and never removed would be worse than not prepared: the teardown removes only what the
+  // declarations name.
+  test("refuses a resolved directory no declaration covers, before creating it", async () => {
+    await expect(
+      installPluginUnderTest(local, artifact(), {
+        files: [RESTORE_FAMILY],
+        db: {},
+        resolveDataDirs: () =>
+          Promise.resolve(["wp-content/uploads/somewhere-else"]),
+      }),
+    ).rejects.toThrow(/somewhere-else.*never removed/s);
+    expect(existsSync(join(wpRoot, "wp-content/uploads/somewhere-else"))).toBe(
+      false,
+    );
+  });
+
+  // Asking boots WordPress over WP-CLI as the transport's user, so it must come before any directory
+  // is handed to the site — not after, where whatever that boot writes would keep the wrong owner.
+  test("asks before preparing any data directory", async () => {
+    let declaredExistedWhenAsked: boolean | undefined;
+    await installPluginUnderTest(local, artifact(), {
+      files: ["wp-content/uploads/backwpup", RESTORE_FAMILY],
+      db: {},
+      resolveDataDirs: () => {
+        declaredExistedWhenAsked = existsSync(
+          join(wpRoot, "wp-content/uploads/backwpup"),
+        );
+        return Promise.resolve([]);
+      },
+    });
+    expect(declaredExistedWhenAsked).toBe(false);
+    expect(existsSync(join(wpRoot, "wp-content/uploads/backwpup"))).toBe(true);
+  });
+
+  // An install whose directories cannot be prepared is not ready, so a resolver that cannot answer
+  // fails it — with nothing opened up yet.
+  test("fails the install when the plugin cannot be asked, preparing nothing", async () => {
+    await expect(
+      installPluginUnderTest(local, artifact(), {
+        files: ["wp-content/uploads/backwpup", RESTORE_FAMILY],
+        db: {},
+        resolveDataDirs: () =>
+          Promise.reject(new Error("the site could not be asked")),
+      }),
+    ).rejects.toThrow("the site could not be asked");
+    expect(existsSync(join(wpRoot, "wp-content/uploads"))).toBe(false);
+  });
+
+  // Each install draws the name afresh (the plugin keeps it in an option the install's sweep
+  // removes), so a reinstall must ask again rather than reuse the first answer.
+  test("asks again on every install", async () => {
+    let asked = 0;
+    const residue: DeclaredResidue = {
+      files: [RESTORE_FAMILY],
+      db: {},
+      resolveDataDirs: () => {
+        asked++;
+        return Promise.resolve([]);
+      },
+    };
+    await installPluginUnderTest(local, artifact(), residue);
+    await replacePluginUnderTest(local, artifact(), residue);
+    expect(asked).toBe(2);
   });
 
   test("prepares nothing when the product declares no data paths", async () => {

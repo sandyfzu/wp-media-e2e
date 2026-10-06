@@ -15,7 +15,11 @@ import { ArchiveSnapshot } from "./support/archive-snapshot";
 import { CliSession } from "./support/cli-session";
 import { ScenarioKeys } from "./support/encryption-keys";
 import { JobExports } from "./support/job-transfer";
-import { removeMarkers, seedMarkers } from "./support/markers";
+import { ChangedMarkers, removeMarkers, seedMarkers } from "./support/markers";
+import { CliRestore, contentKeptOut, restoreSite } from "./support/cli-restore";
+import { ContentCopy, assertNoContentCopyLeft } from "./support/content-copy";
+import { BACKWPUP_SITE_RESIDUE } from "./support/residue";
+import { resolveSiteResidue } from "../../common/wp/residue";
 import { PrivateFolder, privateFolderKey } from "./support/private-folder";
 import { TablePadding, sweepPaddingLeftovers } from "./support/table-padding";
 import type { RestorePage } from "./pages/restore.page";
@@ -112,6 +116,18 @@ interface BackWPupFixtures {
    * byte for byte" is measured against. The steps that make backups record into it.
    */
   archives: ArchiveSnapshot;
+  /**
+   * The values the scenario wrote over its {@link BackWPupFixtures.markers} after the backup it is
+   * about to restore — what a restore that leaves one side of the site alone leaves there.
+   */
+  changedMarkers: ChangedMarkers;
+  /**
+   * The scenario's `wp backwpup restore` runs, guarded so the site ends as found: refused on a
+   * database holding what `wp db reset` would destroy for good, `wp-content` copied before a files
+   * restore and put back exactly after the scenario, the database's default collation set back, the
+   * scenario's `--pre-backup` snapshot removed. Free to request: nothing happens until a run needs it.
+   */
+  cliRestore: CliRestore;
 }
 
 interface BackWPupWorkerFixtures {
@@ -122,12 +138,26 @@ interface BackWPupWorkerFixtures {
    */
   // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- Playwright's type for a fixture that produces no value.
   leftoverPaddingSweep: void;
+  /**
+   * Refuses, before the worker's first scenario, a site still holding a copy of `wp-content` an
+   * earlier run's restore guard could not put back — that site's `wp-content` may be damaged, so every
+   * result on it would be suspect, and the copy may be the only way back. Automatic.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- Playwright's type for a fixture that produces no value.
+  contentCopyLeftover: void;
 }
 
 export const test = base.extend<BackWPupFixtures, BackWPupWorkerFixtures>({
   leftoverPaddingSweep: [
     async ({ boundSite }, use) => {
       await sweepPaddingLeftovers(boundSite);
+      await use();
+    },
+    { scope: "worker", auto: true, box: true },
+  ],
+  contentCopyLeftover: [
+    async ({ boundSite }, use) => {
+      await assertNoContentCopyLeft(boundSite);
       await use();
     },
     { scope: "worker", auto: true, box: true },
@@ -193,6 +223,28 @@ export const test = base.extend<BackWPupFixtures, BackWPupWorkerFixtures>({
   // eslint-disable-next-line no-empty-pattern -- Playwright derives deps from this destructuring; this fixture has none.
   archives: async ({}, use) => {
     await use(new ArchiveSnapshot());
+  },
+  // eslint-disable-next-line no-empty-pattern -- Playwright derives deps from this destructuring; this fixture has none.
+  changedMarkers: async ({}, use) => {
+    await use(new ChangedMarkers());
+  },
+  // Torn down after the `@plugin` teardown (fixtures outlive `After` hooks), so the content directory
+  // is put back once the plugin and its data are gone, and the debug.log it holds after the teardown
+  // has read the scenario's.
+  cliRestore: async ({ site, cli, changedMarkers, pluginArtifact }, use) => {
+    const restore = new CliRestore(
+      restoreSite(site.transport),
+      cli,
+      new ContentCopy(site.transport, async () =>
+        contentKeptOut(
+          pluginArtifact("plugin").slug,
+          await resolveSiteResidue(site.transport, BACKWPUP_SITE_RESIDUE),
+        ),
+      ),
+      changedMarkers,
+    );
+    await use(restore);
+    await restore.release();
   },
 });
 

@@ -14,6 +14,16 @@ import { disposeConnections, wpCli } from "./src/common/wp/exec";
 import { ensurePluginAbsent } from "./src/common/wp/plugin";
 import { stageAndInstallPlugin } from "./src/common/wp/staging";
 import { backwpup } from "./src/projects/backwpup/config/backwpup.config";
+import { prepareResolvedDataDirs } from "./src/common/wp/residue";
+import { BackupHistoryTable } from "./src/projects/backwpup/pages/backup-history.table";
+import { ProRestorePage } from "./src/projects/backwpup/pages/restore.page";
+import { WizardWatch } from "./src/projects/backwpup/pages/wizard-watch";
+import { BACKWPUP_SITE_RESIDUE } from "./src/projects/backwpup/support/residue";
+import { runScheduledBackup } from "./src/projects/backwpup/support/backups";
+import {
+  handRestoreWorkingDirToSite,
+  resolveRestoreWorkingDirs,
+} from "./src/projects/backwpup/support/restore-dir";
 
 /**
  * Re-captures BackWPup's locator-contract fixtures from a real site, and reports what differs
@@ -33,8 +43,12 @@ import { backwpup } from "./src/projects/backwpup/config/backwpup.config";
  *
  * Usage: `npm run fixtures:capture` (add `--headed` to watch it work). It **mutates the target site**:
  * it removes any existing BackWPup (files *and* options), installs the plugin fresh, flips
- * `backwpup_onboarding` to re-enter onboarding, and completes it. The removal is what keeps
- * the fixtures a description of the plugin rather than of whatever the site was last used for.
+ * `backwpup_onboarding` to re-enter onboarding, and completes it — and last, on Pro, backs the site up
+ * through its one scheduled job and restores the database from that backup, through the restore
+ * wizard it captures step by step (`CAPTURE_SKIP_RESTORE=true` leaves that out;
+ * `CAPTURE_RESTORE_ONLY=true` captures only the wizard, installing nothing, on a Pro site already set
+ * up with exactly one scheduled job). The removal is what keeps the fixtures a description of the
+ * plugin rather than of whatever the site was last used for.
  * Point it only at a disposable QA cell — it reads the site from the product's `sites.json`.
  */
 
@@ -53,8 +67,14 @@ const PLUGIN_ZIP = env(
   `${process.env.HOME ?? ""}/.apvm/cache/backwpup/commits/5.7.5/707cf43/backwpup-pro-en-5.7.5-707cf43f.zip`,
 );
 
+/**
+ * Capture the restore wizard **only**, on a Pro site already set up with exactly one scheduled job —
+ * leaving every other fixture as it is. Installs nothing: an install would remove that job.
+ */
+const RESTORE_ONLY = boolEnv("CAPTURE_RESTORE_ONLY", false);
+
 /** Skip the install and capture whatever is already active. Useful when iterating on the captures. */
-const SKIP_INSTALL = boolEnv("CAPTURE_SKIP_INSTALL", false);
+const SKIP_INSTALL = boolEnv("CAPTURE_SKIP_INSTALL", false) || RESTORE_ONLY;
 
 /**
  * Skip onboarding and re-capture only the dashboard, against whatever state the site is already in.
@@ -62,6 +82,12 @@ const SKIP_INSTALL = boolEnv("CAPTURE_SKIP_INSTALL", false);
  * captures practical; it assumes onboarding has been completed at least once.
  */
 const SKIP_ONBOARDING = boolEnv("CAPTURE_SKIP_ONBOARDING", false);
+
+/**
+ * Skip the restore wizard. Its capture runs a real restore — a database-only one, the cheapest that
+ * walks every step — so it is last, and can be left out when iterating on the other captures.
+ */
+const SKIP_RESTORE = boolEnv("CAPTURE_SKIP_RESTORE", false);
 
 const HEADED =
   process.argv.includes("--headed") || boolEnv("CAPTURE_HEADED", false);
@@ -80,6 +106,13 @@ const RUN_TIMEOUT = intEnv(
 /** Placeholders the fixtures use for per-capture noise, matching what is already committed. */
 const HOST_PLACEHOLDER = "wordpress.test";
 const NONCE_PLACEHOLDER = "0000000000";
+
+/**
+ * What a restore working directory's name is written as. Its 20-hex tail is that web-served
+ * directory's only protection on nginx — the plugin itself redacts it from its logs — so no capture
+ * may carry a real one.
+ */
+const RESTORE_DIR_PLACEHOLDER = "backwpup-restore-00000000000000000000";
 
 const RULE = "─".repeat(78);
 
@@ -217,7 +250,9 @@ async function grabContainer(page: Page, selector: string): Promise<string> {
     // renders the provider's saved settings straight into `value` attributes — `storage-FTP.php`
     // even runs `BackWPup_Encryption::decrypt()` on `ftppass` first — so a capture of a configured
     // job would otherwise commit live credentials to a tracked file.
-    const SECRET = /pass|secret|key|token|licen[cs]e|auth|ftpuser|ftphost/i;
+    // `db_*`: the restore wizard's database step renders the site's connection settings as values.
+    const SECRET =
+      /pass|secret|key|token|licen[cs]e|auth|ftpuser|ftphost|db_(?:host|name|user)/i;
     // Fields whose names merely *contain* a trigger word but hold nothing sensitive. Without this,
     // `ftphostport` (the FTP port, "21") gets blanked purely because it contains "host".
     const BENIGN = /port|timeout|maxbackups|nodelete|dir$/i;
@@ -244,7 +279,8 @@ async function grabContainer(page: Page, selector: string): Promise<string> {
 }
 
 /**
- * Replaces the two classes of per-capture noise, then refuses to emit anything still nonce-shaped.
+ * Replaces the per-capture noise — the host, nonces and auth keys, the restore directory's token — then
+ * refuses to emit anything still nonce- or token-shaped.
  *
  * WordPress nonces rotate per user and per session, so leaving them in would make every re-capture a
  * noisy diff — and would commit a (short-lived) credential. The final scan is the safety net: it is
@@ -270,6 +306,16 @@ function sanitise(html: string, host: string): string {
     /(backwpup[\w-]*action=["']?)[0-9a-f]{8,64}\b/gi,
     `$1${NONCE_PLACEHOLDER}`,
   );
+  out = out.replace(
+    /backwpup-restore-[0-9a-f]{20}(?![0-9a-f])/g,
+    RESTORE_DIR_PLACEHOLDER,
+  );
+  const token = out.match(/backwpup-restore-(?!0{20}\b)[0-9a-f]{20}/g);
+  if (token !== null) {
+    throw new Error(
+      "[capture] refusing to write a capture naming a restore directory's token.",
+    );
+  }
 
   const leaked = out.match(
     /[\w-]*(?:nonce|authkey)[\w-]*=["']?(?!0{10}\b)[0-9a-f]{8,64}\b/gi,
@@ -764,6 +810,93 @@ async function captureDashboard(
 
 // ── Main ─────────────────────────────────────────────────────────────────────────
 
+/**
+ * Captures the restore wizard's steps 2–6, by restoring the newest backup's **database** through Pro's
+ * deep link — the strategy that walks every step (3, the connection; 4, the migration; 5, start) — so
+ * the wizard's page object is held to the markup it really drives.
+ *
+ * Each step replaces the page with the next (`location.replace`), so each is captured once its URL
+ * says it has arrived. The backup is made here, after the login: a database restore keeps only the
+ * sessions its dump knows, so an older backup would end this one before the last step. The restore's
+ * working directory is opened to the web server first, as the `@plugin` hook and the restore steps
+ * do: WP-CLI may have created it, and every wizard request writes there.
+ */
+async function captureRestore(
+  page: Page,
+  site: SiteInput,
+  transport: Transport,
+): Promise<void> {
+  step("Restore wizard");
+  const host = new URL(site.baseURL).host;
+  await runScheduledBackup(transport);
+  await prepareResolvedDataDirs(
+    transport,
+    await resolveRestoreWorkingDirs(transport),
+    BACKWPUP_SITE_RESIDUE,
+  );
+  await handRestoreWorkingDirToSite(transport);
+
+  await page.goto("/wp-admin/admin.php?page=backwpup");
+  const history = new BackupHistoryTable(page);
+  await history.waitForLoaded();
+  // The page object's own watch, so a failing wizard fails the capture at once rather than after
+  // RUN_TIMEOUT; the clicks themselves are spelled out here because each step is captured between.
+  const watch = new WizardWatch(page);
+  await new ProRestorePage(page).startFrom(history.newestRow);
+
+  /** Waits for step `n` and its card, failing as soon as the wizard's traffic does. */
+  const atStep = async (n: number): Promise<void> => {
+    await Promise.race([
+      page.waitForURL((url) => url.searchParams.get("step") === String(n), {
+        timeout: RUN_TIMEOUT,
+      }),
+      watch.failed,
+    ]);
+    await page.locator("#bwpr-action-card").waitFor({ timeout: TIMEOUT });
+  };
+  /** The step's action card, as captured. */
+  const card = (): Promise<string> => grabContainer(page, "#bwpr-action-card");
+
+  await atStep(2);
+  await writeFixture("restore-step2.html", await card(), host);
+  await page
+    .locator("#restore_step")
+    .getByRole("button", { name: "Database Only", exact: true })
+    .click();
+  await atStep(3);
+  await writeFixture("restore-step3.html", await card(), host);
+  await page
+    .locator("#db-settings-form")
+    .getByRole("button", { name: "Continue", exact: true })
+    .click();
+  await atStep(4);
+  await writeFixture("restore-step4.html", await card(), host);
+  await page
+    .locator("#migration-settings-form")
+    .getByRole("button", { name: "Continue", exact: true })
+    .click();
+  await atStep(5);
+  await writeFixture("restore-step5.html", await card(), host);
+  await page
+    .locator("#restore_step")
+    .getByRole("button", { name: "Start", exact: true })
+    .click();
+  await Promise.race([
+    page.waitForURL((url) => url.searchParams.get("step") === "6", {
+      timeout: RUN_TIMEOUT,
+    }),
+    watch.failed,
+  ]);
+  await page.getByRole("heading", { name: "Success", exact: true }).waitFor({
+    timeout: TIMEOUT,
+  });
+  await writeFixture(
+    "restore-step6.html",
+    await grabContainer(page, ".bwpr-content"),
+    host,
+  );
+}
+
 async function main(): Promise<void> {
   const cell = backwpup.sites[CELL];
   const site = cell?.sites[SITE_INDEX];
@@ -807,6 +940,13 @@ async function main(): Promise<void> {
         ])
       : null;
   const activeVersion = version ?? freeVersion ?? "unknown";
+  // The wizard is captured from Pro: Free has neither the deep link nor the migration step.
+  const pro = version !== null;
+  if (RESTORE_ONLY && !pro) {
+    throw new Error(
+      "[capture] CAPTURE_RESTORE_ONLY needs BackWPup Pro active — the wizard is captured from Pro's deep link.",
+    );
+  }
   console.log(`  active plugin version: ${activeVersion}`);
   notes.push(`captured from BackWPup ${activeVersion} on ${site.baseURL}`);
 
@@ -822,7 +962,7 @@ async function main(): Promise<void> {
   }
   console.log(`  first backup job id: ${jobId}`);
 
-  if (!SKIP_ONBOARDING) {
+  if (!SKIP_ONBOARDING && !RESTORE_ONLY) {
     step("Re-entering onboarding");
     await wp(transport, ["option", "update", "backwpup_onboarding", "1"]);
   }
@@ -834,6 +974,12 @@ async function main(): Promise<void> {
     context.setDefaultTimeout(TIMEOUT);
     const page = await context.newPage();
     await loginViaUi(page, site, { timeoutMs: TIMEOUT });
+
+    if (RESTORE_ONLY) {
+      await captureRestore(page, site, transport);
+      await context.close();
+      return;
+    }
 
     const onboarding = SKIP_ONBOARDING
       ? null
@@ -889,6 +1035,13 @@ async function main(): Promise<void> {
         onboarding.storageTileShape,
         dashboard.storageTileShape,
         same(onboarding.storageTileShape, dashboard.storageTileShape),
+      );
+    }
+
+    if (!SKIP_RESTORE && pro) await captureRestore(page, site, transport);
+    if (!SKIP_RESTORE && !pro) {
+      notes.push(
+        "restore wizard skipped — it is captured from Pro, whose deep link and migration step Free lacks",
       );
     }
 

@@ -195,6 +195,31 @@ export type StopRunningWork = (
   transport: Transport,
 ) => Promise<string | undefined>;
 
+/**
+ * Directories a plugin creates under one parent, each with a name it picks at runtime — see
+ * {@link ProductConfig.siteResidue}.
+ */
+export interface SiteResidueFamily {
+  /** The directory they are created in, relative to the WordPress root. Only ever listed. */
+  readonly parent: string;
+  /** Their names: a pattern anchored at both ends, as tight as the plugin's naming allows. */
+  readonly name: RegExp;
+}
+
+/** Something a product leaves on a site's filesystem: a path, or a family of directories. */
+export type SiteResidue = string | SiteResidueFamily;
+
+/**
+ * Asks the installed plugin for the data directories it names at runtime — see
+ * {@link ProductConfig.resolveSiteDataDirs}.
+ *
+ * Resolves with paths relative to the WordPress root (empty when the build names none); rejects when
+ * the site could not be asked, since an install whose directories cannot be prepared is not ready.
+ */
+export type ResolveSiteDataDirs = (
+  transport: Transport,
+) => Promise<readonly string[]>;
+
 /** Everything that defines a product (one BDD project family). */
 export interface ProductConfig {
   readonly name: string;
@@ -232,9 +257,22 @@ export interface ProductConfig {
    *
    * Each path must be relative, must not escape the WordPress root, and must not name a directory
    * WordPress itself owns — validated at removal time, so a typo fails loudly instead of deleting
-   * a site. Omit when a product leaves nothing behind.
+   * a site. Directories a plugin creates with names it picks at runtime are declared as a
+   * {@link SiteResidueFamily} — their parent and an anchored name pattern — and found on the site
+   * when it is cleaned. Omit when a product leaves nothing behind.
    */
-  readonly siteResidue?: readonly string[];
+  readonly siteResidue?: readonly SiteResidue[];
+  /**
+   * The data directories this product's plugin names at runtime, asked of the installed plugin after
+   * every `@plugin` install and prepared like the declared ones — open to both the transport's user
+   * and the web server before either writes there.
+   *
+   * For a directory whose name only the plugin knows, so {@link siteResidue} can declare it only as a
+   * family, and a family names nothing to create. Each path resolved must be one a
+   * {@link siteResidue} entry covers, so what is prepared is also removed. Omit when every data
+   * directory has a fixed name.
+   */
+  readonly resolveSiteDataDirs?: ResolveSiteDataDirs;
   /**
    * What this product leaves in a site's **database** when its files are removed without its own
    * uninstall ever running — the option fragments and tables the shared scenario hooks sweep

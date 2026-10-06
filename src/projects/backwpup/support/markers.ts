@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { normalizeOwnership } from "../../../common/wp/ownership";
+import { pathInsideRoot } from "../../../common/wp/paths";
 import { evalPhp, phpLiteral } from "../../../common/wp/php";
 import { isObject } from "../../../common/guards";
 import type { Transport } from "../../../common/config/types";
@@ -168,15 +169,15 @@ function parseSeedReply(reply: string): SeedReply {
  * than handed on.
  */
 function relativeToRoot(path: string, root: string): string {
-  const prefix = root.endsWith("/") ? root : `${root}/`;
-  if (!path.startsWith(prefix)) {
+  const relative = pathInsideRoot(path, root);
+  if (relative === undefined) {
     throw new Error(
       `[backwpup/markers] the file marker landed at "${path}", outside the WordPress root ` +
-        `("${prefix}") — this site keeps its content directory somewhere a backup of the root ` +
+        `("${root}") — this site keeps its content directory somewhere a backup of the root ` +
         "would not cover, so the marker could not prove anything.",
     );
   }
-  return path.slice(prefix.length);
+  return relative;
 }
 
 /**
@@ -193,12 +194,52 @@ export async function readFileMarker(
   const php =
     `$path = WP_CONTENT_DIR . '/' . ${phpLiteral(FILE_MARKER_NAME)};\n` +
     "echo wp_json_encode( is_file( $path ) ? file_get_contents( $path ) : null );";
-  const reply = await evalPhp(
-    transport,
-    php,
-    "reading the file marker",
-    "backwpup/markers",
+  return parseMarkerReply(
+    await evalPhp(
+      transport,
+      php,
+      "reading the file marker",
+      "backwpup/markers",
+    ),
+    "file",
   );
+}
+
+/**
+ * What the database marker holds right now, or `undefined` once the option is gone — the other half
+ * of asking which side of the site a restore brought back.
+ *
+ * @param transport - the site holding it.
+ * @throws {@link Error} if the site answered with anything but a string or nothing.
+ */
+export async function readDatabaseMarker(
+  transport: Transport,
+): Promise<string | undefined> {
+  const php = `echo wp_json_encode( get_option( ${phpLiteral(DATABASE_MARKER_OPTION)}, null ) );`;
+  return parseMarkerReply(
+    await evalPhp(
+      transport,
+      php,
+      "reading the database marker",
+      "backwpup/markers",
+    ),
+    "database",
+  );
+}
+
+/**
+ * Reads a marker reader's JSON reply: the value, or `undefined` for `null` (the marker is gone).
+ * Anything else throws — a marker that cannot be read must not pass for one that was left alone.
+ *
+ * Exported for its unit test.
+ *
+ * @param reply - the snippet's output.
+ * @param which - which marker, for the message.
+ */
+export function parseMarkerReply(
+  reply: string,
+  which: "file" | "database",
+): string | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(reply);
@@ -208,7 +249,7 @@ export async function readFileMarker(
   if (parsed === null) return undefined;
   if (typeof parsed !== "string") {
     throw new Error(
-      `[backwpup/markers] the file marker could not be read — the site answered ${reply.slice(0, 300) || "(nothing)"}.`,
+      `[backwpup/markers] the ${which} marker could not be read — the site answered ${reply.slice(0, 300) || "(nothing)"}.`,
     );
   }
   return parsed;
@@ -251,5 +292,42 @@ export async function removeMarkers(transport: Transport): Promise<void> {
         error instanceof Error ? error.message : String(error)
       }`,
     );
+  }
+}
+
+/**
+ * The values a scenario wrote over its markers after the backup it is about to restore — what each
+ * marker should still hold when a restore leaves its side of the site alone.
+ *
+ * Kept apart from the planted values on purpose: those are what a backup captured, these are what
+ * only the live site holds, and a restore is judged by which of the two each marker holds afterwards.
+ */
+export class ChangedMarkers {
+  /** The values written over the planted ones, once a step has changed them. */
+  private changed: SiteMarkers | undefined;
+
+  /**
+   * Remembers the values the markers were changed to.
+   *
+   * @param values - what `seedMarkers` planted the second time.
+   */
+  record(values: SiteMarkers): void {
+    this.changed = values;
+  }
+
+  /**
+   * The values the markers were changed to.
+   *
+   * @throws {@link Error} if no step changed them — a feature asserting "still changed" without
+   * having changed anything, which is worth saying plainly rather than failing as a mismatch.
+   */
+  get values(): SiteMarkers {
+    if (this.changed === undefined) {
+      throw new Error(
+        "[backwpup/markers] the markers were not changed after the backup in this scenario, so " +
+          "there is nothing to compare against. Change them before asserting what a restore kept.",
+      );
+    }
+    return this.changed;
   }
 }

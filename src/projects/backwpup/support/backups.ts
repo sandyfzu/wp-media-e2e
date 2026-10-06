@@ -394,6 +394,26 @@ export function allowForBackup(
 }
 
 /**
+ * How long a restore may take, end to end: unpacking the archive — Free uploads it through the
+ * browser first (~3 min for 411 MB measured) — and restoring it (under a minute measured), or a
+ * command-line restore with the content directory copied and put back around it.
+ */
+export const RESTORE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * Makes room in a scenario's budget for a step about to restore a backup — {@link allowForBackup}'s
+ * counterpart, on the same terms.
+ *
+ * @param testInfo - the scenario's own test info.
+ */
+export function allowForRestore(
+  testInfo: Pick<TestInfo, "timeout" | "setTimeout">,
+): void {
+  if (testInfo.timeout === 0) return;
+  testInfo.setTimeout(testInfo.timeout + RESTORE_TIMEOUT_MS);
+}
+
+/**
  * Starts a configured job and returns immediately.
  *
  * `--background` hands the job to the web server, which is how every scheduled or on-demand run of

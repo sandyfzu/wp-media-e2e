@@ -5,6 +5,7 @@ import {
   assertSafeElevatedTarget,
   isPathSegment,
   normaliseSitePath,
+  pathInsideRoot,
   pluginSitePath,
 } from "./paths";
 
@@ -46,6 +47,23 @@ test.describe("normaliseSitePath", () => {
   test("a trailing slash cannot smuggle a protected path past the check", () => {
     expect(() => normaliseSitePath("wp-content/uploads/", describe)).toThrow(
       /WordPress itself owns/,
+    );
+  });
+
+  // Core replaces these on every update, so nothing below them is ever a plugin's — and a family
+  // pattern could otherwise reach `wp-admin/css`.
+  test("rejects anything inside core's own directories, however it is spelled", () => {
+    for (const path of [
+      "wp-admin/css",
+      "wp-includes/js/x",
+      "wp-content/../wp-admin/images",
+    ]) {
+      expect(() => normaliseSitePath(path, describe), path).toThrow(
+        /WordPress core replaces on every update/,
+      );
+    }
+    expect(normaliseSitePath("wp-content/wp-admin-backups", describe)).toBe(
+      "wp-content/wp-admin-backups",
     );
   });
 
@@ -136,6 +154,48 @@ test.describe("pluginSitePath", () => {
     expect(normaliseSitePath(pluginSitePath("backwpup-pro"), describe)).toBe(
       "wp-content/plugins/backwpup-pro",
     );
+  });
+});
+
+test.describe("pathInsideRoot", () => {
+  test("gives a path inside the root relative to it", () => {
+    expect(
+      pathInsideRoot("/var/www/site/wp-content/uploads/x", "/var/www/site/"),
+    ).toBe("wp-content/uploads/x");
+    expect(pathInsideRoot("/var/www/site/wp-content/", "/var/www/site")).toBe(
+      "wp-content",
+    );
+  });
+
+  test("normalises both halves first, so `..` cannot lead out of the root", () => {
+    expect(
+      pathInsideRoot("/var/www/site/wp-content/../../etc", "/var/www/site/"),
+    ).toBeUndefined();
+    expect(
+      pathInsideRoot("/var/www/./site//wp-content", "/var/www/site/./"),
+    ).toBe("wp-content");
+  });
+
+  test("refuses a sibling that merely shares the root as a string prefix", () => {
+    expect(
+      pathInsideRoot("/var/www/site2/wp-content", "/var/www/site"),
+    ).toBeUndefined();
+  });
+
+  test("refuses the root itself, and anything outside it", () => {
+    expect(pathInsideRoot("/var/www/site/", "/var/www/site")).toBeUndefined();
+    expect(pathInsideRoot("/tmp/elsewhere", "/var/www/site")).toBeUndefined();
+  });
+
+  test("handles a root of /", () => {
+    expect(pathInsideRoot("/srv/x", "/")).toBe("srv/x");
+    expect(pathInsideRoot("/", "/")).toBeUndefined();
+  });
+
+  // Both are what a site answers with, so a relative one is an answer that went wrong.
+  test("refuses a relative path or root", () => {
+    expect(pathInsideRoot("a/b", "a")).toBeUndefined();
+    expect(pathInsideRoot("/var/www/site/x", "var/www/site")).toBeUndefined();
   });
 });
 

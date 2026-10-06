@@ -10,9 +10,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  ChangedMarkers,
   DATABASE_MARKER_OPTION,
   FILE_MARKER_NAME,
   newMarkerValue,
+  parseMarkerReply,
+  readDatabaseMarker,
   readFileMarker,
   removeMarkers,
   seedMarkers,
@@ -246,4 +249,51 @@ test.describe("readFileMarker", () => {
       );
     });
   }
+});
+
+test.describe("readDatabaseMarker", () => {
+  test("asks for the marker option, and reads its value", async () => {
+    process.env.WP_STUB_MODE = "present";
+    expect(await readDatabaseMarker(local())).toBe(
+      "8e2b1c9d0a4f5e6b7c8d9e0f1a2b3c4d",
+    );
+    const asked = readFileSync(capture, "utf8");
+    expect(asked).toContain("get_option(");
+    expect(asked).not.toContain("WP_CONTENT_DIR");
+  });
+
+  test("answers undefined once the option is gone", async () => {
+    process.env.WP_STUB_MODE = "absent";
+    expect(await readDatabaseMarker(local())).toBeUndefined();
+  });
+});
+
+test.describe("parseMarkerReply", () => {
+  test("reads a value, and null as gone", () => {
+    expect(parseMarkerReply('"abc"', "file")).toBe("abc");
+    expect(parseMarkerReply("null", "database")).toBeUndefined();
+  });
+
+  for (const reply of ["", "false", "1", "{}", 'Notice: x\n"abc"']) {
+    test(`refuses ${JSON.stringify(reply)}, naming the marker`, () => {
+      expect(() => parseMarkerReply(reply, "database")).toThrow(
+        /database marker could not be read/,
+      );
+    });
+  }
+});
+
+test.describe("ChangedMarkers", () => {
+  test("hands back what was recorded", () => {
+    const changed = new ChangedMarkers();
+    changed.record({ file: "a", database: "b" });
+    expect(changed.values).toEqual({ file: "a", database: "b" });
+  });
+
+  // A feature asserting "still changed" without a step that changed anything.
+  test("says so plainly when nothing was recorded", () => {
+    expect(() => new ChangedMarkers().values).toThrow(
+      /were not changed after the backup/,
+    );
+  });
 });

@@ -54,7 +54,10 @@ import type {
  *    pass; it only removes what the product left behind after the verdict is in.
  *  - **Attempted second, never first.** Callers try as themselves and escalate only when the
  *    unprivileged attempt demonstrably failed, so a correctly-permissioned host never runs anything
- *    as root.
+ *    as root. One deliberate exception, and only around a command under test that rewrites the
+ *    content directory wholesale: a copy of it taken and put back exactly, owners included, which
+ *    only root can do — so it is privileged from the start, and refused outright without it (the
+ *    command is then not run).
  *  - **Never interactive.** `sudo -n` fails immediately rather than waiting on a password prompt, so
  *    a host without passwordless sudo reports that instead of hanging a run.
  *  - **Refusable per site** (`transport.elevate: false`), and reported once per target when used.
@@ -685,8 +688,9 @@ export async function execElevated(
     elevationNotices.add(key);
     console.info(
       `[wp/exec] using elevated privileges on ${describeTarget(transport)} for housekeeping the ` +
-        "transport's user is not permitted to do — removing files the web server owns, or reading " +
-        "its debug.log. Only housekeeping is ever elevated; WP-CLI never is.",
+        "transport's user is not permitted to do — removing files the web server owns, reading its " +
+        "debug.log, or keeping a copy of wp-content around a command that rewrites it. Only " +
+        "housekeeping is ever elevated; WP-CLI never is.",
     );
   }
   return dispatch(transport, file, args, options, true);
