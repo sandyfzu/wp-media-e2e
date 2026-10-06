@@ -35,7 +35,11 @@ index, so a malformed file fails fast.
 
 ### Shape
 
-The top-level keys are **cell names** (`apache`, `nginx`, `pro@nginx`, …). A cell
+The top-level keys are **cell names** (`apache`, `nginx`, `pro@nginx`, …). A name
+starts with a lowercase letter or digit and holds only lowercase letters, digits, `@`,
+`.`, `_` and `-`, checked at load. It names folders, so it must be one safe path
+segment. It also names Playwright projects, whose `--project` filter ignores case.
+Names starting with `_` are kept for the suite's own folders (`_all`, `_unit`). A cell
 is either a bare array of sites (editionless) or an object `{ edition?, sites }`:
 
 ```jsonc
@@ -170,7 +174,7 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 | `CI`          | _(unset)_              | Non-empty enables CI config (retries, `forbidOnly`).                    |
 | `PRODUCT`     | `wp-rocket`            | Product for the bare `playwright.config.ts`: a name listed in [`products.ts`](../../src/projects/products.ts) (whitespace ignored). Any other name fails the run. |
 | `REPORT_ROOT` | `reports`              | Report artifact root (accumulates).                                     |
-| `OUTPUT_ROOT` | `test-results`         | Ephemeral Playwright artifact root.                                     |
+| `OUTPUT_ROOT` | `test-results`         | Ephemeral Playwright artifact root: `<product>/<cell>` for a run targeting that cell, `<product>/_all/<cell>` for any other run, `_unit` for unit tests. |
 | `AUTH_ROOT`   | `.auth`                | Ephemeral `storageState` root.                                          |
 | `ARTIFACTS_ROOT` | `.artifacts`        | Resolved plugin-zip root (**wiped & rebuilt each run**; see Plugin artifacts). |
 | `E2E_SITE_STAGING_DIR` | `.e2e_temp`   | Where artifacts are staged **on each site** (absolute, or relative to its WordPress root). A site's own `transport.stagingDir` wins over this. |

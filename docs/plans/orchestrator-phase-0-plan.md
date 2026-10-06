@@ -1,6 +1,7 @@
 # Orchestrator Phase 0 — Make the suite ready
 
-> **Status:** in implementation, in §9's order. **Done:** 0B.3 (2026-10-05, §4.3). The rest is
+> **Status:** in implementation, in §9's order. **Done:** 0B.3 (2026-10-05, §4.3), 0A.2
+> (2026-10-06, §3.2). The rest is
 > investigated: every item has a verified finding and a recommended solution, with the
 > alternatives it beat.
 > **Date:** 2026-09-25.
@@ -21,7 +22,7 @@ The recommended solution per item. "—" means no suite change: the orchestrator
 | Item | Recommended | Suite change |
 | --- | --- | --- |
 | 0A.1 `bddgen` rewrites every cell | **Pin a run to one cell**: with `E2E_CELL=<cell>` the config holds only that cell, so `bddgen` touches only its specs | `run-context.ts`, `project.ts` |
-| 0A.2 shared `test-results/` | Setup projects write in their cell's folder, unit runs in `_unit`, runs of no cell in `<product>/_all/<cell>`; cell names checked at load | `project.ts`, `run-context.ts`, `playwright.unit.config.ts`, `sites.ts` |
+| 0A.2 shared `test-results/` — **done** | Setup projects write in their cell's folder, unit runs in `_unit`, runs of no cell in `<product>/_all/<cell>`; cell names checked at load; reports and logins absolute | `project.ts`, `run-context.ts`, `reporting.ts`, `playwright.unit.config.ts`, `sites.ts` |
 | 0A.3 shared hosts | Never two runs on one site or staging root. **No limit per server**: the user decides; a **warning** (command, dashboard, event) once a server's busy-run threshold — default 4, configurable — is reached, or its free disk is low | — |
 | 0A.4 two runs on one site | Refuse a site listed by two cells of any product, compared on its normalized URL and location | — (optional loader check) |
 | 0A.5 APVM's cache | Build in a **worker process per build**, detached, with a private `TMPDIR`: stop, cancel and timeout = SIGKILL its group and remove that folder. The cache survived every kill measured | — |
@@ -214,7 +215,7 @@ test-results/
   or `..` would escape `dirs()`, `_all` collides with the report bucket, and case alone would let
   Playwright's case-insensitive filter match two cells.
 - Fix `execution-model.md`'s "concurrent cells never collide", which is false today.
-- **Found in 0B.3's audit (V133): Allure's results follow the working directory.** Playwright
+- **Found in 0B.3's audit (V133), done in 0A.2 (V141): Allure's results follow the working directory.** Playwright
   resolves the config's paths, its report folders included, against the config's folder. But
   allure-playwright resolves `resultsDir` (`reporting.ts:33`, relative) against the working
   directory. A run started elsewhere splits its report: `allure-results/` there, the Playwright
@@ -231,6 +232,30 @@ cannot; only UI and watch mode set `preserveOutputDir`, V3).
 control). Live: a failing scenario on a real cell while `npm run test:unit` runs on the same checkout —
 traces and videos intact in all three reports. No site: a run started from another working directory
 writes all three reports into the same `reports/<product>/<cell>/<RUN_ID>/`.
+
+**Implemented** (2026-10-06, V138–V144). As recommended, plus:
+
+- **The rule, generalized** (`outputDirFor`): a project writes in its cell's folder only when the
+  run targets that cell. Any other project writes in `_all/<cell>`, including another cell's
+  project picked alongside a targeted run (`--project=a --project=artifacts:b`), which would
+  otherwise empty `b`'s folder.
+- **Unit runs:** develop's `fe7cd1e` had already moved them to `test-results/unit`. They now use
+  `<OUTPUT_ROOT>/_unit`, as recommended. `products.spec.ts` requires product names like cell names
+  (lowercase, no `_`), so no product can share that folder.
+- **`.last-run.json`** goes into the first selected project's output folder (V139). With every
+  project now in a folder of its own, runs no longer share it, and `--last-failed` works per
+  selection.
+- **`.auth/` followed the working directory too.** A relative `storageState` resolves against it,
+  which V133 missed: its run skipped the auth setup. Logins are now absolute paths, like the report
+  folder. `reporters()` refuses a relative folder.
+- **Specs:** `outputDirFor` and the cell-name rule are unit-tested. `project.spec.ts` builds a real
+  config per `--project` selection in a fresh Node, from another working directory. The child
+  runner moved to `src/common/__fixtures__/child-node.ts`, shared with `products.spec.ts`.
+
+**Out of scope, found here:** two runs of one cell still share its auth, bdd and artifacts folders.
+`--project=setup:<cell>` or `artifacts:<cell>` alone, during a run of that cell, rewrites its logins
+or wipes its zips (`resolve.ts:94`). This is 0A.4's ground: a cell takes one run at a time, and
+the orchestrator never runs a setup project alone.
 
 ### 3.3 0A.3 — Cells that share a server
 
@@ -961,7 +986,7 @@ Each step ships with its unit tests, passes the four gates, and gets the live ch
 on `bwu2`/`bwu3`, one cell at a time.
 
 1. 0B.3, one product list — everything the orchestrator spawns starts from it. **Done 2026-10-05.**
-2. 0A.2, the output folders and the cell-name rule — a hazard today.
+2. 0A.2, the output folders and the cell-name rule — a hazard today. **Done 2026-10-06.**
 3. 0A.1, the cell pin.
 4. 0B.1, a run's environment.
 5. 0D.2 with 0B.2 — the full commit, the digest, and the built commit (the artifacts code).
@@ -1082,3 +1107,10 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V135 | ESLint's `no-restricted-imports`, and typescript-eslint's, flag no dynamic `import()` (exit 0); a `no-restricted-syntax` `ImportExpression` selector does. `ts.preProcessFile` (TypeScript 6.0.3) reports static, `import type`, side-effect, `export … from`, `export *`, dynamic, template-literal and `typeof import()` forms, and nothing from a comment or a string | ✅ 2026-10-05 | A probe file under `src/common/`, linted then deleted; a scanner probe over each form |
 | V136 | `import-boundary.spec.ts` scans the 90 files of `src/common/`. A dynamic import, a static import and a `typeof import()` of product code each fail it. Only the static one also fails ESLint. Scanning by substring, or dropping the outside-the-folder check, fails its own scanner test. The control passes | ✅ 2026-10-05 | A throwaway copy per mutation, `import-boundary.spec.ts` alone plus `eslint src/common` |
 | V137 | `PRODUCT=backwpu npx bddgen` exits 1 with the same message as the runner. V8's `JSON.parse` errors name a position, not source text, so a malformed sites file's `[cause]` quotes no value. The gates after the audit: typecheck, lint and format clean; unit 1256 passed, 8 skipped. The products spec's 14 mutations are all still caught | ✅ 2026-10-05 | `bddgen` exit status; `node -e` over two malformed objects; the gates; the mutation script re-run |
+| V138 | 0A.2's marker measurement, before and after. Before: a unit run emptied only `test-results/unit` (develop's `fe7cd1e`), `--project=apache` only its folder, and each of `--project=setup:apache`, `--project=artifacts:apache`, no `--project` and `--project='*'` emptied every folder, both products' and the root. After: the unit run empties only `_unit`, the cell only its folder, the four others only `wp-rocket/_all/…`, and the root survives every run | ✅ 2026-10-06 | A marker in eight folders before each of six invocations, in a copy of the worktree with placeholder cells |
+| V139 | Playwright 1.63.0 writes `.last-run.json` in the first selected project's output folder; empties the output folder of every selected project before a run; matches `--project` case-insensitively, with `*` wildcards. After 0A.2 the file lands in `_unit/`, `wp-rocket/apache/` or `wp-rocket/_all/apache/`, per selection | ✅ source + measured | `runner/index.js:6606–6614`, `:6398–6418`, `:2140–2170`; the V138 runs |
+| V140 | The mid-run experiment. A failing `apache` probe attaches a file, waits 25 s, then fails, while a unit run, a run with no `--project`, `--project=setup:apache` and `--project=artifacts:apache` start. After 0A.2 it matches its control: the trace, video, screenshot, attached file and error context in the Playwright and Allure reports, and a ~1.08 MB Cucumber report. On the previous commit the same run kept 1 screenshot in the Playwright report, 2 of 5 attachments in Allure and a 2.5 KB Cucumber report, with ENOENT errors | ✅ 2026-10-06 | `midrun.sh`, in copies of the worktree and of `HEAD` |
+| V141 | Started from another working directory, a run now writes all three reports into one `reports/<product>/_all/<RUN_ID>/` in the checkout, and nothing in the working directory. Playwright's docs: a relative `storageState` path resolves against the working directory, so `.auth/` followed it before. `.env` is still read from the working directory | ✅ 2026-10-06 | V133's probe re-run; Playwright 1.63.0 docs (`browserContext.storageState`, `path`) via Context7 |
+| V142 | Live on `bwu2`, read-only. `--project=setup:free@nginx`, started from another folder, saved its login to the checkout's `.auth/backwpup/free@nginx/site-0.json` and left that folder empty. A probe on `free@nginx` opened wp-admin and failed by the 30 s timeout (03:21:10.8–03:21:41.2). `npm run test:unit` (1271 passed) emptied `_unit` at 03:21:17.3, inside that window. The probe's trace, video, screenshot, attached file and error context reached all three reports, with no ENOENT | ✅ 2026-10-06 | `live.sh`, its probe files removed after; Allure result times; `_unit`'s birth time |
+| V143 | Every cell name in use matches `^[a-z0-9][a-z0-9@._-]*$`: `apache`, `nginx`, `free@nginx`, `pro@nginx`, `free@apache`, `pro@apache` | ✅ 2026-10-06 | The keys of every sites file in both checkouts, the products' examples and `docker/` |
+| V144 | Nine mutations each fail the tests aimed at them, and the control passes 59 tests: setup projects with no `outputDir`; every run owning the cell's folder; a relative report folder (every config build stops); `reporters()` accepting one; a relative `storageState`; cell names with uppercase, with a leading `_`, or unchecked; unit runs back in the root. The gates: typecheck, lint and format clean; unit 1272 passed, 8 skipped (1256 before) | ✅ 2026-10-06 | `mutate-0a2.sh`, a copy of the worktree per mutation, five specs |

@@ -1,9 +1,12 @@
 import { test, expect } from "@playwright/test";
 import { isAbsolute } from "node:path";
 
+import unitConfig from "../../../playwright.unit.config";
 import {
   dirs,
   isCellTargeted,
+  NO_CELL,
+  outputDirFor,
   REPO_ROOT,
   seedSelectedCells,
   selectedCells,
@@ -198,5 +201,52 @@ test.describe("dirs — artifacts directory", () => {
 
   test("REPO_ROOT is absolute (so paths never depend on process.cwd())", () => {
     expect(isAbsolute(REPO_ROOT)).toBe(true);
+  });
+});
+
+test.describe("outputDirFor — only a run targeting a cell may own (and so empty) its folder", () => {
+  const OUTPUT_ROOT = "OUTPUT_ROOT";
+  const saved = process.env[OUTPUT_ROOT];
+
+  test.beforeEach(() => {
+    Reflect.deleteProperty(process.env, OUTPUT_ROOT);
+  });
+
+  test.afterEach(() => {
+    if (saved === undefined) Reflect.deleteProperty(process.env, OUTPUT_ROOT);
+    else process.env[OUTPUT_ROOT] = saved;
+  });
+
+  test("the targeted cell writes in its own folder", () => {
+    expect(outputDirFor("backwpup", "pro@nginx", "pro@nginx")).toBe(
+      "test-results/backwpup/pro@nginx",
+    );
+  });
+
+  test("a run targeting no cell writes under _all/<cell>", () => {
+    expect(NO_CELL).toBe("_all");
+    expect(outputDirFor("backwpup", "pro@nginx", undefined)).toBe(
+      "test-results/backwpup/_all/pro@nginx",
+    );
+  });
+
+  test("another cell's project in a targeted run writes under _all/<cell> too", () => {
+    expect(outputDirFor("backwpup", "free@nginx", "pro@nginx")).toBe(
+      "test-results/backwpup/_all/free@nginx",
+    );
+  });
+
+  test("OUTPUT_ROOT replaces only the root, for both kinds of run", () => {
+    process.env[OUTPUT_ROOT] = "/srv/e2e-output";
+    expect(outputDirFor("wp-rocket", "nginx", "nginx")).toBe(
+      "/srv/e2e-output/wp-rocket/nginx",
+    );
+    expect(outputDirFor("wp-rocket", "nginx", undefined)).toBe(
+      "/srv/e2e-output/wp-rocket/_all/nginx",
+    );
+  });
+
+  test("unit runs write in a _unit folder of their own, which no product can be named", () => {
+    expect(unitConfig.outputDir).toMatch(/\/_unit$/);
   });
 });

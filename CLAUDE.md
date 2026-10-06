@@ -42,6 +42,7 @@ src/
 │   ├── pages/              # cross-product Page Object Model (e.g. plugins.page.ts)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, verify, consume, pre-warm)
+│   ├── __fixtures__/       # spec helpers (child-node.ts: run code in a fresh Node)
 │   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -64,7 +65,12 @@ playwright*.config.ts       # entry configs (default, per-product, unit)
   steps, sites, and optional service credentials.
 - **Cell** — a named environment (`apache`, `nginx`, `pro@nginx`). Cells are
   data-driven: the merged top-level keys of a product's sites files
-  (`sites.json` + any `sites.*.json` overlays — see Configuration below).
+  (`sites.json` + any `sites.*.json` overlays — see Configuration below). A name is
+  lowercase `a-z0-9@._-`, never `_`-prefixed, checked at load: it names folders and projects.
+- **Output folders** — Playwright empties a selected project's output folder as a run starts,
+  so only a run targeting a cell writes in `test-results/<product>/<cell>`; any other run
+  writes in `<product>/_all/<cell>`, unit runs in `_unit` (`outputDirFor`). Reports and
+  logins are absolute paths in the checkout, wherever a run starts.
 - **Pool** — the interchangeable WordPress sites under a cell; each worker binds to
   one site by `parallelIndex`.
 - **Run unit** — one `(product × cell)`. **Run exactly one cell per invocation**

@@ -140,14 +140,28 @@ resolves all paths via `dirs(product, cell)`. Two lifecycles:
 | Kind                       | Path shape                                          | Lifecycle                                                     |
 | -------------------------- | --------------------------------------------------- | ------------------------------------------------------------ |
 | **report** (accumulates)   | `<REPORT_ROOT>/<product>/<cell>/<RUN_ID>/`          | One per run; pruned later by a `report:prune` utility.       |
-| **output / auth / bdd**    | `<*_ROOT>/<product>/<cell>/`                         | Ephemeral, stable per `(product, cell)`; overwritten in place. |
+| **output**                 | `<OUTPUT_ROOT>/<product>/<cell>/`, or `…/<product>/_all/<cell>/` | Ephemeral: Playwright empties it as a run that selects one of its projects starts (see below). |
+| **auth / bdd**             | `<*_ROOT>/<product>/<cell>/`                         | Ephemeral, stable per `(product, cell)`; overwritten in place. |
 | **artifacts** (ephemeral)  | `<ARTIFACTS_ROOT>/<product>/<cell>/`                | **Wiped whole** and re-resolved each run; holds the role zips under test + `resolution.json`. |
 
 - `RUN_ID` is auto-stamped (filesystem-safe, lexically sortable) unless pinned by
   an orchestrator so a batch of cells shares one token.
-- The `<product>/<cell>` namespace is **always** appended, so concurrent cells
-  never collide regardless of `*_ROOT` overrides (`REPORT_ROOT`, `OUTPUT_ROOT`,
-  `AUTH_ROOT`, `ARTIFACTS_ROOT`).
+- The `<product>/<cell>` namespace is **always** appended, so two cells never share a
+  directory, whatever the `*_ROOT` overrides (`REPORT_ROOT`, `OUTPUT_ROOT`, `AUTH_ROOT`,
+  `ARTIFACTS_ROOT`). Two runs of one cell share every folder of it but the report, so a
+  cell takes one run at a time.
+- **Output folders follow the selection** (`outputDirFor`). Playwright empties the output
+  folder of every project a run selects before it starts. So a cell's three projects
+  write in `<product>/<cell>` only in a run that targets that cell
+  (`--project=<cell>`). Every other run's projects write in `<product>/_all/<cell>`:
+  no `--project`, a setup project alone, a wildcard, another cell's project. None of
+  them can empty a running cell's folder. Unit runs write in `<OUTPUT_ROOT>/_unit`.
+  Cell names are checked at load, so none is `_`-prefixed or escapes its folder.
+- **Reports and logins are absolute paths in the checkout.** Playwright resolves a
+  config's own paths against the config's folder. But allure-playwright's `resultsDir` and
+  a `storageState` path resolve against the working directory, so `reporters()` refuses
+  a relative folder and each site's `storageState` is absolute. A run started anywhere
+  writes in the checkout, though `.env` is still read from the working directory.
 - The artifacts dir is the only one **wiped** (not merely overwritten) each run:
   refs re-resolve (a cache hit is a copy) and provided zips are copied in, so no
   stale zip from a prior execution can survive. `resolution.json` lives inside it,

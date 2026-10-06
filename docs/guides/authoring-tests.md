@@ -410,3 +410,10 @@ configs, whose generated specs live in `.features-gen/` (outside `src/`). Add a
 one that drops tables, say — can be driven against a fake `$wpdb` with the local `php`
 ([`table-padding.php.spec.ts`](../../src/projects/backwpup/support/table-padding.php.spec.ts));
 such a spec skips where PHP is not installed, as in CI.
+
+Some things can only be measured in a process nothing else has touched: what importing a
+module does to the environment, or how a config builds under a given `--project`.
+[`runInChildNode`](../../src/common/__fixtures__/child-node.ts) runs such code in a fresh Node
+under tsx, with only `PATH` and `HOME` and a 15 s limit, and returns the JSON it prints
+(`project.spec.ts`, `products.spec.ts`). Unit runs write their output to `<OUTPUT_ROOT>/_unit`,
+a folder of their own, so running them never empties a cell run's output.

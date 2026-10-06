@@ -415,6 +415,26 @@ function checkEditionConsistency(
 }
 
 /**
+ * What a cell may be named. A cell names folders (`<OUTPUT_ROOT>/<product>/<cell>`, its reports,
+ * logins, generated specs and zips) and Playwright projects (`<cell>`, `setup:<cell>`,
+ * `artifacts:<cell>`). So: one path segment; lowercase, because `--project` ignores case and
+ * would select two cells differing in case alone together; and no leading `_`, kept for the
+ * suite's own folders (`_all`, `_unit`).
+ */
+const CELL_NAME = /^[a-z0-9][a-z0-9@._-]*$/;
+
+/** Throws, naming the file and the rule, unless `cell` is a name {@link CELL_NAME} allows. */
+function validateCellName(cell: string, source: string): void {
+  if (!CELL_NAME.test(cell)) {
+    throw new Error(
+      `[sites] ${source}: cell name ${JSON.stringify(cell)} must start with a lowercase ` +
+        'letter or digit and hold only lowercase letters, digits, "@", ".", "_" and "-": it ' +
+        "names folders and Playwright projects.",
+    );
+  }
+}
+
+/**
  * Validates the parsed JSON of one file into a {@link CellMap}. Checks edition
  * consistency within the file; cross-file consistency is checked after merging.
  */
@@ -426,6 +446,7 @@ function validateCellMap(value: unknown, source: string): CellMap {
   }
   const result: Record<string, CellConfig> = {};
   for (const [cell, raw] of Object.entries(value)) {
+    validateCellName(cell, source);
     result[cell] = validateCell(raw, `${source} → ${cell}`);
   }
   checkEditionConsistency(result, source);

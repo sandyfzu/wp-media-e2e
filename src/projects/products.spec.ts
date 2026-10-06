@@ -1,5 +1,4 @@
 import { test, expect } from "@playwright/test";
-import { execFile } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
@@ -10,10 +9,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
-import { isObject } from "../common/guards";
+import { importable, runInChildNode } from "../common/__fixtures__/child-node";
 import {
   PRODUCTS,
   playwrightConfigFor,
@@ -28,16 +26,11 @@ import {
  * which the orchestrator will rely on.
  */
 
-const execFileAsync = promisify(execFile);
-
 /** The repository root, two levels above this file. */
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
 /** The unit config, the only root entry config that is not a product's. */
 const UNIT_ENTRY = "unit";
-
-/** tsx's loader, so a child Node imports the suite's TypeScript as the runners do. */
-const TSX_LOADER = import.meta.resolve("tsx");
 
 /** A working directory whose `.env` sets a sentinel, so a child that loads `.env` shows it. */
 let probeDir = "";
@@ -51,64 +44,16 @@ test.afterAll(() => {
   rmSync(probeDir, { recursive: true, force: true });
 });
 
-/**
- * How long a child may run. One takes under 2 s here; this leaves room for a slow CI runner and
- * stays under the 30 s test timeout, so a hung child fails its test with {@link runInChild}'s
- * message rather than the runner's.
- */
-const CHILD_TIMEOUT_MS = 15_000;
-
-/** Why a child failed: killed at the time limit, its exit code, or why it never started. */
-function describeChildFailure(error: unknown): string {
-  if (!isObject(error)) return String(error);
-  const stderr = typeof error.stderr === "string" ? error.stderr : "";
-  const how =
-    error.killed === true
-      ? `killed after ${String(CHILD_TIMEOUT_MS)} ms`
-      : typeof error.code === "number"
-        ? `exit ${String(error.code)}`
-        : String(error.code ?? error.message);
-  return `${how}: ${stderr}`;
-}
-
-/**
- * Runs `body` — ES module code — in a fresh Node from {@link probeDir}, with only `PATH` and
- * `HOME`, and returns the JSON printed on its last stdout line. A child, because what is measured
- * is what importing a module does to a process, and this worker has imported plenty already.
- * Asynchronous, so the test's own timeout can still interrupt it.
- */
-async function runInChild(body: string): Promise<unknown> {
-  let stdout: string;
-  try {
-    ({ stdout } = await execFileAsync(
-      process.execPath,
-      ["--import", TSX_LOADER, "--input-type=module", "--eval", body],
-      {
-        cwd: probeDir,
-        encoding: "utf8",
-        timeout: CHILD_TIMEOUT_MS,
-        env: { PATH: process.env.PATH, HOME: process.env.HOME },
-      },
-    ));
-  } catch (error) {
-    // The argv is our own probe code and the env holds only PATH and HOME: nothing to hide.
-    throw new Error(`child Node failed (${describeChildFailure(error)})`, {
-      cause: error,
-    });
-  }
-  return JSON.parse(stdout.trim().split("\n").at(-1) ?? "");
-}
-
-/** The `file:` URL of a repository file, as a JS string literal for a child's code. */
-function moduleUrl(repoPath: string): string {
-  return JSON.stringify(pathToFileURL(join(REPO_ROOT, repoPath)).href);
+/** Runs `body` in a fresh Node from {@link probeDir}: see {@link runInChildNode}. */
+function runInChild(body: string): Promise<unknown> {
+  return runInChildNode(body, { cwd: probeDir });
 }
 
 /** The environment variables importing `repoPath` adds, removes or changes, sorted. */
 function envChangedByImport(repoPath: string): Promise<unknown> {
   return runInChild(`
     const before = { ...process.env };
-    await import(${moduleUrl(repoPath)});
+    await import(${importable(join(REPO_ROOT, repoPath))});
     const keys = new Set([...Object.keys(before), ...Object.keys(process.env)]);
     console.log(JSON.stringify([...keys].filter((k) => before[k] !== process.env[k]).sort()));
   `);
@@ -117,7 +62,7 @@ function envChangedByImport(repoPath: string): Promise<unknown> {
 /** The product names on the projects that a Playwright entry config builds. */
 function productsBuiltBy(entryConfig: string): Promise<unknown> {
   return runInChild(`
-    const config = (await import(${moduleUrl(entryConfig)})).default;
+    const config = (await import(${importable(join(REPO_ROOT, entryConfig))})).default;
     console.log(JSON.stringify([...new Set(config.projects.map((p) => p.metadata?.product))]));
   `);
 }
@@ -145,6 +90,11 @@ test.describe("PRODUCTS — against the repository", () => {
       [...names].sort(),
       "src/projects/ and PRODUCTS (src/projects/products.ts) must name the same products",
     ).toEqual(folders);
+  });
+
+  test("names every product as a lowercase path segment, never _-prefixed like _unit", () => {
+    // A product names folders beside the unit tests' `<OUTPUT_ROOT>/_unit`, and npm scripts.
+    for (const name of names) expect(name).toMatch(/^[a-z0-9][a-z0-9-]*$/);
   });
 
   test("keeps every product's features and own steps inside its own folder", () => {

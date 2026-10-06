@@ -133,7 +133,9 @@ override to cells they never named).
 ```
 
 - The root is overridable with `ARTIFACTS_ROOT`; `<product>/<cell>` is always
-  appended, so concurrent cells never share a directory.
+  appended, so two cells never share a directory. Two runs resolving one cell's zips do
+  (a run of the cell, or `--project=artifacts:<cell>` alone): the second wipes the first's
+  zips, so a cell takes one such run at a time.
 - **Every resolved zip is normalised to mode `0644`.** A build lands `0600`, and getting it
   onto a site copies it verbatim: `docker cp` preserves the host mode _and_ numeric owner
   (meaningless inside a container), so WP-CLI there cannot open the archive and

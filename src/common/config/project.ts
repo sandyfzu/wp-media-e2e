@@ -1,3 +1,5 @@
+import { resolve } from "node:path";
+
 import { defineConfig } from "@playwright/test";
 import type { PlaywrightTestConfig, Project } from "@playwright/test";
 import { defineBddConfig } from "playwright-bdd";
@@ -14,7 +16,14 @@ import {
   routingMetadata,
 } from "./metadata";
 import { reporters } from "./reporting";
-import { dirs, seedSelectedCells, selectedCells } from "./run-context";
+import {
+  NO_CELL,
+  REPO_ROOT,
+  dirs,
+  outputDirFor,
+  seedSelectedCells,
+  selectedCells,
+} from "./run-context";
 import { VISUAL_EXPECT, snapshotPathTemplateFor } from "./visual";
 import type { Edition, ProductConfig, SiteConfig, SitePool } from "./types";
 
@@ -43,11 +52,15 @@ const isCI = process.env.CI !== undefined && process.env.CI !== "";
  */
 const RETRIES = intEnv("E2E_RETRIES", 2, 0, 10);
 
-/** Assigns each pooled site its per-run `storageState` path under the cell's auth dir. */
+/**
+ * Assigns each pooled site its per-run `storageState` path under the cell's auth dir. The path
+ * is absolute: Playwright and `fs` resolve a relative one against the working directory, which
+ * would put the logins wherever the run was started.
+ */
 function withState(pool: SitePool, authDir: string): SiteConfig[] {
   return pool.map((site, index) => ({
     ...site,
-    storageState: `${authDir}/site-${String(index)}.json`,
+    storageState: resolve(REPO_ROOT, authDir, `site-${String(index)}.json`),
   }));
 }
 
@@ -114,7 +127,7 @@ export function createProductConfig(
     selected === undefined ? undefined : product.sites[selected];
   // A cell-less run (no / `*` / unknown --project) is serial and safe; its report goes
   // to an `_all` bucket so it is never mislabeled as belonging to a single cell.
-  const reportCell = selected ?? "_all";
+  const reportCell = selected ?? NO_CELL;
 
   const projects: Project[] = cells.flatMap((cell): Project[] => {
     const cellConfig = product.sites[cell];
@@ -130,6 +143,9 @@ export function createProductConfig(
     const firstSite = pooled[0];
     const tags = editionFilter(edition);
     const routing = routingMetadata(product.name, cell, edition);
+    // All three projects of a cell share one output folder, which Playwright empties for each
+    // project a run selects; see `outputDirFor` for which runs may own the cell's own folder.
+    const outputDir = outputDirFor(product.name, cell, selected);
 
     return [
       {
@@ -137,6 +153,7 @@ export function createProductConfig(
         testDir: "src/common/auth",
         testMatch: /auth\.setup\.ts$/,
         use: { ...DESKTOP },
+        outputDir,
         metadata: routing,
       },
       {
@@ -145,6 +162,7 @@ export function createProductConfig(
         name: artifactsName,
         testDir: "src/common/artifacts",
         testMatch: /artifacts\.setup\.ts$/,
+        outputDir,
         metadata: routing,
       },
       {
@@ -160,7 +178,7 @@ export function createProductConfig(
           ...DESKTOP,
           ...(firstSite ? { baseURL: firstSite.baseURL } : {}),
         },
-        outputDir: cellDirs.output,
+        outputDir,
         dependencies: [setupName, artifactsName],
         // Defensive upper bound only: per-project `workers` caps how many workers a
         // project uses, not which parallelIndex slots it sees, so it cannot by itself
@@ -182,7 +200,9 @@ export function createProductConfig(
       selectedCellConfig && selectedCellConfig.sites.length > 0
         ? selectedCellConfig.sites.length
         : 1,
-    reporter: reporters(dirs(product.name, reportCell).report),
+    reporter: reporters(
+      resolve(REPO_ROOT, dirs(product.name, reportCell).report),
+    ),
     // Committed-baseline visual checks (`toHaveScreenshot`): comparison tolerance + where the
     // per-product/cell baselines live. WP Rocket's A/B check (visual/ab.ts) diffs live renders and
     // does NOT use this — it is the wiring for the general committed-baseline capability.

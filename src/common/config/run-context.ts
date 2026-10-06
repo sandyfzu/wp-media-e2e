@@ -32,7 +32,9 @@ export const REPO_ROOT: string = fileURLToPath(
  *
  * The `*_ROOT` env vars and `RUN_ID` are the only knobs (an orchestrator may pin RUN_ID
  * so every cell of a batch shares one token). The `<product>/<cell>` namespace is always
- * appended, so cells never collide. Running a cell manually needs no environment at all.
+ * appended, so two cells never share a directory, and a run that targets no single cell
+ * writes its output under {@link NO_CELL} instead ({@link outputDirFor}). Running a cell
+ * manually needs no environment at all.
  */
 
 /** Filesystem-safe, lexically-sortable run token. Used ONLY to namespace the report directory. */
@@ -177,7 +179,8 @@ export interface RunDirs {
 /**
  * Resolve the artifact directories for a (product, cell). All paths are repo-root-relative.
  * A `*_ROOT` override replaces only the root prefix; the `<product>/<cell>` namespace is
- * always appended, so concurrent cells never share a directory.
+ * always appended, so two cells never share a directory. Two runs of one cell do, but for a
+ * report, which `RUN_ID` keeps apart.
  */
 export function dirs(product: string, cell: string): RunDirs {
   const cellNs = `${product}/${cell}`;
@@ -188,4 +191,30 @@ export function dirs(product: string, cell: string): RunDirs {
     bdd: `.features-gen/${cellNs}`,
     artifacts: `${env("ARTIFACTS_ROOT", ".artifacts")}/${cellNs}`,
   };
+}
+
+/**
+ * The folder, in place of a cell's, for what a run that targets no single cell writes — its
+ * report, and its projects' output. `sites.ts` refuses a cell named so.
+ */
+export const NO_CELL = "_all";
+
+/**
+ * Where a project of `cell` writes its Playwright output (traces, videos, screenshots).
+ *
+ * Playwright empties the output folder of every project a run selects before it starts. A cell's
+ * own folder therefore belongs only to runs that target that cell. Every other run's projects
+ * write under `<product>/_all/<cell>`: no `--project`, a setup project alone, a wildcard, or
+ * another cell's project. So none of those runs can empty the folder of a run in progress.
+ *
+ * @param targetedCell - the one cell this run targets, if any; `undefined` for any other run.
+ */
+export function outputDirFor(
+  product: string,
+  cell: string,
+  targetedCell: string | undefined,
+): string {
+  return cell === targetedCell
+    ? dirs(product, cell).output
+    : `${dirs(product, NO_CELL).output}/${cell}`;
 }

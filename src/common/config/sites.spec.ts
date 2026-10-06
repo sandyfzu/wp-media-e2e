@@ -162,3 +162,67 @@ test.describe("transport parsing — the file-ownership override", () => {
     expect(transport.fileOwner).toBe("sftp_backwpup:www-data");
   });
 });
+
+test.describe("cell names — they name folders and Playwright projects", () => {
+  const SITE = {
+    baseURL: "https://site.example.test",
+    username: "admin",
+    password: "pw",
+    transport: SSH,
+  };
+
+  /** Writes `file` with one single-site cell per name and returns the cells the folder loads as. */
+  function loadCells(names: readonly string[], file = "sites.json"): string[] {
+    writeFileSync(
+      join(configDir, file),
+      JSON.stringify(Object.fromEntries(names.map((name) => [name, [SITE]]))),
+    );
+    return Object.keys(loadSites(configDir));
+  }
+
+  test("accepts every cell name in use, and others of the same shape", () => {
+    const names = [
+      "apache",
+      "nginx",
+      "free@nginx",
+      "pro@nginx",
+      "free@apache",
+      "pro@apache",
+      "php8.3@nginx",
+      "a_b-c",
+      "0day",
+    ];
+    expect(loadCells(names)).toEqual(names);
+  });
+
+  test("refuses a name that is not one lowercase path segment, or that starts with _", () => {
+    for (const bad of [
+      "_all", // the folder of runs that target no cell
+      "_unit", // the unit tests' folder
+      "Pro@nginx", // `--project` ignores case: it would select pro@nginx too
+      "pro@NGINX",
+      "../escape",
+      "a/b",
+      "a\\b",
+      "",
+      " nginx",
+      "nginx ",
+      ".hidden",
+      "-flag",
+      "@nginx",
+      "setup:nginx", // reads as one of a cell's own projects
+      "pro*", // a `--project` wildcard
+      "naïve",
+    ]) {
+      expect(() => loadCells([bad]), JSON.stringify(bad)).toThrow(
+        `cell name ${JSON.stringify(bad)} must start with a lowercase letter or digit`,
+      );
+    }
+  });
+
+  test("names the file holding the bad name, overlays included", () => {
+    expect(() => loadCells(["Nginx"], "sites.local.json")).toThrow(
+      `[sites] ${join(configDir, "sites.local.json")}: cell name "Nginx"`,
+    );
+  });
+});

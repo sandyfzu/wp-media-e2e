@@ -1,5 +1,7 @@
 import { defineConfig } from "@playwright/test";
 
+import { env } from "./src/common/config/env";
+
 /**
  * Unit / integration tests for everything under `src/` — the shared `common/` layer (WP
  * automation, config, artifacts, page objects) **and** each product's own specs, so a product
@@ -14,8 +16,9 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "src",
   testMatch: /\.spec\.ts$/,
-  // A folder of its own: Playwright empties its output folder as a run starts, and the default —
-  // `test-results/` — holds a live cell run's results too, which a unit run beside it would wipe.
-  outputDir: "test-results/unit",
+  // A folder of its own, because Playwright empties its output folder as a run starts: under
+  // `OUTPUT_ROOT` like every run's, and `_`-prefixed so no product (a folder name) can own it.
+  // Read with `env()` alone: `.env` and `run-context.ts` stay out of unit runs.
+  outputDir: `${env("OUTPUT_ROOT", "test-results")}/_unit`,
   reporter: [["list"]],
 });

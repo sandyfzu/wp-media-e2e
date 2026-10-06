@@ -1,3 +1,5 @@
+import { isAbsolute } from "node:path";
+
 import type { ReporterDescription } from "@playwright/test";
 import { cucumberReporter } from "playwright-bdd";
 
@@ -19,8 +21,20 @@ import { env } from "./env";
  *                        analytics report (history/trends, flaky categories, dashboard)
  *                        is generated from them by `scripts/allure.mjs` (`npm run
  *                        report:allure`); report config lives in `allurerc.mjs`.
+ *
+ * @param reportDir - the run's report folder, absolute. Playwright resolves its reporters'
+ *   relative paths against the config's folder, but allure-playwright resolves `resultsDir`
+ *   against the working directory, so a relative folder splits the report when a run starts
+ *   anywhere but the repository root.
+ * @throws {@link Error} when `reportDir` is relative.
  */
 export function reporters(reportDir: string): ReporterDescription[] {
+  if (!isAbsolute(reportDir)) {
+    throw new Error(
+      `[reporting] The report folder must be absolute, got "${reportDir}": a relative one ` +
+        "would send Allure's results to wherever the run was started.",
+    );
+  }
   const rich = env("REPORT_MODE") === "rich";
   return [
     ["list"],
