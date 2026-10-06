@@ -86,6 +86,8 @@ jobs:
       # scenario in the repo happening to be tagged that way: scenarios that drive a real site
       # (`@plugin`, storage, restore) are skipped here and run against a real cell. What remains
       # still exercises config loading + bddgen + step/hook wiring + a real Chromium launch.
+      # One step per product in src/projects/products.ts, kept by hand: products.spec.ts checks
+      # the list against the repo but not against these steps. Add one with each new product.
       - run: npm run test:wp-rocket -- --grep @noauth
       - run: npm run test:backwpup -- --grep @noauth
       - name: Upload report on failure

@@ -87,7 +87,7 @@ Phase 0.5 starts once Phase 0 is done; this is why each item matters here.
 | 0A.1 the cell pin (`E2E_CELL`) | Two cells of one product side by side (2 of 80 failed without it, V29) | required |
 | 0A.2 output folders | A `test:unit` or manual run on the runner not deleting running cells' traces | recommended |
 | 0B.1 `E2E_LOAD_DOTENV` | Runs not changed by a `.env` on the runner | required |
-| 0B.3 one product list | Validating a task's product and finding its config | required |
+| 0B.3 one product list — **done 2026-10-05** | Validating a task's product (`productByName`) and finding its config (`playwrightConfigFor`) | required |
 | 0C the drain, `stopRunningWork` first | A graceful stop; a killed run's next run recovering the site | required |
 | 0D.1 run facts, 0D.2 full commit, 0D.3 site versions | Slack and Datator: plugin, commit, site, WordPress, PHP | required |
 | 0E results stream | Counts, scenarios and first errors — the suite writes no Cucumber JSON | required |
@@ -358,7 +358,19 @@ orchestrator/
   match. New dependencies: `commander` 15, `zod` 4 (both ESM; Node ≥ 22.12 and none, V127). Hono,
   SQLite, pino and React wait for the phases that need them.
 - It imports from the suite only modules without import side effects: the product list (0B.3), the
-  sites loader, 0F's `run-id.ts` and `retention.ts`. Never `run-context.ts` (V84).
+  sites loader, 0F's `run-id.ts` and `retention.ts`. Never `run-context.ts`, nor `resolve.ts`,
+  `consume.ts` or `project.ts`, which import it (V84, V130). Importing any of those would load
+  `.env` into the orchestrator's own process and stamp its `RUN_ID`. The child environment's
+  allowlist (Phase 0 §2) keeps that state out of runs, but it should not exist at all.
+  **Enforced twice**, because a lint rule sees only an import's own path, not what that module
+  imports in turn, and misses a dynamic `import()` (V135):
+  - **ESLint**, a `no-restricted-imports` block on `orchestrator/**`: anything under `src/` is
+    refused except the modules above, an allowlist, so a new import is a decision (the `src/common/`
+    block in `eslint.config.js` is the model);
+  - **a spec** that imports every orchestrator module except the command's entry (which runs on
+    import) in a child Node, and asserts the environment is unchanged. This is the
+    `products.spec.ts` probe (V130), moved into a shared test helper. It catches a side effect an
+    allowed module picks up later.
 - `.gitignore`: `/.orchestrator/`.
 
 ## 6. Running it on the runner
@@ -385,6 +397,9 @@ Which machine is D4. On it:
 
 Each step ships with its unit specs and passes the four gates (CLAUDE.md).
 
+0. The scaffold, before any module, so none lands unchecked: `orchestrator/` in `tsconfig.json`'s
+   `include` (or `tsc` skips it) and in the unit config, the `.gitignore` line, and both import
+   guards (§5). Prove each guard fails on a forbidden import, e.g. one of `run-context.ts`.
 1. M2 configuration — schema, loader, example.
 2. M4's pure parts — identity, environment, the outcome table; M6's builder and bus.
 3. M7 and M8 formatters (pure), then their senders.

@@ -306,7 +306,9 @@ in between means the run builds fresh — correct, just slower for that run.
   own verification. The obligation is mirrored as a comment on that manifest, and
   until it lands the fixture hard-errors.
 - **Imagify** — add a manifest (and verify its identity row from its build
-  definition) when the product is wired; everything else is data-driven.
+  definition) when the product is wired
+  ([Adding a product](../guides/authoring-tests.md#adding-a-product)); the rest of
+  the artifact flow is data-driven.
 - **Version-aware tests** — `resolution.json` already exposes the verified
   version (the zip's own header, see the preflight above) and the commit per role,
   for migration or version-gated-notice assertions. BackWPup's CLI feature already

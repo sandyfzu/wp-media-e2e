@@ -8,8 +8,7 @@ import type { WarmSummary, WarmUnit } from "./src/common/artifacts/warm";
 import { isNonEmptyString } from "./src/common/guards";
 import { isPlaceholderSite } from "./src/common/config/sites";
 import type { ProductConfig } from "./src/common/config/types";
-import { backwpup } from "./src/projects/backwpup/config/backwpup.config";
-import { wpRocket } from "./src/projects/wp-rocket/config/wp-rocket.config";
+import { PRODUCTS } from "./src/projects/products";
 
 /**
  * Pre-warm the APVM cache for the plugin zips a run will need, standalone — a CI
@@ -26,8 +25,6 @@ import { wpRocket } from "./src/projects/wp-rocket/config/wp-rocket.config";
  * succeeded, `1` if any plan or warm failed **or** a filter named something that does not exist —
  * a typo must never look like a primed cache.
  */
-
-const PRODUCTS: readonly ProductConfig[] = [wpRocket, backwpup];
 
 const RULE = "─".repeat(72);
 

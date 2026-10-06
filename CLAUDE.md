@@ -14,7 +14,7 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 > **Current state:** the scaffolded, runnable products are **WP Rocket** and
 > **BackWPup**. Imagify is a planned product and not yet wired up — add it as a new
 > product under `src/projects/` when work begins (see
-> [authoring-tests.md](docs/guides/authoring-tests.md)).
+> [authoring-tests.md → Adding a product](docs/guides/authoring-tests.md#adding-a-product)).
 
 ## Key technologies
 
@@ -43,13 +43,15 @@ src/
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, verify, consume, pre-warm)
 │   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
-└── projects/<product>/
-    ├── config/             # <product>.config.ts + sites.json / sites.*.json / sites.example.json
-    ├── fixtures.ts         # this product's test instance: common's + its page objects
-    ├── features/           # *.feature (Gherkin)
-    ├── pages/              # this product's page objects (+ locator-contract specs)
-    ├── steps/              # product-specific steps
-    └── support/            # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
+└── projects/
+    ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
+    └── <product>/
+        ├── config/         # <product>.config.ts + sites.json / sites.*.json / sites.example.json
+        ├── fixtures.ts     # this product's test instance: common's + its page objects
+        ├── features/       # *.feature (Gherkin)
+        ├── pages/          # this product's page objects (+ locator-contract specs)
+        ├── steps/          # product-specific steps
+        └── support/        # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
 
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)
@@ -255,6 +257,17 @@ field**, so passing a property that merely shares one of those names (`describe(
 is not flagged — a gate that fires on innocent code is one people start disabling. The single deliberate exception is out of scope by design —
 [`visual/stabilize.ts`](src/common/visual/stabilize.ts) uses one timeboxed, already-caught
 `networkidle` attempt to settle lazy media before a screenshot.
+
+It also keeps `src/common/**` from importing anything under `src/projects/`: a product hands the
+shared code its policy through `ProductConfig` and the config factory's registries. ESLint
+(`no-restricted-imports`) flags a static import as it is typed. It cannot see a dynamic `import()`
+or a `typeof import()` type, so [`import-boundary.spec.ts`](src/common/import-boundary.spec.ts)
+checks every form with TypeScript's own import scanner. The product list,
+[`src/projects/products.ts`](src/projects/products.ts), is therefore read
+only by the entry points that span products — `playwright.config.ts`, the healthcheck, the
+artifact warm and, later, the orchestrator. Importing it never loads `.env` or stamps `RUN_ID`.
+Its spec fails when it and `src/projects/`, the root `playwright.<product>.config.ts` files or
+the `test:<product>` scripts disagree.
 
 **Auth fixture / setup:** [`src/common/auth/auth.setup.ts`](src/common/auth/auth.setup.ts)
 is a dependency project that runs before any BDD scenarios. It does two things in order:
@@ -656,7 +669,8 @@ instead and link it from the [Documentation map](#documentation-map).
 
 Update it when you change anything about:
 
-- How products, cells, pools, or run units are defined or selected.
+- How products, cells, pools, or run units are defined or selected — the product list
+  (`src/projects/products.ts`) and its drift guard included.
 - The `parallelIndex` invariant or the worker-to-site binding.
 - The config factory (`createProductConfig`) or the project pairs it generates.
 - The metadata/credential registry (`registerPool`, `routingMetadata`), or the per-process

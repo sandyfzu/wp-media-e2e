@@ -168,7 +168,7 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 | `REPORT_MODE` | _(unset)_ → self-contained | `rich` → external attachments + embedded trace viewer (serve over http). |
 | `RUN_ID`      | auto-stamped           | Per-run report token; pin to share one token across a batch.            |
 | `CI`          | _(unset)_              | Non-empty enables CI config (retries, `forbidOnly`).                    |
-| `PRODUCT`     | `wp-rocket`            | Default product for the bare `playwright.config.ts`.                    |
+| `PRODUCT`     | `wp-rocket`            | Product for the bare `playwright.config.ts`: a name listed in [`products.ts`](../../src/projects/products.ts) (whitespace ignored). Any other name fails the run. |
 | `REPORT_ROOT` | `reports`              | Report artifact root (accumulates).                                     |
 | `OUTPUT_ROOT` | `test-results`         | Ephemeral Playwright artifact root.                                     |
 | `AUTH_ROOT`   | `.auth`                | Ephemeral `storageState` root.                                          |

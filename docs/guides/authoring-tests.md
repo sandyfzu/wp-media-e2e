@@ -27,6 +27,7 @@ src/
 │   ├── config/devices.ts         # desktop & @mobile device profiles
 │   ├── artifacts/                # the plugin zips under test (see ../architecture/plugin-artifacts.md)
 │   └── wp/                       # WordPress automation (see ../architecture/wordpress-automation.md)
+├── projects/products.ts          # the one product list (see "Adding a product" below)
 └── projects/<product>/
     ├── config/<product>.config.ts   # ProductConfig + sites.json/sites.*.json/sites.example.json
     ├── fixtures.ts                  # this product's test instance: common's + its page objects
@@ -43,6 +44,23 @@ A product's `steps` array (in its config) is the exact set of files loaded at ru
 available to that product — and a **hook file missing from that array never registers**,
 leaving its lifecycle silently absent rather than failing. Add new shared hooks as
 `src/common/hooks/<name>.hooks.ts` so the existing glob picks them up.
+
+### Adding a product
+
+1. `src/projects/<name>/config/<name>.config.ts` exports its `ProductConfig`: `name: "<name>"`,
+   features and its own steps under `src/projects/<name>/`, its artifact manifest (see
+   [plugin-artifacts.md](../architecture/plugin-artifacts.md)), and a committed `sites.example.json`
+   beside it.
+2. List it in `PRODUCTS` ([`src/projects/products.ts`](../../src/projects/products.ts)).
+3. Create `playwright.<name>.config.ts` at the root: `import "./src/common/config/load-env"`, then
+   `export default createProductConfig(<its config>)`, importing only that product.
+4. Add the `test:<name>` script, which runs `bddgen` and then `playwright test`, each with
+   `--config playwright.<name>.config.ts`, plus its `:ui` and `:headed` variants.
+5. Add its `@noauth` smoke step to `.github/workflows/ci.yml` once it has a `@noauth` scenario.
+   Without one the step fails with "No tests found". Without the step, CI never runs the product.
+
+`products.spec.ts` fails until the folder, the list, the entry config and the script agree. It
+does not check the CI step or the example sites file.
 
 ## Fixtures ([`src/common/fixtures.ts`](../../src/common/fixtures.ts))
 

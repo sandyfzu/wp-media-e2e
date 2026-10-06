@@ -1,7 +1,8 @@
 # Orchestrator Phase 0 — Make the suite ready
 
-> **Status:** investigated; **nothing implemented yet**. Every item has a verified finding and a
-> recommended solution, with the alternatives it beat; implementation starts when approved.
+> **Status:** in implementation, in §9's order. **Done:** 0B.3 (2026-10-05, §4.3). The rest is
+> investigated: every item has a verified finding and a recommended solution, with the
+> alternatives it beat.
 > **Date:** 2026-09-25.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept; this plan details its
 > §6, Phase 0. Verification rows continue the parent's numbering, from V29 (§11).
@@ -26,7 +27,7 @@ The recommended solution per item. "—" means no suite change: the orchestrator
 | 0A.5 APVM's cache | Build in a **worker process per build**, detached, with a private `TMPDIR`: stop, cancel and timeout = SIGKILL its group and remove that folder. The cache survived every kill measured | — |
 | 0B.1 a run's settings | `E2E_LOAD_DOTENV=false` makes the suite skip `.env`; the orchestrator builds each child's environment from an allowlist | `load-env.ts` |
 | 0B.2 the built commit | The warm returns what it built — full commit, version, the ref that pins it; the run gets `commit:<sha>` (or `release:<tag>`) and then needs no network | `warm.ts` |
-| 0B.3 one product list | `src/projects/products.ts`, with a drift-guard spec, replaces the three hard-coded lists; a misspelt `PRODUCT` fails instead of running WP Rocket | new `products.ts`; `healthcheck.ts`, `warm-artifacts.ts`, `playwright.config.ts` |
+| 0B.3 one product list — **done** | `src/projects/products.ts`, with a drift-guard spec, replaces the three hard-coded lists; a misspelt `PRODUCT` fails instead of running WP Rocket | new `products.ts`; `healthcheck.ts`, `warm-artifacts.ts`, `playwright.config.ts`, `eslint.config.js` |
 | 0C stopping a run | Spawn the Playwright CLI directly, in its own process group. Stop = **drain** (a stop file skips each scenario's first attempt), then **one** SIGINT, then SIGKILL of the group; never SIGTERM. The `@plugin` Before path stops running work first | `fixtures.ts`, `plugin-lifecycle.ts`, `plugin.hooks.ts` |
 | 0D.1 reports say it up front | A *run facts* reporter, listed first: the HTML report's title, Allure's `environment.properties`, a banner on the Cucumber report, `run-facts.json` | new `src/common/reporting/`; `reporting.ts`, `scripts/allure.mjs` |
 | 0D.2 commit and digest | Record the full commit, and a SHA-256 of **every** resolved zip | `resolve.ts`, `types.ts`, `consume.ts`, `verify.ts` |
@@ -213,6 +214,12 @@ test-results/
   or `..` would escape `dirs()`, `_all` collides with the report bucket, and case alone would let
   Playwright's case-insensitive filter match two cells.
 - Fix `execution-model.md`'s "concurrent cells never collide", which is false today.
+- **Found in 0B.3's audit (V133): Allure's results follow the working directory.** Playwright
+  resolves the config's paths, its report folders included, against the config's folder. But
+  allure-playwright resolves `resultsDir` (`reporting.ts:33`, relative) against the working
+  directory. A run started elsewhere splits its report: `allure-results/` there, the Playwright
+  and Cucumber reports in the checkout. Make `resultsDir` absolute, from the repository root.
+  Compute that root without importing `run-context.ts`, which loads `.env` and stamps `RUN_ID`.
 
 **Rejected.** Setup folders alone (a run without `--project` still wipes its product's cells);
 per-run output folders (they accumulate, and break `--last-failed`); preserving the output (the CLI
@@ -222,7 +229,8 @@ cannot; only UI and watch mode set `preserveOutputDir`, V3).
 `OUTPUT_ROOT`; the setup projects' `outputDir` equals their cell's. No site: the marker measurement
 (each invocation deletes only its own folder) and the mid-run deletion experiment (identical to its
 control). Live: a failing scenario on a real cell while `npm run test:unit` runs on the same checkout —
-traces and videos intact in all three reports.
+traces and videos intact in all three reports. No site: a run started from another working directory
+writes all three reports into the same `reports/<product>/<cell>/<RUN_ID>/`.
 
 ### 3.3 0A.3 — Cells that share a server
 
@@ -391,7 +399,8 @@ hit).
 
 **Rejected.** Blanking every known variable (an unknown key still leaks, V81); keeping the server's
 checkout free of `.env` (the first operator who writes one for a manual run or a healthcheck changes
-every orchestrated run, silently); another working directory (the configs use repo-relative globs).
+every orchestrated run, silently); another working directory (it would skip `.env`, but Allure's
+results follow the working directory and would leave the run's report, V133).
 
 **BackWPup's storage credentials** (V86–V91, asked by the user):
 
@@ -486,6 +495,55 @@ final before it. `createProductConfig` and the per-process registries run only i
 
 **Rejected.** Lazy `import()` loaders: every consumer already imports both products, and async loading
 would complicate Playwright's and `bddgen`'s config for no gain at two or three products.
+
+**Implemented** (2026-10-05, V128–V132). As recommended, with these additions and differences:
+
+- **`productFromEnv(value)`** carries the bare config's `PRODUCT` rule, so it can be unit-tested.
+  Unset or blank means wp-rocket. Surrounding whitespace is ignored: `" backwpup"` used to run WP
+  Rocket. Any other value throws, naming `PRODUCT`. `productByName` stays exact, for callers that
+  have already validated their input.
+- **The per-product entry configs still import only their own product**, never the list, so one
+  product's run never loads another's sites files.
+- **The guard checks more than planned:**
+  - each product's features and own steps lie in its own folder;
+  - its entry config builds that product, checked by importing it in a child Node and reading the
+    projects' `metadata.product`;
+  - no other root `playwright.*.config.ts` exists, and no npm script names an unlisted product.
+
+  The import boundary is a test too: importing the list in a child Node changes no environment
+  variable, and a control proves the probe sees `run-context.ts` load `.env` and stamp `RUN_ID`.
+- **The `src/common/` boundary did not exist.** This section assumed an ESLint rule "as for
+  `src/common/`"; there was none. Two checks now keep `src/common/**` from importing
+  `src/projects/`. `no-restricted-imports` flags a static import. `src/common/import-boundary.spec.ts`
+  also catches a dynamic `import()` or a `typeof import()` type, which the rule misses (V135, V136).
+- **Moved to Phase 0.5:** the orchestrator's import boundary and its `tsconfig.json` entry. Both
+  need the `orchestrator/` folder, so they are its step 0 ([Phase 0.5](orchestrator-phase-0.5-plan.md)
+  §5, §7).
+- **Left manual, on purpose: CI's smoke steps.** `ci.yml` runs one
+  `npm run test:<product> -- --grep @noauth` step per product, written by hand, so a product
+  added without one is never smoke-tested and nothing fails. The guard does not require the step:
+  a new product may have no `@noauth` scenario yet, and its step would then fail with "No tests
+  found". Two reminders instead: step 5 of `authoring-tests.md` → "Adding a product", and a
+  comment above the steps in `ci.yml`.
+
+**Audit** (2026-10-05, V133–V137). Every changed file was re-read and its claims re-measured.
+Found and fixed:
+
+- **A false reason in `playwrightConfigFor`'s TSDoc.** It said runs must start in the repository
+  root "since the configs' globs are relative to it". Playwright resolves them against the
+  config's folder. The real reasons are `.env` and Allure's results, which follow the working
+  directory (V133). Allure's case splits a run's report, so it is now a 0A.2 item (§3.2). §4.1's
+  rejected alternative gave the same false reason; corrected.
+- **A hung child could hold the spec past its timeout.** The children ran under `spawnSync`,
+  which the test timeout cannot interrupt: one held its worker 61 s, past the 30 s limit. They
+  now run asynchronously with a 15 s limit (V134).
+- **The boundary was overstated.** `no-restricted-imports` misses a dynamic `import()` and a
+  `typeof import()` type. `import-boundary.spec.ts` now checks every form (V135, V136).
+- **Wording:** the list's TSDoc described the orchestrator as already reading it; CLAUDE.md's
+  tree line credited the guard to `products.ts`.
+
+Confirmed, unchanged: `bddgen` stops on a `PRODUCT` typo too, and a malformed sites file's parse
+error quotes no values (V137).
 
 ## 5. 0C — Stopping a run
 
@@ -902,7 +960,7 @@ target intact, cell-level files kept, each removal verified).
 Each step ships with its unit tests, passes the four gates, and gets the live check its section names,
 on `bwu2`/`bwu3`, one cell at a time.
 
-1. 0B.3, one product list — everything the orchestrator spawns starts from it.
+1. 0B.3, one product list — everything the orchestrator spawns starts from it. **Done 2026-10-05.**
 2. 0A.2, the output folders and the cell-name rule — a hazard today.
 3. 0A.1, the cell pin.
 4. 0B.1, a run's environment.
@@ -1014,3 +1072,13 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V107 | `E2E_REPORTS_KEEP` read with `intEnv(…, 20, 0, 10000)`: blank → 20, `0` → no cap, a bad value fails at start naming it | ✅ measured | Parse cases |
 | V108 | A failed removal is reported and harmless to the exit code, but partial — `rmSync` had already deleted the run's `playwright/` | ✅ measured | A locked-folder run |
 | V109 | On the main checkout's tree (165 runs, 711.5 MB): age-only removes 91 runs (468.3 MB); with the cap of 20, 109 (544.6 MB) | ✅ dry run 2026-09-28 | `real-dryrun.mts` |
+| V128 | 0B.3: before it, `PRODUCT=backwpu` and `PRODUCT=" backwpup"` listed WP Rocket's 10 tests. After it, the typo stops the config load with `PRODUCT="backwpu" names no product…`. `" backwpup"` lists BackWPup's 117 (52 Free + 61 Pro scenarios + 4 setups); blank and `"  "` list WP Rocket's 10 | ✅ 2026-10-05 | `npx playwright test --list` on the bare config, before and after; `bddgen` first, since `.features-gen/backwpup` was stale |
+| V129 | The guard's 13 tests pass. Each of 14 mutations fails exactly the tests aimed at it, and the unmutated control passes: unlisted folder, a duplicate entry, features or steps in another product's folder, an entry config building another product, a missing or stray entry config, a script with the wrong config or an unlisted product, the list importing `load-env` or `run-context`, `PRODUCT` untrimmed, a typo falling back to WP Rocket | ✅ 2026-10-05 | A throwaway copy of the worktree per mutation (`node_modules` linked, no `sites.json`), `products.spec.ts` alone |
+| V130 | Importing `products.ts` in a fresh Node (tsx, only `PATH` and `HOME`) from a folder whose `.env` sets a sentinel changes no environment variable. `run-context.ts`, `resolve.ts` and `consume.ts` each load the sentinel and stamp `RUN_ID`. Each probe takes under 1 s | ✅ 2026-10-05 | The spec's child probe, and the same probe by hand on the three modules |
+| V131 | The `src/common/**` rule flags a value import, an `import type`, an `export … from` and a nested folder's import of `src/projects/`, but not `./guards`; the existing tree passes it | ✅ 2026-10-05 | Two temporary probe files under `src/common/`, linted then deleted; `npm run lint` |
+| V132 | The consumers after the change: the warm exits 1 on an unknown `--product` or `--cell`, naming the known ones, and 0 with nothing to warm for WP Rocket. The healthcheck walks both products and passes 7/7 on `bwu2` and `bwu3`, exit 0. The bare config's `@noauth` smoke passes (6 passed, 4 skipped). The gates: typecheck, lint and format clean; unit 1254 passed, 8 skipped (1241 before) | ✅ 2026-10-05 | `npx tsx warm-artifacts.ts …`; `healthcheck.ts` live (read-only); `bddgen && playwright test --grep @noauth` |
+| V133 | Started from another working directory with absolute config paths, `bddgen` and the `@noauth` run both work. The generated specs, `test-results/` and the Playwright and Cucumber reports land beside the config. `allure-results/` lands under the working directory, and `.env` is read from there | ✅ 2026-10-05 | A copy of the worktree, run from an empty folder with a sentinel `.env`; `reporting.ts:33` (relative `resultsDir`) |
+| V134 | Under `spawnSync`, a child that never exits held its test 61 s, past the 30 s test timeout. Under async `execFile` with a 15 s limit it fails at 16 s, `killed after 15000 ms`, and leaves no process. A crashing child reports `exit 1` and its stderr | ✅ 2026-10-05 | A probe test added to a copy of the spec: a child kept alive by a timer; a child importing a missing module; `pgrep` afterwards |
+| V135 | ESLint's `no-restricted-imports`, and typescript-eslint's, flag no dynamic `import()` (exit 0); a `no-restricted-syntax` `ImportExpression` selector does. `ts.preProcessFile` (TypeScript 6.0.3) reports static, `import type`, side-effect, `export … from`, `export *`, dynamic, template-literal and `typeof import()` forms, and nothing from a comment or a string | ✅ 2026-10-05 | A probe file under `src/common/`, linted then deleted; a scanner probe over each form |
+| V136 | `import-boundary.spec.ts` scans the 90 files of `src/common/`. A dynamic import, a static import and a `typeof import()` of product code each fail it. Only the static one also fails ESLint. Scanning by substring, or dropping the outside-the-folder check, fails its own scanner test. The control passes | ✅ 2026-10-05 | A throwaway copy per mutation, `import-boundary.spec.ts` alone plus `eslint src/common` |
+| V137 | `PRODUCT=backwpu npx bddgen` exits 1 with the same message as the runner. V8's `JSON.parse` errors name a position, not source text, so a malformed sites file's `[cause]` quotes no value. The gates after the audit: typecheck, lint and format clean; unit 1256 passed, 8 skipped. The products spec's 14 mutations are all still caught | ✅ 2026-10-05 | `bddgen` exit status; `node -e` over two malformed objects; the gates; the mutation script re-run |

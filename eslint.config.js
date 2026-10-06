@@ -57,6 +57,29 @@ export default defineConfig([
     },
   },
 
+  // The shared layer never imports product code: a product hands `common/` its policy through
+  // `ProductConfig` and the per-process registries the config factory fills. This is why the
+  // product list lives in `src/projects/products.ts`, for the entry points to import. The rule sees
+  // static imports only; `src/common/import-boundary.spec.ts` also catches a dynamic `import()` and
+  // a `typeof import()` type.
+  {
+    files: ["src/common/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              regex: "(^|/)projects(/|$)",
+              message:
+                "src/common/ must not import product code. Declare what the shared code needs on ProductConfig and pass it through the config factory's registries instead.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+
   // Test-authoring surfaces: ban the flaky-by-construction waits.
   //
   // Every pattern below is a *timing* workaround that Playwright's web-first assertions make

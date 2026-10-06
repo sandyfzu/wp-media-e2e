@@ -7,7 +7,7 @@ config factory turns a product definition into runnable Playwright projects.
 
 | Term         | Meaning                                                                                                                              | Where it lives                                          |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
-| **Product**  | A plugin under test (`wp-rocket`, `backwpup`). Declares its own features, steps, sites, and optional service credentials.            | `src/projects/<product>/config/<product>.config.ts`     |
+| **Product**  | A plugin under test (`wp-rocket`, `backwpup`). Declares its own features, steps, sites, and optional service credentials.            | `src/projects/<product>/config/<product>.config.ts`, listed in `src/projects/products.ts` |
 | **Cell**     | A named environment (`apache`, `nginx`, `pro@nginx`). Cells are **data-driven**: keys of `sites.json` / `sites.*.json` overlays.     | `sites.json` / `sites.*.json`                           |
 | **Pool**     | The list of interchangeable WordPress sites backing one cell. Scenarios are distributed across the pool by worker.                   | a cell's `sites` array                                  |
 | **Run unit** | One `(product × cell)`. The unit of a single invocation and of one report directory.                                                | `--project=<cell>` selects it                           |
@@ -51,6 +51,26 @@ Worker-side code that needs the "was this cell explicitly targeted?" answer shou
 `isCellTargeted(cell, projectName)` rather than re-deriving it — it also counts a
 `--project=artifacts:<cell>` selection, and it is the gate on whether per-run `E2E_*`
 overrides apply (a broad sweep must not inherit one cell's override).
+
+## The product list
+
+[`src/projects/products.ts`](../../src/projects/products.ts) is the one list of products. It is
+read by every entry point that spans products: the bare `playwright.config.ts` (`productFromEnv`
+over `PRODUCT`), the healthcheck, the artifact warm, and the orchestrator later
+(`productByName`, `playwrightConfigFor`). A product's own `playwright.<product>.config.ts`
+imports only that product, so its runs never load another product's sites files.
+
+- **Import effects.** Importing the list loads every product's sites files and reads `BWP_*`,
+  but never loads `.env` or stamps `RUN_ID`. A long-lived process can import it and keep its
+  own environment. Importing `run-context.ts`, and so `resolve.ts` or `consume.ts`, does both.
+- **Drift guard.** `products.spec.ts` fails when the list disagrees with `src/projects/`'s
+  folders, or a product's features or own steps lie outside its folder. It also fails when a
+  product lacks a root entry config that builds it (checked in a child Node) or a `test:<product>`
+  script running that config, or when a stray `playwright.*.config.ts` or script names an
+  unlisted product.
+- **Boundary.** Nothing in `src/common/**` may import `src/projects/`, the list included.
+  ESLint flags a static import as it is typed. `src/common/import-boundary.spec.ts` also catches
+  a dynamic `import()` or a `typeof import()` type, which ESLint cannot see.
 
 ## The config factory
 
