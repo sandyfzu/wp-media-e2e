@@ -52,7 +52,7 @@ if (runs.length === 0) {
   const scope = [product, cell].filter(Boolean).join("/");
   console.error(
     `No Allure results found under "${reportRoot}/"${scope ? ` for ${scope}` : ""}. ` +
-      "Run a suite first, e.g. `npm run test:wp-rocket -- --project=apache`.",
+      "Run a suite first, e.g. `E2E_CELL=apache npm run test:wp-rocket`.",
   );
   process.exit(1);
 }

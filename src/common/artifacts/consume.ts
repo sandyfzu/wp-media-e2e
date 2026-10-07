@@ -84,7 +84,7 @@ export function readResolvedArtifact(
     throw new Error(
       `[artifacts] the resolved "${role}" zip for "${product}/${cell}" is gone ` +
         `("${artifact.zipPath}" no longer exists). The artifacts directory is ephemeral — ` +
-        "re-run the artifacts setup for this cell (run via --project=<cell>, not --no-deps).",
+        "re-run the artifacts setup for this cell (run it with E2E_CELL=<cell>, not --no-deps).",
     );
   }
   return artifact;
@@ -107,8 +107,8 @@ function loadCellArtifacts(product: string, cell: string): CellArtifacts {
   if (!existsSync(path)) {
     throw new Error(
       `[artifacts] no resolution found for "${product}/${cell}" ("${path}" is missing). ` +
-        "The artifacts setup did not run for this cell in this execution — run via " +
-        "--project=<cell> (not --no-deps).",
+        "The artifacts setup did not run for this cell in this execution — run it with " +
+        "E2E_CELL=<cell> (not --no-deps).",
     );
   }
 
@@ -137,7 +137,7 @@ function warnIfStale(raw: unknown, product: string, cell: string): void {
   console.warn(
     `[artifacts] using the resolution a PREVIOUS execution wrote for "${product}/${cell}" ` +
       `(run "${runId}", this run is "${RUN_ID}") — the artifacts setup did not run here. The ` +
-      "zips may be older than the refs you expect; re-run via --project=<cell> without --no-deps " +
+      "zips may be older than the refs you expect; re-run with E2E_CELL=<cell> without --no-deps " +
       "to resolve them afresh.",
   );
 }

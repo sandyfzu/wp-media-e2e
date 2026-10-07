@@ -3,6 +3,7 @@ import "./load-env";
 import { fileURLToPath } from "node:url";
 
 import { isNonEmptyString } from "../guards";
+import { pinnedCell } from "./cell-pin";
 import { env } from "./env";
 
 /**
@@ -109,23 +110,35 @@ function cellsFromEnv(): string[] {
 }
 
 /**
- * The cells a run targets: the `--project` values from the command line, or — in a forked
- * worker, which has no argv — the selection {@link seedSelectedCells} published for it. This
- * is the single source of truth for cell selection, so the config can never size workers for
- * a cell Playwright is not running, and a worker can tell an explicitly selected cell from a
- * broad serial run. A correct invocation selects exactly one cell; this returns ALL requested
- * values so the config factory can reject an unsafe multi-cell selection fail-fast.
+ * The `--project` values this run was started with: from the command line, or — in a forked worker,
+ * which has no argv — the selection {@link seedSelectedCells} published for it. Verbatim, so a
+ * project name (`setup:<cell>`) or a wildcard comes back as typed. {@link selectedCells} answers
+ * which cells the run targets; this answers what was typed, which the cell pin's checks and
+ * {@link cellOwningOutput} need.
+ */
+export function projectSelection(): string[] {
+  const fromArgv = cellsFromArgv();
+  return fromArgv.length > 0 ? fromArgv : cellsFromEnv();
+}
+
+/**
+ * The cells a run targets: the cell `E2E_CELL` pins it to, else its {@link projectSelection}. This
+ * is the single source of truth for cell selection, so the config can never size workers for a cell
+ * Playwright is not running, and a worker can tell an explicitly selected cell from a broad serial
+ * run. The pin comes first because a pinned config holds no other cell: every process of the run
+ * inherits it, `bddgen` included. A correct invocation selects exactly one cell; this returns ALL
+ * requested values so the config factory can reject an unsafe multi-cell selection fail-fast.
  *
  * Values come back **verbatim**, and callers compare them to cell names exactly. Playwright's
  * own project filter is looser — case-insensitive, and `*` wildcards expand — so a selection
  * like `--project='pro*'` runs a cell that no exact comparison here matches. That is deliberate:
  * such a selection is treated as broad, which for the artifacts setup means overrides
  * warn-and-drop rather than silently applying to cells the operator never named (and it keeps
- * the documented `--project='*'` ⇒ serial behaviour). Name the cell exactly to target it.
+ * the documented `--project='*'` ⇒ serial behaviour). Name the cell exactly, or pin it, to target it.
  */
 export function selectedCells(): string[] {
-  const fromArgv = cellsFromArgv();
-  return fromArgv.length > 0 ? fromArgv : cellsFromEnv();
+  const pin = pinnedCell();
+  return pin === undefined ? projectSelection() : [pin];
 }
 
 /**
@@ -146,9 +159,10 @@ export function seedSelectedCells(): void {
  * The inverse of a "serial" run, and the gate on whether per-run overrides may apply: an
  * override the operator set for one cell must not leak into a broad sweep of all of them.
  *
- * True when the selection names the cell itself (`--project=<cell>`, whose dependency graph
- * pulls the per-cell setup projects in) or names the caller's own project
- * (`--project=artifacts:<cell>` — how you resolve a cell's zips without running its scenarios).
+ * True when the run is pinned to the cell (`E2E_CELL`), when the selection names the cell itself
+ * (`--project=<cell>`, whose dependency graph pulls the per-cell setup projects in), or when it
+ * names the caller's own project (`--project=artifacts:<cell>` — how you resolve a cell's zips
+ * without running its scenarios).
  * `projectName` is a parameter because only the caller knows which project it is running as.
  *
  * @param cell - the cell this project belongs to (from its routing metadata).
@@ -203,11 +217,13 @@ export const NO_CELL = "_all";
  * Where a project of `cell` writes its Playwright output (traces, videos, screenshots).
  *
  * Playwright empties the output folder of every project a run selects before it starts. A cell's
- * own folder therefore belongs only to runs that target that cell. Every other run's projects
- * write under `<product>/_all/<cell>`: no `--project`, a setup project alone, a wildcard, or
- * another cell's project. So none of those runs can empty the folder of a run in progress.
+ * own folder therefore belongs only to runs that target that cell as a whole
+ * ({@link cellOwningOutput}). Every other run's projects write under `<product>/_all/<cell>`: no
+ * `--project` and no pin, a setup project alone, a wildcard, or another cell's project. So none of
+ * those runs can empty the folder of a run in progress.
  *
- * @param targetedCell - the one cell this run targets, if any; `undefined` for any other run.
+ * @param targetedCell - the one cell this run targets as a whole, if any; `undefined` for any
+ *   other run.
  */
 export function outputDirFor(
   product: string,
@@ -217,4 +233,23 @@ export function outputDirFor(
   return cell === targetedCell
     ? dirs(product, cell).output
     : `${dirs(product, NO_CELL).output}/${cell}`;
+}
+
+/**
+ * The cell this run targets as a whole, which alone may write in its own output folder
+ * ({@link outputDirFor}): the selected cell, when the run was started with no `--project` (only a
+ * pin selects a cell then) or with the cell's own name. A selection of one of its setup projects
+ * alone, or a wildcard, leaves the cell's folder to the run that owns it.
+ *
+ * @param selected - the one cell the run targets, from {@link selectedCells}; `undefined` if none.
+ * @param selection - the run's `--project` values, from {@link projectSelection}.
+ */
+export function cellOwningOutput(
+  selected: string | undefined,
+  selection: readonly string[],
+): string | undefined {
+  if (selected === undefined) return undefined;
+  return selection.length === 0 || selection.includes(selected)
+    ? selected
+    : undefined;
 }

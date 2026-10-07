@@ -10,7 +10,7 @@ The authoritative design is in [`docs/plans/e2e-modernization-plan.md`](docs/pla
 
 ```bash
 npm install          # also downloads Chromium (see "Browsers" below)
-npm run test:wp-rocket -- --project=apache
+E2E_CELL=apache npm run test:wp-rocket
 ```
 
 A fresh checkout has no `sites.json` or `sites.*.json`, so the example placeholder data is
@@ -27,17 +27,29 @@ WordPress (this is exactly what CI does).
   and any `sites.*.json` overlays).
 - **Pool** — the list of interchangeable WordPress sites under one cell. Each worker binds
   to one site by `parallelIndex`, so scenarios are distributed across the pool.
-- **Run unit** — one `(product × cell)`. Run exactly one cell per invocation with
-  `--project=<cell>`; selecting two cells at once fails fast (the global `parallelIndex`
+- **Run unit** — one `(product × cell)`. Run exactly one cell per invocation, pinned with
+  `E2E_CELL=<cell>`; selecting two cells at once fails fast (the global `parallelIndex`
   would overflow a smaller pool — see plan §3.2).
 
 ## Running
 
 ```bash
-npm run test:wp-rocket -- --project=<cell>     # one product, one cell
-npm run test:backwpup  -- --project=<cell>
-npm run test:wp-rocket -- --project=apache --grep @smoke
+E2E_CELL=<cell> npm run test:wp-rocket     # one product, one cell
+E2E_CELL=<cell> npm run test:backwpup
+E2E_CELL=apache npm run test:wp-rocket -- --grep @smoke
 ```
+
+`E2E_CELL` pins the whole run — `bddgen`, the runner and its workers — to one cell: the config
+holds that cell alone, so `bddgen` regenerates only its specs and runs of different cells of one
+product can go side by side. `--project=<cell>` also runs one cell, but `bddgen` never sees it and
+regenerates **every** cell's specs, deleting them first, so it breaks another run of the same
+product started beside it. Each run prints one `[cell]` line before `Running …` naming its cell,
+how it was chosen, its workers and its report folder. A pin naming no cell of the product, or a
+`--project` selecting none of the pinned cell's projects, fails at once naming `E2E_CELL`. With a
+pin, `--project` still narrows the run within the cell (`--project=artifacts:<cell>` resolves its
+zips only).
+
+Do not set `E2E_CELL` in `.env`: it would pin every run from the checkout.
 
 Reports accumulate per run at `reports/<product>/<cell>/<RUN_ID>/`. Set `REPORT_MODE=rich`
 for an external report with the embedded trace viewer.
@@ -114,7 +126,7 @@ Point a product at it by copying the docker example into its sites file:
 
 ```bash
 cp docker/sites.example.json src/projects/wp-rocket/config/sites.docker.json
-npm run test:wp-rocket -- --project=apache    # or --project=nginx
+E2E_CELL=apache npm run test:wp-rocket    # or E2E_CELL=nginx
 ```
 
 The cells use `transport: { mode: "docker", container: "wpme-wpcli-apache" | "wpme-wpcli-nginx" }`,
@@ -171,7 +183,7 @@ Tag such scenarios `@visual` so they can be run as a group, and run them in the 
 container image for pixel-deterministic rendering:
 
 ```bash
-npm run test:wp-rocket -- --project=apache --grep @visual
+E2E_CELL=apache npm run test:wp-rocket -- --grep @visual
 ```
 
 ## Quality gates

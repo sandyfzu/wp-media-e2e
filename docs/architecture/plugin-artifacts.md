@@ -113,8 +113,8 @@ An override describes *one* run unit. A serial sweep of every cell has no single
 unit to apply it to, so overrides are dropped (with a warning naming them) and
 defaults are used. The predicate is
 [`isCellTargeted(cell, projectName)`](../../src/common/config/run-context.ts),
-which is true for `--project=<cell>` and for `--project=artifacts:<cell>` (the
-way to resolve a cell's zips without running its scenarios).
+which is true for a run pinned to the cell (`E2E_CELL=<cell>`), for `--project=<cell>` and for
+`--project=artifacts:<cell>` (the way to resolve a cell's zips without running its scenarios).
 
 The setup runs in a Playwright **worker**, which is forked without the CLI argv —
 so this answer must ride the environment, not `process.argv`. See
@@ -282,7 +282,7 @@ npm run artifacts:warm -- --product=backwpup --cell=pro@nginx   # one unit
 ```
 
 [`warmArtifacts`](../../src/common/artifacts/warm.ts) plans every unit through
-`buildArtifactPlan` with `serial: false` (the mode a real `--project=<cell>` run
+`buildArtifactPlan` with `serial: false` (the mode a real run of one cell
 plans in, so overrides apply identically), **skips** provided-zip roles (nothing
 to build), **dedupes** by the `{project, gitRef, version, variants}` tuple, then
 warms each distinct request serially. Failures are collected per request, never

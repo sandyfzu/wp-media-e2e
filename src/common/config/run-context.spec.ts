@@ -2,11 +2,14 @@ import { test, expect } from "@playwright/test";
 import { isAbsolute } from "node:path";
 
 import unitConfig from "../../../playwright.unit.config";
+import { CELL_PIN_ENV } from "./cell-pin";
 import {
+  cellOwningOutput,
   dirs,
   isCellTargeted,
   NO_CELL,
   outputDirFor,
+  projectSelection,
   REPO_ROOT,
   seedSelectedCells,
   selectedCells,
@@ -16,8 +19,10 @@ import {
  * `selectedCells()` is the single source of truth for cell selection: it parses the
  * `--project` forms from `process.argv` (exactly what Playwright itself filters on) and, in a
  * forked worker — which receives the parent's environment but NOT its argv — falls back to the
- * selection `seedSelectedCells()` published. These tests drive both channels by swapping
- * `process.argv` / the env var and restoring them afterwards.
+ * selection `seedSelectedCells()` published — unless `E2E_CELL` pins the run, which wins. These
+ * tests drive every channel by swapping `process.argv` and the variables, restoring them afterwards.
+ * Importing run-context loads `.env`, so the pin is cleared before each test: a developer's own pin
+ * must not decide these results.
  */
 
 const ORIGINAL_ARGV = process.argv;
@@ -25,6 +30,7 @@ const ORIGINAL_ARGV = process.argv;
 /** The internal env channel `seedSelectedCells` writes; mirrored here so the test can drive it. */
 const SELECTED_CELLS_ENV = "E2E_INTERNAL_SELECTED_CELLS";
 const ORIGINAL_SEED = process.env[SELECTED_CELLS_ENV];
+const ORIGINAL_PIN = process.env[CELL_PIN_ENV];
 
 /** Run `body` with `process.argv` set to a synthetic CLI, always restoring it after. */
 function withArgv(tail: string[], body: () => void): void {
@@ -36,22 +42,26 @@ function withArgv(tail: string[], body: () => void): void {
   }
 }
 
+/** Sets `name` to `value`, or deletes it when `value` is `undefined`. */
+function setEnv(name: string, value: string | undefined): void {
+  if (value === undefined) Reflect.deleteProperty(process.env, name);
+  else process.env[name] = value;
+}
+
 /** Restores the seed env var to whatever the real process started with. */
 function restoreSeed(): void {
-  if (ORIGINAL_SEED === undefined) {
-    Reflect.deleteProperty(process.env, SELECTED_CELLS_ENV);
-  } else {
-    process.env[SELECTED_CELLS_ENV] = ORIGINAL_SEED;
-  }
+  setEnv(SELECTED_CELLS_ENV, ORIGINAL_SEED);
 }
 
 test.beforeEach(() => {
   restoreSeed();
+  setEnv(CELL_PIN_ENV, undefined);
 });
 
 test.afterEach(() => {
   process.argv = ORIGINAL_ARGV;
   restoreSeed();
+  setEnv(CELL_PIN_ENV, ORIGINAL_PIN);
 });
 
 test.describe("selectedCells (parses --project)", () => {
@@ -130,6 +140,43 @@ test.describe("selection propagation to worker processes", () => {
   });
 });
 
+test.describe("the cell pin (E2E_CELL) in the selection", () => {
+  test("selectedCells returns the pin, whatever --project names", () => {
+    process.env[CELL_PIN_ENV] = "pro@nginx";
+    for (const tail of [[], ["--project=setup:pro@nginx"], ["--project=*"]]) {
+      withArgv(tail, () => {
+        expect(selectedCells(), JSON.stringify(tail)).toEqual(["pro@nginx"]);
+      });
+    }
+  });
+
+  test("a blank pin is no pin: the command line decides", () => {
+    process.env[CELL_PIN_ENV] = "  ";
+    withArgv(["--project=nginx"], () => {
+      expect(selectedCells()).toEqual(["nginx"]);
+    });
+  });
+
+  test("projectSelection still returns what was typed, pinned or not", () => {
+    process.env[CELL_PIN_ENV] = "pro@nginx";
+    withArgv(["--project", "setup:pro@nginx", "*"], () => {
+      expect(projectSelection()).toEqual(["setup:pro@nginx", "*"]);
+    });
+    withArgv([], () => {
+      expect(projectSelection()).toEqual([]);
+    });
+  });
+
+  test("a worker, with no argv and no seed, still reads the pin it inherited", () => {
+    process.env[CELL_PIN_ENV] = "pro@nginx";
+    Reflect.deleteProperty(process.env, SELECTED_CELLS_ENV);
+    withArgv([], () => {
+      expect(selectedCells()).toEqual(["pro@nginx"]);
+      expect(isCellTargeted("pro@nginx", "artifacts:pro@nginx")).toBe(true);
+    });
+  });
+});
+
 test.describe("isCellTargeted (gates whether per-run overrides apply)", () => {
   const CELL = "pro@nginx";
   const PROJECT = `artifacts:${CELL}`;
@@ -162,6 +209,14 @@ test.describe("isCellTargeted (gates whether per-run overrides apply)", () => {
   test("false for a wildcard: broad by design, so overrides warn instead of applying", () => {
     withArgv(["--project=*"], () => {
       expect(isCellTargeted(CELL, PROJECT)).toBe(false);
+    });
+  });
+
+  test("true for the pinned cell with no --project; false for another cell then", () => {
+    process.env[CELL_PIN_ENV] = CELL;
+    withArgv([], () => {
+      expect(isCellTargeted(CELL, PROJECT)).toBe(true);
+      expect(isCellTargeted("free@nginx", "artifacts:free@nginx")).toBe(false);
     });
   });
 
@@ -248,5 +303,37 @@ test.describe("outputDirFor — only a run targeting a cell may own (and so empt
 
   test("unit runs write in a _unit folder of their own, which no product can be named", () => {
     expect(unitConfig.outputDir).toMatch(/\/_unit$/);
+  });
+});
+
+test.describe("cellOwningOutput — the cell a run targets as a whole", () => {
+  test("the selected cell, when no --project was typed (only a pin selects a cell then)", () => {
+    expect(cellOwningOutput("pro@nginx", [])).toBe("pro@nginx");
+  });
+
+  test("the selected cell, when --project names it exactly", () => {
+    expect(cellOwningOutput("pro@nginx", ["pro@nginx"])).toBe("pro@nginx");
+    expect(
+      cellOwningOutput("pro@nginx", ["setup:pro@nginx", "pro@nginx"]),
+    ).toBe("pro@nginx");
+  });
+
+  test("none for a setup project alone, a wildcard, or a different case", () => {
+    for (const selection of [
+      ["setup:pro@nginx"],
+      ["artifacts:pro@nginx"],
+      ["*"],
+      ["PRO@nginx"],
+    ]) {
+      expect(
+        cellOwningOutput("pro@nginx", selection),
+        JSON.stringify(selection),
+      ).toBeUndefined();
+    }
+  });
+
+  test("none when no cell is selected", () => {
+    expect(cellOwningOutput(undefined, [])).toBeUndefined();
+    expect(cellOwningOutput(undefined, ["setup:a"])).toBeUndefined();
   });
 });

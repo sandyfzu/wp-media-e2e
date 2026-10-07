@@ -172,6 +172,7 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 | `REPORT_MODE` | _(unset)_ → self-contained | `rich` → external attachments + embedded trace viewer (serve over http). |
 | `RUN_ID`      | auto-stamped           | Per-run report token; pin to share one token across a batch.            |
 | `CI`          | _(unset)_              | Non-empty enables CI config (retries, `forbidOnly`).                    |
+| `E2E_CELL`    | _(unset)_ → no pin     | Pins the run — `bddgen`, the runner, its workers — to one cell of the product: the config holds that cell alone, so `bddgen` regenerates only its specs and cells can run side by side. Exact name; blank means unset. A name the product lacks, or a `--project` selecting none of the cell's projects, fails naming the variable. **Pass it per command, never in `.env`**, which would pin every run from the checkout. |
 | `PRODUCT`     | `wp-rocket`            | Product for the bare `playwright.config.ts`: a name listed in [`products.ts`](../../src/projects/products.ts) (whitespace ignored). Any other name fails the run. |
 | `REPORT_ROOT` | `reports`              | Report artifact root (accumulates).                                     |
 | `OUTPUT_ROOT` | `test-results`         | Ephemeral Playwright artifact root: `<product>/<cell>` for a run targeting that cell, `<product>/_all/<cell>` for any other run, `_unit` for unit tests. |
@@ -203,8 +204,9 @@ Rules (enforced in
   `PREVIOUS` vars) fails fast — they are mutually exclusive and neither wins by default.
 - **Overrides need a cell, named exactly.** On a serial (cell-less) run these are **ignored with
   a warning** and the defaults are used — never a hard failure, so leftover/shared env can't
-  abort a broad run. Apply them with `--project=<cell>` (or `--project=artifacts:<cell>`, to
-  resolve zips without running scenarios). A wildcard or differently-cased `--project` still
+  abort a broad run. Apply them with `E2E_CELL=<cell>` or `--project=<cell>` (adding
+  `--project=artifacts:<cell>` to resolve zips without running scenarios). A wildcard or
+  differently-cased `--project` without a pin still
   runs the cell, but counts as a broad selection here and warns instead — spell the cell out.
   No override → defaults.
 - **Values are trimmed**, so a stray space in `.env` or a CI YAML block never becomes part of a

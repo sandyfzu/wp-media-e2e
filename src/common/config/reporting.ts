@@ -1,13 +1,25 @@
 import { isAbsolute } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { ReporterDescription } from "@playwright/test";
 import { cucumberReporter } from "playwright-bdd";
 
+import type { CellNoticeOptions } from "../reporting/cell-notice";
 import { env } from "./env";
+
+/**
+ * The cell notice reporter's file, absolute: Playwright resolves a relative reporter path against
+ * the config's folder, and the configs live at the repository root.
+ */
+const CELL_NOTICE_REPORTER = fileURLToPath(
+  new URL("../reporting/cell-notice.ts", import.meta.url),
+);
 
 /**
  * The layered reporter stack for one run unit, written into `reportDir`:
  *
+ *  - cell notice         — one line naming the run's cell and how it was chosen; first, so it
+ *                          prints before `list`'s "Running …" (`reporting/cell-notice.ts`).
  *  - `list`              — concise terminal output.
  *  - Playwright `html`   — the interactive runner report (trace viewer, video).
  *  - Cucumber `html`     — the Gherkin-centric report, dual-mode via REPORT_MODE:
@@ -26,9 +38,13 @@ import { env } from "./env";
  *   relative paths against the config's folder, but allure-playwright resolves `resultsDir`
  *   against the working directory, so a relative folder splits the report when a run starts
  *   anywhere but the repository root.
+ * @param notice - what the cell notice says about the run.
  * @throws {@link Error} when `reportDir` is relative.
  */
-export function reporters(reportDir: string): ReporterDescription[] {
+export function reporters(
+  reportDir: string,
+  notice: CellNoticeOptions,
+): ReporterDescription[] {
   if (!isAbsolute(reportDir)) {
     throw new Error(
       `[reporting] The report folder must be absolute, got "${reportDir}": a relative one ` +
@@ -37,6 +53,7 @@ export function reporters(reportDir: string): ReporterDescription[] {
   }
   const rich = env("REPORT_MODE") === "rich";
   return [
+    [CELL_NOTICE_REPORTER, notice],
     ["list"],
     ["html", { outputFolder: `${reportDir}/playwright`, open: "never" }],
     cucumberReporter("html", {

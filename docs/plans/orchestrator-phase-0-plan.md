@@ -1,7 +1,7 @@
 # Orchestrator Phase 0 — Make the suite ready
 
 > **Status:** in implementation, in §9's order. **Done:** 0B.3 (2026-10-05, §4.3), 0A.2
-> (2026-10-06, §3.2). The rest is
+> (2026-10-06, §3.2), 0A.1 (2026-10-06, §3.1). The rest is
 > investigated: every item has a verified finding and a recommended solution, with the
 > alternatives it beat.
 > **Date:** 2026-09-25.
@@ -21,7 +21,7 @@ The recommended solution per item. "—" means no suite change: the orchestrator
 
 | Item | Recommended | Suite change |
 | --- | --- | --- |
-| 0A.1 `bddgen` rewrites every cell | **Pin a run to one cell**: with `E2E_CELL=<cell>` the config holds only that cell, so `bddgen` touches only its specs | `run-context.ts`, `project.ts` |
+| 0A.1 `bddgen` rewrites every cell — **done** | **Pin a run to one cell**: with `E2E_CELL=<cell>` the config holds only that cell, so `bddgen` touches only its specs; a `[cell]` line names the cell and how it was chosen | new `cell-pin.ts`, `reporting/cell-notice.ts`; `run-context.ts`, `project.ts`, `reporting.ts` |
 | 0A.2 shared `test-results/` — **done** | Setup projects write in their cell's folder, unit runs in `_unit`, runs of no cell in `<product>/_all/<cell>`; cell names checked at load; reports and logins absolute | `project.ts`, `run-context.ts`, `reporting.ts`, `playwright.unit.config.ts`, `sites.ts` |
 | 0A.3 shared hosts | Never two runs on one site or staging root. **No limit per server**: the user decides; a **warning** (command, dashboard, event) once a server's busy-run threshold — default 4, configurable — is reached, or its free disk is low | — |
 | 0A.4 two runs on one site | Refuse a site listed by two cells of any product, compared on its normalized URL and location | — (optional loader check) |
@@ -182,6 +182,45 @@ recommendations below fit together as one contract.
 simultaneous-start batch (0 failures), the inode check, a disagreeing `--project` fails, CI's smoke
 unchanged. Live: pinned `free@nginx` and `pro@nginx` together on a database-only feature, then a full
 pass per cell, one after the other.
+
+**Implemented** (2026-10-06, V145–V153). As recommended, plus:
+
+- **Where it lives.** `src/common/config/cell-pin.ts` reads the pin (`pinnedCell`: blank means unset,
+  surrounding whitespace kept so `" pro@nginx"` is refused rather than trimmed into a cell) and holds
+  the two refusals. `run-context.ts` splits what was typed (`projectSelection`, the old argv-or-seed
+  logic) from the cells a run targets (`selectedCells`, pin first). The factory builds `[pin]` only.
+- **The `--project` check mirrors Playwright's own filter** (`matchesProjectFilter`: case-insensitive,
+  `*` wildcards, everything else literal). A spec compares it with `projectUtils.filterProjects` from
+  the installed Playwright, so an upgrade that changes the rule fails it (V145). It is stricter than
+  Playwright in one case, on purpose: a wildcard selecting none of the pinned projects is refused even
+  beside one that does.
+- **Output folders keep 0A.2's rule** (`cellOwningOutput`): a pinned run owns the cell's folder only
+  when it runs the cell whole — no `--project`, or `--project=<cell>`. `--project=setup:<cell>` or a
+  wildcard alone writes under `_all/<cell>`, as without a pin. Its report goes to the pinned cell's
+  folder (the report follows `selectedCells`, which is the pin); report folders are per `RUN_ID`, so
+  nothing is overwritten.
+- **The `[cell]` notice** is `src/common/reporting/cell-notice.ts`, first in `reporters()`. It says
+  "bddgen generates …" rather than "… were regenerated": the runner cannot know whether a `bddgen` ran
+  before it. It takes the worker count from `onBegin`, so `--workers` shows. `printsToStdio()` is
+  `false`: one line is not a progress reporter.
+- **Hints.** The operator messages that recommended `--project=<cell>` (`consume.ts`, `registry.ts`,
+  `request.ts`, `scripts/report.mjs`, `scripts/allure.mjs`) now recommend `E2E_CELL=<cell>`; the docs
+  lead with the pin and call the `--project` form unsafe beside another run of the product.
+- **Found while testing:** outside Playwright's loader, playwright-bdd resolves a BDD config's
+  `outputDir` against the working directory (V148). Real runs are unaffected — Playwright's loader
+  resolves it against the config's folder (V133) — but a spec building configs in a child Node must
+  compare those paths relative to its own working directory.
+
+**Not changed, by design:** an inherited `PLAYWRIGHT_BDD_CONFIGS` still makes `bddgen` generate every
+config it names, pin or not (V32). It is playwright-bdd's internal channel to `bddgen` and to the
+workers (`config/env.js`), undocumented, so the suite does not edit it; only a process that inherited
+it from a run is affected, and the orchestrator's allowlisted environment never carries it (§2). The healthcheck
+and the artifact warm ignore the pin: they span cells by design and take `--product`/`--cell`.
+
+**Out of scope, found here** (V153): BackWPup `develop` (`ab4a2e2`) moved the restore working folder
+to `uploads/backwpup-restore-<token>`. The suite neither opens it to both users nor clears it, so on
+`pro@nginx` 12 scenarios fail with "Restore working directory … is not writable", and the folders —
+each with a `restore.dat` — pile up on both cells. A product change, not the pin; phase-6 work.
 
 ### 3.2 0A.2 — The root `test-results/` is shared
 
@@ -987,7 +1026,7 @@ on `bwu2`/`bwu3`, one cell at a time.
 
 1. 0B.3, one product list — everything the orchestrator spawns starts from it. **Done 2026-10-05.**
 2. 0A.2, the output folders and the cell-name rule — a hazard today. **Done 2026-10-06.**
-3. 0A.1, the cell pin.
+3. 0A.1, the cell pin. **Done 2026-10-06.**
 4. 0B.1, a run's environment.
 5. 0D.2 with 0B.2 — the full commit, the digest, and the built commit (the artifacts code).
 6. 0C's suite parts: the Before path stopping running work (worth having now), then the drain.
@@ -1114,3 +1153,12 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V142 | Live on `bwu2`, read-only. `--project=setup:free@nginx`, started from another folder, saved its login to the checkout's `.auth/backwpup/free@nginx/site-0.json` and left that folder empty. A probe on `free@nginx` opened wp-admin and failed by the 30 s timeout (03:21:10.8–03:21:41.2). `npm run test:unit` (1271 passed) emptied `_unit` at 03:21:17.3, inside that window. The probe's trace, video, screenshot, attached file and error context reached all three reports, with no ENOENT | ✅ 2026-10-06 | `live.sh`, its probe files removed after; Allure result times; `_unit`'s birth time |
 | V143 | Every cell name in use matches `^[a-z0-9][a-z0-9@._-]*$`: `apache`, `nginx`, `free@nginx`, `pro@nginx`, `free@apache`, `pro@apache` | ✅ 2026-10-06 | The keys of every sites file in both checkouts, the products' examples and `docker/` |
 | V144 | Nine mutations each fail the tests aimed at them, and the control passes 59 tests: setup projects with no `outputDir`; every run owning the cell's folder; a relative report folder (every config build stops); `reporters()` accepting one; a relative `storageState`; cell names with uppercase, with a leading `_`, or unchecked; unit runs back in the root. The gates: typecheck, lint and format clean; unit 1272 passed, 8 skipped (1256 before) | ✅ 2026-10-06 | `mutate-0a2.sh`, a copy of the worktree per mutation, five specs |
+| V145 | Playwright 1.63.0's `--project` filter lowercases both sides, turns each `*` into `.*` and escapes every other metacharacter (the same `escapeRegExp` as ours); an exact name that matches nothing throws "Project(s) … not found", a wildcard throws only when the whole selection matches nothing. `matchesProjectFilter` selects exactly what `projectUtils.filterProjects` selects for 15 filters over 5 project names | ✅ 2026-10-06 | `runner/index.js:2137–2177`, `coreBundle.js:560`; `cell-pin.spec.ts` loads the installed filter (`playwright/lib/runner`, an exported path) |
+| V146 | `bddgen` for BackWPup, inode check: unpinned rewrote all 10 `free@nginx` and all 12 `pro@nginx` specs; pinned to `pro@nginx` it rewrote its 12 and kept all 10 of `free@nginx`; pinned to `free@nginx`, the mirror image | ✅ 2026-10-06 | `inodes.sh` (`stat -f %i` before and after) |
+| V147 | Two wp-rocket cells (`apache`, `nginx`, placeholder sites) started together through `npm run test:wp-rocket -- --grep @noauth`, 40 iterations each way, same machine, back to back: **pinned 0 of 80 failed**; the `--project` form 4 of 80, each `ENOENT … lstat '.features-gen/wp-rocket/nginx/…/smoke.feature.spec.js'` (one an `apache` run crashing on `nginx`'s spec) | ✅ 2026-10-06 | `batch.sh pinned 40`, `batch.sh unpinned 40`; reports and output kept out of the checkout |
+| V148 | The refusals, measured: an unknown pin stops `npm run test:backwpup` in `bddgen` (exit 1, Playwright never starts) naming the cells; a pin in the working directory's `.env` with `--project=free@nginx` exits 1 naming `E2E_CELL` and `.env`; `--project=artifacts:pro@nginx` under that pin lists 1 test. In a child Node without Playwright's loader, playwright-bdd keys its configs by the BDD `outputDir` resolved against the working directory | ✅ 2026-10-06 | `envpin.sh` from a temporary folder; `unknown-pin*.log`; `project.spec.ts` failure before the fix |
+| V149 | Unpinned behaviour unchanged: `--list` for no `--project`, `apache`, `nginx`, `setup:apache` and `*` is identical before and after but for the new `[cell]` line; CI's two smoke commands on placeholder sites, HEAD against the working tree: wp-rocket 6 passed / 4 skipped and backwpup 4 / 4, exit 0, both times | ✅ 2026-10-06 | `lists.sh base` (before any change) and `lists.sh after`, diffed; `ci-smoke.sh` (`git archive HEAD` vs a copy, sites files removed) |
+| V150 | Fifteen mutations each fail the tests aimed at them, and the control passes 65 tests: the pin ignored by `selectedCells`; every cell built when pinned; an unknown pin or a stray `--project` accepted; the filter case-sensitive or unescaped; a pinned run with no `--project` not owning its folder, or a setup project alone owning it; `outputDir` from the selection instead of ownership; a blank pin pinning; the pin trimmed; the notice after `list`, never "pinned", claiming the terminal or ignoring `--workers`. The gates: typecheck, lint and format clean; unit 1306 passed, 8 skipped (1272 before) | ✅ 2026-10-06 | `mutate.mjs`, a copy of the worktree per mutation, five specs |
+| V151 | Live, `E2E_RETRIES=0`: `free@nginx` (`bwu2`) and `pro@nginx` (`bwu3`) pinned and started together on `cli-backups.feature` — 6 passed each (both setups, 4 scenarios), exit 0, 5.4 min side by side; each printed its `[cell]` line, pinned. Afterwards both sites had no BackWPup plugin, option, table or staging left; `bwu3` held 4 `uploads/backwpup-restore-<id>/` folders, one per scenario (V153) | ✅ 2026-10-06 | `live-pair.sh`; `site-state.sh` before and after |
+| V152 | Live full passes, pinned, `E2E_RETRIES=0`, one after the other: `free@nginx` **54 passed** (56 min); `pro@nginx` 51 passed, **12 failed** (1.2 h) — 5 of `backups.feature`, 6 of `onboarding.feature`, 1 of `cli-running-job.feature`, every one on the restore-folder fatal of V153 and no other. The control, the same `backups.feature` run **unpinned** with `--project=pro@nginx`, fails the same 5 scenarios on the same fatal (and its `[cell]` line names the `--project` form and the pin): the failures are the product's, not the pin's. Afterwards, on both sites: no BackWPup plugin, option, table or staging left | ✅ 2026-10-06 | `live-full.sh`, `control-unpinned-pro.log`; `site-state.sh` |
+| V153 | **BackWPup `develop` moved to `ab4a2e2`, which tokenizes the restore working folder** — not caused by 0A.1. It is now `uploads/backwpup-restore-<20 hex>` (`commons.php:48–106`, `:164`; the token is the per-site option `backwpup_restore_dir_token`, the fixed `backwpup-restore` kept only as a legacy sweep target), holding `.htaccess`, `Web.config`, `index.php`, `uploads/` and `restore.dat`. The suite opens and clears only the fixed folder (`BACKWPUP_SITE_RESIDUE`, `prepareSiteDataDirs`), so whichever user creates the new one first locks the other out: created by the web server (`www-data`, 755), Pro's `wp backwpup backup` dies "Restore working directory … is not writable"; created by WP-CLI (`ubuntu`, 775), the web server's requests die the same way and the history never loads. All 12 Pro failures in V152 carry that fatal and no other. The folders also pile up: 28 `uploads/backwpup*` entries on `bwu3`, 7 on `bwu2` (Free, all `www-data`, no failure) after V152; one was on `bwu3` before this session. Phase-6 work, out of scope here; nothing removed | ✅ 2026-10-06 | `.artifacts/…/backwpup-pro-en-9.99.99-ab4a2e28.zip`; `find -printf`, `ls -ld` on both sites; the 12 `error-context.md` |

@@ -10,7 +10,7 @@ config factory turns a product definition into runnable Playwright projects.
 | **Product**  | A plugin under test (`wp-rocket`, `backwpup`). Declares its own features, steps, sites, and optional service credentials.            | `src/projects/<product>/config/<product>.config.ts`, listed in `src/projects/products.ts` |
 | **Cell**     | A named environment (`apache`, `nginx`, `pro@nginx`). Cells are **data-driven**: keys of `sites.json` / `sites.*.json` overlays.     | `sites.json` / `sites.*.json`                           |
 | **Pool**     | The list of interchangeable WordPress sites backing one cell. Scenarios are distributed across the pool by worker.                   | a cell's `sites` array                                  |
-| **Run unit** | One `(product × cell)`. The unit of a single invocation and of one report directory.                                                | `--project=<cell>` selects it                           |
+| **Run unit** | One `(product × cell)`. The unit of a single invocation and of one report directory.                                                | `E2E_CELL=<cell>` pins it (or `--project=<cell>`)       |
 | **Edition**  | `free` / `pro`, for products shipped as two packages (BackWPup). Editionless products (WP Rocket) omit it.                           | a cell's optional `edition` field                       |
 
 ## Worker → site binding (the load-bearing invariant)
@@ -29,26 +29,61 @@ the smaller pool. The config factory therefore:
    ([`createProductConfig`](../../src/common/config/project.ts)).
 2. **Fails fast** if more than one known cell is selected at once.
 
-> **Rule for agents:** run exactly one cell per invocation
-> (`--project=<cell>`). Never "select all projects". A cell-less run is forced
+> **Rule for agents:** run exactly one cell per invocation, pinned
+> (`E2E_CELL=<cell>`). Never "select all projects". A cell-less run is forced
 > serial (`workers = 1`) and is safe but exercises no pool.
+
+### The cell pin (`E2E_CELL`)
+
+`bddgen` generates every BDD config the product's Playwright config registers — one per cell — and
+deletes each cell's specs before writing them again. So with every cell in the config, a run's
+`bddgen` removes the specs another run of the same product is collecting or loading: started
+together, two runs of different cells failed 2 times in 80 (`ENOENT`, `Cannot find module`).
+`bddgen` takes no `--project`, and npm hands `-- args` to a script's last command only, so the
+environment is the one channel that reaches `bddgen`, the runner and every worker alike.
+
+`E2E_CELL=<cell>` ([`cell-pin.ts`](../../src/common/config/cell-pin.ts)) is that channel. With it:
+
+- the config holds that cell alone — its three projects, its pool, its BDD config — so `bddgen`
+  regenerates only its specs, and needs no `--project` (the config's three projects are the cell);
+- `selectedCells()` returns the pin, so the worker count, the report folder and
+  `isCellTargeted` agree with it in every process;
+- a pin naming no cell of the product fails at once, in `bddgen` already, naming the product's cells;
+- a `--project` that selects none of the pinned cell's projects — matched by Playwright's own rule:
+  case-insensitive, `*` wildcards — fails naming `E2E_CELL`. Playwright alone would say only
+  "Project(s) … not found", a puzzle when the pin came from `.env`. A `--project` that does fit
+  narrows the run within the cell (`--project=artifacts:<cell>`).
+
+Unpinned, everything is as before: `--project=<cell>` runs one cell, but its `bddgen` regenerates
+every cell's specs, so it is safe only when no other run of the product is going. A blank
+`E2E_CELL` is no pin. `.env` is loaded into every process, so a pin there pins every run from the
+checkout; the orchestrator builds each run's environment itself, from an allowlist that never
+carries `PLAYWRIGHT_BDD_CONFIGS` — an inherited value of that playwright-bdd variable would make
+`bddgen` generate the configs it names, pin or not.
+
+**The `[cell]` notice.** Nothing else on the terminal names a run's cell, so the first reporter
+([`reporting/cell-notice.ts`](../../src/common/reporting/cell-notice.ts)) prints one line before
+`Running …`: the product and cell, whether `E2E_CELL` or `--project` chose it (and so whether
+another cell may run beside it), the workers and the report folder. A reporter, because only the
+runner process runs reporters; the config is evaluated in every process of a run.
 
 ### Reading the selection from a worker
 
 `selectedCells()` ([`run-context.ts`](../../src/common/config/run-context.ts)) is
-the single source of truth for "which cells did this invocation target". It parses
+the single source of truth for "which cells did this invocation target". A pin wins; every
+process inherits it. Otherwise it reads `projectSelection()`, which parses
 the `--project` forms from `process.argv` — but **a Playwright worker never receives
 the CLI argv**: it is forked with `[node, workerProcessEntry.js]`, and the project
 `metadata` a worker reads is the copy *it* just rebuilt, not the runner's. So an
 argv-derived decision cannot reach a worker through either channel.
 
 It rides the **environment** instead, exactly as `RUN_ID` does: the config factory
-calls `seedSelectedCells()` while the runner builds the config, and `selectedCells()`
+calls `seedSelectedCells()` while the runner builds the config, and `projectSelection()`
 falls back to that inherited value when argv is empty. Reading `process.argv` directly
 from worker-side code is a bug.
 
 Worker-side code that needs the "was this cell explicitly targeted?" answer should ask
-`isCellTargeted(cell, projectName)` rather than re-deriving it — it also counts a
+`isCellTargeted(cell, projectName)` rather than re-deriving it — it also counts a pin and a
 `--project=artifacts:<cell>` selection, and it is the gate on whether per-run `E2E_*`
 overrides apply (a broad sweep must not inherit one cell's override).
 
@@ -76,8 +111,8 @@ imports only that product, so its runs never load another product's sites files.
 
 [`createProductConfig(product)`](../../src/common/config/project.ts) expands a
 [`ProductConfig`](../../src/common/config/types.ts) into a Playwright config. For
-**each** cell it emits three projects — two sibling setup projects and the BDD
-project that depends on both:
+**each** cell it holds — every cell of the product, or the pinned one alone — it emits three
+projects, two sibling setup projects and the BDD project that depends on both:
 
 - **`setup:<cell>`** — a plain Playwright project (not BDD) that runs
   [`auth.setup.ts`](../../src/common/auth/auth.setup.ts) to authenticate the
@@ -152,9 +187,10 @@ resolves all paths via `dirs(product, cell)`. Two lifecycles:
   cell takes one run at a time.
 - **Output folders follow the selection** (`outputDirFor`). Playwright empties the output
   folder of every project a run selects before it starts. So a cell's three projects
-  write in `<product>/<cell>` only in a run that targets that cell
-  (`--project=<cell>`). Every other run's projects write in `<product>/_all/<cell>`:
-  no `--project`, a setup project alone, a wildcard, another cell's project. None of
+  write in `<product>/<cell>` only in a run that targets that cell as a whole
+  (`cellOwningOutput`): pinned with no `--project`, or `--project=<cell>`, pinned or not. Every
+  other run's projects write in `<product>/_all/<cell>`: no pin and no `--project`, a setup
+  project alone, a wildcard, another cell's project. None of
   them can empty a running cell's folder. Unit runs write in `<OUTPUT_ROOT>/_unit`.
   Cell names are checked at load, so none is `_`-prefixed or escapes its folder.
 - **Reports and logins are absolute paths in the checkout.** Playwright resolves a
@@ -175,11 +211,12 @@ resolves all paths via `dirs(product, cell)`. Two lifecycles:
 ## Mental model, end to end
 
 ```text
-npm run test:wp-rocket -- --project=apache
+E2E_CELL=apache npm run test:wp-rocket
         │
         ├─ load-env.ts                 → .env into process.env (once)
         ├─ wp-rocket.config.ts         → ProductConfig { name, features, steps, sites, artifacts }
-        └─ createProductConfig()
+        └─ createProductConfig()       (in bddgen, the runner and every worker)
+              ├─ E2E_CELL → holds apache alone (unknown pin / stray --project → fail)
               ├─ selectedCells() → ["apache"]  (fail fast if >1)
               ├─ global workers  = apache pool size
               ├─ project setup:apache     → preflight + auth.setup.ts (login → storageState)

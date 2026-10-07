@@ -34,7 +34,8 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 ```text
 src/
 ├── common/                 # product-agnostic, shared by every product
-│   ├── config/             # env, sites loading, run-context, metadata, devices, file-owner rule, the config factory
+│   ├── config/             # env, sites loading, run-context, the cell pin, metadata, devices, file-owner rule, the config factory
+│   ├── reporting/          # the suite's own Playwright reporters (cell-notice.ts)
 │   ├── auth/               # auth.setup.ts (login → storageState)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── steps/              # generic step definitions
@@ -73,8 +74,12 @@ playwright*.config.ts       # entry configs (default, per-product, unit)
   logins are absolute paths in the checkout, wherever a run starts.
 - **Pool** — the interchangeable WordPress sites under a cell; each worker binds to
   one site by `parallelIndex`.
-- **Run unit** — one `(product × cell)`. **Run exactly one cell per invocation**
-  (`--project=<cell>`); selecting two at once fails fast.
+- **Run unit** — one `(product × cell)`. **Run exactly one cell per invocation**; selecting
+  two at once fails fast. **Pin it with `E2E_CELL=<cell>`**: the config then holds that cell
+  alone, so `bddgen` regenerates only its specs and two cells of one product can run side by
+  side. `--project=<cell>` still works, but `bddgen` then regenerates every cell's specs, which
+  breaks another run of the product started beside it. An unknown pin, or a `--project` the pin
+  cannot satisfy, fails naming `E2E_CELL`. Each run prints a `[cell]` line saying which it is.
 
 Full detail — the `parallelIndex` invariant, the config factory, the credential
 registry, and artifact lifecycle — is in
@@ -85,9 +90,11 @@ registry, and artifact lifecycle — is in
 ```bash
 # Testing
 npm run test                       # default product, bddgen + run
-npm run test:wp-rocket -- --project=<cell>    # one product, one cell
-npm run test:backwpup  -- --project=<cell>
-npm run test:wp-rocket -- --project=apache --grep @smoke   # filter by tag
+E2E_CELL=<cell> npm run test:wp-rocket       # one product, one cell (safe beside other cells)
+E2E_CELL=<cell> npm run test:backwpup
+E2E_CELL=apache npm run test:wp-rocket -- --grep @smoke   # filter by tag
+npm run test:backwpup -- --project=<cell>     # also one cell, but regenerates every cell's specs:
+                                              # never beside another run of the same product
 npm run test:ui                    # Playwright UI mode
 npm run test:headed                # headed browser
 npm run test:unit                  # unit/integration specs (src/**/*.spec.ts)
@@ -606,7 +613,7 @@ npm run test:unit     # unit/integration specs pass
 ```
 
 For behavioural changes, also verify against a real cell:
-`npm run test:<product> -- --project=<cell>`. Keep the runner awake through it (`caffeinate -i`
+`E2E_CELL=<cell> npm run test:<product>`. Keep the runner awake through it (`caffeinate -i`
 on macOS): a runner that sleeps drops its SSH connections, and the run fails as if the network
 had — hooks far past their timeouts, `ECONNRESET` after each wake.
 
@@ -676,7 +683,8 @@ instead and link it from the [Documentation map](#documentation-map).
 Update it when you change anything about:
 
 - How products, cells, pools, or run units are defined or selected — the product list
-  (`src/projects/products.ts`) and its drift guard included.
+  (`src/projects/products.ts`) and its drift guard, the cell pin (`E2E_CELL`, `cell-pin.ts`) and
+  the `[cell]` notice included.
 - The `parallelIndex` invariant or the worker-to-site binding.
 - The config factory (`createProductConfig`) or the project pairs it generates.
 - The metadata/credential registry (`registerPool`, `routingMetadata`), or the per-process

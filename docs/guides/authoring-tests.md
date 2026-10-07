@@ -370,7 +370,7 @@ a short one that needs a neighbour.
 5. Document every new function/method with TSDoc; type everything explicitly.
 6. Run the quality gates (typecheck, lint, format, unit tests) — see
    [CLAUDE.md](../../CLAUDE.md#required-workflow-after-every-edit).
-7. Verify against a real cell: `npm run test:<product> -- --project=<cell>`.
+7. Verify against a real cell: `E2E_CELL=<cell> npm run test:<product>`.
 
 ## Banned waits (enforced by lint)
 

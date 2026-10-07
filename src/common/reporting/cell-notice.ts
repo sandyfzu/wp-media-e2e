@@ -1,0 +1,69 @@
+import type { FullConfig, Reporter } from "@playwright/test/reporter";
+
+/**
+ * A one-line notice, printed before Playwright's own "Running …", of the cell a run is for and how
+ * it was chosen. Nothing else on the terminal names it, and whether a run was pinned decides whether
+ * another cell of its product may run beside it.
+ *
+ * A reporter, because reporters live in the runner process alone: the config itself is evaluated
+ * in every process of a run (`bddgen`, the runner, each worker) and would print once per process.
+ */
+
+/** What the config factory knows about a run, handed over as this reporter's options. */
+export interface CellNoticeOptions {
+  /** The product under test. */
+  readonly product: string;
+  /** The one cell the run targets; absent when it targets none. */
+  readonly cell?: string;
+  /** Whether `E2E_CELL` chose the cell, rather than `--project`. */
+  readonly pinned: boolean;
+  /** The run's report folder, as the operator will look for it. */
+  readonly reportDir: string;
+}
+
+/**
+ * The notice for a run of `workers` workers.
+ *
+ * @example
+ * ```ts
+ * cellNotice({ product: "backwpup", cell: "pro@nginx", pinned: true, reportDir: "reports/…" }, 1);
+ * // "[cell] backwpup/pro@nginx, pinned by E2E_CELL: bddgen generates only its specs. 1 worker;
+ * //  report in reports/…"
+ * ```
+ */
+export function cellNotice(
+  options: CellNoticeOptions,
+  workers: number,
+): string {
+  const { product, cell } = options;
+  const how =
+    cell === undefined
+      ? `${product}: no single cell selected, so the run is serial and bddgen generates every ` +
+        "cell's specs"
+      : options.pinned
+        ? `${product}/${cell}, pinned by E2E_CELL: bddgen generates only its specs`
+        : `${product}/${cell}, selected by --project: bddgen generates every cell's specs, which ` +
+          `breaks another ${product} run started beside this one; E2E_CELL=${cell} instead ` +
+          "lets cells run side by side";
+  const count = `${String(workers)} worker${workers === 1 ? "" : "s"}`;
+  return `[cell] ${how}. ${count}; report in ${options.reportDir}`;
+}
+
+/** Prints {@link cellNotice} as the run begins; listed first, so it comes before "Running …". */
+export default class CellNoticeReporter implements Reporter {
+  /** @param options - the facts, as the config factory passed them. */
+  constructor(private readonly options: CellNoticeOptions) {}
+
+  /** Prints the notice, with the worker count the run actually uses (`--workers` included). */
+  onBegin(config: FullConfig): void {
+    process.stdout.write(`${cellNotice(this.options, config.workers)}\n`);
+  }
+
+  /**
+   * One line is no progress report: answering `false` keeps Playwright adding its own terminal
+   * reporter whenever no other reporter prints.
+   */
+  printsToStdio(): boolean {
+    return false;
+  }
+}
