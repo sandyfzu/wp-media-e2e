@@ -208,9 +208,10 @@ test.describe("exec — a failure never quotes the command's arguments", () => {
   });
 
   // A command that never stops writing is ended by the broken pipe, so it has a signal and no exit
-  // code; naming SIGPIPE would hide the cause.
+  // code; naming SIGPIPE would hide the cause. The `--` matters: GNU `yes` (CI, the cells) refuses
+  // `--key=…` as an unknown option and exits at once, while BSD `yes` (macOS) just repeats it.
   test("output over the capture cap, from a command that never stops", async () => {
-    expect(await failureOf(exec(local, "yes", [ARG]))).toBe(
+    expect(await failureOf(exec(local, "yes", ["--", ARG]))).toBe(
       '[wp/exec] "yes" produced more output than can be captured, so its result was truncated ' +
         "and cannot be trusted.",
     );
