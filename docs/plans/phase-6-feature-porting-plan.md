@@ -95,7 +95,7 @@ BackWPup — **page objects first (6B)**, then onboarding → backup & history �
 WP-CLI → restore → the storage credential surface → Free-edition coverage + the parity gate. The
 storage *round-trips* are carved out as **6H.2** and **deferred** until credentials exist, so no
 other sub-phase waits on them. **6J** is shared rails again, product-agnostic like 6A: it keeps the
-staging area off the web. **6G.1**, shipped with 6G, handles the restore directories the latest stable release names with a random suffix. **6K** closes the restore work: `.zip` and `.tar.gz` archives, after 6G's `.tar`. WP Rocket reuses 6A and gets its own breakdown afterwards (§6).
+staging area off the web. **6G.1**, shipped with 6G, handles the restore directories the latest stable release names with a random suffix. **6K** closes the restore work: `.zip` and `.tar.gz` archives, after 6G's `.tar`. WP Rocket reuses 6A and gets its own breakdown, **deferred until after Phase 10** (§6).
 
 **Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → 6F ✅ (6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → 6F.3 ✅ → 6F.4 ✅) → 6G.0 ✅ → 6G ✅ (with 6G.1 ✅) → **6H** → 6I → 6J → 6K → *(later)* 6H.2. 6J depends on nothing and can be pulled forward; 6K needs only 6G.
 
@@ -2700,15 +2700,18 @@ differs, by the format switch.
 
 ---
 
-## 6. After BackWPup — WP Rocket
+## 6. After Phase 10 — WP Rocket
+
+**Deferred (decided 2026-10-06):** WP Rocket's port starts only once Phase 10 (cleanup & validation)
+is done — not straight after BackWPup. Phase 6 closes on BackWPup alone (§5).
 
 WP Rocket reuses **6A unchanged** and follows the same recipe: **page objects first**, then features.
 Its baseline is much larger (`src/features/`, `src/specs/`, `src/support/steps/`, plus the 921-line
 `page-utils.ts` and 486-line `sections.ts`) and brings concerns BackWPup does not: `@mobile` (6A),
 settings export/import diffing, the `@visual` A/B scenarios (`expectOptimizedToMatchUnoptimized`,
 already shipped), third-party plugin interactions, and the `previous` artifact role for update paths.
-It gets its own sub-phase breakdown, written from the same verified-source discipline, once BackWPup
-is done — deliberately **not** guessed here.
+It gets its own sub-phase breakdown, written from the same verified-source discipline, when that
+work starts — deliberately **not** guessed here.
 
 ---
 
