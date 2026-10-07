@@ -10,10 +10,9 @@ import {
   declaredResidue,
   extendedTimeout,
   installPluginUnderTest,
+  scenarioReport,
   teardownPluginUnderTest,
 } from "./plugin-lifecycle";
-import type { ScenarioReport } from "./plugin-lifecycle";
-import type { TestInfo } from "@playwright/test";
 
 /**
  * Product-agnostic scenario hooks for the plugin under test, scoped to `@plugin`.
@@ -31,22 +30,6 @@ import type { TestInfo } from "@playwright/test";
  *
  * The policy itself lives in `./plugin-lifecycle.ts`; this file only binds it to the runtime.
  */
-
-/**
- * Adapts Playwright's `TestInfo` to the narrow {@link ScenarioReport} the teardown gate needs.
- * `status` is populated for `After` hooks (they run as `test.afterEach`), so the gate can tell a
- * scenario that already failed — and therefore wants the log attached — from a clean one.
- */
-function scenarioReport(testInfo: TestInfo): ScenarioReport {
-  return {
-    title: testInfo.title,
-    failed:
-      testInfo.status !== undefined &&
-      testInfo.status !== testInfo.expectedStatus,
-    attach: (name, body) =>
-      testInfo.attach(name, { body, contentType: "text/plain" }),
-  };
-}
 
 Before(
   {

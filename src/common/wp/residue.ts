@@ -9,10 +9,16 @@ import {
   wpRootDir,
 } from "./exec";
 import { normalizeOwnership } from "./ownership";
-import { assertSafeElevatedTarget, normaliseSitePath } from "./paths";
+import {
+  PROTECTED_SITE_PATHS,
+  assertSafeElevatedTarget,
+  isPathSegment,
+  normaliseSitePath,
+} from "./paths";
 import { SiteResidueRemovalFailedError } from "./errors";
+import { errorMessage } from "../guards";
 import type { ExecResult } from "./exec";
-import type { Transport } from "../config/types";
+import type { SiteResidue, Transport } from "../config/types";
 
 /**
  * The data a plugin writes to the site's **filesystem**: opening those directories before a scenario
@@ -50,6 +56,14 @@ import type { Transport } from "../config/types";
  * Which paths a product leaves is the product's own knowledge, so it declares them
  * (`ProductConfig.siteResidue`) and the shared scenario hooks read them from the per-process
  * registry. This module only knows how to prepare and remove such a path safely on any transport.
+ *
+ * **A plugin may also name a directory at runtime**, under a fixed prefix and a random tail — BackWPup
+ * names its restore working directory `uploads/backwpup-restore-<20 hex>`, the tail kept in an option
+ * and drawn afresh on every install. Such a family is declared as its parent and an anchored name
+ * pattern (`SiteResidueFamily`, {@link parseResidueDeclaration}) and found on the site at removal
+ * time, which also catches the directories earlier installs left under names nobody remembers. It
+ * names nothing to create up front; a product that can ask the installed plugin for the current name
+ * resolves it after each install instead ({@link prepareResolvedDataDirs}).
  */
 
 /**
@@ -71,6 +85,297 @@ export function normaliseResiduePath(declared: string): string {
       `[wp/residue] "${declared}" cannot be removed as leftover data: ${reason}. Declare a path ` +
       'relative to the WordPress root that the product itself created, e.g. "wp-content/uploads/<plugin>".',
   );
+}
+
+/**
+ * One residue declaration, parsed: a path, or a family of directories the plugin names at runtime.
+ *
+ * A `family` matches the **directories** directly inside `parent` whose whole name `name` matches —
+ * never a file, never a symbolic link, never anything deeper, never the parent itself.
+ */
+export type ResidueDeclaration =
+  | { readonly kind: "path"; readonly path: string }
+  | {
+      readonly kind: "family";
+      readonly parent: string;
+      readonly name: RegExp;
+    };
+
+/**
+ * A family pattern's opening: `^`, then the plugin's fixed prefix spelled out — three literal
+ * characters at least, none made optional by a quantifier after it. What makes a family "a fixed
+ * prefix and a tail the plugin picks" rather than any name at all (`/^[a-z0-9]+$/` would take every
+ * year folder in `uploads`), and what keeps it from ever matching `.` or `..`.
+ */
+const LITERAL_PREFIX = /^\^[A-Za-z0-9_-]{3,}(?![*+?{])/;
+
+/**
+ * A pattern source ending in a real `$` anchor — not an escaped `\$`, which is a literal dollar sign
+ * and anchors nothing.
+ */
+const ENDS_WITH_ANCHOR = /(?:^|[^\\])(?:\\\\)*\$$/;
+
+/**
+ * Parses and validates one residue declaration.
+ *
+ * A path is validated by {@link normaliseResiduePath}. A family's parent must be a relative path
+ * inside the root, short of the root itself, no segment edged with whitespace — it may be a directory
+ * WordPress owns, since it is only ever listed. Its name pattern must make `^` and `$` bound the
+ * **whole** name: anchored at both ends, no alternation (which can leave a branch unanchored), not
+ * multiline (which lets them match at a line break), not global or sticky (stateful) — and open with
+ * the plugin's fixed prefix ({@link LITERAL_PREFIX}). It must match no directory WordPress owns in
+ * that parent: every match is validated again before removal, so this cannot delete one, but it makes
+ * the mistake fail at declaration rather than on the first site that happens to hold the directory.
+ *
+ * @param declared - the declaration as the product made it.
+ * @returns the parsed declaration, normalised.
+ * @throws Error naming the declaration and the rule it broke.
+ */
+export function parseResidueDeclaration(
+  declared: SiteResidue,
+): ResidueDeclaration {
+  if (typeof declared === "string") {
+    return { kind: "path", path: normaliseResiduePath(declared) };
+  }
+  const { parent, name } = declared;
+  const refuse = (reason: string): Error =>
+    new Error(
+      `[wp/residue] the directories "${parent}/${name.source}" cannot be removed as leftover data: ` +
+        `${reason}. Declare a parent inside the WordPress root and an anchored name pattern as ` +
+        "tight as the plugin's naming, e.g. /^<plugin>-[0-9a-f]{20}$/.",
+    );
+  const rejection = familyPatternRejection(name);
+  if (rejection !== undefined) throw refuse(rejection);
+  if (parent.split("/").some((segment) => segment !== segment.trim())) {
+    throw refuse(
+      "a segment of its parent begins or ends with whitespace, which would name a directory " +
+        "nobody meant — and a family whose parent is not there is silently empty",
+    );
+  }
+  const sample = normaliseSitePath(
+    posix.join(parent, "x"),
+    (reason) => refuse(`its parent is unusable — ${reason}`).message,
+  );
+  const parentPath = posix.dirname(sample);
+  if (parentPath === ".") throw refuse("its parent is the WordPress root");
+  const owned = PROTECTED_SITE_PATHS.find(
+    (protectedPath) =>
+      posix.dirname(protectedPath) === parentPath &&
+      name.test(posix.basename(protectedPath)),
+  );
+  if (owned !== undefined) {
+    throw refuse(
+      `it would match "${owned}", a directory WordPress itself owns`,
+    );
+  }
+  return { kind: "family", parent: parentPath, name };
+}
+
+/**
+ * The rule a family's name pattern breaks, or `undefined` when `^` and `$` bound the whole name and it
+ * opens with a fixed prefix — see {@link parseResidueDeclaration}.
+ *
+ * @param name - the declared pattern.
+ * @returns the reason it is unusable, or `undefined` when it is fine.
+ */
+function familyPatternRejection(name: RegExp): string | undefined {
+  if (!name.source.startsWith("^") || !ENDS_WITH_ANCHOR.test(name.source)) {
+    return "its name pattern is not anchored at both ends, so it would match parts of names";
+  }
+  if (name.source.includes("|")) {
+    return "its name pattern has an alternation, which can leave one branch unanchored";
+  }
+  if (name.global || name.sticky) {
+    return "its name pattern is global or sticky, which makes every test depend on the last";
+  }
+  if (name.multiline) {
+    return "its name pattern is multiline, so ^ and $ would match at a line break inside a name";
+  }
+  if (!LITERAL_PREFIX.test(name.source)) {
+    return (
+      "its name pattern does not open with the plugin's fixed prefix spelled out (three " +
+      "characters at least), so it could match directories of any name"
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Whether a directory name belongs to a family: one path segment its pattern matches whole. Checked
+ * on what the site lists, so a listing that went wrong cannot widen a removal.
+ *
+ * A name edged with whitespace is never a member: the shared path rules trim, so it could not be
+ * addressed exactly — removal and its verification would act on a different, trimmed path.
+ */
+function inFamily(
+  declaration: Extract<ResidueDeclaration, { kind: "family" }>,
+  name: string,
+): boolean {
+  return (
+    isPathSegment(name) && name === name.trim() && declaration.name.test(name)
+  );
+}
+
+/**
+ * Whether `path` is one of the declared leftovers — named by a path declaration, or a directory of a
+ * declared family. The check that keeps a resolved data directory from being prepared and then never
+ * removed.
+ *
+ * @param path - a validated path relative to the WordPress root.
+ * @param declarations - the product's parsed declarations.
+ */
+export function isDeclaredResidue(
+  path: string,
+  declarations: readonly ResidueDeclaration[],
+): boolean {
+  return declarations.some((declaration) =>
+    declaration.kind === "path"
+      ? declaration.path === path
+      : posix.dirname(path) === declaration.parent &&
+        inFamily(declaration, posix.basename(path)),
+  );
+}
+
+/**
+ * The directories of a family on the site right now, relative to the root.
+ *
+ * The names are matched here, whole, against the declared pattern ({@link inFamily}). A parent that
+ * is not there holds nothing; one that could not be listed throws, because "nothing matched" must
+ * never stand in for "could not look".
+ *
+ * @param transport - the target site's transport.
+ * @param root - the site's resolved WordPress root.
+ * @param declaration - the family to expand.
+ * @throws Error if the parent exists but could not be listed.
+ */
+async function expandFamily(
+  transport: Transport,
+  root: string,
+  declaration: Extract<ResidueDeclaration, { kind: "family" }>,
+): Promise<string[]> {
+  const listing = await listDirectories(
+    transport,
+    root,
+    posix.join(root, declaration.parent),
+    declaration.name,
+  );
+  return listing
+    .split("\0")
+    .filter((entry) => entry !== "")
+    .map((entry) => posix.basename(entry))
+    .filter((name) => inFamily(declaration, name))
+    .map((name) => normaliseResiduePath(posix.join(declaration.parent, name)));
+}
+
+/**
+ * The directories directly inside `parent`, NUL-separated — empty when it is not there.
+ *
+ * `find -H` follows `parent` itself when it is a link, so a relocated `uploads` is listed where it
+ * leads (every match is then held to the root before anything acts on it), but nothing below it: a
+ * link is never a match. As the transport's user first, and with privileges only when that was
+ * refused — the plugin writes as the web server, which may leave a parent others cannot list.
+ *
+ * @param transport - the target site's transport.
+ * @param root - the site's resolved WordPress root.
+ * @param parent - the absolute directory to list.
+ * @param name - the family's pattern, for the message.
+ * @throws Error if the parent is there but could not be listed at any privilege available.
+ */
+async function listDirectories(
+  transport: Transport,
+  root: string,
+  parent: string,
+  name: RegExp,
+): Promise<string> {
+  const argv = [
+    "-H",
+    parent,
+    "-mindepth",
+    "1",
+    "-maxdepth",
+    "1",
+    "-type",
+    "d",
+    "-print0",
+  ];
+  let listing = await exec(transport, "find", argv);
+  if (listing.exitCode === 0) return listing.stdout;
+  // A parent that is not there is the usual failure, and telling so needs no privileges.
+  if ((await exec(transport, "test", ["-e", parent])).exitCode !== 0) return "";
+  const elevation = await elevationSupport(transport);
+  if (elevation === "available") {
+    assertSafeElevatedTarget(parent, root, describeRemoval(root));
+    listing = await execElevated(transport, "find", argv);
+    if (listing.exitCode === 0) return listing.stdout;
+  }
+  throw new Error(
+    `[wp/residue] ${describeTarget(transport)}: could not list "${parent}" to find the leftovers ` +
+      `named ${String(name)} (exit ${String(listing.exitCode)}: ` +
+      `${(listing.stderr || listing.stdout).trim() || "no output"}; elevation: ${elevation}).`,
+  );
+}
+
+/** What the declarations name on the site now, and the families that could not be looked for. */
+interface FoundResidue {
+  /** Every path found, relative to the root, each once. */
+  readonly paths: readonly string[];
+  /** Why each family that could not be listed could not be. */
+  readonly unlisted: readonly Error[];
+}
+
+/**
+ * Every path the declarations name on the site right now: the declared paths as they are, and each
+ * family expanded to its directories there. A family that cannot be listed does not stop the others,
+ * so removal can still clear what it can before saying what it could not look at.
+ */
+async function findResidue(
+  transport: Transport,
+  root: string,
+  declarations: readonly ResidueDeclaration[],
+): Promise<FoundResidue> {
+  const paths = new Set<string>();
+  const unlisted: Error[] = [];
+  for (const declaration of declarations) {
+    if (declaration.kind === "path") {
+      paths.add(declaration.path);
+      continue;
+    }
+    try {
+      for (const path of await expandFamily(transport, root, declaration)) {
+        paths.add(path);
+      }
+    } catch (error) {
+      unlisted.push(
+        error instanceof Error ? error : new Error(errorMessage(error)),
+      );
+    }
+  }
+  return { paths: [...paths], unlisted };
+}
+
+/**
+ * What a product's residue declarations name on the site right now — the paths as declared, and each
+ * family's directories as found — relative to the WordPress root. For a caller that must leave those
+ * paths alone, as a copy of the content directory must.
+ *
+ * @param transport - the target site's transport.
+ * @param declared - the product's declarations.
+ * @throws Error if a declaration is unusable, or a family's parent could not be listed.
+ */
+export async function resolveSiteResidue(
+  transport: Transport,
+  declared: readonly SiteResidue[],
+): Promise<readonly string[]> {
+  const declarations = declared.map(parseResidueDeclaration);
+  if (declarations.length === 0) return [];
+  const found = await findResidue(
+    transport,
+    await wpRootDir(transport),
+    declarations,
+  );
+  const [unlisted] = found.unlisted;
+  if (unlisted !== undefined) throw unlisted;
+  return found.paths;
 }
 
 /** Runs one command against the site — either as the transport's user, or with privileges. */
@@ -123,27 +428,75 @@ const DATA_DIR_MODE = "0777";
  * activation created a moment ago as WP-CLI. Ownership correction is best-effort by contract, which
  * is why the mode is applied independently rather than left to it.
  *
+ * A family is skipped: its directories have no name until the plugin picks one, so there is nothing
+ * to create here — see {@link prepareResolvedDataDirs}.
+ *
  * @param transport - the target site's transport.
- * @param paths - the product's declared paths, as {@link removeSiteResidue} takes them. Empty does
- * nothing at all, not even resolving the root.
- * @throws Error if a declared path is not a usable residue path (see {@link normaliseResiduePath}),
- * if the root is unusable for a privileged step (see {@link assertSafeElevatedTarget}), if a path is
- * a symbolic link rather than a directory, or if a directory can be neither created nor opened to
- * both users. Handing over ownership never throws; a host that cannot do it is warned about.
+ * @param paths - the product's declared paths, as {@link removeSiteResidue} takes them. Nothing to
+ * create does nothing at all, not even resolving the root.
+ * @throws Error if a declaration is not usable (see {@link parseResidueDeclaration}), if the root is
+ * unusable for a privileged step (see {@link assertSafeElevatedTarget}), if a path is a symbolic link
+ * rather than a directory, or if a directory can be neither created nor opened to both users.
+ * Handing over ownership never throws; a host that cannot do it is warned about.
  */
 export async function prepareSiteDataDirs(
   transport: Transport,
-  paths: readonly string[],
+  paths: readonly SiteResidue[],
 ): Promise<void> {
-  if (paths.length === 0) return;
   // Validated before the site is touched at all, so a typo in one declaration cannot leave the
   // others half-prepared.
-  const relative = paths.map(normaliseResiduePath);
+  const relative = paths
+    .map(parseResidueDeclaration)
+    .flatMap((declaration) =>
+      declaration.kind === "path" ? [declaration.path] : [],
+    );
+  if (relative.length === 0) return;
   const root = await wpRootDir(transport);
 
   for (const path of relative) {
     await prepareOneDataDir(transport, root, path);
   }
+}
+
+/**
+ * Prepares the data directories only the installed plugin can name, exactly as
+ * {@link prepareSiteDataDirs} prepares the declared ones — after **each** install, since an install
+ * is what draws the name.
+ *
+ * Every resolved directory must be one the product's residue declarations cover, or it would be
+ * opened up and then never removed; that is refused before anything is created.
+ *
+ * @param transport - the target site's transport.
+ * @param resolved - what the product's resolver answered, relative to the WordPress root.
+ * @param declared - the product's residue declarations, as {@link removeSiteResidue} takes them.
+ * @throws Error if a resolved path is unusable or undeclared, or on anything
+ * {@link prepareSiteDataDirs} throws for.
+ */
+export async function prepareResolvedDataDirs(
+  transport: Transport,
+  resolved: readonly string[],
+  declared: readonly SiteResidue[],
+): Promise<void> {
+  const declarations = declared.map(parseResidueDeclaration);
+  const paths = resolved.map((path) =>
+    normaliseSitePath(
+      path,
+      (reason) =>
+        `[wp/residue] the product resolved "${path}" as a data directory, which cannot be ` +
+        `prepared: ${reason}. A resolver answers paths relative to the WordPress root.`,
+    ),
+  );
+  const undeclared = paths.filter(
+    (path) => !isDeclaredResidue(path, declarations),
+  );
+  if (undeclared.length > 0) {
+    throw new Error(
+      `[wp/residue] the product resolved ${undeclared.map((path) => `"${path}"`).join(", ")} as a ` +
+        "data directory, but none of its residue declarations covers it, so it would be prepared and " +
+        "never removed. Declare it, or a family matching it, in `ProductConfig.siteResidue`.",
+    );
+  }
+  await prepareSiteDataDirs(transport, paths);
 }
 
 /**
@@ -178,6 +531,15 @@ async function prepareOneDataDir(
   // lexical check agreed. Measured: content outside the root was removed that way. Checked before
   // `mkdir`, which happily follows a linked parent and would hide it.
   await assertResolvedInsideRoot(transport, target, root, describe);
+  // The guard above lets a link that stays inside the site through — and `chmod` follows the link it
+  // is given: a data directory linked at the root would open the root itself `0777`, as root if need
+  // be. A data directory is a directory; a link where one belongs is refused, wherever it leads.
+  if ((await exec(transport, "test", ["-L", target])).exitCode === 0) {
+    throw new Error(
+      `[wp/residue] refusing to prepare "${target}": it is a symbolic link where the plugin's data ` +
+        "directory belongs, and opening it would open whatever it points at. Remove the link.",
+    );
+  }
   // `--` ends option parsing, as the ownership commands do. The guard above already proves
   // `target` is absolute so it cannot begin with a dash — this keeps that from being the only
   // thing standing between a future refactor and a flag.
@@ -252,6 +614,14 @@ async function removeEach(
   return survivors;
 }
 
+/** The wording removal uses when a path cannot be placed inside the site, shared by both guards. */
+function describeRemoval(root: string): (reason: string) => string {
+  return (reason) =>
+    `[wp/residue] refusing to remove leftover data: this site's WordPress root ("${root}") cannot ` +
+    `be used for it — ${reason}. Fix the site's \`rootDir\`, or declare a residue path that stays ` +
+    "inside the site.";
+}
+
 /**
  * Refuses a privileged `rm -rf` whose WordPress root is not a plausible site root.
  *
@@ -262,14 +632,6 @@ async function removeEach(
  * @param root - the site's resolved WordPress root.
  * @throws Error naming the value and the rule it broke.
  */
-/** The wording removal uses when a path cannot be placed inside the site, shared by both guards. */
-function describeRemoval(root: string): (reason: string) => string {
-  return (reason) =>
-    `[wp/residue] refusing to remove leftover data: this site's WordPress root ("${root}") cannot ` +
-    `be used for it — ${reason}. Fix the site's \`rootDir\`, or declare a residue path that stays ` +
-    "inside the site.";
-}
-
 function assertSafeElevatedRemoval(target: string, root: string): void {
   assertSafeElevatedTarget(
     target,
@@ -290,23 +652,59 @@ function assertSafeElevatedRemoval(target: string, root: string): void {
  * still ends up clean. Re-running is safe either way — a path that is already gone is simply
  * confirmed gone.
  *
+ * A family is expanded to its directories on the site now, so whatever an earlier, killed run left
+ * under such a name goes too. One whose parent cannot be listed does not stop the rest from being
+ * removed; it is reported once they have been.
+ *
  * @param transport - the target site's transport.
- * @param paths - paths relative to the WordPress root, as the product declared them. An empty
- * list does nothing at all, not even resolving the root, so a product that leaves nothing behind
- * pays nothing.
- * @throws Error if a declared path is not a usable residue path (see {@link normaliseResiduePath}),
- * or if the root is unusable for a privileged removal (see {@link assertSafeElevatedRemoval}); or
- * {@link SiteResidueRemovalFailedError} naming whatever survived, and how far privileges reached.
+ * @param paths - the product's declarations (see {@link parseResidueDeclaration}). An empty list does
+ * nothing at all, not even resolving the root, so a product that leaves nothing behind pays nothing.
+ * @throws Error if a declaration is not usable (see {@link parseResidueDeclaration}), if a family's
+ * parent could not be listed (naming any survivors too), or if a path or the root is unusable for
+ * removal (see {@link assertSafeElevatedRemoval}); or {@link SiteResidueRemovalFailedError} naming
+ * whatever survived, and how far privileges reached.
  */
 export async function removeSiteResidue(
   transport: Transport,
-  paths: readonly string[],
+  paths: readonly SiteResidue[],
 ): Promise<void> {
   if (paths.length === 0) return;
-  // Validate every path before touching the site: a typo in one declaration should not leave the
-  // site half-cleaned.
-  const relative = paths.map(normaliseResiduePath);
+  // Validate every declaration before touching the site: a typo in one should not leave the site
+  // half-cleaned.
+  const declarations = paths.map(parseResidueDeclaration);
   const root = await wpRootDir(transport);
+  const found = await findResidue(transport, root, declarations);
+  // Kept as thrown, so a `SiteResidueRemovalFailedError` still reaches the teardown as one.
+  let removal: Error | undefined;
+  try {
+    await removeFound(transport, root, found.paths);
+  } catch (error) {
+    removal = error instanceof Error ? error : new Error(errorMessage(error));
+  }
+  if (found.unlisted.length > 0) {
+    throw new Error(
+      [...found.unlisted, ...(removal === undefined ? [] : [removal])]
+        .map((error) => error.message)
+        .join("\n"),
+    );
+  }
+  if (removal !== undefined) throw removal;
+}
+
+/**
+ * The two removal passes over what was found — see {@link removeSiteResidue}.
+ *
+ * @param transport - the target site's transport.
+ * @param root - the site's resolved WordPress root.
+ * @param relative - the paths found, relative to it.
+ * @throws Error if a path or the root is unusable for removal; or
+ * {@link SiteResidueRemovalFailedError} naming whatever survived.
+ */
+async function removeFound(
+  transport: Transport,
+  root: string,
+  relative: readonly string[],
+): Promise<void> {
   const targets = relative.map((path) => posix.join(root, path));
 
   // Before **either** pass, not just the privileged one. A path that resolves outside the site must

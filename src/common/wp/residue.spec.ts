@@ -16,9 +16,13 @@ import { join } from "node:path";
 import { SiteResidueRemovalFailedError } from "./errors";
 import { resetOwnershipCaches } from "./ownership";
 import {
+  isDeclaredResidue,
   normaliseResiduePath,
+  parseResidueDeclaration,
+  prepareResolvedDataDirs,
   prepareSiteDataDirs,
   removeSiteResidue,
+  resolveSiteResidue,
 } from "./residue";
 import type { DockerTransport, LocalTransport } from "../config/types";
 
@@ -293,6 +297,34 @@ test.describe("removeSiteResidue — escalation", () => {
     }
   });
 
+  // The plugin writes as the web server, which can leave a family's parent unlistable by anyone else;
+  // the listing is retried with privileges as removal is. (This fake sudo cannot really read it, so
+  // the retry is observed and the failure still reported.)
+  test("retries a family listing it was refused, with privileges", async () => {
+    test.skip(isRoot, "root lists any directory");
+    const uploads = join(wpRoot, "wp-content/uploads");
+    seed(`wp-content/uploads/backwpup-restore-${TOKEN}`);
+    chmodSync(uploads, 0o311);
+    try {
+      await expect(removeSiteResidue(local, [FAMILY])).rejects.toThrow(
+        /could not list .*elevation: available/s,
+      );
+      expect(
+        sudoCalls().some((argv) =>
+          argv.startsWith(`-n -- find -H ${uploads} `),
+        ),
+      ).toBe(true);
+    } finally {
+      chmodSync(uploads, 0o755);
+    }
+  });
+
+  // A family whose parent is not there is the common case, and costs no privileged command.
+  test("does not escalate, or even probe, to find a parent that is not there", async () => {
+    await removeSiteResidue(local, [FAMILY]);
+    expect(sudoCalls()).toEqual([]);
+  });
+
   // A correctly-permissioned host must never run anything as root — not even the probe.
   test("does not escalate, or even probe, when the first pass succeeded", async () => {
     seed("wp-content/uploads/backwpup/abc123");
@@ -355,13 +387,6 @@ test.describe("removeSiteResidue — escalation", () => {
 });
 
 /**
- * Preparing the product's data directories.
- *
- * The property under test is the one the cell taught us: after this runs, a directory the plugin
- * writes must be writable by **every** user sharing the docroot — not merely by whoever created it.
- * Checked as a mode rather than by simulating two users, because the mode is the whole mechanism.
- */
-/**
  * Removal is guarded before **both** passes, not only the privileged one.
  *
  * A symlinked ancestor makes every lexical check agree while `rm -rf` deletes the referent —
@@ -387,6 +412,13 @@ test.describe("removeSiteResidue — a path that resolves out of the root", () =
   });
 });
 
+/**
+ * Preparing the product's data directories.
+ *
+ * The property under test is the one the cell taught us: after this runs, a directory the plugin
+ * writes must be writable by **every** user sharing the docroot — not merely by whoever created it.
+ * Checked as a mode rather than by simulating two users, because the mode is the whole mechanism.
+ */
 test.describe("prepareSiteDataDirs", () => {
   /** The permission bits of `path`, as an octal string. */
   const mode = (path: string): string =>
@@ -589,5 +621,409 @@ test.describe("prepareSiteDataDirs", () => {
     } finally {
       chmodSync(uploads, 0o700);
     }
+  });
+});
+
+/**
+ * Families — a parent and an anchored name pattern — for the directories a plugin names at runtime.
+ * Expanded against the real filesystem, so "what matched" is a property of `find` and the pattern,
+ * not of a stub.
+ */
+const FAMILY = {
+  parent: "wp-content/uploads",
+  name: /^backwpup-restore-[0-9a-f]{20}$/,
+};
+const TOKEN = "0123456789abcdef0123";
+
+test.describe("parseResidueDeclaration", () => {
+  test("reads a string as a path, normalised", () => {
+    expect(parseResidueDeclaration(" wp-content/uploads/./backwpup/ ")).toEqual(
+      {
+        kind: "path",
+        path: "wp-content/uploads/backwpup",
+      },
+    );
+  });
+
+  test("reads a family, its parent normalised", () => {
+    expect(
+      parseResidueDeclaration({ ...FAMILY, parent: "wp-content/./uploads/" }),
+    ).toEqual({
+      kind: "family",
+      parent: "wp-content/uploads",
+      name: FAMILY.name,
+    });
+  });
+
+  // An escaped `\$` is a literal dollar sign: `/^backwpup-restore\$/` matched "backwpup-restore$tail".
+  test("refuses a pattern not anchored at both ends", () => {
+    for (const name of [
+      /backwpup-restore-/,
+      /^backwpup-restore-/,
+      /backwpup-restore-x$/,
+      /^backwpup-restore\$/,
+    ]) {
+      expect(() => parseResidueDeclaration({ ...FAMILY, name })).toThrow(
+        /not anchored at both ends/,
+      );
+    }
+    expect(
+      parseResidueDeclaration({ ...FAMILY, name: /^backwpup-restore\\$/ }).kind,
+    ).toBe("family");
+  });
+
+  // Each passes the anchoring check and, unrefused, removed what it was never meant to (measured):
+  // another plugin's `other-plugin-<hex>`, and a media year folder.
+  test("refuses an alternation, which can leave a branch unanchored", () => {
+    for (const name of [
+      /^backwpup-restore$|-[0-9a-f]{20}$/,
+      /^20\d\d|^backwpup-restore-[0-9a-f]{20}$/,
+      /^backwpup-restore-(?:[0-9a-f]{20}|x)$/,
+    ]) {
+      expect(() => parseResidueDeclaration({ ...FAMILY, name })).toThrow(
+        /has an alternation/,
+      );
+    }
+  });
+
+  test("refuses a stateful pattern", () => {
+    expect(() =>
+      parseResidueDeclaration({ ...FAMILY, name: /^backwpup-restore-x$/g }),
+    ).toThrow(/global or sticky/);
+    expect(() =>
+      parseResidueDeclaration({ ...FAMILY, name: /^backwpup-restore-x$/y }),
+    ).toThrow(/global or sticky/);
+  });
+
+  // `/m` matched "2026\nbackwpup-restore-<hex>" — a name only partly the plugin's.
+  test("refuses a multiline pattern", () => {
+    expect(() =>
+      parseResidueDeclaration({ ...FAMILY, name: /^backwpup-restore-x$/m }),
+    ).toThrow(/multiline/);
+  });
+
+  // `/^[^.].*$/` is anchored and matches no WordPress directory by name — and every year folder and
+  // every other plugin's folder in `uploads`. A family is a fixed prefix and a tail.
+  test("refuses a pattern that does not open with a fixed prefix", () => {
+    for (const name of [
+      /^[^.].*$/,
+      /^[a-z0-9]+$/,
+      /^\.+$/,
+      /^ab$/,
+      /^abc?-x$/,
+      /^ab*c-x$/,
+    ]) {
+      expect(
+        () => parseResidueDeclaration({ ...FAMILY, name }),
+        String(name),
+      ).toThrow(/fixed prefix/);
+    }
+    expect(
+      parseResidueDeclaration({ ...FAMILY, name: /^abc-[0-9]+$/ }).kind,
+    ).toBe("family");
+  });
+
+  // `wp-content` + /^upload.*$/ would match `wp-content/uploads` itself.
+  test("refuses a pattern that would match a directory WordPress owns", () => {
+    expect(() =>
+      parseResidueDeclaration({ parent: "wp-content", name: /^upload.*$/ }),
+    ).toThrow(
+      /would match "wp-content\/uploads", a directory WordPress itself owns/,
+    );
+  });
+
+  test("holds the parent to the root rules, short of the root itself", () => {
+    expect(() =>
+      parseResidueDeclaration({ ...FAMILY, parent: "../elsewhere" }),
+    ).toThrow(/escapes the WordPress root/);
+    expect(() =>
+      parseResidueDeclaration({ ...FAMILY, parent: "/tmp" }),
+    ).toThrow(/absolute/);
+    expect(() => parseResidueDeclaration({ ...FAMILY, parent: "." })).toThrow(
+      /its parent is the WordPress root/,
+    );
+    expect(() =>
+      parseResidueDeclaration({ parent: "wp-admin", name: /^css-x$/ }),
+    ).toThrow(/its parent is unusable — it lies inside "wp-admin"/);
+  });
+
+  // "wp-content/uploads " names a directory nobody has, so the family would be silently empty.
+  test("refuses a parent with a segment edged by whitespace", () => {
+    for (const parent of [
+      "wp-content/uploads ",
+      " wp-content/uploads",
+      "wp-content /uploads",
+    ]) {
+      expect(
+        () => parseResidueDeclaration({ ...FAMILY, parent }),
+        JSON.stringify(parent),
+      ).toThrow(/whitespace/);
+    }
+  });
+});
+
+test.describe("isDeclaredResidue", () => {
+  const declarations = ["wp-content/uploads/backwpup", FAMILY].map(
+    parseResidueDeclaration,
+  );
+
+  test("covers a declared path and a directory of a declared family", () => {
+    expect(isDeclaredResidue("wp-content/uploads/backwpup", declarations)).toBe(
+      true,
+    );
+    expect(
+      isDeclaredResidue(
+        `wp-content/uploads/backwpup-restore-${TOKEN}`,
+        declarations,
+      ),
+    ).toBe(true);
+  });
+
+  // The shared path rules trim, so such a name could not be addressed exactly.
+  test("never counts a name edged with whitespace as a member", () => {
+    const [loose] = [
+      { parent: "wp-content/uploads", name: /^plugin-tmp\s?$/ },
+    ].map(parseResidueDeclaration);
+    if (loose === undefined) throw new Error("unreachable");
+    expect(isDeclaredResidue("wp-content/uploads/plugin-tmp", [loose])).toBe(
+      true,
+    );
+    expect(isDeclaredResidue("wp-content/uploads/plugin-tmp ", [loose])).toBe(
+      false,
+    );
+  });
+
+  test("covers nothing deeper, beside, above, or merely similar", () => {
+    for (const path of [
+      `wp-content/uploads/backwpup-restore-${TOKEN}/uploads`,
+      "wp-content/uploads/backwpup-restore",
+      "wp-content/uploads/backwpup-restore-0123",
+      `wp-content/uploads/backwpup-restore-${TOKEN.toUpperCase()}`,
+      `wp-content/backwpup-restore-${TOKEN}`,
+      "wp-content/uploads",
+    ]) {
+      expect(isDeclaredResidue(path, declarations), path).toBe(false);
+    }
+  });
+});
+
+test.describe("removeSiteResidue — families", () => {
+  test("removes every directory of the family, whatever its tail", async () => {
+    const first = seed(`wp-content/uploads/backwpup-restore-${TOKEN}/extract`);
+    const second = seed(
+      "wp-content/uploads/backwpup-restore-ffffffffffffffffffff",
+    );
+
+    await removeSiteResidue(local, [FAMILY]);
+
+    expect(existsSync(join(first, ".."))).toBe(false);
+    expect(existsSync(second)).toBe(false);
+  });
+
+  test("leaves its parent, the fixed sibling and every near miss alone", async () => {
+    seed(`wp-content/uploads/backwpup-restore-${TOKEN}`);
+    const kept = [
+      seed("wp-content/uploads/backwpup-restore"),
+      seed("wp-content/uploads/backwpup-restore-0123"),
+      seed(`wp-content/uploads/backwpup-restore-${TOKEN}-old`),
+      seed("wp-content/uploads/2026/10"),
+      seed(`wp-content/backwpup-restore-${TOKEN}`),
+    ];
+
+    await removeSiteResidue(local, [FAMILY]);
+
+    for (const dir of kept) {
+      expect(existsSync(join(dir, "archive.tar")), dir).toBe(true);
+    }
+  });
+
+  // A family names directories: a file of that name is not one, and a link is never followed.
+  test("leaves a matching file, and a matching link and what it points at", async () => {
+    const uploads = join(wpRoot, "wp-content/uploads");
+    mkdirSync(uploads, { recursive: true });
+    const file = join(uploads, `backwpup-restore-${TOKEN}`);
+    writeFileSync(file, "keep");
+    const outside = mkdtempSync(join(tmpdir(), "wp-residue-family-outside-"));
+    writeFileSync(join(outside, "keep.txt"), "keep");
+    const link = join(uploads, "backwpup-restore-ffffffffffffffffffff");
+    symlinkSync(outside, link);
+
+    try {
+      await removeSiteResidue(local, [FAMILY]);
+      expect(readFileSync(file, "utf8")).toBe("keep");
+      expect(existsSync(link)).toBe(true);
+      expect(existsSync(join(outside, "keep.txt"))).toBe(true);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("is fine when the parent directory is not there at all", async () => {
+    await expect(removeSiteResidue(local, [FAMILY])).resolves.toBeUndefined();
+  });
+
+  test("still removes the paths declared beside a family", async () => {
+    const backups = seed("wp-content/uploads/backwpup/abc123");
+    const restore = seed(`wp-content/uploads/backwpup-restore-${TOKEN}`);
+
+    await removeSiteResidue(local, ["wp-content/uploads/backwpup", FAMILY]);
+
+    expect(existsSync(backups)).toBe(false);
+    expect(existsSync(restore)).toBe(false);
+  });
+
+  // Measured before the rule: removal trimmed the member's name, deleted the *non-member* `plugin-tmp`
+  // and left the member — reporting success.
+  test("leaves a name edged with whitespace, and the trimmed name beside it", async () => {
+    const member = seed("wp-content/uploads/plugin-tmp ");
+    const other = seed("wp-content/uploads/plugin-tmp");
+
+    await removeSiteResidue(unprivileged(), [
+      { parent: "wp-content/uploads", name: /^plugin-tmp\s$/ },
+    ]);
+
+    expect(existsSync(member)).toBe(true);
+    expect(existsSync(other)).toBe(true);
+  });
+
+  // A relocated `uploads` is still where the plugin writes, so its directories are found through the
+  // link — measured before `find -H`: prepared, then never removed.
+  test("follows a parent that is a link inside the site", async () => {
+    mkdirSync(join(wpRoot, "wp-content/real-uploads"), { recursive: true });
+    symlinkSync(
+      join(wpRoot, "wp-content/real-uploads"),
+      join(wpRoot, "wp-content/uploads"),
+    );
+    const restore = seed(`wp-content/uploads/backwpup-restore-${TOKEN}`);
+
+    expect(await resolveSiteResidue(local, [FAMILY])).toEqual([
+      `wp-content/uploads/backwpup-restore-${TOKEN}`,
+    ]);
+    await removeSiteResidue(local, [FAMILY]);
+
+    expect(existsSync(restore)).toBe(false);
+    expect(existsSync(join(wpRoot, "wp-content/real-uploads"))).toBe(true);
+  });
+
+  // Listed through the link, a match then lies outside the site — refused before anything is removed.
+  test("refuses a parent that is a link out of the site, removing nothing", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "wp-residue-parent-outside-"));
+    mkdirSync(join(outside, `backwpup-restore-${TOKEN}`));
+    mkdirSync(join(wpRoot, "wp-content"), { recursive: true });
+    symlinkSync(outside, join(wpRoot, "wp-content/uploads"));
+    try {
+      await expect(removeSiteResidue(local, [FAMILY])).rejects.toThrow(
+        /outside it/,
+      );
+      expect(existsSync(join(outside, `backwpup-restore-${TOKEN}`))).toBe(true);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  // "Nothing matched" must never stand in for "could not look" — and one family that cannot be
+  // looked at must not keep the declared paths beside it on the site.
+  test("removes the other paths, then fails, when a parent cannot be listed", async () => {
+    test.skip(isRoot, "root lists any directory");
+    const backups = seed("wp-content/uploads/backwpup/abc123");
+    const uploads = join(wpRoot, "wp-content/uploads");
+    chmodSync(uploads, 0o311);
+    try {
+      await expect(
+        removeSiteResidue(unprivileged(), [
+          "wp-content/uploads/backwpup",
+          FAMILY,
+        ]),
+      ).rejects.toThrow(/could not list .*elevation: disabled/s);
+      expect(existsSync(backups)).toBe(false);
+    } finally {
+      chmodSync(uploads, 0o755);
+    }
+  });
+});
+
+test.describe("resolveSiteResidue", () => {
+  test("names the declared paths and the family's directories found now", async () => {
+    seed(`wp-content/uploads/backwpup-restore-${TOKEN}`);
+    expect(
+      await resolveSiteResidue(local, ["wp-content/uploads/backwpup", FAMILY]),
+    ).toEqual([
+      "wp-content/uploads/backwpup",
+      `wp-content/uploads/backwpup-restore-${TOKEN}`,
+    ]);
+  });
+});
+
+test.describe("prepareSiteDataDirs — families", () => {
+  test("creates nothing for a family, which names no directory yet", async () => {
+    await prepareSiteDataDirs(local, [FAMILY]);
+    expect(existsSync(join(wpRoot, "wp-content/uploads"))).toBe(false);
+  });
+});
+
+test.describe("prepareResolvedDataDirs", () => {
+  const DECLARED = ["wp-content/uploads/backwpup", FAMILY];
+  const mode = (path: string): string =>
+    (statSync(path).mode & 0o777).toString(8).padStart(4, "0");
+
+  test("prepares a resolved directory its family covers", async () => {
+    const resolved = `wp-content/uploads/backwpup-restore-${TOKEN}`;
+    await prepareResolvedDataDirs(local, [resolved], DECLARED);
+    expect(mode(join(wpRoot, resolved))).toBe("0777");
+  });
+
+  // Prepared and then never removed would be worse than not prepared.
+  test("refuses an undeclared directory before creating anything", async () => {
+    await expect(
+      prepareResolvedDataDirs(
+        local,
+        [
+          `wp-content/uploads/backwpup-restore-${TOKEN}`,
+          "wp-content/uploads/somewhere-else",
+        ],
+        DECLARED,
+      ),
+    ).rejects.toThrow(/"wp-content\/uploads\/somewhere-else".*never removed/s);
+    expect(existsSync(join(wpRoot, "wp-content/uploads"))).toBe(false);
+  });
+
+  test("refuses an answer that is no path inside the root, in a resolver's own words", async () => {
+    for (const [answer, rule] of [
+      ["/var/www/x", /absolute/],
+      ["../x", /escapes/],
+      ["wp-content/uploads", /WordPress itself owns/],
+    ] as const) {
+      await expect(
+        prepareResolvedDataDirs(local, [answer], DECLARED),
+        answer,
+      ).rejects.toThrow(
+        new RegExp(
+          `the product resolved "${answer.replace(/[./]/g, "\\$&")}" as a data directory.*${rule.source}`,
+          "s",
+        ),
+      );
+    }
+    expect(existsSync(join(wpRoot, "wp-content"))).toBe(false);
+  });
+
+  test("does nothing for a build that resolves no directory", async () => {
+    await expect(
+      prepareResolvedDataDirs(local, [], DECLARED),
+    ).resolves.toBeUndefined();
+    expect(existsSync(join(wpRoot, "wp-content"))).toBe(false);
+  });
+
+  // `chmod` follows the link it is given: measured before the refusal, a resolved directory linked at
+  // the WordPress root opened the root itself `0777`.
+  test("refuses a resolved directory that is a link, even one inside the site", async () => {
+    chmodSync(wpRoot, 0o755);
+    mkdirSync(join(wpRoot, "wp-content/uploads"), { recursive: true });
+    const resolved = `wp-content/uploads/backwpup-restore-${TOKEN}`;
+    symlinkSync(wpRoot, join(wpRoot, resolved));
+
+    await expect(
+      prepareResolvedDataDirs(local, [resolved], DECLARED),
+    ).rejects.toThrow(/is a symbolic link where the plugin's data directory/);
+    expect(mode(wpRoot)).toBe("0755");
   });
 });

@@ -215,6 +215,29 @@ touching the site rather than the page:
 - **It must be resolved before the backup under inspection.** A marker planted after a run cannot be
   in that run's archive, and an assertion looking for it would fail for the wrong reason.
 
+**Restoring** ([`restore.feature`](../../src/projects/backwpup/features/restore.feature),
+[`cli-restore.feature`](../../src/projects/backwpup/features/cli-restore.feature)) is judged by the
+same markers: back up, then `Given the site's marker data has changed since that backup` plants fresh
+values (remembered by **`changedMarkers`**), and after the restore each marker must hold the backed-up
+value where the restore was meant to reach and the changed one where it was not. The wizard is driven by
+the edition's **`restore`** page object (Pro's deep link, Free's upload); the command by
+`When I run the BackWPup restore command "restore {path to the newest backup} --yes --type=…"`, which goes
+through **`cliRestore`**. Three things about restoring a shared cell that the steps already handle, and a
+new restore step must too:
+
+- A files restore puts back the `debug.log` its archive holds, so the log so far is judged first, by the
+  `@plugin` gate's own rule (`checkDebugLog`) — before the command, and in the wizard again just before
+  "Start" (`restoreWith`'s `beforeStart`).
+- BackWPup's restore working directory must be writable by the web server — `handRestoreWorkingDirToSite`
+  before driving the wizard, since WP-CLI may have written there while the backup was arranged.
+- `wp backwpup restore --type=file|full` replaces `wp-content` wholesale and `--type=db|full` drops and
+  recreates the database, so the command runs only through `cliRestore` (the generic step refuses it). It
+  refuses a database holding anything the backup cannot bring back and a relocated `wp-content`, copies
+  `wp-content` before (as root, into a root-only `<root>/.e2e_content_copy/`; refused without passwordless
+  `sudo` — the command is then not run), puts it back exactly after the scenario, sets the database's default
+  collation back, and removes the scenario's own `--pre-backup` snapshot. A copy that could not go back stays,
+  and BackWPup runs refuse that site until someone settles it — the message says how.
+
 Use `site.transport` to drive the WordPress automation layer, and `page` (the
 standard Playwright fixture) for browser interaction. To install the zip under test,
 pass `pluginArtifact("plugin").zipPath` to
@@ -247,6 +270,7 @@ await stageAndInstallPlugin(site.transport, artifact.zipPath, {
 | `@smoke`    | Scaffolding/smoke scenarios; run with `--grep @smoke`.                                           |
 | `@free` / `@pro` | Edition scoping. An edition-ful cell auto-filters: a `pro` cell skips `@free` and vice-versa. |
 | `@visual`   | Visual-regression scenarios; group with `--grep @visual` and run in the Playwright container.    |
+| `@slow`     | Takes minutes by its nature — a real restore, say — so CI can split fast from slow. playwright-bdd triples the scenario's timeout (`test.slow()`). |
 
 `@plugin` and `@mobile` are both implemented in shared code, not per product — see
 [CLAUDE.md → Shared scenario hooks](../../CLAUDE.md#shared-scenario-hooks) and

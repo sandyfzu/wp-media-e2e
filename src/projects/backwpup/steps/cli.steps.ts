@@ -23,6 +23,7 @@ import {
   theScheduledJob,
 } from "../support/job-options";
 import { commandArgv } from "../support/placeholders";
+import { isRestoreCommand } from "../support/cli-restore";
 import { isObject } from "../../../common/guards";
 import { resolveIdentity } from "../../../common/artifacts/manifest";
 import type { CliLevel, CliResult } from "../support/cli";
@@ -61,14 +62,20 @@ import type { CliLevel, CliResult } from "../support/cli";
 When(
   "I run the BackWPup command {string}",
   async ({ cli, site, privateFolder, archives, keys }, command: string) => {
-    await cli.run(
-      await commandArgv(command, {
-        transport: site.transport,
-        privateFolder,
-        archives,
-        keys,
-      }),
-    );
+    const argv = await commandArgv(command, {
+      transport: site.transport,
+      privateFolder,
+      archives,
+      keys,
+    });
+    // Unguarded, a restore rewrites a shared site past what any teardown undoes.
+    if (isRestoreCommand(argv)) {
+      throw new Error(
+        `[backwpup/cli] \`${argv[0] ?? ""}\` must run through "I run the BackWPup restore command …", ` +
+          "which copies wp-content first and puts the site back afterwards.",
+      );
+    }
+    await cli.run(argv);
   },
 );
 

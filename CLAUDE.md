@@ -173,7 +173,8 @@ shared fixtures:
 
 BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds `onboarding`, `firstBackup`,
 `dashboard`, `dataSelection`, `frequency`, `storages`, `jobRun`, `backupHistory`, `restore`
-(edition-aware), `plugins`, `cli`, `markers`, `archives`, `privateFolder`, `keys`, `jobExports` and `tablePadding`. `cli` runs one `wp backwpup …`
+(edition-aware), `plugins`, `cli`, `markers`, `archives`, `privateFolder`, `keys`, `jobExports`, `tablePadding`,
+`changedMarkers` and `cliRestore`. `cli` runs one `wp backwpup …`
 subcommand and remembers the result for the step that asserts on it — for the feature where the
 **command is the system under test**, so a refusal is returned rather than thrown (`support/cli.ts`);
 use `support/backups.ts` when WP-CLI is only arranging or checking a site, since that one throws. A
@@ -195,7 +196,22 @@ each export is arranged, what "as they were" is measured against; `tablePadding`
 database with empty tables of its own (`<prefix>e2e_pace_NNN`) so a paced backup, which pauses once
 per table, lasts as long on every site — removed after the `@plugin` teardown, only if a step padded.
 Padding can never pile up (fixed names, and every padding drops the last first), and what a killed run
-left is dropped when the next BackWPup run's worker starts (`leftoverPaddingSweep`, automatic). See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
+left is dropped when the next BackWPup run's worker starts (`leftoverPaddingSweep`, automatic).
+`restore` drives the six-step restore wizard (`strategiesOffered`, `restoreWith`), every wait failing at
+once on the wizard's error line, the decryption prompt, the login screen, or what `WizardWatch` saw in its
+traffic since the page object was made — a stream reconnecting (a PHP failure after its headers) or answered
+with something else, a failed `controller=job` call, an uncaught error in the plugin's scripts;
+`changedMarkers` holds the values the markers were changed to after a backup, which a restore's untouched
+half must still hold. `cliRestore` runs `wp backwpup restore` so the shared cell ends as found — the only way
+to run it, the generic command step refuses it: refused on a database holding what `wp db reset` would
+destroy for good (tables outside the prefix, views, routines, events, triggers) or a relocated
+`wp-content`; `wp-content` copied as root into `<root>/.e2e_content_copy/` (root-only) before a files restore
+and put back exactly (`tar --recursive-unlink`) after the scenario, once no run is still in flight — a copy
+that cannot go back is kept and its way back spelled out, and every BackWPup worker refuses a site still
+holding one (`contentCopyLeftover`, automatic); the database's default collation set back; the scenario's
+own snapshots removed, watched on every run and told from other runs' by either changed marker. A files
+restore overwrites `debug.log`, so the restore steps judge the log so far first, and again just before
+"Start" (`checkDebugLog`, the `@plugin` gate's own rule). See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
 the pattern, the locator policy, and the locator-contract spec every page object carries.
 
 ## Shared scenario hooks
@@ -221,6 +237,9 @@ module so it is unit-testable without the runtime.
   directories (`ProductConfig.siteResidue`) are created, opened to **both** users sharing the
   docroot and handed to the site's ownership — WP-CLI and the web server are different users on a
   real cell, and whichever writes first would otherwise lock the other out (`prepareSiteDataDirs`).
+  A data directory the plugin names at runtime is resolved from the installed plugin after each
+  install (`ProductConfig.resolveSiteDataDirs`) and prepared the same way — BackWPup's
+  `uploads/backwpup-restore-<20 hex>`, which WP-CLI otherwise creates unwritable by the web server.
   A step that must reinstall part-way uses `replacePluginUnderTest` — the same install without the
   log reset, so the teardown still judges the scenario's whole log — with `declaredResidue`.
 - **After** — `debug.log` scanned with the product's preset: a **PHP fatal fails the
@@ -317,7 +336,12 @@ re-focus landing mid-fill otherwise diverts the password into the username box a
 fails much later as "login never settled".
 
 > **Traces carry site credentials.** Playwright records every `fill()` argument, so a
-> retained trace (`trace: "retain-on-failure"`) contains the site password. Treat
+> retained trace (`trace: "retain-on-failure"`) contains the site password — and BackWPup's restore
+> wizard renders the site's **database** password into its connection step's markup, which a trace's
+> DOM snapshots keep. Pro's restore deep link, and any message naming BackWPup's restore working
+> directory, carry that directory's 20-hex name: on nginx the only thing keeping it, and the database
+> credentials its `restore.dat` holds during a restore, from being served (the teardown removes it
+> after every scenario). Treat
 > `test-results/` and report artifacts as sensitive, exactly like the sites file. Login
 > failures are asserted in code rather than with `toHaveValue` so at least the failure
 > _message_ never quotes the password.
@@ -509,7 +533,10 @@ ssh). Highlights — full reference in
   `PROTECTED_TABLES` at declaration time, `PROTECTED_OPTIONS` against what the query actually matched
   — and that one refuses the **whole** sweep before deleting anything. Multisite is refused outright.
 - [`wp/residue.ts`](src/common/wp/residue.ts) removes the files a plugin leaves behind after it
-  is uninstalled, from the paths its product declares as `ProductConfig.siteResidue`. Validated
+  is uninstalled, from the paths its product declares as `ProductConfig.siteResidue` — a path, or a
+  family for the directories a plugin names at runtime (a parent, and a pattern that bounds the whole
+  name and opens with the plugin's fixed prefix), whose matching directories are found on the site.
+  Validated
   before removal and **verified afterwards**, never inferred from `rm`'s exit code. Removal runs
   unprivileged first and **escalates only what survived** (`execElevated`), because a plugin writes
   as the web-server user and leaves directories nobody else can empty; `prepareSiteDataDirs` opens
@@ -689,7 +716,8 @@ Update it when you change anything about:
 - The config factory (`createProductConfig`) or the project pairs it generates.
 - The metadata/credential registry (`registerPool`, `routingMetadata`), or the per-process
   registries that carry a product's policy to the shared hooks (`registerDebugLogOptions`,
-  `registerSiteResidue`, `registerSiteDbResidue`, `registerStopRunningWork`).
+  `registerSiteResidue`, `registerSiteDbResidue`, `registerSiteDataDirResolver`,
+  `registerStopRunningWork`).
 - Artifact directories, `RUN_ID` handling, or the `*_ROOT` env vars.
 
 ### docs/architecture/wordpress-automation.md
@@ -702,7 +730,9 @@ Update it when you change anything about:
 - The plugin lifecycle functions or their error types.
 - The debug-log API (`readDebugLog`, `clearDebugLog`, `scanDebugLog`, `ScanDebugLogOptions`).
 - File ownership (`ownership.ts`: `planOwnership`, `normalizeOwnership`, the grant rule,
-  `transport.fileOwner`) or the shared path guards (`paths.ts`).
+  `transport.fileOwner`) or the shared path guards (`paths.ts`, `pathInsideRoot`).
+- Residue declarations (`residue.ts`: `parseResidueDeclaration`, `SiteResidueFamily`,
+  `resolveSiteResidue`, `prepareResolvedDataDirs`, `isDeclaredResidue`).
 - The leftover-footprint sweep (`db-residue.ts`: `SiteDbResidue`, `findSiteDbResidue`,
   `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`).
 - The WP-Cron helpers (`cron.ts`: `nextScheduled`, `triggerScheduledEvent`).

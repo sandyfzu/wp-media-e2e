@@ -11,6 +11,7 @@ import { intEnv } from "./env";
 import {
   registerDebugLogOptions,
   registerPool,
+  registerSiteDataDirResolver,
   registerSiteDbResidue,
   registerSiteResidue,
   registerStopRunningWork,
@@ -146,6 +147,10 @@ export function createProductConfig(
   // And for the footprint it leaves in the site's *database* when its files go without its own
   // uninstall running — swept off what is found, not off whether the plugin is installed.
   registerSiteDbResidue(product.name, product.siteDbResidue);
+
+  // And for how to ask the installed plugin for the data directories it names at runtime, which the
+  // shared install prepares beside the declared ones — a function, so this is its only channel too.
+  registerSiteDataDirResolver(product.name, product.resolveSiteDataDirs);
 
   // And for how to stop work it may still be doing on a site, which the shared teardown asks for
   // before it removes the plugin — a function, so this registry is its only possible channel.

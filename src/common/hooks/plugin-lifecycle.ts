@@ -6,15 +6,29 @@ import {
 import { isEmptyDbResidue, removeSiteDbResidue } from "../wp/db-residue";
 import { clearDebugLog, scanDebugLog } from "../wp/log";
 import { ensurePluginAbsent, isPluginActive } from "../wp/plugin";
-import { prepareSiteDataDirs, removeSiteResidue } from "../wp/residue";
+import {
+  prepareResolvedDataDirs,
+  prepareSiteDataDirs,
+  removeSiteResidue,
+} from "../wp/residue";
 import { pluginSitePath } from "../wp/paths";
 import { stageAndInstallPlugin } from "../wp/staging";
-import { getSiteDbResidue, getSiteResidue } from "../config/metadata";
+import {
+  getSiteDataDirResolver,
+  getSiteDbResidue,
+  getSiteResidue,
+} from "../config/metadata";
 import { errorMessage } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
 import type { SiteDbResidue } from "../wp/db-residue";
+import type { TestInfo } from "@playwright/test";
 import type { ResolvedArtifact } from "../artifacts/types";
-import type { StopRunningWork, Transport } from "../config/types";
+import type {
+  ResolveSiteDataDirs,
+  SiteResidue,
+  StopRunningWork,
+  Transport,
+} from "../config/types";
 
 /**
  * The policy behind the {@link PLUGIN_TAG} scenario hooks: what "a freshly installed plugin under
@@ -36,10 +50,15 @@ import type { StopRunningWork, Transport } from "../config/types";
  * teardown's parameter list readable, which two more positional lists would not.
  */
 export interface DeclaredResidue {
-  /** Paths relative to the WordPress root — `ProductConfig.siteResidue`. */
-  readonly files: readonly string[];
+  /** Paths relative to the WordPress root, or families of directories — `ProductConfig.siteResidue`. */
+  readonly files: readonly SiteResidue[];
   /** The database footprint — `ProductConfig.siteDbResidue`. */
   readonly db: SiteDbResidue;
+  /**
+   * How to ask the installed plugin for the data directories it names at runtime —
+   * `ProductConfig.resolveSiteDataDirs`.
+   */
+  readonly resolveDataDirs?: ResolveSiteDataDirs | undefined;
 }
 
 /** A product that declares neither kind of leftover; every step below then costs nothing. */
@@ -53,7 +72,11 @@ const NO_RESIDUE: DeclaredResidue = { files: [], db: {} };
  * @param product - the product under test, from the project's routing metadata.
  */
 export function declaredResidue(product: string): DeclaredResidue {
-  return { files: getSiteResidue(product), db: getSiteDbResidue(product) };
+  return {
+    files: getSiteResidue(product),
+    db: getSiteDbResidue(product),
+    resolveDataDirs: getSiteDataDirResolver(product),
+  };
 }
 
 /**
@@ -75,10 +98,12 @@ export const PLUGIN_TAG = "@plugin";
  * Later additions widen that, and no longer marginally. Re-measured against the same box with
  * BackWPup's two declared data paths: **preparation ≈ 15 s** — per path a symlink probe, `mkdir`,
  * `chmod`, then the ownership handover's own probe, `chmod -R`, `chown -R` and verifying re-read —
- * and the plugin's own handover ≈ 1.8 s once the plan is cached. So **Before ≈ 30 s** on that link,
- * still well inside this budget, but the breakdown above is a floor and not a total. The cost is
- * round-trips rather than work: a product declaring many data paths would pay linearly, and batching
- * the paths into single commands is the lever if it ever matters.
+ * and the plugin's own handover ≈ 1.8 s once the plan is cached. So **Before ≈ 30 s** on that link.
+ * With a third declared path and the directory the installed plugin names at runtime (one `wp eval`
+ * to ask, then prepared like the others), measured over three rounds on `pro@nginx`: **Before
+ * 44–50 s, After ≈ 23 s** — about 2.4× inside this budget, where the breakdown above had 4–5×. The
+ * cost is round-trips rather than work: a product declaring many data paths pays linearly, and
+ * batching the paths into single commands is the lever when the margin needs widening.
  *
  * The leftover-footprint sweep adds **one `wp eval` per hook** on the ordinary path — a product that
  * declares one stops after the scan that finds nothing, and one that declares none pays no
@@ -170,7 +195,9 @@ export function extendedTimeout(current: number): number {
  * Last, the plugin's own **data directories are opened to both users** that share this site's
  * docroot. On a real cell WP-CLI and the web server are different users, and whichever of them
  * creates one of those directories first would otherwise lock the other out of it — see
- * {@link prepareSiteDataDirs} for the fatal that caused.
+ * {@link prepareSiteDataDirs} for the fatal that caused. That covers the declared directories and
+ * those the installed plugin names at runtime, asked of it first (`resolveDataDirs`) and prepared
+ * the same way ({@link prepareResolvedDataDirs}).
  *
  * @param transport - the target site's transport.
  * @param artifact - the resolved artifact under test. Its `slug` addresses the plugin without
@@ -178,9 +205,10 @@ export function extendedTimeout(current: number): number {
  * nothing to a remote `wp`.
  * @param residue - what this product leaves behind, on disk and in the database. Defaults to
  * neither, so a product that declares nothing pays nothing.
- * @throws Error if the artifact's slug is unusable, if the removal, the install or the directory
- * preparation fails, or {@link PluginActivationFailedError} if the plugin is not active afterwards.
- * Ownership normalisation is best-effort and never throws.
+ * @throws Error if the artifact's slug is unusable, if the removal, the install, asking the plugin
+ * for its runtime-named directories or the directory preparation fails (an undeclared one included),
+ * or {@link PluginActivationFailedError} if the plugin is not active afterwards. Ownership
+ * normalisation is best-effort and never throws.
  */
 export async function installPluginUnderTest(
   transport: Transport,
@@ -220,10 +248,17 @@ export async function replacePluginUnderTest(
   if (!(await isPluginActive(transport, artifact.slug))) {
     throw new PluginActivationFailedError(artifact.slug);
   }
+  // Asked of the plugin now installed, since each install names these anew — and asked before any
+  // directory is handed over, because asking boots WordPress over WP-CLI, as the transport's user.
+  const resolved =
+    residue.resolveDataDirs === undefined
+      ? []
+      : await residue.resolveDataDirs(transport);
   // After the install, because a fresh install is what removes the previous scenario's copy of these
   // directories; before any scenario step, because the first writer is otherwise whoever gets there
   // first. See `prepareSiteDataDirs` for the failure this prevents.
   await prepareSiteDataDirs(transport, residue.files);
+  await prepareResolvedDataDirs(transport, resolved, residue.files);
 }
 
 /**
@@ -264,6 +299,27 @@ export interface ScenarioReport {
   readonly failed: boolean;
   /** Attaches a text body to the scenario's report. */
   attach(name: string, body: string): Promise<void>;
+}
+
+/**
+ * Adapts Playwright's `TestInfo` to the narrow {@link ScenarioReport} the gate needs. In an `After`
+ * hook (a `test.afterEach`) `status` is the scenario's outcome, so the gate can tell one that already
+ * failed — and therefore wants the log attached — from a clean one. Inside a step it still reads
+ * `"passed"`, Playwright's starting value, so a scenario that has not failed yet reads as not failed.
+ *
+ * @param testInfo - the scenario's own test info.
+ */
+export function scenarioReport(
+  testInfo: Pick<TestInfo, "title" | "status" | "expectedStatus" | "attach">,
+): ScenarioReport {
+  return {
+    title: testInfo.title,
+    failed:
+      testInfo.status !== undefined &&
+      testInfo.status !== testInfo.expectedStatus,
+    attach: (name, body) =>
+      testInfo.attach(name, { body, contentType: "text/plain" }),
+  };
 }
 
 /**
@@ -395,7 +451,7 @@ async function stopWorkLeftRunning(
  */
 async function sweepResidue(
   transport: Transport,
-  residue: readonly string[],
+  residue: readonly SiteResidue[],
   report: ScenarioReport,
 ): Promise<void> {
   try {
@@ -438,9 +494,16 @@ function toError(value: unknown): Error {
  * attaches nothing, and what is attached is bounded ({@link boundLogForAttachment}), so reports
  * stay small either way.
  *
+ * Also exported for a step about to **overwrite** the log — a restore puts back the `debug.log` its
+ * archive holds, which would hide whatever PHP logged since the backup from the teardown's reading —
+ * so the log so far is judged first, by the same rule.
+ *
+ * @param transport - the target site's transport.
+ * @param options - the product's `debug.log` scan preset.
+ * @param report - the scenario's result and attachment sink.
  * @throws {@link DebugLogFatalError} when the scan matched at least one fatal.
  */
-async function checkDebugLog(
+export async function checkDebugLog(
   transport: Transport,
   options: ScanDebugLogOptions,
   report: ScenarioReport,

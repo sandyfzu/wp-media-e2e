@@ -777,7 +777,7 @@ actionability wait can stall right after an in-session deactivate); await the **
 action links are gone — WordPress's in-place row removal is unreliable under automation, so the reloaded
 DOM is the authoritative check. Throws the distinct errors above. Routine setup/teardown always uses the
 faster CLI `ensurePluginAbsent`. *(WP Rocket's own post-delete "delete data" page is not yet exercised —
-to be verified when porting WP Rocket in Phase 6.)*
+to be verified when porting WP Rocket, after Phase 10.)*
 
 ### 7.4 Other ported capabilities
 
@@ -988,7 +988,7 @@ pixel difference, and masking ignores a differing region. The `@visual` scenario
 
 **Phase 6 — Feature porting (per product) — improve, don't copy.** Rewrite to modern idioms
 (web-first assertions, role/label locators, fixtures, `storageState`); port auth, POM, tag-scoped hooks,
-and the `debug.log` scan; migrate `wp-rocket` and `backwpup`. The **editions** model (§4.5) is already
+and the `debug.log` scan; migrate `backwpup` (`wp-rocket` is deferred until after Phase 10 — see below). The **editions** model (§4.5) is already
 in place (`Edition` type, per-cell `edition` in routing metadata, the all-or-none check, `editionFilter`,
 the `edition` fixture); what remains here is tagging scenarios `@free`/`@pro` (untagged = both) and the
 **plugin-install hook**, which must:
@@ -1017,6 +1017,11 @@ optimization moved with it.
 
 **Phase 10 — Cleanup & validation.** `deps:check` (e.g. `depcheck`) to catch unused deps; ensure no
 dropped dependency reappears; `lint`/`typecheck`/`format:check` green; reports generate. Remove any mention of the Phases in codebase comments, etc.
+
+**After Phase 10 — WP Rocket feature porting.** Deferred out of Phase 6 (decided 2026-10-06): Phase 6
+closes on BackWPup alone, and WP Rocket's port starts once Phase 10 is done, on the same rails and
+recipe. Scope and approach:
+[phase-6-feature-porting-plan.md §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket).
 
 ---
 

@@ -1,6 +1,6 @@
 # Phase 6 — Feature porting: BackWPup first
 
-> **Status:** in progress — **6A, 6B, 6C, 6D, 6E, 6F and 6G.0 are done** (6G.0 shipped, §2.25, §4.6G.0); **6G next**; 6G–6K planned (6K — restore from `.zip` and `.tar.gz` — added 2026-10-05, last in the sequence and required to close the phase);
+> **Status:** in progress — **6A, 6B, 6C, 6D, 6E, 6F, 6G.0, 6G and 6G.1 are done** (6G shipped with 6G.1 folded in, §2.28, §4.6G; audited, §2.29; 6G.1 closed, §2.30); **6H next**; 6H–6K planned (6K — restore from `.zip` and `.tar.gz` — added 2026-10-05, last in the sequence and required to close the phase);
 > **6H.2 deferred** (needs storage credentials — see §4.6H.2).
 > **Date:** 2026-07-28; revised 2026-07-30 (§2.3 re-verification at the ref; storage split),
 > 2026-07-31 (§2.5 — post-implementation audit of 6B; four corrections, all verified live),
@@ -68,22 +68,36 @@
 > and 2026-10-05 (§2.26 — **V188**: a killed run's padding is swept by the next BackWPup run) and
 > 2026-10-05 (§2.27, §4.6G, §4.6K — **6G widened, 6K added**; **V189–V192** added. 6G now also restores
 > backups *made* files-only or database-only, and asserts the half a partial restore skips is untouched;
-> `.zip` and `.tar.gz` restores — each unpacked by different code, in the UI and the CLI alike — are 6K).
+> `.zip` and `.tar.gz` restores — each unpacked by different code, in the UI and the CLI alike — are 6K)
+> and 2026-10-05 (§4.6G.1 — **6G.1 added**: the latest stable BackWPup restores in
+> `uploads/backwpup-restore-<hash>`, which the teardown's literal residue paths never clear; to be
+> measured when the sub-phase starts) and 2026-10-05 (§2.28, §4.6G — **6G shipped, 6G.1 folded in**;
+> **V193–V208** added. `develop` had moved to `a612005`, whose hashed restore directory, created by a
+> WP-CLI listing, broke the backup history page and every restore on Pro — so 6G.1 could not wait; the
+> command-line restore turned out to delete what its archive does not hold, reset the database's
+> collation and leave a world-readable snapshot in `/tmp`, so it now runs behind a copy of `wp-content`
+> that is put back; and a restore was shown to overwrite the `debug.log` the fatal gate reads) and
+> 2026-10-06 (§2.29, §4.6G — **6G audited**, adversarially; **V209–V225** added: residue families,
+> the command-line restore's guard and the wizard's waits hardened, each finding reproduced first; the
+> re-run found Ubuntu's tar refusing the put-back, which the guard contained and the copy's new layout
+> fixes) and 2026-10-06 (§2.30 — **6G.1 closed**; **V226–V227** added: its open questions answered from
+> the source, and a killed run's restore directory swept live; files backups capture the restore
+> directory, credentials included when a restore was abandoned — a plugin bug).
 > **Parent:** [e2e-modernization-plan.md](e2e-modernization-plan.md) §9, Phase 6 — this doc supersedes
 > that phase's summary. Phases 0–5 are done; Phase 6 is **feature content on finished rails**.
 > **Baseline (reference only):** `wp-rocket-e2e/src/backwpup/` — 12 feature files, 28 scenarios, ~1.6k LoC.
 
 ## TL;DR
 
-Phase 6 splits into **thirteen sub-phases**, of which 6F is broken down further (6F.0–6F.4). **6A** lands the shared rails every product needs (plugin
+Phase 6 splits into **fourteen sub-phases**, of which 6F is broken down further (6F.0–6F.4). **6A** lands the shared rails every product needs (plugin
 install/cleanup hooks, the debug-log gate, `@mobile`, an anti-pattern lint gate). **6B–6I** port
 BackWPup — **page objects first (6B)**, then onboarding → backup & history → plugin deletion →
 WP-CLI → restore → the storage credential surface → Free-edition coverage + the parity gate. The
 storage *round-trips* are carved out as **6H.2** and **deferred** until credentials exist, so no
 other sub-phase waits on them. **6J** is shared rails again, product-agnostic like 6A: it keeps the
-staging area off the web. **6K** closes the restore work: `.zip` and `.tar.gz` archives, after 6G's `.tar`. WP Rocket reuses 6A and gets its own breakdown afterwards (§6).
+staging area off the web. **6G.1**, shipped with 6G, handles the restore directories the latest stable release names with a random suffix. **6K** closes the restore work: `.zip` and `.tar.gz` archives, after 6G's `.tar`. WP Rocket reuses 6A and gets its own breakdown, **deferred until after Phase 10** (§6).
 
-**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → 6F ✅ (6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → 6F.3 ✅ → 6F.4 ✅) → 6G.0 ✅ → **6G** → 6H → 6I → 6J → 6K → *(later)* 6H.2. 6J depends on nothing and can be pulled forward; 6K needs only 6G.
+**Execution order:** 6A ✅ → 6B ✅ → 6C ✅ → 6D ✅ → 6E ✅ → 6F ✅ (6F.0 ✅ → 6F.1 ✅ → 6F.2 ✅ → 6F.3 ✅ → 6F.4 ✅) → 6G.0 ✅ → 6G ✅ (with 6G.1 ✅) → **6H** → 6I → 6J → 6K → *(later)* 6H.2. 6J depends on nothing and can be pulled forward; 6K needs only 6G.
 
 Every artifact follows **Understand → Improve → Adapt → Port** (§1): read the baseline for *intent*,
 verify the plugin's real contract in source, pick the strongest signal Playwright/WP-CLI offers, then
@@ -924,6 +938,73 @@ the usual rule. Every file cited below is byte-identical in Free and Pro.
 | V191 | **Each format is extracted by different code, and the UI and the CLI do not share it.** UI: `.tar` → `PharData`, `.tar.gz` → PEAR `Archive_Tar`, `.zip` → its own file-by-file extractor with progress events. CLI: `.zip` → `ZipArchive`, `.tar.gz` → `PharData::decompress` then extract, `.tar` → `PharData`. | `Decompressor.php:244-311,379-402`; `src/Cli/Helpers/CommandsRestoreHelpersTrait.php:50-100`. | A `.tar` restore proves nothing about the other two, in either entry path, so the format axis is real (6K). The content axis is not: the extractor is chosen by extension and never by contents, so 6K restores mixed backups only and does not multiply by contents. |
 | V192 | **CLI `--type=full\|db\|file` is the strategy choice of the UI screen**, defaulting to `full`. | `src/Cli/Commands/Restore.php:90-94`. | 6G's CLI scenarios use it the way the UI ones use the strategy buttons. |
 
+
+### 2.28 Facts established measuring 6G (2026-10-05, live on `pro@nginx`, `develop@a612005`)
+
+Measured on `simple.e2e` with the repo's own modules driving a fresh install, the plugin's own
+onboarding seeding, a real backup (~412 MB `.tar`) and the restore — in the browser (Playwright,
+headless) and over WP-CLI — after every backup the two markers changed, and the site's state read
+before and after. Free was measured on the same site with the Free build of the same commit. The site
+was left as found; what the CLI measurements broke was repaired with the user's approval (V205).
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V193 | **`develop` moved past `af1ab5c` on 2026-10-02 (`a612005`).** `214ad9d` names the restore working directory per install and sweeps abandoned ones after 6 h; `8c912a9` runs a scheduled job inside the WP-Cron request (and only there: `wp_doing_cron()`); `59b6fd9` releases the archive before a restart. The CLI restore and the wizard's views and scripts are unchanged. | `gh api …/compare/af1ab5c1...a6120057`; both builds unpacked and diffed. | 6G is measured and built at `a612005`; V189–V192 re-checked there (V199, V204). |
+| V194 | **The restore working directory is `uploads/backwpup-restore-<20 hex>`, and on Pro a WP-CLI backup listing creates it unwritable by the web server.** `wp backwpup backup` reaches `restore_registry()` through Pro's folder destination, which creates the directory as the transport's user (`ubuntu:ubuntu 0775`, `restore.dat 0664`); the next admin page that lists backups dies on an uncaught `FileSystemException` ("Restore working directory … is not writable, protection files cannot be created") — HTTP 500. Free's listing never reaches it. The name lives in `backwpup_restore_dir_token`, drawn on first need. | `commons.php` `restore_dir_name()`, `ensure_uploads_folder_protected()`; `WorkingDirectoryProtector::protect()`; reproduced on the history page at 19:00:53. | A plugin regression (an uncaught exception where `af1ab5c` only failed softly) to report upstream. The suite prepares the directory after every install from the plugin's own `restore_dir_name()` (`ProductConfig.resolveSiteDataDirs`, V196). |
+| V195 | **Prepared, the directory still fails the wizard once WP-CLI has written `restore.dat` in it.** *(Corrected by V220: the answer was a stream that ended, not an HTML page.)* A listing recreates `restore.dat` (`ubuntu 0664`) whenever the last restore's cleanup removed it; every wizard request then dies on "Could not write Registry file", answering its event stream with an HTML error page — and the browser's `EventSource` reconnects every ~3.5 s for ever, the page stuck on step 1. | Run 2: the `download` stream fataled every ~3.5 s from 19:16:52 until the run was stopped, `restore.dat` owned by `ubuntu`. After `normalizeOwnership` on the directory the same backup restored. | `handRestoreWorkingDirToSite` before a UI restore; the page object fails at once on a stream answered with anything but `text/event-stream` (the type `EventSource.php` sends). |
+| V196 | **The suite's residue declaration could not reach the new directories**: each install draws a new name, and `uploads/backwpup-restore` matched none of them. A backup also captures the staging area (`.e2e_temp/plugins/<zip>`) and the restore directory's protection files. | Listing after setup; the archive's members. | Residue declarations take a name prefix ending in `*` (`wp-content/uploads/backwpup-restore-*`), expanded on the site to directories only; preparation of a resolved directory requires a declaration covering it. *(Superseded by V209: a family is a parent and a pattern bounding the whole name — `^backwpup-restore-[0-9a-f]{20}$` — not a `*` prefix.)* |
+| V197 | **Pro's deep link names the archive twice and has the server fetch it.** `file` is the archive in `uploads/backwpup/<hash>/backups/`, `restore_file` the slot in the restore directory's `uploads/` it is copied to, `service=folder`; the click adds `step=1&trigger_download=1&_wpnonce`, the server copies (`download`) and unpacks it, and the dropzone is hidden. 412 MB: step 1 → 2 in 5 s. | Run 3's URLs; `controller.js` `triggerDownloadByUrlQuery`. | **Corrects V13**, which had `restore_file` pointing at the archive in place. `ProRestorePage.expectEntryPath(archive)` holds both to the archive restored, `trigger_download=1`, and the dropzone hidden. |
+| V198 | **The wizard is six page loads.** 2 strategies → 3 database connection → 4 URL migration (Pro only: `migrate_allowed = is_pro()`) → 5 Start → 6 report; *Files Only* goes 2 → 5, Free 3 → 5. Step 3 renders `DB_PASSWORD` into `#db_pw`'s `value`. Step 6 shows "Success", or "Restore Report" when the restore log holds errors (its `count( $message )` on a string would `TypeError` then — source only). Files took 21 s, the database 7–9 s. | Runs 3–7, 9; `views/restore/steps/*`, `TemplateLoader::createBindFromStep()`. | `restoreWith` follows the URL step by step (two hops at most), asserts "Success", and fails at once on the wizard's error line, a broken stream or the login screen. Traces carry the database password (CLAUDE.md). |
+| V199 | **V189 holds live.** Mixed offers all three; database-only (`["DBDUMP"]`) only *Database Only*; files-only (`["FILE","WPPLUGIN"]`) only *Files Only*. Each partial restore restores its half and leaves the other changed. | Runs 4–7. | 6G's contents and strategy scenarios. |
+| V200 | **A database restore keeps the admin session only if it predates the backup.** The restored `session_tokens` know the login the run's auth setup made; a login made after the backup lands on `wp-login.php?reauth=1` at step 6 (`login_user_again()` skips the cookie once headers are sent). | Run 3 (login after the backup) vs runs 4–7 (before). | No re-authentication needed: the suite's login is made before every scenario's backup. The page object names the cause if the session is lost. |
+| V201 | **A restore puts back the `debug.log` its archive holds.** The fatals logged between run 2's backup and its restore were gone after run 3's full restore (many → the one logged before the backup). | `grep -c Fatal` before and after. | The restore steps judge the log so far by the `@plugin` gate's rule (`checkDebugLog`) before restoring. |
+| V202 | **After a database restore the backup's own run is "in progress" again** — the dump was taken mid-run — and the history lists no backup. | Run 1's history ("No backup was found"); the `@plugin` teardown's stop-running-work report. | Reported by the teardown, not failed; nothing to stop. |
+| V203 | **Free re-uploads through the browser.** The row's action is the bare `page=backwpuprestore`; the history download took 27.6 s for 411 MB, the upload (plupload, 2 MB chunks) 168 s; then the same wizard, 3 → 5. | Run 9. | One `@free` scenario, budgeted for the upload. |
+| V204 | **`wp backwpup restore … --yes --type=db\|file\|full`: exit 0, `Success: Restore completed successfully.`**, 9.9 / 7.1 / 12.7 s; each type restored its half only. Its workspace `/tmp/backwpup-restore-<uniqid>` is removed. | The CLI rounds, 21:15–21:19. | V192 holds; the CLI scenarios assert by the markers. |
+| V205 | **A files restore replaces `wp-content` wholesale and deletes what its archive does not hold.** It empties `wp-content` but for `plugins/backwpup*`, then copies the archive's tree back as the transport's user: 16 273 entries `ubuntu`, files `0664`; deleted for good were empty directories, a `.donotbackup` folder and files the job's default exclusions skip (`.git*`, `.tmp`) — 20 entries of the site and two other plugins. | Trees before and after; repaired from the plugins' wordpress.org zips with the user's approval. | `cliRestore` copies `wp-content` with root `tar` before such a command (refused without sudo, the command then not run) and puts it back after the scenario. A plugin bug to report: a restore deletes data it never backed up. |
+| V206 | **`wp db reset` recreates the database with the server's default collation** — `utf8mb4_0900_ai_ci` against the siblings' `utf8mb4_general_ci`; the tables keep theirs from the dump. | `information_schema.SCHEMATA` after the CLI rounds. | Read before, set back after (`ALTER DATABASE`). |
+| V207 | **`--pre-backup` leaves its snapshot in the temp directory, never removed**: `db.sql` (`0664`, readable by every local account) and a copy of `wp-content` — 752 MB with the archives — under a `1777` directory. It prints `Success: Pre-backup created.` first. | `/tmp/backwpup-snapshot-6ac4143fe8c876.55994123`. | The scenario asserts the snapshot holds the site as it was (the changed markers) and removes it — only one holding its own marker, since other runs share the server's temp directory. A plugin bug to report. |
+| V208 | **The 5.7.7 release names the restore directory the same way.** Tag `5.7.7` (`850263d6`, published 2026-10-05) defines `restore_dir_name()` and `RESTORE_DIR_TOKEN_PATTERN = 'backwpup-restore-[0-9a-f]{20}'`, and its `src/Cli/Commands/Restore.php` is byte-identical to `a612005`'s (same blob). `f1ebfd0` does not have it. | `gh api …/contents/…?ref=850263d6`; the cached `5.7.7` builds. | §4.6G.1's premise holds for the latest stable as for `develop`; the family pattern is the plugin's own. |
+
+### 2.29 Facts established auditing 6G (2026-10-06)
+
+An adversarial audit — three independent reviews (the shared rails, the command-line restore's
+guard, the wizard's page object) and this phase's own — each finding reproduced before it was fixed:
+locally against real directories over the `local` transport, GNU tar in a Debian container, the
+plugin's own source, or read-only on `simple`. No restore had passed for the wrong reason; what was
+found were destructive edges in the guards, failures that surfaced slowly or not at all, and claims
+the code did not keep.
+
+| # | Fact | Evidence | Consequence |
+| - | ---- | -------- | ----------- |
+| V209 | **A family's lexical anchor check let a loose pattern delete what it should not.** `^…$` passed with an alternation (`/^backwpup-restore$\|-[0-9a-f]{20}$/` removed `uploads/other-plugin-<hex>`; `/^20\d\d\|^…$/` removed a media year folder), an escaped `\$`, or `/m`; `/^[^.].*$/` matched every directory in `uploads`, where no WordPress-owned name could refuse it. | Local experiments through `removeSiteResidue` / `isDeclaredResidue`. | A family pattern must make `^`…`$` bound the whole name (unescaped `$`, no `\|`, no `m`, `g` or `y`) and open with a literal prefix of three characters at least; paths inside `wp-admin`/`wp-includes` are refused outright. |
+| V210 | **`chmod` follows a data directory that is a link — even one inside the site.** `assertResolvedInsideRoot` accepts a target resolving to the root itself; a resolved directory linked at the root opened the root `0755 → 0777`. | Local experiment through `prepareResolvedDataDirs`. | Preparation refuses a final-component link wherever it leads (removal was already safe: `rm -rf` removes the link). |
+| V211 | **A family member edged with whitespace was mis-addressed.** The shared path rules trim, so removal of `plugin-tmp ` deleted the non-member `plugin-tmp` and left the member, reporting success. | Local experiment. | Such a name is never a member; a parent with a whitespace-edged segment is refused at declaration. |
+| V212 | **`find` without `-H` lists nothing through a parent that is a link**, so a family under a relocated `uploads` was prepared and never removed; a parent the transport's user cannot list aborted the whole removal, the fixed paths included (a regression on the code before 6G). | Local experiments (BSD `find`; GNU documents the same `-P` default). | `find -H`, every match still held to the root; the listing escalates as removal does; one unlisted family no longer stops the rest, and fails the teardown after them. An absent parent is told without privileges. |
+| V213 | **`@slow` triples a scenario's timeout** — playwright-bdd calls `testInfo.slow()` — where the docs said "no runtime effect". | `node_modules/playwright-bdd/dist/runtime/bddTestFixtures.js:25`. | Docs corrected. |
+| V214 | **After a timeout Playwright still tears down — `afterEach` hooks, then test fixtures — in one slot of the larger of the project and test timeouts, while the abandoned test function keeps running.** A restore command still running when its step timed out would have raced the put-back. | `node_modules/playwright/lib/worker/workerProcessEntry.js:1661-1678`. | `CliRestore.release` waits for a run in flight (bounded, 10 min) and puts nothing back under a command still running. |
+| V215 | **The full suite's one `pro@nginx` failure was the runner, not the product.** The renderer stopped answering for 8.5 s (polls and screencast frames stopped) while the plugin had already replaced the history's placeholder row and the server answered every call in ~0.6 s. | The trace; the scenario then passed 3/3. | No change; recorded so the next failure of that shape is read the same way. |
+| V216 | **A plain `tar -xpf` cannot put a rewritten tree back: it exits 2 on a type conflict half-done**, leaving a root-owned directory where a file was. **`--recursive-unlink` mirrors the copy exactly** — what the command added removed, owners, modes and hard links restored, a link where a directory was replaced and never followed. | GNU tar 1.34 in `debian:bookworm-slim`; the cells run 1.35. | The put-back uses it, so nothing that parsed `tar`/`find` listings to hand "gained" entries over remains — which also removes a filename-steered root `chmod`/`chown` path. *Corrected by V223: the copy must not be of `.`.* |
+| V217 | **The worker's teardown removes the whole staging area**, so a copy kept in the scenario's private folder could survive neither a failed put-back nor a run killed after the restore. | `wp/teardown.ts` `releaseSite` → `cleanSiteStaging(transport)`. | The copy lives in a root-only `<root>/.e2e_content_copy/`, removed only once back; a failed put-back keeps it and spells out the way back, and every BackWPup worker refuses a site still holding one. |
+| V218 | **Exit 1 is ambiguous for a privileged `tar`.** GNU tar exits 1 when a file changed — or shrank, padding the copy with zeros — and `sudo -n` exits 1 when it refuses; `sudo -n true` succeeding does not prove another command is allowed. A refused `sudo du` answered nothing, which read as `0` KB. | Reproduced in a container with a limited sudoers. | Exit 1 is accepted only when every complaint is a file that changed or went while read; the copy must list back whole; the room check needs whole numbers. |
+| V219 | **`wp db reset` drops the whole database, and BackWPup dumps only the site's prefixed tables**, so anything else there — another prefix's tables, views, routines, events, triggers — would be lost for good; the copy guarded `<root>/wp-content` while the command replaces `WP_CONTENT_DIR`. `simple` holds nothing outside `wp_`, its `WP_CONTENT_DIR` is `<root>/wp-content` (no link), and no ACLs. | `inc/class-jobtype-dbdump.php:54-57`; `Restore.php:163, 192`; read-only probe; `getfacl -R -s`. | The command is refused on a site breaking either premise. ACLs and xattrs are not kept (none on the cells). |
+| V220 | **V195 corrected: the wizard's failing streams were stream-typed.** Every streamed action sends `text/event-stream` and flushes before any work, so a fatal after that is a stream that *ends* — and the browser reconnects it, re-running the action, every few seconds for ever; an HTML or non-200 answer instead closes the `EventSource` for good (one request). The broken-stream check would therefore not have caught V195's failure (a 15-min timeout instead), and one answered before a wait began went unseen. | `AjaxHandler.php:387`, `EventSource.php:28-40`; Chromium measured by the reviewer (20 requests in 6 s; one). | `WizardWatch`, armed with the page object: a second request for a stream on one page, a non-200 or non-stream answer, a failed `controller=job` call, an uncaught error in the plugin's own scripts — remembered, so a wait begun later still fails at once. |
+| V221 | **The wizard's steps 2–5 `POST` `controller=job` calls answered through `wp_send_json_*`;** on an HTML answer its failure handler throws (`responseJSON` is undefined) and prints nothing, and step 3's connection failure only printed the error line while the page object's in-between wait watched for nothing. | `AjaxHandler.php:521, 591`; `strategy.js`, `database.js`. | Those calls are watched; every wait goes through `untilStep` with all its signals, the decryption prompt included. |
+| V222 | **A files restore writes the archive's `debug.log` back**, so what the wizard's requests logged from the dashboard to "Start" was overwritten unread. | `RestoreFiles` excludes no `debug.log`; V201. | The log is judged again just before "Start"; what the restore's own files request logs before it writes the log back is the one stretch no reading reaches. |
+| V223 | **V216 corrected: Ubuntu's GNU tar 1.35 refuses to unlink `.` under `--recursive-unlink`** (`.: Cannot unlink: Invalid argument`, exit 2) — Debian's 1.34 and Alpine's 1.35, where V216 was measured, do not. Live, the first command-line restore's put-back failed so; the guard kept the copy, and the worker gate refused the 30 scenarios after it, so nothing else ran on the site. `wp-content` then read identical to the copy — no `tar --diff` difference, 16 282 entries both ways — the unlink of `.` itself the only step that failed. | The audit run's log; reproduced in `ubuntu:24.04`; read-only comparison on `simple`. | The copy is taken from the WordPress root with `wp-content` as its member, and put back into the root — exact on all three builds and on `simple` (a copy put straight back reads identical: paths, modes, owners, sizes, modification times). The kept copy was removed once proven redundant. |
+| V224 | **tar's default format rounds modification times down to the second; `--format=posix` keeps them to the nanosecond.** `simple`'s `wp-content` lost its sub-second parts to the failed put-back — harmless (PHP's opcache and WordPress compare seconds, and `tar --diff`, at that resolution, found nothing), but not "as found". | `ubuntu:24.04`, GNU tar 1.35. | The copy uses the POSIX format. |
+| V225 | **"As found" for `debug.log` is "as the last scenario left it".** The `@plugin` Before hook deletes it every scenario (`clearDebugLog`), so a site's log after a run is whatever the run's last scenario wrote — none, after this one, on both sites. | The as-found probes; `wp/log.ts`. | Not a leftover; the probes say so rather than counting it. |
+
+### 2.30 Facts closing 6G.1 (2026-10-06)
+
+§4.6G.1 asked questions 6G answered only in part, and asked for one live check 6G's runs never made.
+Answered from the source of the build under test, and that check made on `simple`.
+
+| # | Fact | Evidence | Consequence |
+|---|------|----------|-------------|
+| V226 | **6G.1's open questions, answered at `ab4a2e2`** (both editions' `commons.php` identical). The fixed `backwpup-restore` is no longer written — the name survives as the token's prefix and as a sweep target — while `af1ab5c` still writes only it. The token is per install: uninstall deletes every `%backwpup_%` option, `backwpup_restore_dir_token` among them. The command-line restore never uses the directory: it works in `get_temp_dir()/backwpup-restore-<uniqid>` and reads only the container's `decrypter`, which needs no registry. A successful restore empties the directory but keeps it with its protection files (§2.28's run 3); the plugin removes one untouched for 6 h (`maybe_cleanup_abandoned_restore`, links skipped); uninstall leaves it. `StaleRestoreFilesDetector` checks every name. **No files backup excludes it**: the uploads exclusions default to the log folder alone, and the content exclusion `backwpup-restore` names `wp-content/backwpup-restore`, which no build uses — so an archive takes whatever the directory holds, an abandoned restore's `restore.dat` / `restore.dat.bkp` included, which carry `dbuser` and `dbpassword` in plain text once the wizard's database step has saved them (V196 saw the protection files in an archive). | `src/Infrastructure/Restore/commons.php`, `uninstall.php`, `src/Cli/Helpers/CommandsRestoreHelpersTrait.php`, `inc/class-jobtype-file.php` (defaults; exclusions joined to their own folder), the vendored `Registry.php` and `JobController.php`. | The family and the per-install preparation rest on these; nothing changes. The fixed name stays declared for `af1ab5c` and older, so these builds get it prepared, empty and unused. The missing exclusion is a plugin bug to report; the suite's backups each precede any restore in their install, so none of them holds credentials. |
+| V227 | **A killed run's restore directory is swept by the next scenario's teardown.** Planted on `simple` as the web server leaves one mid-restore — a 20-hex name no install drew, `www-data` `0755`/`0644`, `restore.dat`, `restore.dat.bkp`, a 1 MB upload and an extraction tree the transport's user cannot empty — it was gone after one `@plugin` scenario, removed with elevation; the scenario passed, and `simple` was then as found but for `debug.log` (core's automatic updates, V225). | 2026-10-06 23:06–23:08 UTC, `develop@ab4a2e2`, `cli-reads`' version scenario; the as-found probe before and after. | §4.6G.1's last verification item; its acceptance holds. |
+
 ---
 
 ## 3. Coverage & tagging decisions
@@ -958,8 +1039,8 @@ is English, so a locale mismatch fails once with a clear message rather than as 
 ### 3.3 Tags kept
 
 `@smoke`, `@free`/`@pro`, `@noauth`, `@visual`, `@mobile`, plus `@storage` and `@slow` (jobs that
-really do take minutes — lets CI split fast from slow; 6F.2 does not use it, since every job it runs
-takes seconds, V112). The `@bwpup*` family is dropped: the product
+really do take minutes — lets CI split fast from slow, and playwright-bdd triples such a scenario's
+timeout; 6F.2 does not use it, since every job it runs takes seconds, V112). The `@bwpup*` family is dropped: the product
 is the config file, not a tag.
 
 6A added one more: **`@plugin`**, which opts a scenario into the shared plugin lifecycle (fresh
@@ -974,7 +1055,7 @@ Nearly every ported scenario carries it; the exceptions are scenarios that asser
 Each is independently shippable and ends with the standard gates (typecheck / lint / format /
 `test:unit`) plus a green real-cell run. 6A is a prerequisite for everything and 6B for every feature
 phase; 6C–6H are otherwise independent of each other and can be reordered by need. **6G.0 must
-ship before 6G**, and **6G before 6K**. **6H.2 is deferred out of the sequence** — nothing downstream waits on it.
+ship before 6G**, and **6G before 6K** (6G.1 shipped with 6G). **6H.2 is deferred out of the sequence** — nothing downstream waits on it.
 
 ### 6A — Shared rails *(product-agnostic; unblocks BackWPup **and** WP Rocket)* — **DONE**
 
@@ -2118,7 +2199,99 @@ budget — the cells run `ssh`, which the change leaves as it is.
 **Not covered, stated:** while a command runs, its argv is visible in the host's process list —
 inherent to arguments, and to the plugin's own `--key=`.
 
-### 6G — Restore
+### 6G — Restore — **DONE** *(6G.1 folded in)*
+
+**Shipped 2026-10-05** at `develop@a612005`, measured first (§2.28, V193–V208). Two features, both
+`@plugin @slow`:
+[`restore.feature`](../../src/projects/backwpup/features/restore.feature) — five `@pro` scenarios
+from the backup history (full, database-only and files-only restores of a full backup; a
+database-only and a files-only backup) and the `@free` upload — and
+[`cli-restore.feature`](../../src/projects/backwpup/features/cli-restore.feature) (`@pro`, four:
+`--type=full|db|file` and `--pre-backup`). The coverage table below is what shipped.
+
+What shipped:
+
+- **The wizard's page object** (`pages/restore.page.ts`): `strategiesOffered` / `offered` /
+  `restoreWith`, following the wizard by its URL's `step` (V198) to the "Success" panel, and failing
+  at once — naming why — on the wizard's error line, the decryption prompt, the login screen (V200)
+  and whatever `WizardWatch` (`pages/wizard-watch.ts`, armed with the page object) saw in its
+  traffic: a stream reconnecting or answered with something else, a failed `controller=job` call, an
+  uncaught error in the plugin's scripts (V220, V221). `ProRestorePage.expectEntryPath(archive)` holds the deep link to the
+  archive restored (`file`, `restore_file`), `trigger_download=1` and no upload offered (V197).
+  `restore.wizard.spec.ts` drives it through the wizard's captured steps 2–6 (`npm run
+  fixtures:capture` gained the restore phase), following the buttons' own `data-next-step`.
+- **Steps** (`steps/restore.steps.ts`): `Given the site's marker data has changed since that
+  backup` (`changedMarkers`), the two history journeys, `When I run the BackWPup restore command
+  "…"`, the strategy and snapshot assertions, and the four marker verdicts. Each restore step judges
+  `debug.log` first (`checkDebugLog`, V201) and hands the restore directory to the web server
+  (`handRestoreWorkingDirToSite`, V195).
+- **`cliRestore`** (`support/cli-restore.ts`, over `content-copy.ts`, `database-defaults.ts` and
+  `restore-snapshots.ts`): refused on a database holding what `wp db reset` would destroy for good,
+  or a relocated `wp-content` (V219); `wp-content` copied with root `tar` into a root-only
+  `<root>/.e2e_content_copy/` before a files restore and put back exactly after the scenario
+  (`wp-content` from the root, POSIX format, `--recursive-unlink`; V205, V216, V223, V224) — kept, with the way back spelled out, when it cannot be, and a
+  site still holding one refused by every BackWPup worker (V217); the database's default collation
+  set back (V206); the scenario's own snapshots removed, told from another run's by either changed
+  marker, on every run (V207). The generic command step refuses `restore`.
+- **6G.1, folded in** — the hashed restore directories. Residue declarations take a family
+  (`SiteResidueFamily`: parent + anchored name pattern; BackWPup's is the plugin's own
+  `^backwpup-restore-[0-9a-f]{20}$`), and a product may resolve, after each install, the data
+  directories only the installed plugin can name (`ProductConfig.resolveSiteDataDirs`), which the
+  `@plugin` hook prepares like the declared ones.
+
+**Deliberate revisions** against this section as planned, each for a measured reason:
+
+- **6G.1 shipped with 6G, not after it.** On `develop` (and 5.7.7, V208) the hashed directory is not
+  only residue: on Pro a WP-CLI listing creates it unwritable by the web server, after which the
+  backup history page answers 500 (V194) and every wizard request fails (V195) — 6G could not run, nor
+  could any Pro scenario that lists backups and then opens the history. §4.6G.1's measurement
+  questions are answered by V193–V196 and V208.
+- **The directory is prepared under its real name**, where §4.6G.1 had "the fix is its parent's mode,
+  not a guessed name": the name is not guessed — it is the installed plugin's own `restore_dir_name()`
+  — and the parent's mode cannot fix it, `uploads` being `0777` already on the cell while the
+  directory and its `restore.dat` arrive `0775`/`0664` from WP-CLI's umask. Preparing it and handing
+  it back before the wizard holds whatever the umask.
+- **The `@pro` entry asserts what V197 measured**: the deep link names the archive in the backup
+  folder and a copy slot in the restore directory, fetched by the server — not the archive "in place".
+- **No re-authentication** (V200): the suite's login predates every scenario's backup.
+- **The CLI guard** (`cliRestore`) was not planned: V205–V207 made the CLI scenarios unsafe on a
+  shared cell without it. The approach is the user's ("create a backup before touching anything").
+
+**Verified 2026-10-05** at `develop@a612005` (V193), with `E2E_RETRIES=0` on a runner kept awake: the
+full BackWPup suite **71/72 on `pro@nginx`** (2.2 h), all nine restore scenarios among the passes —
+its one failure, *Bulk-deleting the selected backups removes every one of them*, the browser's
+renderer answering nothing for 8.5 s while the history loaded (the trace: the plugin had replaced the
+placeholder row 4.4 s before the deadline, the server answered every call in ~0.6 s, the screencast
+froze), the scenario then passing **3/3** — and **55/55 on `free@nginx`** (1.4 h), the upload
+restore among them (5.0 min). Live mutation: switched to
+*Full Restore*, each partial restore of a full backup failed at the half it was not to touch ("…
+still hold(s) the changes made after the backup"). Both sites were left as found — modes and owners
+as before the run, the database's collation unchanged, no plugin, footprint, restore directory,
+snapshot or staging area. Unit suite **1241 → 1344** passed (8 skipped, unchanged); **22 mutations**,
+all caught; the restore-directory, collation and snapshot snippets run under a real `php` by their
+specs.
+
+**Audited 2026-10-06** (§2.29, V209–V225), adversarially: the shared rails, the command-line
+restore's guard and the wizard's page object each reviewed independently, every finding reproduced
+before it was fixed and pinned by a test that fails without the fix. No restore had passed for the
+wrong reason. Fixed: family patterns that deleted what they should not (V209–V212); a data directory
+linked at the root opened `0777` (V210); a put-back that could race a still-running command (V214),
+stop half-done (V216), delete the only copy after failing (V217), or fail on Ubuntu's tar and round
+modification times down (V223, V224 — found live, the guard containing it); exit codes and sizes read
+wrongly (V218); a database or `wp-content` the guard could not protect (V219); wizard failures that
+surfaced only as 15-minute timeouts, or the log of its requests overwritten unread (V220–V222); the
+capture tool's restore-only mode, token redaction and edition guard; docs (`@slow`, V213). Unit suite
+**1344 → 1423** passed (8 skipped, unchanged); **77 mutations**, all caught — each guard broken once, its spec run.
+Live, with `E2E_RETRIES=0` on a runner kept awake, at `develop@ab4a2e2` — `develop` moved by six
+merges whose tree is `a612005`'s byte for byte (same tree SHA): **55/55 on `free@nginx`** (1.6 h);
+on `pro@nginx` **41 passed** before the first command-line restore's put-back failed on Ubuntu's tar
+(V223) — the guard kept its copy, the worker gate refused the 30 scenarios after it, and
+`wp-content` proved identical to the copy before it was removed. With the copy rooted at the
+WordPress root and in the POSIX format (V223, V224) a copy put straight back on `simple` reads
+identical, and the 31 scenarios re-ran **33/33** with the setups (1.0 h). Both sites left as found —
+modes, owners, file counts, collation; no plugin, footprint, restore directory, snapshot, staging
+area or copy — bar `debug.log`, which the `@plugin` hook clears by design (V225). The `@plugin`
+hooks re-timed on `pro@nginx`: Before 44–50 s, After ≈ 23 s, about 2.4× inside `HOOK_TIMEOUT_MS`.
 
 Replaces the untracked WIP `wp-cli/restore.feature`, which asserts nothing about restoring.
 
@@ -2191,6 +2364,76 @@ and that V189–V192 hold live.
 baseline never had), and a partial one also fails if the half it does not cover was restored; each
 contents scenario fails if offered any strategy beyond its own; each edition's scenario fails if it
 is served the *other* edition's entry path.
+
+### 6G.1 — Hashed restore directories — **DONE, with 6G**
+
+**Shipped as part of 6G** (§4.6G "Deliberate revisions"): measured in §2.28 (V193–V196, V208), fixed
+with residue families and plugin-resolved data directories, verified with 6G's live runs; the
+questions 6G left open answered and a killed run's directory swept live in §2.30 (V226, V227). The
+plan as written follows, for the record.
+
+**The gap.** BackWPup's latest stable release keeps its restore working files in a directory with a
+random suffix — `wp-content/uploads/backwpup-restore-<hash>`, e.g. `backwpup-restore-7b20d60dc8d75d16f8b4`
+— where earlier builds used the fixed `wp-content/uploads/backwpup-restore`. `BACKWPUP_SITE_RESIDUE`
+(`support/residue.ts`) names only the fixed path, and `siteResidue` takes **literal** paths, so the
+`@plugin` teardown never sees the new directories: each restore leaves one behind, they accumulate
+across runs, and the reason the old one was cleared applies to them unchanged — an uploaded archive,
+an extraction tree, and possibly a `restore.dat.bkp` holding the site's database credentials in clear.
+6G's restores are the first scenarios to create them; until 6G.1 ships, clear them by hand after 6G's
+live runs.
+
+**1. Measure first** — at the start of the sub-phase, not before, on `pro@nginx` at the ref under
+test (§2's rule), then recorded as V-rows in a new §2 section. Nothing below the measurement is
+settled until it is:
+
+- **Which builds write it.** The ref the cells install, latest stable, both editions; whether the fixed
+  `backwpup-restore` is still written alongside it (and by what), or gone.
+- **Which journeys create it.** UI in-place (`@pro`), UI upload (`@free`), CLI restore — and whether
+  any other step does (opening the restore page, a download, the stale-files notice).
+- **The name.** Length and alphabet of the suffix; random per restore, per install, or derived from
+  something the suite can read (`backwpup_cfg_hash`, an option) — that decides whether the sweep
+  matches a family or can name the one directory.
+- **Ownership and mode** as the web server creates it, and whether the transport's user can remove it
+  unprivileged — the fixed directory could not be (§4.6A, "cleanup escalates").
+- **Its lifecycle in the plugin.** Whether a successful, a failed or an aborted restore removes it,
+  and whether uninstall does.
+- **Its contents**, `restore.dat.bkp` in particular, and whether `StaleRestoreFilesDetector` and the
+  backup's own uploads exclusion (`backupuploadsexcludedirs`) know the new name — a files backup that
+  captured it would carry those credentials into an archive.
+- **The CLI's temp path.** `support/residue.ts` says the CLI restore works in
+  `get_temp_dir()/backwpup-restore-<uniqid>`, outside the root; confirm whether that is this same
+  directory resolved into `uploads`, or a separate one, and correct the comment either way.
+
+**2. The fix** — shape to be confirmed by the measurement:
+
+- **A residue entry that names a family**, if the suffix is not knowable in advance: a parent the
+  product declares (`wp-content/uploads`) plus a one-segment pattern for the name, matched **on the
+  site**. Each match is a literal path from then on and goes through every guard a declared path
+  does — `normaliseResiduePath`, `isPathSegment`, `assertSafeElevatedRemoval`,
+  `assertResolvedInsideRoot`, the symlink refusal — then unprivileged removal, escalation of what
+  survived, and verification by re-reading. The pattern must never match its parent, a fixed sibling
+  such as `backwpup-restore`, or anything outside the one directory, and is as tight as the measured
+  name allows (prefix *and* suffix shape, not `backwpup-restore*`).
+- **The fixed `backwpup-restore` stays declared** while any build the cells can install still writes
+  it, and for runs made before the change.
+- **`prepareSiteDataDirs` prepares literal paths only.** A family is never pre-created; if the
+  measurement shows the two-user lockout applies to the new directory, the fix is its parent's mode,
+  not a guessed name.
+- **Product-agnostic where the mechanism is**: the pattern type lives with `siteResidue` in
+  `common/`, the BackWPup name with `support/residue.ts`.
+- **Docs:** `ProductConfig.siteResidue`'s TSDoc, `support/residue.ts`, `wordpress-automation.md`
+  (residue), CLAUDE.md's `@plugin` section.
+
+**3. Verify** — unit tests for the matcher and its guards (a match at the parent, a sibling, `..`, a
+`/`, a symlinked match pointing out of the root), each mutation-checked; then live on `pro@nginx`: a
+6G UI restore and a CLI restore each leave no restore directory behind, and a planted stale one — what
+a killed run leaves — is swept by the next scenario's teardown. Then `free@nginx` for the upload path.
+
+**Acceptance** — after any restore scenario, on either edition and either entry path, no
+`backwpup-restore*` directory remains under `wp-content/uploads`; one left by an earlier, killed run
+is removed by the next teardown; a declared family can never match outside its parent nor a path
+WordPress owns; the facts the fix rests on are V-rows measured at the ref under test, not this
+section's description of them.
 
 ### 6H — Storage credential surface *(no credentials needed to build it)*
 
@@ -2457,15 +2700,18 @@ differs, by the format switch.
 
 ---
 
-## 6. After BackWPup — WP Rocket
+## 6. After Phase 10 — WP Rocket
+
+**Deferred (decided 2026-10-06):** WP Rocket's port starts only once Phase 10 (cleanup & validation)
+is done — not straight after BackWPup. Phase 6 closes on BackWPup alone (§5).
 
 WP Rocket reuses **6A unchanged** and follows the same recipe: **page objects first**, then features.
 Its baseline is much larger (`src/features/`, `src/specs/`, `src/support/steps/`, plus the 921-line
 `page-utils.ts` and 486-line `sections.ts`) and brings concerns BackWPup does not: `@mobile` (6A),
 settings export/import diffing, the `@visual` A/B scenarios (`expectOptimizedToMatchUnoptimized`,
 already shipped), third-party plugin interactions, and the `previous` artifact role for update paths.
-It gets its own sub-phase breakdown, written from the same verified-source discipline, once BackWPup
-is done — deliberately **not** guessed here.
+It gets its own sub-phase breakdown, written from the same verified-source discipline, when that
+work starts — deliberately **not** guessed here.
 
 ---
 
@@ -2477,7 +2723,7 @@ is done — deliberately **not** guessed here.
 | Icon-only buttons have no accessible name (V7) | Documented as a legitimate `js-backwpup-*` / `data-content` case in the §3.2 policy — not a silent exception. 6B found a **second** such case (V16: every switch is an `sr-only`, `aria-hidden` checkbox with a textless label); both are handled in one place (`pages/toggles.ts`) and each is pinned by a test asserting the control really is unreachable by role, so a future accessibility fix is noticed rather than assumed. |
 | Non-English admin breaks role/label locators | **Shipped in 6B**: the pre-flight asserts `determine_locale()` for the configured admin user and fails once, clearly, with the fix in the hint. Runs only after the transport checks pass, so a dead site reports one cause, not two. |
 | Storage credentials missing / rate-limited | **Realised, and handled by deferral:** no credentials exist yet, so the round-trips are 6H.2 and out of the critical path. 6H still ships the surface — scenarios **skip** (never fail) without credentials, per-site `overrides` exist for rate-limited hosts, `testInfo`-derived paths keep workers isolated. |
-| Restore rewrites the site under test | `@slow`, worker-bound site, re-auth after restore, run last in its cell. |
+| Restore rewrites the site under test | **Realised and handled in 6G (§2.28):** the markers judge each half of the site; the wizard's restores rewrite in place and left the cells as found; the command-line restore, which deletes what its archive lacks and resets the database's collation, runs behind `cliRestore` (a copy of `wp-content` put back, the collation set back, its snapshot removed). No re-authentication (V200), and no ordering — every scenario reinstalls and ends as found. |
 | Backup jobs are genuinely slow | `@slow` for CI splitting; real barriers (`startbackup`, `job-abort-status`) instead of long fixed timeouts, so the wait is as short as the job allows. |
 | **Archives accumulate on the site under test** | **Realised, then fixed in the shared rails (2026-08-05).** BackWPup's uninstall keeps every archive it made, and a full backup of the `pro@nginx` site is ~340 MB, so each scenario left one behind — the cell reached **6.8 GB across 28 per-install directories**. The `@plugin` teardown now clears what a product declares it leaves (`ProductConfig.siteResidue` → `wp/residue.ts`), independently of whether the uninstall succeeded. Verified live: one scenario reclaimed **7 GB**, and a scenario that runs a real backup now leaves no archive behind. **One caveat, reported not failed:** the plugin creates `uploads/backwpup-restore` as `755 www-data`, which the ssh transport's user cannot unlink inside — it is ~24 KB and does not accumulate, so the sweep warns (with the fix in the message) rather than failing the run. Making it removable on a cell is an ownership change there, not a code change here. |
 | **A fresh install that is not fresh** | **Two causes, both handled; one can still end in a fatal (V174).** (V46, V122) WP-CLI's activation does not fire `init`, so BackWPup's activation routine runs in whichever request reaches it first — in this suite the `@plugin` hook's own active-state check — and a second request racing it sends a never-onboarded site down the plugin's upgrade path, which deletes the onboarding flag. Nothing here can hold the second request off, so `finishActivation()` detects a lost race and redoes the install, up to three installs, each reported. (V174) The race can also crash the request that loses it, in the plugin's migration; the debug-log gate then fails the scenario, rightly, whatever the recovery does, and the retry policy absorbs it. (V47) The plugin's `wp_bwpup_backups` table can also outlive an uninstall under concurrency and then block the next install; 6E's database sweep (`ProductConfig.siteDbResidue`) removes it before every install. Both are worth reporting upstream: a plugin's activation should not be re-entrant, and its uninstall should be the last word on its own table. |

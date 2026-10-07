@@ -86,7 +86,8 @@ So the layer offers `execElevated(transport, file, args, opts?)`, plus
 
 The limits are what make a test suite holding root uninteresting:
 
-- **Housekeeping only** — removing leftover files, clearing `debug.log`. **Never `wp`**: WP-CLI
+- **Housekeeping only** — removing leftover files, clearing `debug.log`, keeping a copy of
+  `wp-content` around a command under test that rewrites it. **Never `wp`**: WP-CLI
   refuses to run as root without `--allow-root`, and files it created as root would afterwards be
   unwritable by the web server, so the suite would break the site it is testing. `wpCli` has no way
   to request elevation, which makes that rule structural rather than a convention.
@@ -99,7 +100,10 @@ The limits are what make a test suite holding root uninteresting:
   not to be us, so trying first would be a round-trip whose answer is already decided. It still asks
   nothing of a host that does not need it — the decision is made before the capability probe, and a
   transport user that already owns the install returns without running either (see
-  [File ownership](#file-ownership-wpownershipts)).
+  [File ownership](#file-ownership-wpownershipts)). The other is BackWPup's guard around
+  `wp backwpup restore` (`support/content-copy.ts`), which copies `wp-content` and puts it back as
+  root from the start — only root reads every file and restores every owner — and refuses to let the
+  command run at all where it cannot.
 - **Never interactive.** `sudo -n` fails immediately instead of waiting on a password nobody will
   type, and `--` stops sudo parsing the target command's own flags.
 - **Refusable per site** (`transport.elevate: false`), which `execElevated` enforces by throwing
@@ -374,8 +378,33 @@ itself per scenario (measured on the QA cell before this existed: **6.8 GB acros
   plausible (absolute, not a top-level directory, and the target must resolve inside it): the
   relative half is already constrained by `normaliseResiduePath`, and this is the half it cannot see.
 - `normaliseResiduePath` rejects anything that is not a path below the root — absolute, escaping,
-  or naming a directory WordPress itself owns (`wp-content/uploads` and friends). It guards against
-  a typo in a config file, not against a hostile one.
+  naming a directory WordPress itself owns (`wp-content/uploads` and friends) or lying inside core's
+  `wp-admin`/`wp-includes`. It guards against a typo in a config file, not against a hostile one.
+- A declaration may instead be a **family** (`SiteResidueFamily`): the directories a plugin creates
+  under one parent with names it picks at runtime — a parent and a name pattern, e.g.
+  `{ parent: "wp-content/uploads", name: /^backwpup-restore-[0-9a-f]{20}$/ }`.
+  `parseResidueDeclaration` holds the parent to the path rules (it may be a WordPress directory, being
+  only listed, but not the root, and no segment may be edged with whitespace). The pattern must make
+  `^`…`$` bound the **whole** name — anchored at both ends (a `\$` is no anchor), no alternation, not
+  multiline, not global or sticky — and open with the plugin's fixed prefix spelled out, three
+  characters at least: `/^[a-z0-9]+$/` would take every year folder in `uploads`. One that would match
+  a directory WordPress owns is refused too. Before these rules, patterns breaking them were measured
+  matching — and removing — another plugin's directory and a media year folder. Removal lists the parent with `find -H -type d` (a parent that is itself a link is
+  followed, nothing below it: never a file, never a symlink, nothing deeper), escalating the listing as
+  removal escalates, matches whole names (one edged with whitespace is never a member), and
+  re-validates every match; it also catches what a killed run left under a name nobody remembers. A
+  parent that cannot be listed does not stop the other paths from being removed; it fails the
+  teardown once they have been. `resolveSiteResidue` answers what the declarations name on the site
+  now. A family names nothing to create, so preparation skips it.
+- `prepareResolvedDataDirs(transport, resolved, declared)` prepares, the same way, the directories
+  a product resolves after each install (`ProductConfig.resolveSiteDataDirs`) — those a pattern
+  declares, whose name only the installed plugin knows. Each must be covered by a declaration
+  (`isDeclaredResidue`), or it would be prepared and never removed; that is refused before anything
+  is created. The resolver is asked before any directory is prepared, since asking boots WordPress
+  over WP-CLI as the transport's user. BackWPup resolves its restore working directory this way: since `214ad9d` it is
+  `uploads/backwpup-restore-<20 hex>`, and a WP-CLI backup listing creates it as the transport's user
+  (`0775`) — after which every admin page that lists backups died with HTTP 500 on develop
+  (measured).
 - `prepareSiteDataDirs(transport, paths)` is the other half, run by the **Before** hook over the same
   declared list: per path it creates the directory, opens it to every user sharing the docroot
   (`0777`), then hands it to the site's ownership through `normalizeOwnership` — the same primitive
@@ -387,8 +416,8 @@ itself per scenario (measured on the QA cell before this existed: **6.8 GB acros
   `unnecessary` and only the mode applies. Ownership correction is best-effort either way, so a host
   that refuses it still gets prepared directories.
   It escalates when the transport's user is refused, so it runs the **same root-plausibility guard**
-  removal does — and refuses a path that is a symlink, since the `chmod` would otherwise follow it
-  out of the tree as root — before doing so — otherwise a site whose `rootDir` was a top-level directory would
+  removal does — and refuses a path that is a symlink, wherever it leads (the `chmod` would follow it:
+  a data directory linked at the root once opened the root itself `0777`) — before doing so — otherwise a site whose `rootDir` was a top-level directory would
   have world-writable directories created as root at the filesystem root, which teardown would then
   refuse to remove.
   On a real cell **WP-CLI and the web server are different users** — `ubuntu` over SSH, `www-data`
@@ -636,6 +665,9 @@ normalisation all validate through them.
 - `isPathSegment(name)` is that one-segment rule itself — not empty, not `.` or `..`, no `/` or
   `\` — which `pluginSitePath`, the staging area's categories and filenames, and a product's own
   joined names (an archive in a backup folder, say) all pass through, so the rule has one copy.
+- `pathInsideRoot(path, root)` turns an absolute path the **site** reported (`WP_CONTENT_DIR`, an
+  uploads directory) into the root-relative form the guards take, or `undefined` when it does not lie
+  strictly inside the root — normalising both halves first, so a `..` cannot carry it out.
 
 Both **guards** take the caller's own message builder, so a failure reads in the vocabulary of what
 was being attempted and names the remedy that caller can offer; `pluginSitePath` throws its own fixed

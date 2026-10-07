@@ -7,6 +7,7 @@ import { BACKWPUP_LOG_OPTIONS } from "../support/debug-log";
 import { BACKWPUP_SITE_DB_RESIDUE } from "../support/db-residue";
 import { BACKWPUP_SITE_RESIDUE } from "../support/residue";
 import { stopRunningJobs } from "../support/job-runs";
+import { resolveRestoreWorkingDirs } from "../support/restore-dir";
 import type {
   ProductArtifacts,
   ProductConfig,
@@ -107,6 +108,9 @@ export const backwpup: ProductConfig = {
   artifacts,
   debugLog: BACKWPUP_LOG_OPTIONS,
   siteResidue: BACKWPUP_SITE_RESIDUE,
+  // The restore working directory, named per install: prepared once the plugin has named it, so the
+  // web server can write there whoever creates it first.
+  resolveSiteDataDirs: resolveRestoreWorkingDirs,
   siteDbResidue: BACKWPUP_SITE_DB_RESIDUE,
   // A backup job runs in a web request of its own, so one a scenario left running would otherwise
   // outlive the plugin's removal.

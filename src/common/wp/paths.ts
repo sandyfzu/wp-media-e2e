@@ -11,8 +11,9 @@ import { posix } from "node:path";
  * The two halves are deliberately separate, because they check different things:
  *
  *  - {@link normaliseSitePath} constrains the **relative** half — that the path stays inside the
- *    WordPress root and does not name a directory WordPress itself owns. It is what stops
- *    `wp-content/uploads` (a dropped last segment) from standing in for one plugin's directory.
+ *    WordPress root, does not name a directory WordPress itself owns, and does not reach into core's
+ *    own `wp-admin`/`wp-includes`. It is what stops `wp-content/uploads` (a dropped last segment)
+ *    from standing in for one plugin's directory.
  *  - {@link assertSafeElevatedTarget} constrains the half the first one cannot see — that the
  *    **root** it is joined to is a plausible site root, and that joining the two really did stay
  *    inside it. Only elevated callers need it; unelevated ones already have the transport user's
@@ -45,6 +46,12 @@ export const PROTECTED_SITE_PATHS: readonly string[] = [
   "wp-content/languages",
   "wp-content/upgrade",
 ];
+
+/**
+ * WordPress core's own directories: nothing **inside** them is a plugin's either. Core replaces them
+ * on every update, so no plugin keeps data there, and a declaration reaching in is always a mistake.
+ */
+const CORE_DIRECTORIES: readonly string[] = ["wp-admin", "wp-includes"];
 
 /**
  * Validates one declared path against a site's WordPress root and returns it normalised.
@@ -100,6 +107,10 @@ function sitePathRejection(path: string): string | undefined {
   if (PROTECTED_SITE_PATHS.includes(normalised)) {
     return `it resolves to "${normalised}", a directory WordPress itself owns`;
   }
+  const core = CORE_DIRECTORIES.find((dir) => normalised.startsWith(`${dir}/`));
+  if (core !== undefined) {
+    return `it lies inside "${core}", which WordPress core replaces on every update`;
+  }
   return undefined;
 }
 
@@ -142,6 +153,31 @@ export function pluginSitePath(slug: string): string {
     );
   }
   return posix.join("wp-content", "plugins", slug);
+}
+
+/**
+ * A path the site reported, made relative to its WordPress root — or `undefined` when it does not lie
+ * strictly inside it.
+ *
+ * For an absolute path a site answers with (`WP_CONTENT_DIR`, an uploads directory) that is about to
+ * go through the guards here, which take root-relative paths only. Lexical, after normalising both,
+ * so a `..` cannot carry the answer out of the root; where a path really leads is
+ * `assertResolvedInsideRoot`'s question.
+ *
+ * @param path - the absolute path the site reported.
+ * @param root - the site's WordPress root, as it reported it.
+ * @returns the path relative to `root`, or `undefined` when either is not absolute, or the path is
+ * outside the root or is the root itself.
+ */
+export function pathInsideRoot(path: string, root: string): string | undefined {
+  if (!posix.isAbsolute(path) || !posix.isAbsolute(root)) return undefined;
+  const base = trimTrailingSlashes(posix.normalize(root));
+  const prefix = base === "/" ? base : `${base}/`;
+  const normalised = trimTrailingSlashes(posix.normalize(path));
+  if (!normalised.startsWith(prefix) || normalised.length === prefix.length) {
+    return undefined;
+  }
+  return normalised.slice(prefix.length);
 }
 
 /**
