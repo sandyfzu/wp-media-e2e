@@ -105,6 +105,12 @@ export const PLUGIN_TAG = "@plugin";
  * cost is round-trips rather than work: a product declaring many data paths pays linearly, and
  * batching the paths into single commands is the lever when the margin needs widening.
  *
+ * The leftover-files sweep pulls that lever, because what it **finds** is not bounded by any
+ * declaration: a family of runtime-named directories piles up wherever an earlier build or a killed
+ * run left them. Removing them one by one cost ~6 round-trips each (~0.8 s apiece, measured), and 28
+ * of them took a teardown past this budget. Now the sweep's commands are the same for one leftover
+ * as for thirty — the root resolved once, a family checked through its parent, one `rm` per pass.
+ *
  * The leftover-footprint sweep adds **one `wp eval` per hook** on the ordinary path — a product that
  * declares one stops after the scan that finds nothing, and one that declares none pays no
  * round-trip at all. Only a site that really is carrying a footprint pays the removal and the

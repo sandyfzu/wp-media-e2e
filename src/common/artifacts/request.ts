@@ -94,9 +94,8 @@ export interface PlanInput {
   readonly edition: Edition | undefined;
   /**
    * Whether this is a serial (cell-less) run — no cell pinned (`E2E_CELL`) or selected
-   * (`--project=<cell>`). Serial runs
-   * always use defaults; any applicable override is **warned and ignored**, never fatal
-   * — so the operator sees it had no effect without the run aborting.
+   * (`--project=<cell>`). Serial runs always use defaults; any applicable override is **warned
+   * and ignored**, never fatal — so the operator sees it had no effect without the run aborting.
    */
   readonly serial: boolean;
   /** The already-read env vars (see {@link readArtifactEnv}). */

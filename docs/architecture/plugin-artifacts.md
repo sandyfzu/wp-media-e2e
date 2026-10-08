@@ -119,9 +119,10 @@ which is true for a run pinned to the cell (`E2E_CELL=<cell>`), for `--project=<
 The setup runs in a Playwright **worker**, which is forked without the CLI argv —
 so this answer must ride the environment, not `process.argv`. See
 [execution-model.md](execution-model.md#reading-the-selection-from-a-worker); the
-matching cell name is compared **exactly**, so `--project='pro*'` runs the cell
-but reads here as a broad selection (it warns rather than applying one operator's
-override to cells they never named).
+matching cell name is compared **exactly**, so an unpinned `--project='pro*'` runs the
+cell but reads here as a broad selection (it warns rather than applying one operator's
+override to cells they never named). A pinned run holds one cell whatever `--project`
+adds, so it is always targeted.
 
 ## Resolution: wipe → resolve → verify → publish
 
@@ -255,7 +256,7 @@ failure modes visible:
 - Requesting a role the product does not declare **throws before any file read** —
   a comparison test can never consume a role that was never resolved or verified.
 - A missing `resolution.json` throws with the fix (the setup did not run for this
-  cell — run via `--project=<cell>`, not `--no-deps`).
+  cell — run it with `E2E_CELL=<cell>`, not `--no-deps`).
 - A resolution written by a **different** `runId` warns once per cell. It stays
   non-fatal on purpose (it keeps the fast `--no-deps` edit-run loop working) but
   never silent, since the zips may be older than the refs you expect.

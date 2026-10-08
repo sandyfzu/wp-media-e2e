@@ -7,7 +7,7 @@
  * The correctness property is the **parity invariant**: warming must produce the exact
  * `{project, gitRef, version, variants}` a real run would, or the warmed entry is never hit and
  * the warm is wasted. This module therefore plans through the **same** `buildArtifactPlan` the
- * resolver uses, with `serial: false` — the mode a real `--project=<cell>` run plans in — so
+ * resolver uses, with `serial: false` — the mode a real run of one cell plans in — so
  * overrides apply identically on both sides.
  *
  * {@link warmArtifacts} is pure orchestration (dedupe, skip provided zips, collect failures) with
@@ -91,7 +91,7 @@ export type WarmOne = (
  *
  * @param units - the `(product × cell)`s to warm.
  * @param env - the already-read `E2E_*` overrides ({@link ArtifactEnv}); applied because warm
- * plans in the same `serial: false` mode a real `--project=<cell>` run does.
+ * plans in the same `serial: false` mode a real run of one cell does.
  * @param warmOne - the cache primer (real or a test double).
  */
 export async function warmArtifacts(
@@ -147,7 +147,7 @@ function collectUnit(
     plan = buildArtifactPlan({
       product: unit.manifest,
       edition: unit.edition,
-      // Warm as a real `--project=<cell>` run plans (overrides apply) — the parity invariant.
+      // Warm as a real run of one cell plans (overrides apply) — the parity invariant.
       serial: false,
       env,
     });

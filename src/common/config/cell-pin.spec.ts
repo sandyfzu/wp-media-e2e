@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { isObject } from "../guards";
 import {
   CELL_PIN_ENV,
+  assertNoForeignBddConfigs,
   assertPinKnown,
   assertSelectionFitsPin,
   matchesProjectFilter,
@@ -184,5 +185,60 @@ test.describe("assertSelectionFitsPin", () => {
         "free*",
       ]);
     }).toThrow('--project "free@nginx", "free*" selects nothing');
+  });
+});
+
+test.describe("assertNoForeignBddConfigs", () => {
+  /** playwright-bdd's value, keyed by absolute output folder, for these folders. */
+  const configs = (...folders: string[]): string =>
+    JSON.stringify(
+      Object.fromEntries(
+        folders.map((folder) => [folder, { outputDir: folder }]),
+      ),
+    );
+  const OWN = "/srv/e2e/.features-gen/backwpup/pro@nginx";
+  const OTHER = "/srv/e2e/.features-gen/backwpup/free@nginx";
+
+  test("accepts nothing inherited, or only the pinned cell's own config", () => {
+    for (const inherited of [undefined, "", configs(OWN), configs(`${OWN}/`)]) {
+      expect(() => {
+        assertNoForeignBddConfigs(inherited, "backwpup", "pro@nginx");
+      }, String(inherited)).not.toThrow();
+    }
+  });
+
+  // A worker of a pinned run inherits its runner's value, which names the pinned cell — reached
+  // through whatever path the runner used, a symlinked checkout included.
+  test("recognises its own folder by its tail, wherever the checkout is", () => {
+    expect(() => {
+      assertNoForeignBddConfigs(
+        configs("/elsewhere/link/.features-gen/backwpup/pro@nginx"),
+        "backwpup",
+        "pro@nginx",
+      );
+    }).not.toThrow();
+  });
+
+  test("refuses another cell's or product's specs, naming them, the variable and the fix", () => {
+    expect(() => {
+      assertNoForeignBddConfigs(
+        configs(OWN, OTHER, "/srv/e2e/.features-gen/wp-rocket/apache"),
+        "backwpup",
+        "pro@nginx",
+      );
+    }).toThrow(
+      "[cell] PLAYWRIGHT_BDD_CONFIGS came into this run naming other cells' specs " +
+        "(backwpup/free@nginx, wp-rocket/apache), so bddgen would regenerate them although " +
+        'E2E_CELL pins the run to "pro@nginx".',
+    );
+  });
+
+  // Never a false refusal for a format this check does not understand.
+  test("ignores a value it cannot read, and keys that are no generated-spec folder", () => {
+    for (const inherited of ["{not json", "[1]", configs("/srv/other/out")]) {
+      expect(() => {
+        assertNoForeignBddConfigs(inherited, "backwpup", "pro@nginx");
+      }, inherited).not.toThrow();
+    }
   });
 });

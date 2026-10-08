@@ -22,8 +22,10 @@ export interface CellNoticeOptions {
 }
 
 /**
- * The notice for a run of `workers` workers.
+ * The notice for a run.
  *
+ * @param options - what the config factory knows about the run.
+ * @param workers - the workers it starts ({@link actualWorkers}).
  * @example
  * ```ts
  * cellNotice({ product: "backwpup", cell: "pro@nginx", pinned: true, reportDir: "reports/…" }, 1);
@@ -49,14 +51,36 @@ export function cellNotice(
   return `[cell] ${how}. ${count}; report in ${options.reportDir}`;
 }
 
+/**
+ * The workers a run really starts, as Playwright's own "Running … using N workers" line counts
+ * them: `metadata.actualWorkers` (the configured count capped by the test groups to run, set
+ * before reporters begin), else `workers` — which already includes `--workers`.
+ *
+ * @param config - the run's resolved config.
+ */
+export function actualWorkers(
+  config: Pick<FullConfig, "workers" | "metadata">,
+): number {
+  const actual: unknown = config.metadata.actualWorkers;
+  return typeof actual === "number" && Number.isInteger(actual) && actual > 0
+    ? actual
+    : config.workers;
+}
+
 /** Prints {@link cellNotice} as the run begins; listed first, so it comes before "Running …". */
 export default class CellNoticeReporter implements Reporter {
   /** @param options - the facts, as the config factory passed them. */
   constructor(private readonly options: CellNoticeOptions) {}
 
-  /** Prints the notice, with the worker count the run actually uses (`--workers` included). */
+  /**
+   * Prints the notice.
+   *
+   * @param config - the run's resolved config; its worker count is {@link actualWorkers}.
+   */
   onBegin(config: FullConfig): void {
-    process.stdout.write(`${cellNotice(this.options, config.workers)}\n`);
+    process.stdout.write(
+      `${cellNotice(this.options, actualWorkers(config))}\n`,
+    );
   }
 
   /**

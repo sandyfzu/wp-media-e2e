@@ -38,6 +38,7 @@ src/
 │   ├── reporting/          # the suite's own Playwright reporters (cell-notice.ts)
 │   ├── auth/               # auth.setup.ts (login → storageState)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
+│   ├── text.ts             # small shared string helpers (escapeRegExp)
 │   ├── steps/              # generic step definitions
 │   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
 │   ├── pages/              # cross-product Page Object Model (e.g. plugins.page.ts)
@@ -79,7 +80,9 @@ playwright*.config.ts       # entry configs (default, per-product, unit)
   alone, so `bddgen` regenerates only its specs and two cells of one product can run side by
   side. `--project=<cell>` still works, but `bddgen` then regenerates every cell's specs, which
   breaks another run of the product started beside it. An unknown pin, or a `--project` the pin
-  cannot satisfy, fails naming `E2E_CELL`. Each run prints a `[cell]` line saying which it is.
+  cannot satisfy, fails naming `E2E_CELL`; so does a pinned run that inherited another run's
+  `PLAYWRIGHT_BDD_CONFIGS`. Each run prints a `[cell]` line saying which it is (unless a
+  command-line `--reporter` replaces the configured reporters).
 
 Full detail — the `parallelIndex` invariant, the config factory, the credential
 registry, and artifact lifecycle — is in

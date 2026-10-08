@@ -9,7 +9,7 @@ import { productFromEnv } from "./src/projects/products";
  * orchestrator. Choose its product with `PRODUCT=backwpup` (unset: WP Rocket); a name no
  * product has fails here.
  *
- * Select a cell with `--project=<cell>` to use that cell's full site pool; without
- * one, the run is serial (workers = 1) and safe.
+ * Pin a cell with `E2E_CELL=<cell>` (or select it with `--project=<cell>`) to use that cell's
+ * full site pool; a run of no single cell is serial (workers = 1) and safe.
  */
 export default createProductConfig(productFromEnv(process.env.PRODUCT));

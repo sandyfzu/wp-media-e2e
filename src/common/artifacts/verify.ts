@@ -14,6 +14,7 @@ import { styleText } from "node:util";
 import AdmZip from "adm-zip";
 
 import { errorMessage } from "../guards";
+import { escapeRegExp } from "../text";
 import type { CheckResult } from "../setup/preflight";
 import type { Edition } from "../config/types";
 import { resolveIdentity } from "./manifest";
@@ -297,11 +298,6 @@ function parseHeader(block: string, field: string): string | undefined {
  */
 function cleanHeaderValue(raw: string): string {
   return raw.replace(/\s*(?:\*\/|\?>).*/, "").trim();
-}
-
-/** Escapes a literal string for safe interpolation into a `RegExp` source. */
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // ── Report formatting (failure report, success summary, JSON attachment) ────────

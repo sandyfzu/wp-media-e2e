@@ -68,6 +68,8 @@ interface Built {
   readonly pools: string[];
   /** The first site of cell `a`'s `storageState` path, if `a` was built. */
   readonly storageState?: string;
+  /** `PLAYWRIGHT_BDD_CONFIGS` as the build left it — what a child of this process inherits. */
+  readonly bddEnv: string;
 }
 
 /** A working directory that is not the repository's. */
@@ -108,6 +110,7 @@ async function build(
         .map((dir) => relative(process.cwd(), dir)),
       pools,
       storageState: pools.includes("a") ? getPool("demo", "a")[0].storageState : undefined,
+      bddEnv: process.env.PLAYWRIGHT_BDD_CONFIGS ?? "",
     }));
     `,
     { cwd: elsewhere, env: { RUN_ID: "run-1", ...env } },
@@ -136,7 +139,7 @@ test.describe("createProductConfig — output folders by selection", () => {
     });
   });
 
-  test("every run targeting no single cell writes under _all", async () => {
+  test("every run targeting no single cell writes, and reports, under _all", async () => {
     const selections = [
       [], // no --project
       ["--project=setup:a"], // a setup project alone
@@ -145,12 +148,27 @@ test.describe("createProductConfig — output folders by selection", () => {
       ["--project=A"], // Playwright ignores case; the run is not treated as targeting `a`
     ];
     const built = await Promise.all(selections.map((args) => build(args)));
-    built.forEach(({ outputDirs }, index) => {
-      expect(outputDirs, JSON.stringify(selections[index])).toEqual({
+    const allRun = resolve(REPO_ROOT, "reports/demo/_all/run-1");
+    built.forEach(({ outputDirs, reportPaths, notice, workers }, index) => {
+      const selection = JSON.stringify(selections[index]);
+      expect(outputDirs, selection).toEqual({
         ...cellProjects("a", ALL_A),
         ...cellProjects("b", ALL_B),
       });
+      expect(reportPaths, selection).toHaveLength(3);
+      for (const path of reportPaths) {
+        expect(path, selection).toMatch(new RegExp(`^${allRun}/`));
+      }
+      expect(notice, selection).not.toHaveProperty("cell");
+      expect(workers, selection).toBe(1);
     });
+  });
+
+  // The load-bearing invariant: two cells in one run would overflow the smaller pool.
+  test("refuses two cells in one run, naming them", async () => {
+    await expect(build(["--project=a", "--project=b"])).rejects.toThrow(
+      "Multiple cells selected (a, b).",
+    );
   });
 
   test("OUTPUT_ROOT replaces only the root", async () => {
@@ -175,9 +193,11 @@ test.describe("createProductConfig — paths that never follow the working direc
       `${run("a")}/cucumber/index.html`,
       `${run("a")}/allure-results`,
     ]);
-    expect(
-      untargeted.reportPaths.every((path) => path.startsWith(run("_all"))),
-    ).toBe(true);
+    expect(untargeted.reportPaths).toEqual([
+      `${run("_all")}/playwright`,
+      `${run("_all")}/cucumber/index.html`,
+      `${run("_all")}/allure-results`,
+    ]);
   });
 
   test("a site's login is saved in the repository's .auth", async () => {
@@ -233,11 +253,12 @@ test.describe("createProductConfig — pinned by E2E_CELL", () => {
   test("sizes the run to the pinned pool and reports under the cell, saying it was pinned", async () => {
     const built = await build([], PIN_A);
     expect(built.workers).toBe(2);
-    expect(
-      built.reportPaths.every((path) =>
-        path.startsWith(resolve(REPO_ROOT, "reports/demo/a/run-1/")),
-      ),
-    ).toBe(true);
+    const run = resolve(REPO_ROOT, "reports/demo/a/run-1");
+    expect(built.reportPaths).toEqual([
+      `${run}/playwright`,
+      `${run}/cucumber/index.html`,
+      `${run}/allure-results`,
+    ]);
     expect(built.notice).toMatchObject({
       product: "demo",
       cell: "a",
@@ -264,12 +285,48 @@ test.describe("createProductConfig — pinned by E2E_CELL", () => {
     const built = await Promise.all(
       [...owning, ...notOwning].map((args) => build(args, PIN_A)),
     );
-    built.forEach(({ outputDirs, notice }, index) => {
+    const run = resolve(REPO_ROOT, "reports/demo/a/run-1");
+    built.forEach(({ outputDirs, notice, reportPaths }, index) => {
       const selection = JSON.stringify([...owning, ...notOwning][index]);
       const dir = index < owning.length ? OWN_A : ALL_A;
       expect(outputDirs, selection).toEqual(cellProjects("a", dir));
-      expect(notice, selection).toMatchObject({ cell: "a", pinned: true });
+      // The report follows the pin even when the output does not: one folder per RUN_ID.
+      expect(notice, selection).toMatchObject({
+        cell: "a",
+        pinned: true,
+        reportDir: "reports/demo/a/run-1",
+      });
+      expect(reportPaths[0], selection).toBe(`${run}/playwright`);
     });
+  });
+
+  // A worker inherits its runner's value, which names the pinned cell alone.
+  test("accepts the BDD config its own pinned run handed down", async () => {
+    const runner = await build([], PIN_A);
+    const worker = await build([], {
+      ...PIN_A,
+      PLAYWRIGHT_BDD_CONFIGS: runner.bddEnv,
+    });
+    expect(worker.bddConfigs).toEqual([bddDir("a")]);
+  });
+
+  // Inherited from an unpinned run, the list names every cell: bddgen would regenerate them all.
+  test("refuses BDD configs inherited from an enclosing run naming other cells", async () => {
+    const enclosing = await build([]);
+    await expect(
+      build([], { ...PIN_A, PLAYWRIGHT_BDD_CONFIGS: enclosing.bddEnv }),
+    ).rejects.toThrow(
+      "PLAYWRIGHT_BDD_CONFIGS came into this run naming other cells' specs (demo/b)",
+    );
+  });
+
+  // A seed some other run wrote is not this run's selection: no false "--project selects nothing".
+  test("ignores a selection seed inherited from another run", async () => {
+    const built = await build([], {
+      ...PIN_A,
+      E2E_INTERNAL_SELECTED_CELLS: JSON.stringify({ pid: 1, cells: ["b"] }),
+    });
+    expect(built.outputDirs).toEqual(cellProjects("a", OWN_A));
   });
 
   test("a blank pin is no pin", async () => {

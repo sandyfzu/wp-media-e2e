@@ -201,7 +201,8 @@ pass per cell, one after the other.
   nothing is overwritten.
 - **The `[cell]` notice** is `src/common/reporting/cell-notice.ts`, first in `reporters()`. It says
   "bddgen generates …" rather than "… were regenerated": the runner cannot know whether a `bddgen` ran
-  before it. It takes the worker count from `onBegin`, so `--workers` shows. `printsToStdio()` is
+  before it. Its worker count is the one Playwright's own "Running …" line prints
+  (`metadata.actualWorkers`, else `workers`; corrected by the audit, V158). `printsToStdio()` is
   `false`: one line is not a progress reporter.
 - **Hints.** The operator messages that recommended `--project=<cell>` (`consume.ts`, `registry.ts`,
   `request.ts`, `scripts/report.mjs`, `scripts/allure.mjs`) now recommend `E2E_CELL=<cell>`; the docs
@@ -211,11 +212,9 @@ pass per cell, one after the other.
   resolves it against the config's folder (V133) — but a spec building configs in a child Node must
   compare those paths relative to its own working directory.
 
-**Not changed, by design:** an inherited `PLAYWRIGHT_BDD_CONFIGS` still makes `bddgen` generate every
-config it names, pin or not (V32). It is playwright-bdd's internal channel to `bddgen` and to the
-workers (`config/env.js`), undocumented, so the suite does not edit it; only a process that inherited
-it from a run is affected, and the orchestrator's allowlisted environment never carries it (§2). The healthcheck
-and the artifact warm ignore the pin: they span cells by design and take `--product`/`--cell`.
+**Not changed, by design:** the healthcheck and the artifact warm ignore the pin: they span cells by
+design and take `--product`/`--cell`. (An inherited `PLAYWRIGHT_BDD_CONFIGS` was first left here too;
+the audit made the pinned config refuse it, V157.)
 
 **Found here, fixed by merging develop** (V153, V154): BackWPup `develop` (`ab4a2e2`) moved the
 restore working folder to `uploads/backwpup-restore-<token>`. This branch neither opened it to both
@@ -223,6 +222,48 @@ users nor cleared it, so on `pro@nginx` 12 scenarios failed with "Restore workin
 writable", and the folders — each with a `restore.dat` — piled up on both cells. A product change, not
 the pin. The suite's `develop` already handled it (`cd9b146`: `support/restore-dir.ts` prepares the
 folder after each install, `support/residue.ts` sweeps the whole family); merged in `de2633b`.
+
+#### Audit (2026-10-07, V155–V162)
+
+Three adversarial reviews (logic and edge cases; tests and docs; merge integration and the teardown
+overrun), each read-only and required to prove its findings, then every finding verified here before
+it was fixed. The merge itself was clean (`git show --cc` empty; develop adds nothing that reads the
+selection). Fixed:
+
+- **An inherited selection seed was believed** (both a reviewer and this audit, reproduced): a run
+  started from inside another read the enclosing run's `E2E_INTERNAL_SELECTED_CELLS` as its own
+  `--project` — pinned, a false "selects nothing"; unpinned, workers and report sized to a cell
+  Playwright was not running. The seed now names its writer (`{"pid","cells"}`) and is believed only
+  by that process's direct children — Playwright forks workers and its test loader straight from the
+  runner (`runner/index.js:1915`, `:2092`, `:5451`); every other process overwrites it with its own,
+  an empty one included (V155).
+- **`--project` after `--` was parsed** although Playwright reads it as a test-file filter
+  (`program.js:51–53`); the scan now stops at `--` (V156).
+- **An inherited `PLAYWRIGHT_BDD_CONFIGS` defeated the pin** (measured: pinned to `free@nginx`, it
+  rewrote all 14 `pro@nginx` specs, while the notice said "only its specs"). The pinned config now
+  refuses one naming any other cell's generated folder, compared by its `<product>/<cell>` tail so a
+  symlinked checkout still recognises its own and a format it cannot read is never refused (V157).
+- **The notice's worker count** was `config.workers`, not what runs: workers 4 with one test printed
+  "4 workers" beside Playwright's "using 1 worker" (V158).
+- **The teardown overran its 120 s budget on accumulated leftovers** (the note left for this audit):
+  ~6 sequential SSH commands per leftover family directory at ~0.78 s each (measured), so 28 of them
+  took ~130 s. `removeSiteResidue` now resolves the root once, checks a family once through its parent
+  (members come from `find -H -type d`, which never lists a link — measured on GNU and BSD), removes
+  each pass in one `rm -rf` and re-reads it in one listing per family; a re-listing that fails while
+  the parent is there counts every member as a survivor. Its command count no longer depends on the
+  number found (V159, V160). Also read: playwright-bdd races a hook against its timeout
+  (`Promise.race`, `utils/index.js:63–73`), so a timed-out teardown is abandoned, not cancelled. Not
+  changed: with the sweep bounded, the budget is not reached.
+- **Tests that proved less than they claimed:** the multi-cell fail-fast, the filter of the selection
+  to known cells, the pinned report folder, short flags in the variadic scan, empty `.every(...)`, and
+  a spec restoring rather than clearing an inherited seed — each now has a test that a mutation
+  breaks (V161).
+- **Docs and conventions:** the entry configs, `plugin-artifacts.md`, the warm's comments and the
+  wildcard rule still described `--project` as the way or the rule; `.env`'s scope is the working
+  directory, not the checkout; the orchestrator was described in the present tense; the healthcheck
+  and the warm ignoring the pin was undocumented; `--reporter` drops the notice. `cell-pin.ts` now
+  reads through `env()`, `escapeRegExp` is one shared helper (`src/common/text.ts`) instead of two
+  copies, and every changed function has its `@param`s. V154 named three features; four ran.
 
 ### 3.2 0A.2 — The root `test-results/` is shared
 
@@ -1164,4 +1205,12 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V151 | Live, `E2E_RETRIES=0`: `free@nginx` (`bwu2`) and `pro@nginx` (`bwu3`) pinned and started together on `cli-backups.feature` — 6 passed each (both setups, 4 scenarios), exit 0, 5.4 min side by side; each printed its `[cell]` line, pinned. Afterwards both sites had no BackWPup plugin, option, table or staging left; `bwu3` held 4 `uploads/backwpup-restore-<id>/` folders, one per scenario (V153) | ✅ 2026-10-06 | `live-pair.sh`; `site-state.sh` before and after |
 | V152 | Live full passes, pinned, `E2E_RETRIES=0`, one after the other: `free@nginx` **54 passed** (56 min); `pro@nginx` 51 passed, **12 failed** (1.2 h) — 5 of `backups.feature`, 6 of `onboarding.feature`, 1 of `cli-running-job.feature`, every one on the restore-folder fatal of V153 and no other. The control, the same `backups.feature` run **unpinned** with `--project=pro@nginx`, fails the same 5 scenarios on the same fatal (and its `[cell]` line names the `--project` form and the pin): the failures are the product's, not the pin's. Afterwards, on both sites: no BackWPup plugin, option, table or staging left | ✅ 2026-10-06 | `live-full.sh`, `control-unpinned-pro.log`; `site-state.sh` |
 | V153 | **BackWPup `develop` moved to `ab4a2e2`, which tokenizes the restore working folder** — not caused by 0A.1. It is now `uploads/backwpup-restore-<20 hex>` (`commons.php:48–106`, `:164`; the token is the per-site option `backwpup_restore_dir_token`, the fixed `backwpup-restore` kept only as a legacy sweep target), holding `.htaccess`, `Web.config`, `index.php`, `uploads/` and `restore.dat`. This branch, before merging develop, opened and cleared only the fixed folder (`BACKWPUP_SITE_RESIDUE`, `prepareSiteDataDirs`), so whichever user creates the new one first locks the other out: created by the web server (`www-data`, 755), Pro's `wp backwpup backup` dies "Restore working directory … is not writable"; created by WP-CLI (`ubuntu`, 775), the web server's requests die the same way and the history never loads. All 12 Pro failures in V152 carry that fatal and no other. The folders also pile up: 28 `uploads/backwpup*` entries on `bwu3`, 7 on `bwu2` (Free, all `www-data`, no failure) after V152; one was on `bwu3` before this session. Already fixed on the suite's `develop` (`cd9b146`); merged here, V154 | ✅ 2026-10-06 | `.artifacts/…/backwpup-pro-en-9.99.99-ab4a2e28.zip`; `find -printf`, `ls -ld` on both sites; the 12 `error-context.md` |
-| V154 | After merging `origin/develop` (`43f801a`, in `de2633b`; no conflicts, no edits inside the merge): the gates clean, unit 1488 passed, 8 skipped. Live, pinned, `E2E_RETRIES=0`, the three features that failed in V152 on `pro@nginx`: 23 passed, 1 failed — the first scenario, whose teardown passed 120 s while sweeping the 28 folders V152 had left; alone, right after, it passed in 2.2 min. Every other scenario that failed in V152 passed. One Free scenario then swept `bwu2`'s 7. Afterwards both sites: no plugin, option, table, staging or `uploads/backwpup*` entry left. Observation: a teardown that inherits many such folders can outrun its budget — once | ✅ 2026-10-07 | `fix-pro.log`, `fix-pro-rerun.log`, `fix-free.log`; `site-state.sh` |
+| V154 | After merging `origin/develop` (`43f801a`, in `de2633b`; no conflicts, no edits inside the merge): the gates clean, unit 1488 passed, 8 skipped. Live, pinned, `E2E_RETRIES=0`, the three features that failed in V152 on `pro@nginx` — the filter `backups.feature` also took `cli-backups.feature`, so four ran, 24 tests: 23 passed, 1 failed — the first scenario, whose teardown passed 120 s while sweeping the 28 folders V152 had left; alone, right after, it passed in 2.2 min. Every other scenario that failed in V152 passed. One Free scenario then swept `bwu2`'s 7. Afterwards both sites: no plugin, option, table, staging or `uploads/backwpup*` entry left. Observation: a teardown that inherits many such folders can outrun its budget — once | ✅ 2026-10-07 | `fix-pro.log`, `fix-pro-rerun.log`, `fix-free.log`; `site-state.sh` |
+| V155 | Before the audit fix, an inherited seed `["free@apache"]` with `E2E_CELL=pro@nginx` and no `--project` failed "--project … selects nothing"; unpinned, it sized the run and filed its report as `free@apache` while Playwright ran every project. Playwright forks its workers and its out-of-process loader from the runner (`runner/index.js:1915`, `:2092`, `:5451`) and never re-executes itself. After: an old-style or another run's seed changes nothing (pinned: the cell's 5 tests; unpinned: serial, all 10), and in a real `--project=apache` run every worker-written trace lands in `test-results/…/apache/`, not `_all` — workers still read their runner's seed | ✅ 2026-10-07 | the logic review's repro; `audit-probes.sh` 1a–1c, 5 |
+| V156 | `program.js:51–53`: arguments after `--` are test filters. Before: `E2E_CELL=pro@nginx … -- --project=free@apache` failed with the pin's refusal; after: the pinned 5 tests are listed | ✅ 2026-10-07 | the logic review's repro; `audit-probes.sh` 2 |
+| V157 | `bddgen` generates every config in an inherited `PLAYWRIGHT_BDD_CONFIGS` (`cli/commands/test.js`, `config/env.js:72–83`): pinned to `free@nginx` with an unpinned run's value, it rewrote all 11 + 14 specs of both cells. After: exit 1 naming the variable and `backwpup/pro@nginx`, and 0 of 25 rewritten. A pinned run's own value, handed to its workers, passes (spec: runner → worker build) | ✅ 2026-10-07 | `inherit-bdd.sh` before and after; `project.spec.ts` |
+| V158 | Playwright's "Running … using N workers" counts `metadata.actualWorkers` = min(workers, test groups) (`runner/index.js:1182`, `:6547`); with workers 4 and one test the notice said "4 workers" beside "using 1 worker". After, `--workers=4` on wp-rocket's pinned smoke: "2 workers" in both lines | ✅ 2026-10-07 | the tests-and-docs review's probe; `audit-probes.sh` 4 |
+| V159 | The sweep's cost, before: 1 + 4(N+2) + 2S commands for N family members and S survivors (the merge review's harness: 173 for N=28) at ~0.78 s each on `bwu3` (`exec`, `execElevated`, `readlink -f`, n=10 each). The 28-leftover teardown hit 120 s; the next needed 59 s; normal ≈ 23–24 s. After: the same commands for 1 leftover as for 30 (spec, PATH shims), one privileged `rm` for 5 stuck members. Facts the design rests on, measured on GNU (`bwu3`: coreutils 9.4, findutils 4.9.0) and BSD (macOS 26.7): `find -H … -type d` never lists a linked member and follows a linked parent; `readlink -f` with several operands drops the ones it cannot resolve (so it is not batched) | ✅ 2026-10-07 | allure step timings of the overrun; `latency.mts`; `find-h-probe.sh`, `find-h-gnu.sh`, `bsd-probe.sh`; `residue.spec.ts` |
+| V160 | Live on `pro@nginx` with 35 leftover family folders planted (30 `www-data` 755, 5 `ubuntu`, each with a `restore.dat`): the scenario passed, its teardown took **20.3 s**, and `bwu3` was left with no `uploads/backwpup*` entry, plugin, option, table or staging | ✅ 2026-10-07 | `plant-leftovers.sh`; `sweep-live.log`; allure; `site-state.sh` |
+| V161 | Fourteen mutations each fail the tests aimed at them, and the control passes 134 tests: the seed believed from any process; a runner keeping an inherited seed; `--project` parsed after `--`; short flags eaten; inherited BDD configs unchecked; the own config counted as foreign; keys compared whole; `actualWorkers` ignored; the multi-cell fail-fast off; the selection unfiltered; one `rm` per target; a failed re-list read as gone; declared paths or family parents not resolved. The gates: typecheck, lint and format clean; unit 1506 passed, 8 skipped (1488 before) | ✅ 2026-10-07 | `mutate-audit.mjs`, a copy of the worktree per mutation |
+| V162 | After the audit fixes, full passes, pinned, `E2E_RETRIES=0`: `free@nginx` **55 passed** (1.4 h), `pro@nginx` **72 passed** (2.0 h), restore features included, exit 0 both. Afterwards both sites: no BackWPup plugin, option, table, staging or `uploads/backwpup*` entry; 25 GB free | ✅ 2026-10-07 | `live-full.sh`; `site-state.sh` |

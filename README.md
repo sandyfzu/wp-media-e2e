@@ -49,7 +49,9 @@ how it was chosen, its workers and its report folder. A pin naming no cell of th
 pin, `--project` still narrows the run within the cell (`--project=artifacts:<cell>` resolves its
 zips only).
 
-Do not set `E2E_CELL` in `.env`: it would pin every run from the checkout.
+Do not set `E2E_CELL` in `.env`: `.env` is read from the working directory, so it would pin every
+run started there. A `--reporter` on the command line replaces the configured reporters, the
+`[cell]` line with them.
 
 Reports accumulate per run at `reports/<product>/<cell>/<RUN_ID>/`. Set `REPORT_MODE=rich`
 for an external report with the embedded trace viewer.

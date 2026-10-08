@@ -5,6 +5,7 @@ import {
   elevationSupport,
   exec,
   execElevated,
+  assertAllResolvedInsideRoot,
   assertResolvedInsideRoot,
   wpRootDir,
 } from "./exec";
@@ -287,17 +288,7 @@ async function listDirectories(
   parent: string,
   name: RegExp,
 ): Promise<string> {
-  const argv = [
-    "-H",
-    parent,
-    "-mindepth",
-    "1",
-    "-maxdepth",
-    "1",
-    "-type",
-    "d",
-    "-print0",
-  ];
+  const argv = listingArgv(parent);
   let listing = await exec(transport, "find", argv);
   if (listing.exitCode === 0) return listing.stdout;
   // A parent that is not there is the usual failure, and telling so needs no privileges.
@@ -315,10 +306,41 @@ async function listDirectories(
   );
 }
 
+/**
+ * `find`'s arguments for listing the directories directly inside `parent`, NUL-separated. `-H`
+ * follows `parent` itself when it is a link but nothing below it, and `-type d` then never lists a
+ * link — so every directory listed lies directly inside wherever `parent` really leads (measured with
+ * GNU findutils 4.9 and macOS's BSD `find`), which is what lets removal check a family once, through
+ * its parent, rather than member by member.
+ */
+function listingArgv(parent: string): string[] {
+  return [
+    "-H",
+    parent,
+    "-mindepth",
+    "1",
+    "-maxdepth",
+    "1",
+    "-type",
+    "d",
+    "-print0",
+  ];
+}
+
+/** A family's directories found on the site, relative to the root. */
+interface FoundFamily {
+  /** The family's parent directory. */
+  readonly parent: string;
+  /** Its directories found there, each a path directly inside {@link FoundFamily.parent}. */
+  readonly members: readonly string[];
+}
+
 /** What the declarations name on the site now, and the families that could not be looked for. */
 interface FoundResidue {
-  /** Every path found, relative to the root, each once. */
+  /** Every path found, relative to the root, each once — declared paths and family members alike. */
   readonly paths: readonly string[];
+  /** The families found with at least one directory, so removal can check and verify each at once. */
+  readonly families: readonly FoundFamily[];
   /** Why each family that could not be listed could not be. */
   readonly unlisted: readonly Error[];
 }
@@ -334,6 +356,7 @@ async function findResidue(
   declarations: readonly ResidueDeclaration[],
 ): Promise<FoundResidue> {
   const paths = new Set<string>();
+  const families: FoundFamily[] = [];
   const unlisted: Error[] = [];
   for (const declaration of declarations) {
     if (declaration.kind === "path") {
@@ -341,8 +364,10 @@ async function findResidue(
       continue;
     }
     try {
-      for (const path of await expandFamily(transport, root, declaration)) {
-        paths.add(path);
+      const members = await expandFamily(transport, root, declaration);
+      for (const path of members) paths.add(path);
+      if (members.length > 0) {
+        families.push({ parent: declaration.parent, members });
       }
     } catch (error) {
       unlisted.push(
@@ -350,7 +375,7 @@ async function findResidue(
       );
     }
   }
-  return { paths: [...paths], unlisted };
+  return { paths: [...paths], families, unlisted };
 }
 
 /**
@@ -585,33 +610,96 @@ async function escalateIfDenied(
 }
 
 /**
- * `rm -rf`s each target with `run`, and returns the ones still there afterwards.
+ * Most paths one `rm` is handed. Far below any platform's argument limit at a site path's length,
+ * and still one command for every leftover pile a run has met (28, measured).
+ */
+const MAX_TARGETS_PER_COMMAND = 200;
+
+/** `items` cut into runs of at most `size`. */
+function chunked<T>(items: readonly T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let start = 0; start < items.length; start += size) {
+    chunks.push(items.slice(start, start + size));
+  }
+  return chunks;
+}
+
+/** What one removal pass works on: absolute paths, the family members grouped by absolute parent. */
+interface RemovalTargets {
+  /** Declared paths, absolute. */
+  readonly paths: readonly string[];
+  /** Family members, absolute, keyed by their absolute parent. */
+  readonly families: ReadonlyMap<string, readonly string[]>;
+}
+
+/** Every target of a pass, absolute. */
+function allTargets(targets: RemovalTargets): string[] {
+  return [...targets.paths, ...[...targets.families.values()].flat()];
+}
+
+/**
+ * `rm -rf`s every target with `run`, and returns the ones still there afterwards.
  *
- * Every path is attempted even when an earlier one fails, so one stubborn directory cannot leave the
- * rest behind, and a caller can report **all** the survivors at once rather than the first.
+ * **One `rm` for all of them, and one re-read per family.** Every command is a round-trip to the
+ * site (~0.8 s over SSH, measured), and a removal that paid several per target made the teardown's
+ * cost grow with the leftovers it found: 28 of them took it past its budget. `rm -rf` carries on past
+ * a path it cannot remove, so every path is still attempted, and a caller still learns **all** the
+ * survivors rather than the first.
  *
  * Removal is verified rather than inferred: `rm -rf` reports success for a path it never had to
- * touch, and this suite's discipline elsewhere is to re-read the state rather than trust an exit
- * code. The check runs at the **same privilege** as the removal, because a `test -e` the transport's
- * user is not allowed to answer would report a path it cannot even see as gone.
+ * touch. The re-read runs at the **same privilege** as the removal: a family by listing its parent
+ * again — a listing that fails while the parent is still there counts every member as a survivor,
+ * because "could not look" must never read as "gone" — and a declared path by `test -e` (`test`
+ * takes no `--`; the path is absolute, so it cannot be read as an option).
  *
- * @param targets - absolute paths to remove.
+ * @param targets - what this pass removes.
  * @param run - how to run one command, at the privilege this pass uses.
- * @returns the targets still present afterwards.
+ * @returns what is still present afterwards, in the same shape.
  */
-async function removeEach(
-  targets: readonly string[],
+async function removeAll(
+  targets: RemovalTargets,
+  run: Runner,
+): Promise<RemovalTargets> {
+  for (const chunk of chunked(allTargets(targets), MAX_TARGETS_PER_COMMAND)) {
+    await run("rm", ["-rf", "--", ...chunk]);
+  }
+  const paths: string[] = [];
+  for (const path of targets.paths) {
+    if ((await run("test", ["-e", path])).exitCode === 0) paths.push(path);
+  }
+  const families = new Map<string, readonly string[]>();
+  for (const [parent, members] of targets.families) {
+    const left = await membersStillThere(parent, members, run);
+    if (left.length > 0) families.set(parent, left);
+  }
+  return { paths, families };
+}
+
+/**
+ * Which of `members` a fresh listing of `parent` still shows, at `run`'s privilege — all of them when
+ * the parent is still there but cannot be listed, none when the parent itself is gone.
+ *
+ * @param parent - the family's parent, absolute, as it was listed to find the members.
+ * @param members - the members removal acted on, absolute, each directly inside `parent`.
+ * @param run - how to run one command, at the privilege this pass uses.
+ */
+async function membersStillThere(
+  parent: string,
+  members: readonly string[],
   run: Runner,
 ): Promise<string[]> {
-  const survivors: string[] = [];
-  for (const target of targets) {
-    await run("rm", ["-rf", "--", target]);
-    // `test` takes no options, so `--` would be read as an operand; the target is absolute
-    // (the guards proved it) and so cannot be mistaken for one either way.
-    const { exitCode } = await run("test", ["-e", target]);
-    if (exitCode === 0) survivors.push(target);
+  const listing = await run("find", listingArgv(parent));
+  if (listing.exitCode !== 0) {
+    const parentGone = (await run("test", ["-e", parent])).exitCode !== 0;
+    return parentGone ? [] : [...members];
   }
-  return survivors;
+  const listed = new Set(
+    listing.stdout
+      .split("\0")
+      .filter((entry) => entry !== "")
+      .map((entry) => posix.basename(entry)),
+  );
+  return members.filter((member) => listed.has(posix.basename(member)));
 }
 
 /** The wording removal uses when a path cannot be placed inside the site, shared by both guards. */
@@ -677,7 +765,7 @@ export async function removeSiteResidue(
   // Kept as thrown, so a `SiteResidueRemovalFailedError` still reaches the teardown as one.
   let removal: Error | undefined;
   try {
-    await removeFound(transport, root, found.paths);
+    await removeFound(transport, root, found);
   } catch (error) {
     removal = error instanceof Error ? error : new Error(errorMessage(error));
   }
@@ -694,51 +782,66 @@ export async function removeSiteResidue(
 /**
  * The two removal passes over what was found — see {@link removeSiteResidue}.
  *
+ * What it costs does not grow with what it finds: the root is resolved once, a family is checked
+ * once through its parent, and each pass removes in one `rm` and re-reads in one listing per family
+ * (see {@link removeAll}).
+ *
  * @param transport - the target site's transport.
  * @param root - the site's resolved WordPress root.
- * @param relative - the paths found, relative to it.
+ * @param found - what the declarations name on the site now.
  * @throws Error if a path or the root is unusable for removal; or
  * {@link SiteResidueRemovalFailedError} naming whatever survived.
  */
 async function removeFound(
   transport: Transport,
   root: string,
-  relative: readonly string[],
+  found: FoundResidue,
 ): Promise<void> {
-  const targets = relative.map((path) => posix.join(root, path));
+  const members = new Set(found.families.flatMap((family) => family.members));
+  const targets: RemovalTargets = {
+    paths: found.paths
+      .filter((path) => !members.has(path))
+      .map((path) => posix.join(root, path)),
+    families: new Map(
+      found.families.map((family) => [
+        posix.join(root, family.parent),
+        family.members.map((member) => posix.join(root, member)),
+      ]),
+    ),
+  };
 
   // Before **either** pass, not just the privileged one. A path that resolves outside the site must
   // not be removed at any privilege: "unprivileged" is only a bound while the transport's user is
   // not root, which a `docker` container or a root SSH login does not guarantee — and deleting
   // another part of the filesystem is wrong either way. Measured before this existed: a symlinked
-  // `wp-content/uploads` let `rm -rf` remove content outside the WordPress root.
-  for (const target of targets) {
-    await assertResolvedInsideRoot(
-      transport,
-      target,
-      root,
-      describeRemoval(root),
-    );
-  }
+  // `wp-content/uploads` let `rm -rf` remove content outside the WordPress root. A family member is
+  // a directory its parent's listing found, never a link (`listingArgv`), so it lies inside the root
+  // exactly when that parent does: checking the parent checks every member.
+  await assertAllResolvedInsideRoot(
+    transport,
+    [...targets.paths, ...targets.families.keys()],
+    root,
+    describeRemoval(root),
+  );
 
-  const survivors = await removeEach(targets, (file, args) =>
+  const survivors = await removeAll(targets, (file, args) =>
     exec(transport, file, args),
   );
-  if (survivors.length === 0) return;
+  if (allTargets(survivors).length === 0) return;
 
   // Probed only now: a clean cell should not pay a round-trip asking about privileges it never needs.
   const elevation = await elevationSupport(transport);
   if (elevation !== "available") {
-    throw new SiteResidueRemovalFailedError(survivors, elevation);
+    throw new SiteResidueRemovalFailedError(allTargets(survivors), elevation);
   }
 
-  for (const target of survivors) {
+  for (const target of allTargets(survivors)) {
     assertSafeElevatedRemoval(target, root);
   }
-  const stubborn = await removeEach(survivors, (file, args) =>
+  const stubborn = await removeAll(survivors, (file, args) =>
     execElevated(transport, file, args),
   );
-  if (stubborn.length > 0) {
-    throw new SiteResidueRemovalFailedError(stubborn, elevation);
+  if (allTargets(stubborn).length > 0) {
+    throw new SiteResidueRemovalFailedError(allTargets(stubborn), elevation);
   }
 }

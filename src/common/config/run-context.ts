@@ -2,7 +2,7 @@ import "./load-env";
 
 import { fileURLToPath } from "node:url";
 
-import { isNonEmptyString } from "../guards";
+import { isNonEmptyString, isObject } from "../guards";
 import { pinnedCell } from "./cell-pin";
 import { env } from "./env";
 
@@ -34,8 +34,8 @@ export const REPO_ROOT: string = fileURLToPath(
  * The `*_ROOT` env vars and `RUN_ID` are the only knobs (an orchestrator may pin RUN_ID
  * so every cell of a batch shares one token). The `<product>/<cell>` namespace is always
  * appended, so two cells never share a directory, and a run that targets no single cell
- * writes its output under {@link NO_CELL} instead ({@link outputDirFor}). Running a cell
- * manually needs no environment at all.
+ * writes its output under {@link NO_CELL} instead ({@link outputDirFor}). A run is held to one
+ * cell by `E2E_CELL` (see `cell-pin.ts`), or selects it with `--project`.
  */
 
 /** Filesystem-safe, lexically-sortable run token. Used ONLY to namespace the report directory. */
@@ -65,13 +65,28 @@ export const RUN_ID: string = resolveRunId();
  * the one *it* just rebuilt, not the runner's. Any argv-derived decision must therefore ride
  * the environment, exactly as {@link RUN_ID} does. Seeded by {@link seedSelectedCells} while
  * the runner builds the config; never set by hand.
+ *
+ * The value names the process that wrote it — `{"pid": <runner>, "cells": [...]}` — and is believed
+ * only by that process's **direct children** (`process.ppid`): Playwright forks its workers and its
+ * out-of-process test loader straight from the runner. Anything else that inherited it — a run
+ * started from inside another run — reads it as absent, so a stale selection never stands in for
+ * what its own command line said.
  */
 const SELECTED_CELLS_ENV = "E2E_INTERNAL_SELECTED_CELLS";
+
+/** The seed's shape: who wrote it, and the selection it carries. */
+interface SelectionSeed {
+  /** The process that built the config with this selection on its command line. */
+  readonly pid: number;
+  /** That command line's `--project` values, verbatim. */
+  readonly cells: readonly string[];
+}
 
 /**
  * Parses the `--project` forms out of the live `process.argv` (`--project=x`, `--project x`,
  * the variadic `--project x y`, and repeats) — the exact signal Playwright itself filters on.
- * Empty in a worker process, which never receives the CLI argv.
+ * Stops at `--`, after which Playwright reads every argument as a test-file filter. Empty in a
+ * worker process, which never receives the CLI argv.
  */
 function cellsFromArgv(): string[] {
   const cells = new Set<string>();
@@ -80,6 +95,7 @@ function cellsFromArgv(): string[] {
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === undefined) continue;
+    if (arg === "--") break;
     if (arg.startsWith(eq)) {
       cells.add(arg.slice(eq.length));
     } else if (arg === "--project") {
@@ -95,18 +111,40 @@ function cellsFromArgv(): string[] {
   return [...cells];
 }
 
-/** Reads the selection the runner seeded for its workers; `[]` when absent or unreadable. */
-function cellsFromEnv(): string[] {
+/** The seed in the environment, or `undefined` when absent or not one {@link seedSelectedCells} writes. */
+function readSeed(): SelectionSeed | undefined {
   const raw = process.env[SELECTED_CELLS_ENV];
-  if (!isNonEmptyString(raw)) return [];
+  if (!isNonEmptyString(raw)) return undefined;
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed)
-      ? parsed.filter((value): value is string => typeof value === "string")
-      : [];
+    parsed = JSON.parse(raw);
   } catch {
-    return [];
+    return undefined;
   }
+  if (
+    !isObject(parsed) ||
+    !Number.isInteger(parsed.pid) ||
+    !Array.isArray(parsed.cells)
+  ) {
+    return undefined;
+  }
+  return {
+    pid: parsed.pid as number,
+    cells: parsed.cells.filter(
+      (value): value is string => typeof value === "string",
+    ),
+  };
+}
+
+/** Whether the seed was written by this process's parent — this process is one of its workers. */
+function seededByParent(seed: SelectionSeed | undefined): boolean {
+  return seed?.pid === process.ppid;
+}
+
+/** The selection this process's runner seeded for it; `[]` when there is none for it. */
+function cellsFromEnv(): string[] {
+  const seed = readSeed();
+  return seed !== undefined && seededByParent(seed) ? [...seed.cells] : [];
 }
 
 /**
@@ -129,12 +167,13 @@ export function projectSelection(): string[] {
  * inherits it, `bddgen` included. A correct invocation selects exactly one cell; this returns ALL
  * requested values so the config factory can reject an unsafe multi-cell selection fail-fast.
  *
- * Values come back **verbatim**, and callers compare them to cell names exactly. Playwright's
- * own project filter is looser — case-insensitive, and `*` wildcards expand — so a selection
- * like `--project='pro*'` runs a cell that no exact comparison here matches. That is deliberate:
- * such a selection is treated as broad, which for the artifacts setup means overrides
+ * Unpinned, values come back **verbatim**, and callers compare them to cell names exactly.
+ * Playwright's own project filter is looser — case-insensitive, and `*` wildcards expand — so a
+ * selection like `--project='pro*'` runs a cell that no exact comparison here matches. That is
+ * deliberate: such a selection is treated as broad, which for the artifacts setup means overrides
  * warn-and-drop rather than silently applying to cells the operator never named (and it keeps
- * the documented `--project='*'` ⇒ serial behaviour). Name the cell exactly, or pin it, to target it.
+ * `--project='*'` ⇒ serial). A pinned run has one cell whatever `--project` adds, so it is always
+ * targeted. Name the cell exactly, or pin it, to target it.
  */
 export function selectedCells(): string[] {
   const pin = pinnedCell();
@@ -143,15 +182,15 @@ export function selectedCells(): string[] {
 
 /**
  * Publishes the command line's cell selection into the environment so forked worker
- * processes can read it back through {@link selectedCells}. Called once while the config is
- * built: in the runner that captures the real selection, and in a worker (which rebuilds the
- * same config) it is a no-op — argv is empty there, so the inherited value is never clobbered.
+ * processes can read it back through {@link selectedCells}. Called while the config is built, in
+ * every process of a run. In a worker — its parent wrote the seed — it changes nothing. Anywhere
+ * else it writes this process's own selection, an empty one included, so a seed inherited from an
+ * enclosing run never reaches this run's workers.
  */
 export function seedSelectedCells(): void {
-  const fromArgv = cellsFromArgv();
-  if (fromArgv.length > 0) {
-    process.env[SELECTED_CELLS_ENV] = JSON.stringify(fromArgv);
-  }
+  if (seededByParent(readSeed())) return;
+  const seed: SelectionSeed = { pid: process.pid, cells: cellsFromArgv() };
+  process.env[SELECTED_CELLS_ENV] = JSON.stringify(seed);
 }
 
 /**

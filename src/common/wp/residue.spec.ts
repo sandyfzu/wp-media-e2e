@@ -10,6 +10,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -232,9 +233,12 @@ if [ "$FAKE_SUDO_DENY" = "1" ]; then exit 1; fi
 [ "$1" = "-n" ] && shift
 [ "$1" = "--" ] && shift
 if [ "$1" = "true" ]; then exit 0; fi
-for arg in "$@"; do target="$arg"; done
-chmod u+rwx "$(dirname "$target")" 2>/dev/null
-[ -e "$target" ] && chmod -R u+rwX "$target" 2>/dev/null
+[ "$1" = "rm" ] || exec "$@"
+for target in "$@"; do
+  case "$target" in /*) ;; *) continue ;; esac
+  chmod u+rwx "$(dirname "$target")" 2>/dev/null
+  [ -e "$target" ] && chmod -R u+rwX "$target" 2>/dev/null
+done
 exec "$@"
 `;
 
@@ -294,6 +298,32 @@ test.describe("removeSiteResidue — escalation", () => {
       expect(elevated.some((argv) => argv.includes(easy))).toBe(false);
     } finally {
       if (existsSync(stuck)) chmodSync(stuck, 0o700);
+    }
+  });
+
+  // A pile of directories the web server left is escalated in one privileged command, not one each.
+  test("removes every stuck family directory with one privileged rm", async () => {
+    test.skip(
+      isRoot,
+      "root ignores directory permissions, so nothing is stuck",
+    );
+    const stuck = [1, 2, 3, 4, 5].map((index) =>
+      seed(
+        `wp-content/uploads/backwpup-restore-${index.toString(16).padStart(20, "0")}`,
+      ),
+    );
+    for (const dir of stuck) chmodSync(dir, 0o500);
+    try {
+      await removeSiteResidue(local, [FAMILY]);
+
+      for (const dir of stuck) expect(existsSync(dir), dir).toBe(false);
+      const elevatedRm = sudoCalls().filter((argv) =>
+        argv.startsWith("-n -- rm "),
+      );
+      expect(elevatedRm).toHaveLength(1);
+      for (const dir of stuck) expect(elevatedRm[0]).toContain(dir);
+    } finally {
+      for (const dir of stuck) if (existsSync(dir)) chmodSync(dir, 0o700);
     }
   });
 
@@ -939,6 +969,100 @@ test.describe("removeSiteResidue — families", () => {
     } finally {
       chmodSync(uploads, 0o755);
     }
+  });
+});
+
+/**
+ * What a sweep costs. Every command is a round-trip to the site (~0.8 s over SSH, measured), and a
+ * sweep that paid several per leftover once took the teardown past its 120 s budget on a site holding
+ * 28 of them. Counted with shims on `PATH` that log each command's name, then run the real one.
+ */
+test.describe("removeSiteResidue — what it costs", () => {
+  /** The commands removal runs, each shimmed to log its name before running the real one. */
+  const COMMANDS = ["find", "rm", "test", "readlink"] as const;
+  let shimDir: string;
+  let log: string;
+  let originalPath: string | undefined;
+  /** Each command's real binary, found before the shims shadow it. */
+  const real = new Map<string, string>();
+
+  test.beforeEach(() => {
+    shimDir = mkdtempSync(join(tmpdir(), "wp-residue-shims-"));
+    log = join(shimDir, "commands.log");
+    for (const command of COMMANDS) {
+      const binary = execFileSync("/usr/bin/which", [command], {
+        encoding: "utf8",
+      }).trim();
+      real.set(command, binary);
+      writeFileSync(
+        join(shimDir, command),
+        `#!/bin/sh\nprintf '%s\\n' ${command} >> "${log}"\nexec "${binary}" "$@"\n`,
+      );
+      chmodSync(join(shimDir, command), 0o755);
+    }
+    originalPath = process.env.PATH;
+    process.env.PATH = `${shimDir}:${originalPath ?? ""}`;
+  });
+
+  test.afterEach(() => {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    rmSync(shimDir, { recursive: true, force: true });
+  });
+
+  /** The commands logged so far, then the log emptied. */
+  function takeCommands(): string[] {
+    const lines = existsSync(log)
+      ? readFileSync(log, "utf8").split("\n").filter(Boolean)
+      : [];
+    rmSync(log, { force: true });
+    return lines;
+  }
+
+  /** A family member's name for `index`, 20 hex digits like the plugin's own. */
+  const member = (index: number): string =>
+    `wp-content/uploads/backwpup-restore-${index.toString(16).padStart(20, "0")}`;
+
+  test("runs as many commands for 30 leftovers as for one", async () => {
+    const declared = ["wp-content/uploads/backwpup", FAMILY];
+    seed(member(1));
+    await removeSiteResidue(local, declared);
+    const one = takeCommands();
+
+    for (let index = 1; index <= 30; index += 1) seed(member(index));
+    await removeSiteResidue(local, declared);
+    const thirty = takeCommands();
+
+    expect(thirty).toEqual(one);
+    expect(thirty.filter((command) => command === "rm")).toHaveLength(1);
+    for (let index = 1; index <= 30; index += 1) {
+      expect(existsSync(join(wpRoot, member(index))), member(index)).toBe(
+        false,
+      );
+    }
+  });
+
+  // "Could not look" must never read as "gone": the re-read that verifies the removal fails here, so
+  // every member counts as a survivor — although `rm` really removed them.
+  test("counts every member as a survivor when its parent cannot be listed again", async () => {
+    const counter = join(shimDir, "find.count");
+    const realFind = real.get("find") ?? "find";
+    writeFileSync(
+      join(shimDir, "find"),
+      `#!/bin/sh\nn=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "${counter}"\n` +
+        `[ "$n" -ge 2 ] && exit 1\nexec "${realFind}" "$@"\n`,
+    );
+    seed(member(1));
+    seed(member(2));
+
+    const failure = await removeSiteResidue(unprivileged(), [FAMILY]).catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(SiteResidueRemovalFailedError);
+    expect(
+      [...(failure as SiteResidueRemovalFailedError).paths].sort(),
+    ).toEqual([join(wpRoot, member(1)), join(wpRoot, member(2))].sort());
   });
 });
 

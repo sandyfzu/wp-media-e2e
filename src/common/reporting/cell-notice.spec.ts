@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import type { FullConfig } from "@playwright/test/reporter";
 
-import CellNoticeReporter, { cellNotice } from "./cell-notice";
+import CellNoticeReporter, { actualWorkers, cellNotice } from "./cell-notice";
 import type { CellNoticeOptions } from "./cell-notice";
 
 /**
@@ -48,6 +48,25 @@ test.describe("cellNotice", () => {
   });
 });
 
+// Playwright's own "Running … using N workers" counts `metadata.actualWorkers` — the configured
+// workers capped by the test groups to run (measured: workers 4, one test → "using 1 worker").
+test.describe("actualWorkers", () => {
+  test("takes Playwright's own count when it set one", () => {
+    expect(actualWorkers({ workers: 4, metadata: { actualWorkers: 1 } })).toBe(
+      1,
+    );
+  });
+
+  test("falls back to the configured workers otherwise", () => {
+    for (const metadata of [{}, { actualWorkers: 0 }, { actualWorkers: "2" }]) {
+      expect(
+        actualWorkers({ workers: 4, metadata }),
+        JSON.stringify(metadata),
+      ).toBe(4);
+    }
+  });
+});
+
 test.describe("CellNoticeReporter", () => {
   test("prints the notice once as the run begins, with the run's real worker count", () => {
     const written: string[] = [];
@@ -57,12 +76,15 @@ test.describe("CellNoticeReporter", () => {
       return true;
     };
     try {
-      // onBegin reads only `workers`; the rest of FullConfig is irrelevant here.
-      new CellNoticeReporter(PINNED).onBegin({ workers: 3 } as FullConfig);
+      // onBegin reads only `workers` and `metadata`; the rest of FullConfig is irrelevant here.
+      new CellNoticeReporter(PINNED).onBegin({
+        workers: 4,
+        metadata: { actualWorkers: 1 },
+      } as unknown as FullConfig);
     } finally {
       process.stdout.write = original;
     }
-    expect(written).toEqual([`${cellNotice(PINNED, 3)}\n`]);
+    expect(written).toEqual([`${cellNotice(PINNED, 1)}\n`]);
   });
 
   test("does not claim the terminal, so Playwright keeps a progress reporter", () => {

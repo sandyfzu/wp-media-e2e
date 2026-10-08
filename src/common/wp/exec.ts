@@ -753,23 +753,51 @@ export async function assertResolvedInsideRoot(
   root: string,
   describeRejection: (reason: string) => string,
 ): Promise<void> {
+  await assertAllResolvedInsideRoot(
+    transport,
+    [target],
+    root,
+    describeRejection,
+  );
+}
+
+/**
+ * {@link assertResolvedInsideRoot} for several targets, resolving the root **once** rather than once
+ * per target: every command is a round-trip to the site (~0.8 s over SSH, measured), so a check
+ * that repeats one per target makes a removal's cost grow with what it removes.
+ *
+ * @param transport - the target site's transport.
+ * @param targets - the absolute paths privileged commands would act on; none does nothing.
+ * @param root - the site's WordPress root, as the transport resolved it.
+ * @param describeRejection - builds the message from the rule that was broken.
+ * @throws Error built by `describeRejection`, for the first target that fails.
+ */
+export async function assertAllResolvedInsideRoot(
+  transport: Transport,
+  targets: readonly string[],
+  root: string,
+  describeRejection: (reason: string) => string,
+): Promise<void> {
+  if (targets.length === 0) return;
   const realRoot = await resolveOnTarget(transport, root);
-  const realTarget = await resolveDeepestExisting(transport, target, root);
-  if (realRoot === undefined || realTarget === undefined) {
-    throw new Error(
-      describeRejection(
-        `"${target}" could not be resolved on this site, so where a privileged command would ` +
-          "land is unknown",
-      ),
-    );
-  }
-  if (realTarget !== realRoot && !realTarget.startsWith(`${realRoot}/`)) {
-    throw new Error(
-      describeRejection(
-        `"${target}" really resolves to "${realTarget}", which is outside it — a symbolic link on ` +
-          "the way there points out of the site",
-      ),
-    );
+  for (const target of targets) {
+    const realTarget = await resolveDeepestExisting(transport, target, root);
+    if (realRoot === undefined || realTarget === undefined) {
+      throw new Error(
+        describeRejection(
+          `"${target}" could not be resolved on this site, so where a privileged command would ` +
+            "land is unknown",
+        ),
+      );
+    }
+    if (realTarget !== realRoot && !realTarget.startsWith(`${realRoot}/`)) {
+      throw new Error(
+        describeRejection(
+          `"${target}" really resolves to "${realTarget}", which is outside it — a symbolic link ` +
+            "on the way there points out of the site",
+        ),
+      );
+    }
   }
 }
 

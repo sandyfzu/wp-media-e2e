@@ -5,9 +5,15 @@ import type { PlaywrightTestConfig, Project } from "@playwright/test";
 import { defineBddConfig } from "playwright-bdd";
 
 import { registerManifest } from "../artifacts/registry";
-import { assertPinKnown, assertSelectionFitsPin, pinnedCell } from "./cell-pin";
+import {
+  BDD_CONFIGS_ENV,
+  assertNoForeignBddConfigs,
+  assertPinKnown,
+  assertSelectionFitsPin,
+  pinnedCell,
+} from "./cell-pin";
 import { DESKTOP } from "./devices";
-import { intEnv } from "./env";
+import { env, intEnv } from "./env";
 import {
   registerDebugLogOptions,
   registerPool,
@@ -95,9 +101,11 @@ function cellProjectNames(cell: string): {
  * The cells this config holds: every cell of the product, or only the one `E2E_CELL` pins the run
  * to — so `bddgen`, which generates every cell a config holds, touches that cell's specs alone.
  *
+ * @param product - the product being built.
  * @param pin - the pinned cell, from `pinnedCell()`; `undefined` when the run is not pinned.
- * @throws {@link Error} when the pin names no cell of the product, or a `--project` selects none
- *   of the pinned cell's projects — each naming `E2E_CELL` and the fix.
+ * @throws {@link Error} when the pin names no cell of the product, a `--project` selects none of
+ *   the pinned cell's projects, or this process inherited other cells' BDD configs — each naming
+ *   `E2E_CELL` and the fix.
  */
 function cellsToBuild(
   product: ProductConfig,
@@ -111,6 +119,8 @@ function cellsToBuild(
     Object.values(cellProjectNames(pin)),
     projectSelection(),
   );
+  // Read before this process defines its own BDD config, so only what it inherited is judged.
+  assertNoForeignBddConfigs(env(BDD_CONFIGS_ENV), product.name, pin);
   return [pin];
 }
 

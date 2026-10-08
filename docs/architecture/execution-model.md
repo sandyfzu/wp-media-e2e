@@ -38,7 +38,8 @@ the smaller pool. The config factory therefore:
 `bddgen` generates every BDD config the product's Playwright config registers — one per cell — and
 deletes each cell's specs before writing them again. So with every cell in the config, a run's
 `bddgen` removes the specs another run of the same product is collecting or loading: started
-together, two runs of different cells failed 2 times in 80 (`ENOENT`, `Cannot find module`).
+together, two runs of different cells failed 2 times in 80 when this was found, and 4 in 80 when
+measured again beside the fix, which failed none (`ENOENT`, `Cannot find module`).
 `bddgen` takes no `--project`, and npm hands `-- args` to a script's last command only, so the
 environment is the one channel that reaches `bddgen`, the runner and every worker alike.
 
@@ -52,35 +53,45 @@ environment is the one channel that reaches `bddgen`, the runner and every worke
 - a `--project` that selects none of the pinned cell's projects — matched by Playwright's own rule:
   case-insensitive, `*` wildcards — fails naming `E2E_CELL`. Playwright alone would say only
   "Project(s) … not found", a puzzle when the pin came from `.env`. A `--project` that does fit
-  narrows the run within the cell (`--project=artifacts:<cell>`).
+  narrows the run within the cell (`--project=artifacts:<cell>`);
+- a run that **inherited** `PLAYWRIGHT_BDD_CONFIGS` — playwright-bdd's own channel, which a
+  process started from inside another run carries — naming any other cell's specs fails before
+  anything is generated: `bddgen` generates every config listed there, pin or not (measured).
 
 Unpinned, everything is as before: `--project=<cell>` runs one cell, but its `bddgen` regenerates
 every cell's specs, so it is safe only when no other run of the product is going. A blank
-`E2E_CELL` is no pin. `.env` is loaded into every process, so a pin there pins every run from the
-checkout; the orchestrator builds each run's environment itself, from an allowlist that never
-carries `PLAYWRIGHT_BDD_CONFIGS` — an inherited value of that playwright-bdd variable would make
-`bddgen` generate the configs it names, pin or not.
+`E2E_CELL` is no pin. `.env` is read from the working directory and loaded into every process, so a
+pin there pins every run started from that folder. The planned orchestrator is to build each run's
+environment itself, from an allowlist, so neither a `.env` nor an inherited variable reaches it.
+The healthcheck and the artifact warm ignore the pin: they span cells by design (`--cell` narrows
+the warm).
 
 **The `[cell]` notice.** Nothing else on the terminal names a run's cell, so the first reporter
 ([`reporting/cell-notice.ts`](../../src/common/reporting/cell-notice.ts)) prints one line before
 `Running …`: the product and cell, whether `E2E_CELL` or `--project` chose it (and so whether
-another cell may run beside it), the workers and the report folder. A reporter, because only the
-runner process runs reporters; the config is evaluated in every process of a run.
+another cell may run beside it), the workers — counted as Playwright's own line counts them — and
+the report folder. A reporter, because only the runner process runs reporters; the config is
+evaluated in every process of a run. A `--reporter` on the command line replaces the configured
+reporters, the notice with them.
 
 ### Reading the selection from a worker
 
 `selectedCells()` ([`run-context.ts`](../../src/common/config/run-context.ts)) is
 the single source of truth for "which cells did this invocation target". A pin wins; every
 process inherits it. Otherwise it reads `projectSelection()`, which parses
-the `--project` forms from `process.argv` — but **a Playwright worker never receives
+the `--project` forms from `process.argv` (up to a `--`, after which Playwright reads test-file
+filters) — but **a Playwright worker never receives
 the CLI argv**: it is forked with `[node, workerProcessEntry.js]`, and the project
 `metadata` a worker reads is the copy *it* just rebuilt, not the runner's. So an
 argv-derived decision cannot reach a worker through either channel.
 
 It rides the **environment** instead, exactly as `RUN_ID` does: the config factory
 calls `seedSelectedCells()` while the runner builds the config, and `projectSelection()`
-falls back to that inherited value when argv is empty. Reading `process.argv` directly
-from worker-side code is a bug.
+falls back to that inherited value when argv is empty. The seed names the process that wrote it
+(`{"pid", "cells"}`) and is believed only by that process's **direct children** — Playwright forks
+its workers and its out-of-process test loader straight from the runner — so a run started from
+inside another run never mistakes the enclosing run's selection for its own: it overwrites the seed
+with its own, an empty one included. Reading `process.argv` directly from worker-side code is a bug.
 
 Worker-side code that needs the "was this cell explicitly targeted?" answer should ask
 `isCellTargeted(cell, projectName)` rather than re-deriving it — it also counts a pin and a

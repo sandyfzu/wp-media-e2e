@@ -15,8 +15,8 @@ import { PRODUCTS } from "./src/projects/products";
  * pre-step or local prep long before an orchestrator exists,
  * which later imports the same `warmArtifacts` before spawning cells.
  *
- * For every `(product × cell)` with real sites it plans the build requests exactly as a real
- * `--project=<cell>` run would (the parity invariant), deduplicates them, and warms each once so
+ * For every `(product × cell)` with real sites it plans the build requests exactly as a real run of
+ * that one cell would (the parity invariant), deduplicates them, and warms each once so
  * the subsequent per-cell `build()` is a cache copy. `--product`/`--cell` narrow the set; global
  * `E2E_*` overrides apply (they warm what a same-env run would then build). Placeholder-only
  * cells are skipped, so a fresh checkout warms nothing and needs no GitHub token.
@@ -38,7 +38,7 @@ function readFlag(name: string): string | undefined {
     if (arg.startsWith(eq)) return normalize(arg.slice(eq.length));
     if (arg === `--${name}`) {
       // Space form (`--name value`): treat a following flag (or end of args) as "no value",
-      // mirroring run-context's `selectedCells`, so `--product --cell=x` never misreads the flag.
+      // mirroring run-context's `--project` parsing, so `--product --cell=x` never misreads the flag.
       const next = args[i + 1];
       return next !== undefined && !next.startsWith("-")
         ? normalize(next)

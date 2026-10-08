@@ -48,19 +48,32 @@ function setEnv(name: string, value: string | undefined): void {
   else process.env[name] = value;
 }
 
-/** Restores the seed env var to whatever the real process started with. */
-function restoreSeed(): void {
-  setEnv(SELECTED_CELLS_ENV, ORIGINAL_SEED);
+/**
+ * Seeds `cells` as if this process's **parent** had built the config with them on its command line —
+ * which makes this process one of that run's workers.
+ */
+function seedAsParent(cells: string[]): void {
+  process.env[SELECTED_CELLS_ENV] = JSON.stringify({
+    pid: process.ppid,
+    cells,
+  });
 }
 
+/** The seed currently in the environment, parsed. */
+function currentSeed(): unknown {
+  return JSON.parse(process.env[SELECTED_CELLS_ENV] ?? "null");
+}
+
+// Cleared, not restored: a seed inherited by the test process (or loaded from a `.env`) must not
+// decide these results.
 test.beforeEach(() => {
-  restoreSeed();
+  setEnv(SELECTED_CELLS_ENV, undefined);
   setEnv(CELL_PIN_ENV, undefined);
 });
 
 test.afterEach(() => {
   process.argv = ORIGINAL_ARGV;
-  restoreSeed();
+  setEnv(SELECTED_CELLS_ENV, ORIGINAL_SEED);
   setEnv(CELL_PIN_ENV, ORIGINAL_PIN);
 });
 
@@ -83,9 +96,22 @@ test.describe("selectedCells (parses --project)", () => {
     });
   });
 
-  test("stops the variadic scan at the next flag", () => {
+  test("stops the variadic scan at the next flag, long or short", () => {
     withArgv(["--project", "nginx", "--workers", "3"], () => {
       expect(selectedCells()).toEqual(["nginx"]);
+    });
+    withArgv(["--project", "nginx", "-g", "smoke"], () => {
+      expect(selectedCells()).toEqual(["nginx"]);
+    });
+  });
+
+  // Playwright reads everything after `--` as a test-file filter, never as an option.
+  test("ignores a --project after --", () => {
+    withArgv(["--project=nginx", "--", "--project=apache"], () => {
+      expect(selectedCells()).toEqual(["nginx"]);
+    });
+    withArgv(["--", "--project", "apache"], () => {
+      expect(selectedCells()).toEqual([]);
     });
   });
 
@@ -103,40 +129,59 @@ test.describe("selectedCells (parses --project)", () => {
 });
 
 test.describe("selection propagation to worker processes", () => {
-  test("seedSelectedCells publishes the argv selection, selectedCells reads it back", () => {
+  test("seedSelectedCells publishes the argv selection under this process's own pid", () => {
     withArgv(["--project=pro@nginx"], () => {
       seedSelectedCells();
     });
-    // A worker: no argv, but the seeded environment survives the fork.
+    expect(currentSeed()).toEqual({ pid: process.pid, cells: ["pro@nginx"] });
+  });
+
+  test("a worker — no argv — reads back the selection its parent seeded", () => {
+    seedAsParent(["pro@nginx"]);
     withArgv([], () => {
       expect(selectedCells()).toEqual(["pro@nginx"]);
     });
   });
 
-  test("seedSelectedCells is a no-op without argv, so a worker never clobbers the seed", () => {
-    withArgv(["--project=apache", "--project=nginx"], () => {
-      seedSelectedCells();
-    });
+  test("a worker re-building the config leaves its parent's seed alone", () => {
+    seedAsParent(["apache", "nginx"]);
     withArgv([], () => {
-      seedSelectedCells(); // the worker re-building the config
+      seedSelectedCells();
       expect(selectedCells()).toEqual(["apache", "nginx"]);
+    });
+    expect(currentSeed()).toEqual({
+      pid: process.ppid,
+      cells: ["apache", "nginx"],
     });
   });
 
-  test("argv wins over a stale seed", () => {
-    withArgv(["--project=stale"], () => {
+  // A run started from inside another inherits that run's seed; it must not read it as its own.
+  test("a seed written by any other process is ignored, and replaced by this run's own", () => {
+    process.env[SELECTED_CELLS_ENV] = JSON.stringify({
+      pid: process.ppid + 1,
+      cells: ["stale"],
+    });
+    withArgv([], () => {
+      expect(selectedCells()).toEqual([]);
       seedSelectedCells();
     });
+    expect(currentSeed()).toEqual({ pid: process.pid, cells: [] });
+  });
+
+  test("argv wins over a parent's seed", () => {
+    seedAsParent(["stale"]);
     withArgv(["--project=fresh"], () => {
       expect(selectedCells()).toEqual(["fresh"]);
     });
   });
 
-  test("an unparseable seed degrades to a serial run rather than throwing", () => {
-    process.env[SELECTED_CELLS_ENV] = "{not json";
-    withArgv([], () => {
-      expect(selectedCells()).toEqual([]);
-    });
+  test("an unparseable or old-style seed degrades to a serial run rather than throwing", () => {
+    for (const raw of ["{not json", '["nginx"]', '{"pid":"x","cells":[]}']) {
+      process.env[SELECTED_CELLS_ENV] = raw;
+      withArgv([], () => {
+        expect(selectedCells(), raw).toEqual([]);
+      });
+    }
   });
 });
 
@@ -221,9 +266,7 @@ test.describe("isCellTargeted (gates whether per-run overrides apply)", () => {
   });
 
   test("reads the seeded selection, so it holds inside a worker (no argv there)", () => {
-    withArgv([`--project=${CELL}`], () => {
-      seedSelectedCells();
-    });
+    seedAsParent([CELL]);
     withArgv([], () => {
       expect(isCellTargeted(CELL, PROJECT)).toBe(true);
     });
