@@ -1,7 +1,7 @@
 # Orchestrator Phase 0 — Make the suite ready
 
 > **Status:** in implementation, in §9's order. **Done:** 0B.3 (2026-10-05, §4.3), 0A.2
-> (2026-10-06, §3.2), 0A.1 (2026-10-06, §3.1). The rest is
+> (2026-10-06, §3.2), 0A.1 (2026-10-06, §3.1), 0B.1 (2026-10-08, §4.1). The rest is
 > investigated: every item has a verified finding and a recommended solution, with the
 > alternatives it beat.
 > **Date:** 2026-09-25.
@@ -26,7 +26,7 @@ The recommended solution per item. "—" means no suite change: the orchestrator
 | 0A.3 shared hosts | Never two runs on one site or staging root. **No limit per server**: the user decides; a **warning** (command, dashboard, event) once a server's busy-run threshold — default 4, configurable — is reached, or its free disk is low | — |
 | 0A.4 two runs on one site | Refuse a site listed by two cells of any product, compared on its normalized URL and location | — (optional loader check) |
 | 0A.5 APVM's cache | Build in a **worker process per build**, detached, with a private `TMPDIR`: stop, cancel and timeout = SIGKILL its group and remove that folder. The cache survived every kill measured | — |
-| 0B.1 a run's settings | `E2E_LOAD_DOTENV=false` makes the suite skip `.env`; the orchestrator builds each child's environment from an allowlist | `load-env.ts` |
+| 0B.1 a run's settings — **done** | `E2E_LOAD_DOTENV=false` makes the suite skip `.env`; the orchestrator builds each child's environment from an allowlist | new `dotenv.ts`; `load-env.ts`, `env.ts` |
 | 0B.2 the built commit | The warm returns what it built — full commit, version, the ref that pins it; the run gets `commit:<sha>` (or `release:<tag>`) and then needs no network | `warm.ts` |
 | 0B.3 one product list — **done** | `src/projects/products.ts`, with a drift-guard spec, replaces the three hard-coded lists; a misspelt `PRODUCT` fails instead of running WP Rocket | new `products.ts`; `healthcheck.ts`, `warm-artifacts.ts`, `playwright.config.ts`, `eslint.config.js` |
 | 0C stopping a run | Spawn the Playwright CLI directly, in its own process group. Stop = **drain** (a stop file skips each scenario's first attempt), then **one** SIGINT, then SIGKILL of the group; never SIGTERM. The `@plugin` Before path stops running work first | `fixtures.ts`, `plugin-lifecycle.ts`, `plugin.hooks.ts` |
@@ -537,6 +537,54 @@ passes `CI`, so the orchestrator does not depend on fixing it.
 
 **Verify when implemented.** A unit spec on a temporary `.env`; then the runner-and-worker probes again
 (every key loaded by default; nothing with `E2E_LOAD_DOTENV=false`; a typo rejected).
+
+**Implemented** (2026-10-08, V163–V166). As recommended, plus:
+
+- **Where it lives.** `src/common/config/dotenv.ts` holds the policy, free of side effects (`loadDotenv`,
+  `applyDotenv`, `readDotenvFile`); `load-env.ts` runs it once per process and prints the warning.
+  `env.ts` gains `parseBoolean`, and `boolEnv` an optional source, so the switch is read by the suite's
+  one boolean rule from an injectable environment.
+- **The file is read and applied by the suite**, not by `process.loadEnvFile()`: `util.parseEnv` (the
+  same parser, V163), then every key the environment lacks — so the switch can be read before the file
+  and a copy of it inside the file detected.
+- **A switch inside `.env`** warns, naming the file and the value, and the file loads. A valid one is
+  still set, so the processes the run forks inherit it as present and do not repeat the warning (with
+  `false` they also skip the file, whose keys they inherited); an invalid one is not set, so no worker
+  throws on it, and each process warns once (V164). `bddgen` and the runner are separate processes, so
+  `npm run test:*` prints it twice (V170).
+- **A `.env` that exists but cannot be read now fails the run**, naming the file, the reason and the
+  switch — a directory, no permission, a link to a missing file; it used to be silently skipped. A
+  missing one is still fine, and a malformed line is still skipped (the same parser).
+- **Not changed:** `CI="false"` still counts as on (V82); the allowlist never passes `CI`.
+- **Not run live:** with the switch unset and no `.env` the suite behaves as before (the worktree has
+  none), and the switch only changes what is read at config load, which V164 measured through a real
+  runner and its workers. The orchestrator's spawn is where it is used.
+
+#### Audit (2026-10-08, V167–V171)
+
+Two adversarial reviews (logic and parity with `process.loadEnvFile()`; tests and docs), read-only and
+required to prove each finding; every finding then reproduced here before it was fixed. None was high.
+Fixed:
+
+- **Keys named like `Object` members were dropped** — `toString`, `constructor`: presence was
+  `target[key] !== undefined`, and `process.env` inherits `Object.prototype`. Now `Object.hasOwn`, which
+  still sees a blank real variable (V167).
+- **A link to a missing `.env` read as no file** (`ENOENT`), so a broken link to a shared secrets file
+  would run without it. Now refused, by `lstat` (V167).
+- **Nothing tested that an unreadable `.env` fails the run**: the error path was tested on the reader
+  alone, and a swallowing wrapper in `load-env.ts` or as `loadDotenv`'s default passed every test. Two
+  fresh-Node tests now cover it, the switch-off case included (V168).
+- **`npm run report` and `report:allure` never read `.env`** (before 0B.1): a `REPORT_ROOT` set there
+  made the run write where they never looked. They now import `load-env` and run under `tsx` (V169).
+- **Messages and docs:** the warning advised `=false` even for `=true` in the file; `requireEnv` said
+  "set it in .env" with the file switched off (it has no caller today); the `env.ts` and `load-env.ts`
+  headers and `configuration.md` named the wrong set of importers; the forked-process sentence promised
+  more than it does; `execution-model.md`, the parent plan's 0B.1 and the Phase 0.5 table still showed
+  the old approach or no status; `intEnv`'s lower bound was untested.
+- **Confirmed sound:** `util.parseEnv` and `process.loadEnvFile` are both stable since Node 24.10.0
+  (the docs' history tables; no `ExperimentalWarning` under `--trace-warnings`), under the engines floor
+  of 24.16; parity also holds for a BOM, CRLF, an empty file, a 2 MB value, invalid UTF-8, NUL bytes,
+  odd key names and `NODE_OPTIONS` in the file; no other code reads `.env`.
 
 ### 4.2 0B.2 — The build hands back its commit
 
@@ -1070,7 +1118,7 @@ on `bwu2`/`bwu3`, one cell at a time.
 1. 0B.3, one product list — everything the orchestrator spawns starts from it. **Done 2026-10-05.**
 2. 0A.2, the output folders and the cell-name rule — a hazard today. **Done 2026-10-06.**
 3. 0A.1, the cell pin. **Done 2026-10-06.**
-4. 0B.1, a run's environment.
+4. 0B.1, a run's environment. **Done 2026-10-08.**
 5. 0D.2 with 0B.2 — the full commit, the digest, and the built commit (the artifacts code).
 6. 0C's suite parts: the Before path stopping running work (worth having now), then the drain.
 7. 0D.3, the site's versions.
@@ -1214,3 +1262,12 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V160 | Live on `pro@nginx` with 35 leftover family folders planted (30 `www-data` 755, 5 `ubuntu`, each with a `restore.dat`): the scenario passed, its teardown took **20.3 s**, and `bwu3` was left with no `uploads/backwpup*` entry, plugin, option, table or staging | ✅ 2026-10-07 | `plant-leftovers.sh`; `sweep-live.log`; allure; `site-state.sh` |
 | V161 | Fourteen mutations each fail the tests aimed at them, and the control passes 134 tests: the seed believed from any process; a runner keeping an inherited seed; `--project` parsed after `--`; short flags eaten; inherited BDD configs unchecked; the own config counted as foreign; keys compared whole; `actualWorkers` ignored; the multi-cell fail-fast off; the selection unfiltered; one `rm` per target; a failed re-list read as gone; declared paths or family parents not resolved. The gates: typecheck, lint and format clean; unit 1506 passed, 8 skipped (1488 before) | ✅ 2026-10-07 | `mutate-audit.mjs`, a copy of the worktree per mutation |
 | V162 | After the audit fixes, full passes, pinned, `E2E_RETRIES=0`: `free@nginx` **55 passed** (1.4 h), `pro@nginx` **72 passed** (2.0 h), restore features included, exit 0 both. Afterwards both sites: no BackWPup plugin, option, table, staging or `uploads/backwpup*` entry; 25 GB free | ✅ 2026-10-07 | `live-full.sh`; `site-state.sh` |
+| V163 | `util.parseEnv` reads a file as `process.loadEnvFile()` does — a duplicate's last value, `export`, quotes, multi-line values, comments, a blank real variable still winning — but not in the file's order. On a directory `loadEnvFile` throws `ERR_INVALID_ARG_TYPE`, `readFileSync` `EISDIR` | ✅ measured, Node 24.21.0 | A scratch `.env` through both |
+| V164 | The real `load-env.ts` through a Playwright runner and 2 workers (4 tests): by default every process holds `.env`'s key; `false` and `0`, none — the environment's own value kept; a typo fails the run naming it (exit 1); a valid switch in the file, one warning and the file loaded; an invalid one, a warning per process (runner, 2 workers), the file loaded, no throw; `.env` a directory, the run fails naming it; no `.env`, nothing | ✅ 2026-10-08 | A scratch config importing the real module, `env -i` |
+| V165 | `bddgen` (`playwright.backwpup.config.ts`, pinned to `free@nginx`): `E2E_LOAD_DOTENV=nah` stops it naming the value (exit 1); `false` generates (exit 0) | ✅ 2026-10-08 | The worktree |
+| V166 | Seven mutations each fail the tests aimed at them: the switch ignored; the file overriding the environment; an invalid switch set; a missing file thrown; read errors swallowed; no warning; the switch unreported. Gates: typecheck, lint and format clean; unit 1527 passed, 8 skipped (1506 before) | ✅ 2026-10-08 | Mutations applied in place, restored from a copy |
+| V167 | On a file `toString=t / constructor=c / A=1`, `loadEnvFile` set all three, the first implementation only `A` (`"toString" in process.env` is true, `Object.hasOwn` false — and true for a blank real variable). A dangling `.env` link: `readFileSync` → `ENOENT`, `lstat` finds it. Both fixed and specified | ✅ 2026-10-08 | Probes beside both loaders; `dotenv.spec.ts` |
+| V168 | Thirteen mutations each fail the tests aimed at them: `load-env.ts` or `loadDotenv`'s default swallowing read errors; the error's `cause` dropped; the inherited-member presence test; a dangling link read as absent; `intEnv`'s lower bound; the old `requireEnv` message and warning advice; and V166's seven again | ✅ 2026-10-08 | `mut.py`, the sources restored after each |
+| V169 | From a folder whose `.env` holds `REPORT_ROOT=myreports`, both report scripts look under `myreports/`, and under `reports/` with `E2E_LOAD_DOTENV=false`; under plain `node` they now fail (`ERR_MODULE_NOT_FOUND`), so the npm scripts run them with `tsx`; `npm run report:allure -- backwpup free@nginx` still generates (exit 0) | ✅ 2026-10-08 | Scratch folder; the worktree |
+| V170 | A `.env` holding only `E2E_LOAD_DOTENV=false`: `E2E_CELL=free@nginx npm run test:backwpup -- --list` prints the warning twice (`bddgen`, the runner). The real-runner probe after the fixes: as V164; `=true` in the file warns once; a dangling link fails the run naming it | ✅ 2026-10-08 | The worktree (the `.env` removed after); the scratch config |
+| V171 | Gates after the audit: typecheck, lint and format clean; unit 1531 passed, 8 skipped | ✅ 2026-10-08 | The worktree |

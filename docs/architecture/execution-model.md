@@ -62,7 +62,8 @@ Unpinned, everything is as before: `--project=<cell>` runs one cell, but its `bd
 every cell's specs, so it is safe only when no other run of the product is going. A blank
 `E2E_CELL` is no pin. `.env` is read from the working directory and loaded into every process, so a
 pin there pins every run started from that folder. The planned orchestrator is to build each run's
-environment itself, from an allowlist, so neither a `.env` nor an inherited variable reaches it.
+environment itself, from an allowlist and with `E2E_LOAD_DOTENV=false`, so neither a `.env` nor an
+inherited variable reaches it.
 The healthcheck and the artifact warm ignore the pin: they span cells by design (`--cell` narrows
 the warm).
 
@@ -227,7 +228,7 @@ resolves all paths via `dirs(product, cell)`. Two lifecycles:
 ```text
 E2E_CELL=apache npm run test:wp-rocket
         │
-        ├─ load-env.ts                 → .env into process.env (once)
+        ├─ load-env.ts                 → .env into process.env (once; E2E_LOAD_DOTENV=false skips it)
         ├─ wp-rocket.config.ts         → ProductConfig { name, features, steps, sites, artifacts }
         └─ createProductConfig()       (in bddgen, the runner and every worker)
               ├─ E2E_CELL → holds apache alone (unknown pin / stray --project → fail)

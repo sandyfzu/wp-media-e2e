@@ -278,7 +278,7 @@ src/
     wp/                            # exec layer, plugin guards, db helpers (Phase 3)
     config/
       env.ts                       # env() / requireEnv() / intEnv() / boolEnv()
-      load-env.ts                  # one-time .env loader (process.loadEnvFile)
+      load-env.ts                  # one-time .env loader (util.parseEnv; E2E_LOAD_DOTENV)
       run-context.ts               # RUN_ID + selectedCells + namespaced dirs (§3.5)
       metadata.ts                  # routing metadata + in-process pool registry (§3.3)
       reporting.ts                 # reporter factory + REPORT_MODE (§6.2)

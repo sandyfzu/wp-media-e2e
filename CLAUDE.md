@@ -150,7 +150,8 @@ Two surfaces — schema reference in
     Credentials live only in these files and never enter reports.
 - **`.env`** (copied from `.env.example`, loaded by
   [`load-env.ts`](src/common/config/load-env.ts)) holds runtime flags and BackWPup
-  storage credentials. Real env vars always win over `.env`. Access env only through
+  storage credentials. Real env vars always win over `.env`; `E2E_LOAD_DOTENV=false` in the
+  environment skips the file (the orchestrator's runs). Access env only through
   the typed accessors in [`env.ts`](src/common/config/env.ts).
 
 ## Fixtures

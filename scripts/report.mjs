@@ -1,12 +1,13 @@
-#!/usr/bin/env node
 // Open the Playwright HTML report from a product/cell's most recent run.
 //
-//   node scripts/report.mjs [product] [cell]
+//   npx tsx scripts/report.mjs [product] [cell]
 //
 // Reports are written per run to `reports/<product>/<cell>/<RUN_ID>/playwright` (never to the
 // default `playwright-report/`), so a bare `playwright show-report` would open the wrong (or a
 // stale) directory. This resolves the newest run — optionally filtered to one product/cell —
-// and serves it. Respects REPORT_ROOT (same as the test config) so it finds custom report roots.
+// and serves it. Respects REPORT_ROOT (same as the test config) so it finds custom report roots,
+// `.env`'s included: it loads `.env` as a run does, which is why it runs under tsx.
+import "../src/common/config/load-env";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";

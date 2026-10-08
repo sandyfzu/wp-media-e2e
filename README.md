@@ -100,7 +100,8 @@ Credentials live only in sites files and never enter Playwright reports.
 ## Environment
 
 Copy `.env.example` to `.env` and fill in what you need (BackWPup storage credentials,
-optional runtime flags). Real environment variables always win over `.env`.
+optional runtime flags). Real environment variables always win over `.env`;
+`E2E_LOAD_DOTENV=false` in the environment skips the file.
 
 ## Browsers
 

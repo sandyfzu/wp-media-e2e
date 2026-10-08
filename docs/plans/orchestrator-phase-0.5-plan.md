@@ -84,9 +84,9 @@ Phase 0.5 starts once Phase 0 is done; this is why each item matters here.
 
 | Phase 0 item | Needed for | |
 | --- | --- | --- |
-| 0A.1 the cell pin (`E2E_CELL`) | Two cells of one product side by side (2 of 80 failed without it, V29) | required |
-| 0A.2 output folders | A `test:unit` or manual run on the runner not deleting running cells' traces | recommended |
-| 0B.1 `E2E_LOAD_DOTENV` | Runs not changed by a `.env` on the runner | required |
+| 0A.1 the cell pin (`E2E_CELL`) — **done 2026-10-06** | Two cells of one product side by side (2 of 80 failed without it, V29) | required |
+| 0A.2 output folders — **done 2026-10-06** | A `test:unit` or manual run on the runner not deleting running cells' traces | recommended |
+| 0B.1 `E2E_LOAD_DOTENV` — **done 2026-10-08** | Runs not changed by a `.env` on the runner | required |
 | 0B.3 one product list — **done 2026-10-05** | Validating a task's product (`productByName`) and finding its config (`playwrightConfigFor`) | required |
 | 0C the drain, `stopRunningWork` first | A graceful stop; a killed run's next run recovering the site | required |
 | 0D.1 run facts, 0D.2 full commit, 0D.3 site versions | Slack and Datator: plugin, commit, site, WordPress, PHP | required |

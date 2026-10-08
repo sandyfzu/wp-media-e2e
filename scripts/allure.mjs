@@ -1,12 +1,13 @@
-#!/usr/bin/env node
 // Generate (and optionally serve) the Allure report for a product/cell from its most recent run.
 //
-//   node scripts/allure.mjs [product] [cell] [--open]
+//   npx tsx scripts/allure.mjs [product] [cell] [--open]
 //
 // With no product/cell it picks the most recently written results across all cells. The report
 // is written next to that run's Playwright/Cucumber reports (`reports/<product>/<cell>/<run>/
 // allure`); the trend chart comes from a cell-level history file that accumulates across runs.
-// Respects REPORT_ROOT (same as the test config) so it finds custom report roots.
+// Respects REPORT_ROOT (same as the test config) so it finds custom report roots,
+// `.env`'s included: it loads `.env` as a run does, which is why it runs under tsx.
+import "../src/common/config/load-env";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";

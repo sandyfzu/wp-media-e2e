@@ -159,9 +159,13 @@ maps each edition to the single variant it builds (`pro` → `pro-en`) — see
 ## `.env` ([`.env.example`](../../.env.example))
 
 Copied to `.env` and loaded once by
-[`load-env.ts`](../../src/common/config/load-env.ts), imported first by every
-Playwright config entry. **Real environment variables always win** over `.env`
-(CI secrets are never overwritten). Validation happens only at this boundary,
+[`load-env.ts`](../../src/common/config/load-env.ts), imported first by every product
+Playwright config and script (healthcheck, artifact warm, fixture capture, `report`,
+`report:allure`) — never by the unit config — from the **working directory**. **Real
+environment variables always win** over `.env`, even blank ones (CI secrets are never
+overwritten). Every key is loaded, unknown ones included; a malformed line is skipped. A
+`.env` that exists but cannot be read (a directory, no permission, a link to a missing
+file) fails the run naming it; a missing one is fine. Validation happens only at this boundary,
 through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 (`env`, `requireEnv`, `intEnv`, `boolEnv`).
 
@@ -169,6 +173,7 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 
 | Var           | Default                | Purpose                                                                 |
 | ------------- | ---------------------- | ----------------------------------------------------------------------- |
+| `E2E_LOAD_DOTENV` | `true`              | `false`/`0` **in the environment** skips `.env` entirely, in every process of the run — for a caller that hands the run its whole environment (the orchestrator). Any other value but `true`/`1`/blank fails the run naming it. Set inside `.env` it has no effect (the file is already being read) and a warning says so — once per process that reads the file, so `npm run test:*` (`bddgen`, then the runner) prints it twice. |
 | `REPORT_MODE` | _(unset)_ → self-contained | `rich` → external attachments + embedded trace viewer (serve over http). |
 | `RUN_ID`      | auto-stamped           | Per-run report token; pin to share one token across a batch.            |
 | `CI`          | _(unset)_              | Non-empty enables CI config (retries, `forbidOnly`).                    |
@@ -237,7 +242,8 @@ Rules (enforced in
 
 Read by [`backwpup.config.ts`](../../src/projects/backwpup/config/backwpup.config.ts)
 into the product's `services`; ignored by WP Rocket. Any can be overridden per
-site via that site's `overrides` block.
+site via that site's `overrides` block. They come from the environment or `.env` alike;
+with `E2E_LOAD_DOTENV=false`, only from the environment.
 
 | Var                       | Default       |
 | ------------------------- | ------------- |

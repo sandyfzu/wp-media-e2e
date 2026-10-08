@@ -2,8 +2,8 @@
  * Typed environment-variable accessors.
  *
  * Validation happens only at this boundary, so the rest of the code can treat
- * configuration as total. The `.env` file is loaded once by `./load-env.ts`,
- * which every Playwright config entry imports first.
+ * configuration as total. `.env` is loaded once per process by `./load-env.ts`, which every
+ * product config and script entry point imports first (never the unit config).
  */
 
 import { isNonEmptyString } from "../guards";
@@ -20,7 +20,7 @@ export function requireEnv(name: string): string {
   if (!isNonEmptyString(value)) {
     throw new Error(
       `Missing required environment variable "${name}". ` +
-        "Set it in .env (local) or your CI secret store.",
+        "Set it in the environment (a CI secret store), or in .env unless E2E_LOAD_DOTENV=false.",
     );
   }
   return value;
@@ -49,16 +49,34 @@ export function intEnv(
 }
 
 /**
- * Returns a boolean environment variable. Accepts `true`/`false`/`1`/`0`
- * (case-insensitive); falls back when unset or blank; throws on anything else rather
- * than silently treating an unrecognized value as `false`.
+ * Parses a boolean variable's value: `true`/`false`/`1`/`0`, case-insensitive, surrounding
+ * whitespace ignored.
+ *
+ * @returns the boolean, or `undefined` for anything else (a blank included).
  */
-export function boolEnv(name: string, fallback: boolean): boolean {
-  const raw = process.env[name];
-  if (!isNonEmptyString(raw)) return fallback;
+export function parseBoolean(raw: string): boolean | undefined {
   const value = raw.trim().toLowerCase();
   if (value === "true" || value === "1") return true;
   if (value === "false" || value === "0") return false;
+  return undefined;
+}
+
+/**
+ * Returns a boolean environment variable, by {@link parseBoolean}'s rule. Falls back when unset
+ * or blank; throws on anything else rather than silently treating an unrecognized value as
+ * `false`.
+ *
+ * @param source - Where to read it; `process.env` unless a caller (or a spec) holds another.
+ */
+export function boolEnv(
+  name: string,
+  fallback: boolean,
+  source: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw = source[name];
+  if (!isNonEmptyString(raw)) return fallback;
+  const value = parseBoolean(raw);
+  if (value !== undefined) return value;
   throw new Error(
     `Environment variable "${name}" must be a boolean (true/false/1/0), got "${raw}".`,
   );

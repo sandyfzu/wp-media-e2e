@@ -368,6 +368,8 @@ verified live where possible, with its evidence in §8.
 - **0B.1 — a run's `E2E_*` settings.** They must come only from its task (§1), but the suite also
   loads the repo's `.env`, which fills any var a run leaves unset. So each run's env sets every
   `E2E_*` var, blank meaning the product's default — a blank var does keep `.env` out (V12).
+  **Superseded, done 2026-10-08:** blanking misses unknown keys, so the run gets
+  `E2E_LOAD_DOTENV=false` and an allowlisted environment instead — Phase 0 plan §4.1.
 - **0B.2 — the build step hands back the commit it built.** It plans each run alone, with that run's
   env, so `warmArtifacts`' one env per call is no obstacle; but it doesn't return the commit
   (`WarmOne` returns only `fromCache`), which pinning needs (§2 Builds; V16).
