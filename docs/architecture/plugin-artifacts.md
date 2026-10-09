@@ -35,11 +35,13 @@ WP Rocket has `previous` from day one; BackWPup deliberately does not yet (see
 | `manifest.ts`        | Pure accessors over a product's manifest (roles, default ref, edition → variant).  |
 | `request.ts`         | Reads the six `E2E_*` vars; **pure** `buildArtifactPlan` → one request per role.   |
 | `apvm.ts`            | Lazy `Apvm` singleton, token diagnostics, progress → console, secret redaction.    |
-| `resolve.ts`         | Wipe → build/copy per role → `resolution.json`.                                    |
+| `resolve.ts`         | Wipe → build/copy per role → hash → `resolution.json`.                             |
+| `digest.ts`          | A zip's SHA-256 (`sha256File`, streamed) and its format check (`isSha256`).        |
+| `pin.ts`             | **Pure**: the full commit (`fullCommit`) and the pin that rebuilds a build (`pinOf`, `requirePin`). |
 | `verify.ts`          | Static identity preflight (`adm-zip`) + aggregated report formatting.               |
 | `consume.ts`         | Reads a role back for a test (memo → `resolution.json`), with the role guards.     |
 | `registry.ts`        | Per-process manifest + resolution registries (the `metadata.ts` idiom).            |
-| `warm.ts`            | Pre-warm: dedupe requests, prime APVM's cache serially.                            |
+| `warm.ts`            | Pre-warm: dedupe requests, prime APVM's cache serially, return each pinned build.  |
 | `artifacts.setup.ts` | The `artifacts:<cell>` setup project — thin orchestration of the above.             |
 
 ## The product manifest
@@ -133,6 +135,16 @@ adds, so it is always targeted.
 └── resolution.json                  ← this execution's role → artifact map
 ```
 
+- **Every resolved zip is hashed** (SHA-256, after the `chmod`) — built and provided alike, since
+  it is the one funnel both share. The digest names the artifact; a commit only names its source,
+  and two builds of one commit are different files (a build regenerates `languages/*.pot` and
+  stamps every entry's mtime). The copy in the role dir is what is hashed — the bytes this run
+  installs.
+- **A build records its full commit** (40 hex), never APVM's `commitShort`, and its `pinRef` — the
+  ref that rebuilds exactly it (see [Pinning](#pre-warming)). A release download has no commit
+  (APVM reports `release-<tag>` in that field); its `pinRef` (`release:5.7.7`) is the only record
+  of the tag a `release:latest-stable` chose. The summary line shows `pin=` only for a release — a
+  commit pin repeats the commit.
 - The root is overridable with `ARTIFACTS_ROOT`; `<product>/<cell>` is always
   appended, so two cells never share a directory. Two runs resolving one cell's zips do
   (a run of the cell, or `--project=artifacts:<cell>` alone): the second wipes the first's
@@ -188,7 +200,7 @@ Per resolved artifact, via `adm-zip` (read-only — central directory plus one e
    top-level directory, not the expected slug, so a wrong-edition zip still
    reports its header — two independent witnesses instead of one.
 4. Informational, reported but not asserted: header `Version:`, zip filename,
-   source, resolved commit, origin. The header's `Version:` also **becomes the
+   source, full commit, SHA-256, origin. The header's `Version:` also **becomes the
    artifact's `version`** — it is what WordPress installs and reports, and for a
    provided zip it is the only version there is (none is recorded when one is
    copied in, and a `_VERSION` override is ignored beside it). The build's own
@@ -238,7 +250,9 @@ await installPlugin(site.transport, pluginArtifact("plugin").zipPath, { activate
 
 The `pluginArtifact` fixture returns the role's
 [`ResolvedArtifact`](../../src/common/artifacts/types.ts)
-(`{ slug, zipPath, zipFilename, source, ref?, commit?, version?, origin, resolvedAt }`).
+(`{ slug, zipPath, zipFilename, source, ref?, commit?, pinRef?, version?, sha256?, origin, resolvedAt }`).
+The resolver always sets `sha256`; the parser rejects a malformed one and tolerates its absence,
+since a `resolution.json` written before it existed can still be read by a `--no-deps` run.
 
 **`slug`** is the WordPress plugin directory the artifact installs as
 (`backwpup` vs `backwpup-pro`), so a test or hook can address the plugin —
@@ -294,6 +308,27 @@ values exit `1` rather than reporting a cache that was never primed.
 warmed entry is never hit. That is why there is exactly one planner. A keyword ref
 (`tag:latest-stable`) is re-resolved at both warm and run time, so a release cut
 in between means the run builds fresh — correct, just slower for that run.
+
+**Pinning.** A moving ref (`develop`, `release:latest-stable`) can change between a warm and the
+run it was for. So each successful warm returns a `WarmedBuild` (on `WarmResult.build`) — whether it
+was cached, the full commit, the version, the cached zips, the resolved ref — and its `pin`
+([`pin.ts`](../../src/common/artifacts/pin.ts)), which an orchestrator hands the run as
+`E2E_<ROLE>_REF=<pin.ref>` and, when set, `E2E_<ROLE>_VERSION=<pin.version>`:
+
+| Build | `pin.ref` | `pin.version` | The pinned run, measured with all network denied |
+| --- | --- | --- | --- |
+| Git (branch, PR, tag, commit) | `commit:<sha>` | the version built | served from the cache; APVM's commit check against GitHub fails and is tolerated |
+| Release download | `release:<tag>` | — (its tag's) | **needs network**: APVM fetches the release from GitHub's API, then copies the cached asset |
+
+- A release is checked first: pinning it to a commit would build the source, not the released zip.
+- The version is the one **built**, never "the one requested": APVM's cache is keyed by commit and
+  version, and an embedded-version product (WP Rocket) given none fetches its version file from
+  GitHub before the cache — and clones when it cannot. Given its built version, the version
+  matches its source, so nothing is rewritten.
+- A build that cannot be pinned — no full SHA, or a release still named by a selector (APVM matches
+  those ignoring case) — is a **failed** warm, as is one whose zips are not in the cache: APVM
+  stores a build best-effort, and a cache it could not write leaves only gone temporary paths.
+  So no run is left on a ref that moves. `artifacts:warm` prints each pin.
 
 ## Deferred obligations
 

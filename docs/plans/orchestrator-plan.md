@@ -71,7 +71,7 @@ this suite tests and discusses constantly. Not "run unit": that already names pr
 - Nothing to build: the build step skips it, as `warmArtifacts` already does, and the run receives it
   as `E2E_PLUGIN_ZIP` — an absolute path outside `.artifacts/`, which the suite requires (V24).
 - A zip run records the zip's name, SHA-256 and header version where a built run records its commit;
-  reports and events show the same. The suite records no digest for a zip yet (V22; Phase 0D.2).
+  reports and events show the same. The suite records every zip's SHA-256 since Phase 0D.2.
 - A zip is kept while a task uses it or a kept report refers to it.
 
 **A busy cell:** a scheduled slot that finds the task's own previous run still going is skipped and
@@ -165,7 +165,7 @@ report dir names its run and still sorts by time.
 - **Say what they tested, up front** — product, cell, edition, run id and name, the plugin (ref and
   full commit, or zip name and SHA-256) and version, the site's WordPress and PHP versions — in every
   report: Playwright HTML, Cucumber and Allure. Today only the artifacts setup's attachment carries the
-  ref and a short commit, in two of the three, and a zip carries no digest (V22): Phase 0D.
+  ref, in two of the three (V22) — with the full commit and the zip's SHA-256 since 0D.2: Phase 0D.
 - **Opened from the dashboard** directly, behind its login: Playwright HTML with its trace viewer,
   Cucumber, and Allure, generated when the run ends. The command prints their paths.
 - **Kept for a while, then removed** (§3 Report retention); any report can also be removed by hand.
@@ -372,7 +372,8 @@ verified live where possible, with its evidence in §8.
   `E2E_LOAD_DOTENV=false` and an allowlisted environment instead — Phase 0 plan §4.1.
 - **0B.2 — the build step hands back the commit it built.** It plans each run alone, with that run's
   env, so `warmArtifacts`' one env per call is no obstacle; but it doesn't return the commit
-  (`WarmOne` returns only `fromCache`), which pinning needs (§2 Builds; V16).
+  (`WarmOne` returns only `fromCache`), which pinning needs (§2 Builds; V16). **Done 2026-10-08:**
+  each warm returns the ref that pins it — Phase 0 plan §4.2.
 - **0B.3 — one product list.** `healthcheck.ts:53`, `warm-artifacts.ts:30` and `playwright.config.ts`
   each hard-code the products; the orchestrator would add another. Make it one list, outside
   `src/common` (which must not import product code).
@@ -388,7 +389,7 @@ define stop (graceful), kill (hard), and what runs do when the orchestrator stop
   run id and name, the plugin and its version, the site's WordPress and PHP versions (0D.3). Today
   only the artifacts setup's attachment has the ref and commit, in two of the three (V22).
 - **0D.2 — the full commit, and a zip's SHA-256,** in the resolution the reports are built from
-  (today: `commitShort`, and no digest — V22).
+  (then: `commitShort`, and no digest — V22). **Done 2026-10-08** — Phase 0 plan §6.2.
 - **0D.3 — the site's own versions**, read once per run from Site Health → Info (the "Copy site info"
   text: `php_version`, `php_sapi`, `httpd_software`, WordPress and database versions) in the auth
   setup, which is already logged in. Never WP-CLI's PHP: it differs on both nginx cells (V28).

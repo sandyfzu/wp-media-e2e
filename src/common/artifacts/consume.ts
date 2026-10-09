@@ -21,6 +21,7 @@ import { join } from "node:path";
 
 import { errorMessage, isNonEmptyString, isObject } from "../guards";
 import { REPO_ROOT, RUN_ID, dirs } from "../config/run-context";
+import { isSha256 } from "./digest";
 import { rolesOf } from "./manifest";
 import { getManifest, peekArtifacts, registerArtifacts } from "./registry";
 import type {
@@ -188,7 +189,9 @@ export function parseResolution(raw: unknown, source: string): CellArtifacts {
 /**
  * Validates one role entry from `resolution.json` into a {@link ResolvedArtifact}, checking the
  * required string fields, narrowing the `source`/`origin` enums, and passing optional
- * `ref`/`commit`/`version` through when present.
+ * `ref`/`commit`/`pinRef`/`version` through when present. A `sha256` must be a well-formed digest when
+ * present; its absence is tolerated, since a `resolution.json` written before it was recorded may
+ * still be read by a `--no-deps` run.
  *
  * @throws Error naming the role and `source` on any missing/invalid field.
  */
@@ -216,6 +219,10 @@ function parseRole(
   const origin = requireString(entry.origin, "origin", fail);
   if (!SOURCES.has(source_)) fail(`unknown source "${source_}"`);
   if (!ORIGINS.has(origin)) fail(`unknown origin "${origin}"`);
+  // A digest that is present but malformed is a corrupt file, not an old one: never pass it on.
+  if (entry.sha256 !== undefined && !isSha256(entry.sha256)) {
+    fail('"sha256" must be 64 lowercase hex characters');
+  }
 
   return {
     role,
@@ -227,7 +234,9 @@ function parseRole(
     resolvedAt,
     ...(isNonEmptyString(entry.ref) ? { ref: entry.ref } : {}),
     ...(isNonEmptyString(entry.commit) ? { commit: entry.commit } : {}),
+    ...(isNonEmptyString(entry.pinRef) ? { pinRef: entry.pinRef } : {}),
     ...(isNonEmptyString(entry.version) ? { version: entry.version } : {}),
+    ...(isSha256(entry.sha256) ? { sha256: entry.sha256 } : {}),
   };
 }
 

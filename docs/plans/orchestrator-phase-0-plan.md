@@ -1,7 +1,8 @@
 # Orchestrator Phase 0 — Make the suite ready
 
 > **Status:** in implementation, in §9's order. **Done:** 0B.3 (2026-10-05, §4.3), 0A.2
-> (2026-10-06, §3.2), 0A.1 (2026-10-06, §3.1), 0B.1 (2026-10-08, §4.1). The rest is
+> (2026-10-06, §3.2), 0A.1 (2026-10-06, §3.1), 0B.1 (2026-10-08, §4.1), 0D.2 with 0B.2 (2026-10-08,
+> §6.2, §4.2; audited the same day). The rest is
 > investigated: every item has a verified finding and a recommended solution, with the
 > alternatives it beat.
 > **Date:** 2026-09-25.
@@ -27,11 +28,11 @@ The recommended solution per item. "—" means no suite change: the orchestrator
 | 0A.4 two runs on one site | Refuse a site listed by two cells of any product, compared on its normalized URL and location | — (optional loader check) |
 | 0A.5 APVM's cache | Build in a **worker process per build**, detached, with a private `TMPDIR`: stop, cancel and timeout = SIGKILL its group and remove that folder. The cache survived every kill measured | — |
 | 0B.1 a run's settings — **done** | `E2E_LOAD_DOTENV=false` makes the suite skip `.env`; the orchestrator builds each child's environment from an allowlist | new `dotenv.ts`; `load-env.ts`, `env.ts` |
-| 0B.2 the built commit | The warm returns what it built — full commit, version, the ref that pins it; the run gets `commit:<sha>` (or `release:<tag>`) and then needs no network | `warm.ts` |
+| 0B.2 the built commit — **done** | The warm returns what it built — full commit, version, the pin; the run gets `commit:<sha>` with the built version — a cache hit with no network — or `release:<tag>` (still asks GitHub's API) | new `pin.ts`; `warm.ts`, `apvm.ts`, `warm-artifacts.ts` |
 | 0B.3 one product list — **done** | `src/projects/products.ts`, with a drift-guard spec, replaces the three hard-coded lists; a misspelt `PRODUCT` fails instead of running WP Rocket | new `products.ts`; `healthcheck.ts`, `warm-artifacts.ts`, `playwright.config.ts`, `eslint.config.js` |
 | 0C stopping a run | Spawn the Playwright CLI directly, in its own process group. Stop = **drain** (a stop file skips each scenario's first attempt), then **one** SIGINT, then SIGKILL of the group; never SIGTERM. The `@plugin` Before path stops running work first | `fixtures.ts`, `plugin-lifecycle.ts`, `plugin.hooks.ts` |
 | 0D.1 reports say it up front | A *run facts* reporter, listed first: the HTML report's title, Allure's `environment.properties`, a banner on the Cucumber report, `run-facts.json` | new `src/common/reporting/`; `reporting.ts`, `scripts/allure.mjs` |
-| 0D.2 commit and digest | Record the full commit, and a SHA-256 of **every** resolved zip | `resolve.ts`, `types.ts`, `consume.ts`, `verify.ts` |
+| 0D.2 commit and digest — **done** | Record the full commit, and a SHA-256 of **every** resolved zip | new `digest.ts`; `resolve.ts`, `types.ts`, `consume.ts`, `verify.ts` |
 | 0D.3 the site's versions | Read Site Health's "Copy site info" in the auth setup; keep only whitelisted keys | new page object + parser; `auth.setup.ts` |
 | 0E results stream | A JSON-lines reporter (schema v1), always on, writing `<report dir>/results.jsonl` — nothing on the terminal; plus an end-of-run summary for people | new `src/common/reporting/results-stream.ts`, `run-summary.ts`; `reporting.ts` |
 | 0F pruning | At most 20 reports per cell (FIFO, at each run's end), none older than 30 days, the newest complete one kept up to 6 months; `npm run report:prune` for every cell | new `run-id.ts`, `retention.ts`, `prune-reports.ts` |
@@ -79,8 +80,8 @@ recommendations below fit together as one contract.
   into its own process group, writes stdout and stderr to the run's log file, and runs in the
   checkout's root.
 - **Build first, in a worker of its own** (0A.5, 0B.2): the build returns the commit it built, and the
-  run is pinned to it (`commit:<sha>`, or `release:<tag>`), so its artifacts step is a cache hit that
-  opens no network connection.
+  run is pinned to it — `commit:<sha>` with the version built, a cache hit that needs no network; or
+  `release:<tag>`, which still asks GitHub's API for the release (V176).
 - **Environment — built from an allowlist, never inherited** (0A.1, 0B.1). The orchestrator's own
   process can carry `RUN_ID` or `PLAYWRIGHT_BDD_CONFIGS` from importing suite modules (V32, V84):
   - `E2E_LOAD_DOTENV=false`, so no `.env` can reach the run;
@@ -602,7 +603,9 @@ Fixed:
   build, a cache hit in 0.7–0.9 s with the same SHA-256; `release:5.7.6` hit the entry a `latest-stable`
   warm had filled (0.58 s).
 - Through a logging proxy: a pinned `commit:` or `release:` cache hit opens **no** network connection;
-  a cached `develop` warm still opens `github.com` (git resolving the branch).
+  a cached `develop` warm still opens `github.com` (git resolving the branch). **Corrected by the
+  audit (V175, V176):** the proxy never saw APVM's GitHub API client. With all network denied, a
+  commit pin is a cache hit only given its version, and a release pin fails.
 
 **Recommended.**
 
@@ -611,7 +614,8 @@ Fixed:
 - `pinRef` is a pure function: a 40-hex `commit` → `commit:<commit>`; else a `release` source →
   `release:<value>`; else the build step fails, so a run is never left unpinned.
 - The run gets `E2E_PLUGIN_REF=<pinRef>` and the task's version, so it plans exactly as the warm did, and
-  its artifacts step needs no network.
+  its artifacts step needs no network. **Corrected by the audit:** the version built, not the task's
+  (V176); a release pin still needs network (V176).
 - The orchestrator plans through `warmArtifacts([unit], envFromTask, warmer)` — the environment is
   already injectable (`warm.ts:97–101`) — and never through `readArtifactEnv()`, which reads its own
   `process.env`.
@@ -621,10 +625,68 @@ would then record a provided zip instead of its ref and commit, undoing 0D.
 
 **Not verified.** A `commit:` pin hitting the cache for WP Rocket (its version is embedded) and for
 `tag:` refs; a cold `commit:` rebuild of a pull request from a fork once its cache entry is gone.
+(The first two were measured by the audit — V176; the fork rebuild is still open.)
 
 **Verify when implemented.** `pinRef` over a SHA, a release, and anything else; `warm.spec` for the
 result carried through; live: a warm of a moving ref, then a run pinned to it, with the report's commit
 equal to the warm's.
+
+**Implemented** (2026-10-08, V172–V174). As recommended, plus:
+
+- **Where it lives.** `pin.ts` is pure: `fullCommit` (40 lowercase hex, else nothing — shared with
+  0D.2) and `pinRef` (since the audit, `pinOf` → a `Pin {ref, version?}`, and `requirePin`). `warm.ts`
+  gains `toWarmedBuild`, which maps APVM's output and pins it;
+  `WarmResult.fromCache` became `WarmResult.build` (`build.fromCache`). `toArtifactOrigin` moved to
+  `apvm.ts`, shared by the resolver and the warm.
+- **`pinRef` refuses more than "anything else":** a `release` source whose value is still a selector
+  (`latest-stable`, `previous-stable`, `latest`, `previous-latest`), empty, or holding whitespace or
+  a colon. A refusal is a failed warm (`warmArtifacts` collects it like any other).
+- `WarmedBuild.resolvedRef` is flattened (`input`, `sourceType`, `sourceValue`, `gitRef`); the
+  binding's `null` variant for a single-variant project is dropped rather than passed on.
+- `npm run artifacts:warm` prints each request's pin and version.
+- **Still not verified:** the items above, and that the pinned run opened no network connection —
+  V80 measured that on these versions; this pass did not repeat the proxy. (The audit did, and
+  more: V175–V176.)
+
+#### Audit (2026-10-08, V175–V180) — 0B.2 and 0D.2
+
+Two adversarial reviews (logic against APVM's own source at `cli/v3.0.0`, whose binary matches the
+installed one; tests and docs, by mutation), read-only and required to prove each finding; each was
+then reproduced or measured here before it was fixed.
+
+- **A pinned run was not network-free, and V80's proxy could not see why** (V175, V176). APVM's GitHub
+  API client ignores `HTTPS_PROXY` (a proxy logged nothing for a release pin that, sandboxed, fails on
+  that API). Measured instead with every outbound connection denied by `sandbox-exec`: a commit pin
+  with its version is a cache hit; WP Rocket's commit pin **without** a version fetches its version
+  file, then clones; a release pin fails (`GitHub API error … (Connect)`). **Fixed:** a warm returns a
+  `Pin {ref, version?}` — the version **built** for a commit, none for a release — and every doc says
+  a release pin needs network. One review's advice to give WP Rocket no version was the opposite of
+  what the sandbox showed.
+- **A release chosen by a selector lost its tag** (V177): `commit` used to hold `commitShort`, which
+  for a release is the tag; recording only full SHAs dropped it, leaving the header `version` (no `v`
+  prefix). **Fixed:** every built artifact records `pinRef` (`release:5.7.7`), shown as `pin=` in the
+  summary for a release, and round-tripped through `resolution.json`.
+- **A release with a full commit would have pinned to the commit** — a source build, not the released
+  zip. **Fixed:** a release source is checked first. **Selectors matched case-sensitively**, while
+  APVM ignores case. **Fixed.**
+- **A warm whose zips APVM failed to store still succeeded** (APVM stores best-effort; the paths it
+  reports are then gone). **Fixed:** `assertCached` fails it, naming each missing path.
+- **Tests that could not fail** (V178): hashing the source instead of the copy (that test is removed —
+  it could not tell them apart; the claim stands on `sha256File(produced.zipPath)`); `toWarmedBuild`'s
+  `fromCache`, `gitRef` and `sourceValue` (the fixture used one value for all three — now a PR); the
+  writer dropping `commit` (now a built artifact round-trips); `pinRef`'s order; the real warmer's
+  wiring (now `createApvmWarmer(deps)` takes APVM and the file check, and is tested with a fake).
+- **Docs:** "the same version" was ambiguous and the CLI printed the wrong one; a run reports no
+  pin; CLAUDE.md's structure and trigger lists lacked `pin.ts`/`digest.ts`; `WarmedBuild.artifacts`
+  and `.resolvedRef` had no TSDoc; `apvm.ts` still named `resolve.ts` its sole caller; the hash used
+  `pipeline` then `digest()`, which works but is undocumented — now `for await … update`.
+- **Confirmed sound:** git builds always report the full SHA, annotated tags peeled; `commit:` takes
+  7–40 hex; `release:<tag>` drops the version like `release:latest-stable`; the tag rule keeps
+  `v5.7.6`, `5.7.6-beta1`, `rel/5.7`; hashing after the `chmod` has no race; a hash error is a failed,
+  redacted role; nothing new prints a token; `pin.ts`/`digest.ts` import only Node, so `warm.ts` still
+  loads neither `.env` nor `RUN_ID`; no `fromCache` reader is left.
+- **Not fixed:** a hash failure has no test (it shares the resolver's generic catch, tested); the warm
+  CLI's printing has none (root CLIs sit outside the unit config, as before).
 
 ### 4.3 0B.3 — One product list
 
@@ -910,6 +972,21 @@ in `.artifacts/`.
 trip), `verify.spec` (`infoFor` carries it), `resolve.spec` (a provided zip hashed against a known
 digest).
 
+**Implemented** (2026-10-08, V172–V174). As recommended, plus:
+
+- `digest.ts` holds `sha256File` (streamed, so a large zip is never held in memory) and `isSha256`,
+  the parser's check. The copy in the role dir is hashed — the bytes the run installs.
+- The build path's mapping is now `builtArtifact`, exported and unit-tested (full commit kept, a
+  release's `release-<tag>` dropped); before, only a live run exercised it.
+- **"Double-checks the orchestrator's stored digest"** needs no suite input: the run records the
+  digest of what it installed, and the orchestrator, which stores a zip by its SHA-256, compares the
+  two. No variable was added (§10 P5's list stands).
+- An older `resolution.json` with a short `commit` is still read (only `--no-deps` runs read one);
+  `commit` is not format-checked, `sha256` is.
+- **Audited** with 0B.2 (§4.2's audit, V175–V180): a release chosen by a selector had lost its tag —
+  every built artifact now also records `pinRef` (`release:5.7.7` / `commit:<sha>`), the ref that
+  rebuilds it; a release's shows in the summary as `pin=`.
+
 ### 6.3 0D.3 — The site's own versions
 
 **Finding** (V58, V59; live on `bwu2` and `bwu3`):
@@ -1119,7 +1196,8 @@ on `bwu2`/`bwu3`, one cell at a time.
 2. 0A.2, the output folders and the cell-name rule — a hazard today. **Done 2026-10-06.**
 3. 0A.1, the cell pin. **Done 2026-10-06.**
 4. 0B.1, a run's environment. **Done 2026-10-08.**
-5. 0D.2 with 0B.2 — the full commit, the digest, and the built commit (the artifacts code).
+5. 0D.2 with 0B.2 — the full commit, the digest, and the built commit (the artifacts code). **Done
+   2026-10-08.**
 6. 0C's suite parts: the Before path stopping running work (worth having now), then the drain.
 7. 0D.3, the site's versions.
 8. 0D.1 and 0E, run facts and the results stream (the reporting code).
@@ -1197,7 +1275,7 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V77 | APVM's library reacts to no signal: SIGTERM or SIGINT ends the Node process within 4 ms and orphans its children (composer ran on 27 s, and about 120 s with a download); a SIGKILL of the build's process group leaves no survivor; work folders follow `TMPDIR` | ✅ | K2, K4, K5, K8b; K4, K5, K7, K8 |
 | V78 | A kill during a private clone leaves the GitHub token in `<TMPDIR>/…/.git/config` (mode 0644, folders 0755), for good; once the clone completes the URL is clean | ✅ ×3 · ⏳ exposure on the Linux server | K1, K5, K7 |
 | V79 | A git build's `commit` is the full SHA, equal to `resolvedRef.commitSha`; a release's is `release-<tag>`, with no `commitSha` | ✅ | `develop` at `f1ebfd0…` and `af1ab5c…`, matching GitHub's head; release 5.7.6 |
-| V80 | V17 on apvm-napi 3.0.0 and the current suite: `commit:<sha>` and `release:<tag>` pins are cache hits (0.6–0.9 s, same SHA-256) that open no network connection; a cached `develop` warm opens `github.com` | ✅ | A logging CONNECT proxy |
+| V80 | V17 on apvm-napi 3.0.0 and the current suite: `commit:<sha>` and `release:<tag>` pins are cache hits (0.6–0.9 s, same SHA-256) that open no network connection; a cached `develop` warm opens `github.com` | ⚠️ partly wrong — V175, V176 | A logging CONNECT proxy, which APVM's API client bypasses |
 | V81 | `.env` loads every key — unknown ones included, relative to the working directory — into the runner and every worker; blanking named keys blocks only those; failures are swallowed; `E2E_LOAD_DOTENV=false` (prototype) blocks everything | ✅ source + measured | `load-env.ts`; probes E1–E7, W1, W2 |
 | V82 | `CI` counts as set for `"false"` and for whitespace | ✅ source + measured | `project.ts:24`; probes E5, E5b |
 | V83 | A private product's run asks APVM for a token even when its build is a cache hit; the suite never sets APVM's cache folder | ✅ source | `resolve.ts:291–293`; `apvm.ts:42` |
@@ -1271,3 +1349,12 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V169 | From a folder whose `.env` holds `REPORT_ROOT=myreports`, both report scripts look under `myreports/`, and under `reports/` with `E2E_LOAD_DOTENV=false`; under plain `node` they now fail (`ERR_MODULE_NOT_FOUND`), so the npm scripts run them with `tsx`; `npm run report:allure -- backwpup free@nginx` still generates (exit 0) | ✅ 2026-10-08 | Scratch folder; the worktree |
 | V170 | A `.env` holding only `E2E_LOAD_DOTENV=false`: `E2E_CELL=free@nginx npm run test:backwpup -- --list` prints the warning twice (`bddgen`, the runner). The real-runner probe after the fixes: as V164; `=true` in the file warns once; a dangling link fails the run naming it | ✅ 2026-10-08 | The worktree (the `.env` removed after); the scratch config |
 | V171 | Gates after the audit: typecheck, lint and format clean; unit 1531 passed, 8 skipped | ✅ 2026-10-08 | The worktree |
+| V172 | 0D.2 + 0B.2 unit layer: `pin.spec`, `digest.spec` (FIPS 180-2 vector, empty file, 1 MiB + 1 B against an in-memory hash), `consume.spec`, `resolve.spec` (`builtArtifact`, a provided zip's digest), `verify.spec`, `warm.spec` (`toWarmedBuild`). Four mutations each fail the tests aimed at them: `commitShort` recorded (2 fail), no hash (3), a malformed digest accepted (7), release selectors pinned (4). Gates: typecheck, lint and format clean; unit 1578 passed, 8 skipped | ✅ 2026-10-08 | The worktree; mutations applied in place and restored from copies |
+| V173 | A warm of `develop` for `pro@nginx` (73.6 s, "warmed") returns `commit:1dceea896639a7665a04edb7f90cf7dbc60b4ba6`, version 9.99.99 — equal to `git ls-remote`'s `refs/heads/develop`. A warm of `release:latest-stable` for `free@nginx` pins `release:5.7.7` | ✅ 2026-10-08 | `npm run artifacts:warm -- --product=backwpup --cell=…` |
+| V174 | `artifacts:pro@nginx` pinned to that commit: `origin=cache`, `commit` the full SHA, `sha256` equal to `shasum -a 256` of the zip, in `resolution.json` and the Allure attachment. `artifacts:free@nginx` on `release:latest-stable`: `origin=downloaded`, no `commit`, `sha256` equal to `shasum`; pinned to `release:5.7.7`: `origin=cache`, the same `sha256`. Both cells ran at once; the setup alone never touches a site. (Its later proxy check — no connection for either pin — was blind to APVM's API client: V175) | ✅ 2026-10-08 | `E2E_CELL=<cell> E2E_PLUGIN_REF=<pin> npm run test:backwpup -- --project=artifacts:<cell>` |
+| V175 | APVM's GitHub API client bypasses `HTTPS_PROXY`: through a logging CONNECT proxy, pinned `commit:` and `release:` runs logged nothing, while the same `release:5.7.7` run fails under `sandbox-exec` with `GitHub API error: Service Error: client error (Connect)`. The proxy sees git (`develop`, `tag:latest-stable` → `github.com`) and a cold release download (`api.github.com`, `release-assets.githubusercontent.com`) | ✅ 2026-10-08 | `proxy.mjs`; `sandbox-exec` with `(deny network-outbound (remote ip "*:*"))`, which refuses `curl` |
+| V176 | With all outbound network denied: BackWPup `commit:` pins of `develop` and of tag 5.7.7 with version 9.99.99 and their variant → cache hits (7–9 ms); WP Rocket `commit:3a96b66…` without a version → "Detecting version", then a clone that fails; with `3.23.5.1` (its built version) → cache hit; `release:5.7.7` → fails on the API. The whole pinned suite run (`bddgen`, the runner, the artifacts setup) passes sandboxed; the release pin's fails, naming the API error. APVM `cli/v3.0.0`: `resolve_commit` tolerates an API error with the SHA kept; `try_cache_fast_path` needs the version or `detect_version_pre_clone` | ✅ 2026-10-08 | `pinned.mts` (`apvm.build`); `E2E_CELL=… E2E_PLUGIN_REF=… E2E_PLUGIN_VERSION=… npm run test:backwpup -- --project=artifacts:<cell>` under `sandbox-exec`; `crates/core/src/commands/build.rs`, `git/resolver.rs` |
+| V177 | Warms with the final code: `develop` → `pin: ref commit:1dceea89…, version 9.99.99`; `release:latest-stable` → `pin: ref release:5.7.7 (no version…)`; a `tag:latest-stable` warm pins `commit:850263d6…`, `git ls-remote`'s commit for tag `5.7.7`; WP Rocket `develop` (through `createApvmWarmer`) → `commit:3a96b66…`, and building that pin is a cache hit with the same bytes. A `release:latest-stable` run records `pinRef: release:5.7.7` (`pin=` in the summary) | ✅ 2026-10-08 | `npm run artifacts:warm`; `probe.mts`; `resolution.json` |
+| V178 | Mutations, each failing the tests aimed at it: 4 the review found surviving (hash the source; `fromCache`, `gitRef`, `sourceValue` mapping; writer dropping `commit`; `pinRef` order) and 15 on the fixes — commit before release (7 fail), case-sensitive selectors (2), no pin version (2), `assertCached` ignoring missing or empty (1, 1), the writer, parser or `builtArtifact` dropping `pinRef` (1, 3, 3), the info line always or never naming `pin` (1, 1), the warmer skipping `assertCached`, its redaction, its variants or its token check (1 each). Hashing the source survives by design (removed claim) | ✅ 2026-10-08 | Mutations applied in place, restored from copies |
+| V179 | APVM `cli/v3.0.0` (the source the reviews read) has the installed darwin-arm64 binary's SHA-256; the local APVM checkout is at `cli/v3.2.0-6`, so the source was read at the tag | ✅ 2026-10-08 | `git show cli/v3.0.0:…`; the review's binary digest |
+| V180 | Gates after the audit: typecheck, lint and format clean; unit 1596 passed, 8 skipped | ✅ 2026-10-08 | The worktree |

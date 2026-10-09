@@ -147,10 +147,23 @@ function printSummary(summary: WarmSummary): void {
       : "";
     const wantedBy = styleText(["dim"], `(${result.wantedBy.join(", ")})`);
     if (result.ok) {
-      const note = result.fromCache === true ? "already cached" : "warmed";
+      const note =
+        result.build?.fromCache === true ? "already cached" : "warmed";
       console.log(
         `  ${styleText(["green"], "✓")} ${ref}${variant} — ${note} ${wantedBy}`,
       );
+      // What a run is given to repeat exactly this build, even after `develop` moves: the pin's
+      // ref as its `_REF`, and its version, when there is one, as its `_VERSION`.
+      if (result.build !== undefined) {
+        const { pin } = result.build;
+        const version =
+          pin.version !== undefined
+            ? `, version ${pin.version}`
+            : " (no version: a release's is its tag)";
+        console.log(
+          `      ${styleText(["dim"], `pin: ref ${pin.ref}${version}`)}`,
+        );
+      }
     } else {
       console.log(
         `  ${styleText(["red", "bold"], "✗")} ${styleText(["bold"], `${ref}${variant}`)} ${wantedBy}`,

@@ -259,8 +259,25 @@ export interface ResolvedArtifact {
   readonly source: ArtifactSource;
   /** The git ref, for build/downloaded artifacts; absent for a provided zip. */
   readonly ref?: string;
-  /** The resolved commit SHA, when APVM produced the artifact; absent for a provided zip. */
+  /**
+   * The full commit SHA (40 hex) APVM built. Absent for a provided zip, and for a release download,
+   * which APVM names `release-<tag>` rather than by a commit. A `resolution.json` written before full
+   * SHAs were recorded may still carry a short one.
+   */
   readonly commit?: string;
+  /**
+   * The ref that rebuilds exactly this zip — `release:<tag>` or `commit:<sha>` — where
+   * {@link ResolvedArtifact.ref} is what was asked for (`develop`, `release:latest-stable`). The only
+   * record of which release a selector chose. Absent for a provided zip, or a build that cannot be
+   * pinned.
+   */
+  readonly pinRef?: string;
+  /**
+   * The zip's SHA-256 (64 lowercase hex) — what names the artifact itself, since two builds of one
+   * commit differ. Always set by the resolver; optional only because a `resolution.json` written
+   * before it was recorded may still be read by a `--no-deps` run.
+   */
+  readonly sha256?: string;
   /**
    * The plugin's version. Once verified, the zip's own `Version:` header — what WordPress installs
    * and reports — falling back to what the build reported; absent when neither says.

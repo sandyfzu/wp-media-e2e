@@ -89,10 +89,10 @@ Phase 0.5 starts once Phase 0 is done; this is why each item matters here.
 | 0B.1 `E2E_LOAD_DOTENV` — **done 2026-10-08** | Runs not changed by a `.env` on the runner | required |
 | 0B.3 one product list — **done 2026-10-05** | Validating a task's product (`productByName`) and finding its config (`playwrightConfigFor`) | required |
 | 0C the drain, `stopRunningWork` first | A graceful stop; a killed run's next run recovering the site | required |
-| 0D.1 run facts, 0D.2 full commit, 0D.3 site versions | Slack and Datator: plugin, commit, site, WordPress, PHP | required |
+| 0D.1 run facts, 0D.2 full commit (**done 2026-10-08**), 0D.3 site versions | Slack and Datator: plugin, commit, site, WordPress, PHP | required |
 | 0E results stream | Counts, scenarios and first errors — the suite writes no Cucumber JSON | required |
 | 0F pruning | A loop writes ~25 reports a day per cell (V125) | required |
-| 0B.2, 0A.3–0A.5 | The orchestrator's own builds and scheduling — later phases | not used |
+| 0B.2 (**done 2026-10-08**), 0A.3–0A.5 | The orchestrator's own builds and scheduling — later phases | not used |
 
 ## 4. Design
 

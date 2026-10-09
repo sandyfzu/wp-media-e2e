@@ -8,6 +8,7 @@ import AdmZip from "adm-zip";
 import {
   formatFailureReport,
   formatSuccessSummary,
+  reportSummary,
   verifyArtifact,
   verifyResolved,
 } from "./verify";
@@ -426,5 +427,79 @@ test.describe("report formatting", () => {
     const text = formatSuccessSummary(report, "wp-rocket", "nginx");
     expect(text).toContain("wpr-summary-3.17.4.zip");
     expect(text).toContain("version=3.17.4");
+  });
+
+  test("the info line and the attached summary carry the full commit and the digest", () => {
+    const zip = makeZip("wpr-digest.zip", {
+      "wp-rocket/wp-rocket.php": pluginFile("WP Rocket", "3.17.4"),
+    });
+    const commit = "f1ebfd05c0ffee00112233445566778899aabbcc";
+    const sha256 = "a".repeat(64);
+    const report = verifyResolved(
+      [resolved("plugin", zip, { ref: "develop", commit, sha256 })],
+      WPR_MANIFEST,
+      undefined,
+    );
+    expect(roleOf(report.roles, "plugin").info).toMatchObject({
+      commit,
+      sha256,
+    });
+    expect(report.artifacts.plugin?.sha256).toBe(sha256);
+    expect(formatSuccessSummary(report, "wp-rocket", "nginx")).toContain(
+      `sha256=${sha256}`,
+    );
+    // The JSON attached to the setup test is what a report reader sees.
+    expect(
+      JSON.stringify(reportSummary(report, "wp-rocket", "nginx")),
+    ).toContain(`"sha256":"${sha256}"`);
+  });
+
+  test("the info line names a release's pin, the tag its selector chose", () => {
+    const zip = makeZip("wpr-release.zip", {
+      "wp-rocket/wp-rocket.php": pluginFile("WP Rocket", "3.17.4"),
+    });
+    const report = verifyResolved(
+      [
+        resolved("plugin", zip, {
+          ref: "release:latest-stable",
+          pinRef: "release:3.17.4",
+        }),
+      ],
+      WPR_MANIFEST,
+      undefined,
+    );
+    expect(roleOf(report.roles, "plugin").info).toMatchObject({
+      ref: "release:latest-stable",
+      pin: "release:3.17.4",
+    });
+  });
+
+  test("the info line omits a commit pin, which only repeats the commit", () => {
+    const zip = makeZip("wpr-commitpin.zip", {
+      "wp-rocket/wp-rocket.php": pluginFile("WP Rocket", "3.17.4"),
+    });
+    const commit = "f1ebfd05c0ffee00112233445566778899aabbcc";
+    const report = verifyResolved(
+      [resolved("plugin", zip, { commit, pinRef: `commit:${commit}` })],
+      WPR_MANIFEST,
+      undefined,
+    );
+    const { info } = roleOf(report.roles, "plugin");
+    expect(info).not.toHaveProperty("pin");
+    expect(info).toMatchObject({ commit });
+    // The attached JSON still carries the whole artifact, pin included.
+    expect(report.artifacts.plugin?.pinRef).toBe(`commit:${commit}`);
+  });
+
+  test("the info line names no digest when the artifact has none", () => {
+    const zip = makeZip("wpr-nodigest.zip", {
+      "wp-rocket/wp-rocket.php": pluginFile("WP Rocket", "3.17.4"),
+    });
+    const report = verifyResolved(
+      [resolved("plugin", zip)],
+      WPR_MANIFEST,
+      undefined,
+    );
+    expect(roleOf(report.roles, "plugin").info).not.toHaveProperty("sha256");
   });
 });

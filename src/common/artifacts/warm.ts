@@ -10,23 +10,37 @@
  * resolver uses, with `serial: false` — the mode a real run of one cell plans in — so
  * overrides apply identically on both sides.
  *
+ * Each warm hands back what it actually cached as a {@link WarmedBuild}, including the
+ * {@link WarmedBuild.pin} that rebuilds exactly that: a ref like `develop` can move before the run
+ * it was warmed for starts, so an orchestrator gives the run the pin, not the ref it asked for.
+ *
  * {@link warmArtifacts} is pure orchestration (dedupe, skip provided zips, collect failures) with
  * the actual cache call injected as a {@link WarmOne}, so it is unit-testable without APVM;
  * {@link createApvmWarmer} supplies the real one. The standalone CLI (`warm-artifacts.ts`) and,
  * later, an orchestrator both call `warmArtifacts` with it.
  */
 
+import { existsSync } from "node:fs";
+
 import {
   assertToken,
   createBuildReporter,
   getApvm,
   redactSecrets,
+  toArtifactOrigin,
 } from "./apvm";
 import { errorMessage } from "../guards";
+import { fullCommit, requirePin } from "./pin";
+import type { Pin } from "./pin";
 import { buildArtifactPlan } from "./request";
-import type { ApvmBuildParams, ArtifactEnv, ProductArtifacts } from "./types";
+import type {
+  ApvmBuildParams,
+  ArtifactEnv,
+  ArtifactOrigin,
+  ProductArtifacts,
+} from "./types";
 import type { Edition } from "../config/types";
-import type { WarmOptions } from "apvm-napi";
+import type { Apvm, JsBuildOutput, WarmOptions } from "apvm-napi";
 
 /** One `(product × cell)` to warm: its manifest, the cell's edition, and a display label. */
 export interface WarmUnit {
@@ -38,6 +52,47 @@ export interface WarmUnit {
   readonly edition: Edition | undefined;
 }
 
+/** One zip a warm left in APVM's cache. */
+export interface WarmedArtifact {
+  /** APVM's variant id (`"pro-en"`, `"free"`); absent for a single-variant project. */
+  readonly variant?: string;
+  /** Where the zip sits inside APVM's cache — read it, never move or modify it. */
+  readonly path: string;
+  /** Whether this zip was already cached, or had to be built or downloaded to warm it. */
+  readonly origin: ArtifactOrigin;
+}
+
+/** The ref APVM resolved for a warm: what was asked for, and what it turned out to be. */
+export interface WarmedRef {
+  /** The ref as requested (`"develop"`, `"release:latest-stable"`). */
+  readonly input: string;
+  /** APVM's kind of ref: `"branch"`, `"pull_request"`, `"tag"`, `"commit"` or `"release"`. */
+  readonly sourceType: string;
+  /** Its resolved value — a branch name, PR number, tag, SHA, or the release's actual tag. */
+  readonly sourceValue: string;
+  /** The git ref APVM checked out. */
+  readonly gitRef: string;
+}
+
+/** What one successful warm cached, and the pin that reproduces it. */
+export interface WarmedBuild {
+  /** Whether APVM served the whole warm from cache (no build or download ran). */
+  readonly fromCache: boolean;
+  /** The full commit SHA built; absent for a release download, which its {@link Pin} names. */
+  readonly commit?: string;
+  /** The plugin version APVM built (or the release's). */
+  readonly version: string;
+  /**
+   * What a run is given to rebuild exactly this: `E2E_<ROLE>_REF=<pin.ref>`, plus
+   * `E2E_<ROLE>_VERSION=<pin.version>` when set. It plans to this cache entry.
+   */
+  readonly pin: Pin;
+  /** The zips the warm left in APVM's cache. */
+  readonly artifacts: readonly WarmedArtifact[];
+  /** The ref APVM resolved: what was asked for, and what it turned out to be. */
+  readonly resolvedRef: WarmedRef;
+}
+
 /** The outcome of warming one deduped build request. */
 export interface WarmResult {
   /** The APVM params warmed (the deduped `{project, gitRef, version, variants}`). */
@@ -45,8 +100,8 @@ export interface WarmResult {
   /** Labels of the units that requested this build (deduped requests are shared). */
   readonly wantedBy: readonly string[];
   readonly ok: boolean;
-  /** Whether APVM served the whole warm from cache (no build ran); present on success. */
-  readonly fromCache?: boolean;
+  /** What was cached and how to pin a run to it; present on success. */
+  readonly build?: WarmedBuild;
   /** The failure message; present on failure. */
   readonly error?: string;
 }
@@ -76,12 +131,11 @@ export interface WarmSummary {
 }
 
 /**
- * Warms one build request into APVM's cache. Injected into {@link warmArtifacts} so the
- * orchestration is testable without APVM; {@link createApvmWarmer} provides the real one.
+ * Warms one build request into APVM's cache and reports what it cached. Injected into
+ * {@link warmArtifacts} so the orchestration is testable without APVM; {@link createApvmWarmer}
+ * provides the real one. Rejects when the warm fails — or when its result cannot be pinned.
  */
-export type WarmOne = (
-  params: ApvmBuildParams,
-) => Promise<{ fromCache: boolean }>;
+export type WarmOne = (params: ApvmBuildParams) => Promise<WarmedBuild>;
 
 /**
  * Plans every unit (same code path as the resolver — the parity invariant), then warms each
@@ -186,8 +240,8 @@ async function warmRequest(
   warmOne: WarmOne,
 ): Promise<WarmResult> {
   try {
-    const { fromCache } = await warmOne(params);
-    return { params, wantedBy, ok: true, fromCache };
+    const build = await warmOne(params);
+    return { params, wantedBy, ok: true, build };
   } catch (error) {
     // Redact at the funnel too (idempotent): `createApvmWarmer` scrubs its own rejection, but
     // an `Apvm` that failed to initialise — or any other injected warmer — surfaces here.
@@ -216,13 +270,94 @@ function requestKey(params: ApvmBuildParams): string {
 }
 
 /**
+ * Turns APVM's warm output into a {@link WarmedBuild}, deriving the pin.
+ *
+ * @param output - what `apvm.warmCache` resolved with.
+ * @throws Error from {@link requirePin} when the build cannot be pinned — a warm whose result a run
+ * cannot be held to is a failed warm, so no run is ever left on a ref that moves.
+ */
+export function toWarmedBuild(output: JsBuildOutput): WarmedBuild {
+  const { resolvedRef } = output;
+  const commit = fullCommit(output.commit);
+  return {
+    fromCache: output.fromCache,
+    ...(commit !== undefined ? { commit } : {}),
+    version: output.result.version,
+    pin: requirePin({
+      commit: output.commit,
+      source: resolvedRef.source,
+      version: output.result.version,
+    }),
+    artifacts: output.result.artifacts.map((artifact) => ({
+      // Typed optional, but the binding hands back `null` for a single-variant project.
+      ...(typeof artifact.variantId === "string"
+        ? { variant: artifact.variantId }
+        : {}),
+      path: artifact.path,
+      origin: toArtifactOrigin(artifact.origin),
+    })),
+    resolvedRef: {
+      input: resolvedRef.input,
+      sourceType: resolvedRef.source.type,
+      sourceValue: resolvedRef.source.value,
+      gitRef: resolvedRef.gitRef,
+    },
+  };
+}
+
+/**
+ * Confirms a warm really left its zips in APVM's cache. APVM stores a fresh build in its cache on a
+ * best-effort basis — an unwritable cache or a full disk is only a warning, and the warm still
+ * resolves, naming the build's temporary paths, which are already gone — so a pin from such a warm
+ * would send the run on a cold build it was meant to skip.
+ *
+ * @param build - the warm's result.
+ * @param exists - whether a path exists (injected for tests).
+ * @throws Error naming what is missing, when the warm cached nothing or a zip is not on disk.
+ */
+export function assertCached(
+  build: WarmedBuild,
+  exists: (path: string) => boolean = existsSync,
+): void {
+  if (build.artifacts.length === 0) {
+    throw new Error(
+      "[artifacts] the warm reported no artifact, so nothing is cached.",
+    );
+  }
+  const missing = build.artifacts.filter((a) => !exists(a.path));
+  if (missing.length > 0) {
+    throw new Error(
+      `[artifacts] the warm reported success, but APVM's cache does not hold ` +
+        `${missing.map((a) => `"${a.path}"`).join(", ")} — check its cache folder is writable and ` +
+        "has space, then warm again.",
+    );
+  }
+}
+
+/** What {@link createApvmWarmer} talks to: APVM, and the filesystem to confirm what it cached. */
+export interface WarmerDeps {
+  /** The APVM instance to warm with — only its token check and `warmCache` are used. */
+  readonly apvm: () => Promise<Pick<Apvm, "hasToken" | "warmCache">>;
+  /** Whether a path exists. */
+  readonly exists: (path: string) => boolean;
+}
+
+/** The real {@link WarmerDeps}: the process-wide APVM and the local filesystem. */
+const DEFAULT_WARMER_DEPS: WarmerDeps = { apvm: getApvm, exists: existsSync };
+
+/**
  * The real {@link WarmOne}: asserts a token for private-source products (before any clone),
  * then calls `apvm.warmCache` with a progress reporter, enriching a failure
- * with the builder's reason and last output lines.
+ * with the builder's reason and last output lines. A result that cannot be pinned, or whose zips
+ * are not in the cache, is a failed warm.
+ *
+ * @param deps - the APVM instance and the file check, injected for tests; the real ones by default.
  */
-export function createApvmWarmer(): WarmOne {
+export function createApvmWarmer(
+  deps: WarmerDeps = DEFAULT_WARMER_DEPS,
+): WarmOne {
   return async (params) => {
-    const apvm = await getApvm();
+    const apvm = await deps.apvm();
     assertToken(apvm, params.project);
 
     const label = `${params.project} ${params.gitRef}`;
@@ -244,6 +379,8 @@ export function createApvmWarmer(): WarmOne {
           `APVM warm of ${label} failed: ${redactSecrets(errorMessage(error))}${reporter.failureContext()}`,
         );
       });
-    return { fromCache: output.fromCache };
+    const build = toWarmedBuild(output);
+    assertCached(build, deps.exists);
+    return build;
   };
 }

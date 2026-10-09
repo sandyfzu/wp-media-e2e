@@ -5,13 +5,15 @@
  *
  * This is the only module that imports `apvm-napi` (loading its native binding), so pure logic
  * (`request.ts`, `manifest.ts`) and the identity preflight (`verify.ts`) stay free of it and of
- * the native dependency. `resolve.ts` is the sole caller.
+ * the native dependency. `resolve.ts` (a run) and `warm.ts` (pre-warming) are its callers.
  */
 
 import { styleText } from "node:util";
 
 import { Apvm } from "apvm-napi";
 import type { JsBuildEvent } from "apvm-napi";
+
+import type { ArtifactOrigin } from "./types";
 
 /**
  * Projects whose source repository is **private**, so a build/warm needs a GitHub token.
@@ -54,11 +56,24 @@ export function getApvm(): Promise<Apvm> {
 }
 
 /**
+ * Narrows APVM's per-artifact `origin` string to our {@link ArtifactOrigin}. An unknown value reads
+ * as `"built"` — the conservative claim, since it never suggests a build was skipped.
+ */
+export function toArtifactOrigin(origin: string): ArtifactOrigin {
+  return origin === "built" || origin === "cache" || origin === "downloaded"
+    ? origin
+    : "built";
+}
+
+/**
  * Throws an actionable error if {@link project} needs a token and {@link apvm} has none — caught
  * *before* any clone/download is attempted, so a missing token surfaces as one clear message
  * with the fix, not a deep-in-the-build git failure.
  */
-export function assertToken(apvm: Apvm, project: string): void {
+export function assertToken(
+  apvm: Pick<Apvm, "hasToken">,
+  project: string,
+): void {
   if (requiresToken(project) && !apvm.hasToken()) {
     throw new Error(
       `Building "${project}" needs a GitHub token — its source repository is private. ${TOKEN_HINT}`,

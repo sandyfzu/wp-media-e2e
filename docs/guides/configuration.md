@@ -215,6 +215,12 @@ Rules (enforced in
   differently-cased `--project` still runs the cell, but counts as a broad selection here and
   warns instead — spell the cell out.
   No override → defaults.
+- **Pinning a moving ref.** `develop` or `release:latest-stable` can move between two runs. To
+  repeat exactly what a warm cached, give the run the pin `npm run artifacts:warm` prints per
+  request: its ref (`commit:<full sha>` or `release:<tag>`) as `_REF`, and its version, if it prints
+  one, as `_VERSION`. A cached commit pin then resolves with no network; a release pin still asks
+  GitHub which asset that tag is. A run's setup summary shows each role's full `commit`, its zip's
+  `sha256`, and for a release the tag it got (`pin=release:<tag>`).
 - **Values are trimmed**, so a stray space in `.env` or a CI YAML block never becomes part of a
   ref or a path. A blank value means "unset".
 - **Don't keep a `_ZIP` under `ARTIFACTS_ROOT`.** That tree is ephemeral: each cell's directory

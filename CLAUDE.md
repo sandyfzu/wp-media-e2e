@@ -43,7 +43,7 @@ src/
 │   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
 │   ├── pages/              # cross-product Page Object Model (e.g. plugins.page.ts)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
-│   ├── artifacts/          # the plugin zips under test (resolve, verify, consume, pre-warm)
+│   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
 │   ├── __fixtures__/       # spec helpers (child-node.ts: run code in a fresh Node)
 │   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
@@ -407,10 +407,16 @@ request model, resolution lifecycle, preflight, pre-warm — is in
 - **Overrides:** six `E2E_*` env vars select a git ref **or** a prebuilt zip per role
   (ref XOR zip) — full table and rules in
   [configuration.md](docs/guides/configuration.md).
+- **What was tested:** every resolved zip's SHA-256 (`digest.ts`), a build's **full** commit and
+  its `pinRef` (the ref that rebuilds it — for a release, the tag a selector chose) are recorded in
+  `resolution.json` and the setup's report attachment.
 - **Pre-warm:** `npm run artifacts:warm` primes APVM's cache for the cells a run will
   need, so each `artifacts:<cell>` build becomes a cache copy. It plans through the
   same request builder the resolver uses (the parity invariant), so a warmed entry is
-  always the one a run looks up.
+  always the one a run looks up. Each warm returns the pin that rebuilds exactly what it cached
+  (`pin.ts`: `release:<tag>`, or `commit:<sha>` with the version built), for a run that must not
+  follow a moving ref; an unpinnable or uncached result is a failed warm. A cached commit pin needs
+  no network; a release pin does (APVM asks GitHub for the release).
 
 **Identity matrix** (what the preflight asserts — the slug alone pins product +
 edition; the header is a second, exact-equality witness):
@@ -754,7 +760,11 @@ Update it when you change anything about:
   variant mapping, identity expectations) or a product's copy of it.
 - The request/plan model, override precedence, or what throws vs. warns.
 - Resolution (the artifacts dir lifecycle, `resolution.json`) or the identity preflight.
-- The `pluginArtifact` consumption path, or pre-warming (`warmArtifacts`, `artifacts:warm`).
+- What a resolved artifact records — its full commit, its digest (`digest.ts`: `sha256File`,
+  `isSha256`, `ResolvedArtifact.sha256`).
+- The `pluginArtifact` consumption path, or pre-warming (`warmArtifacts`, `artifacts:warm`) and
+  pinning (`pin.ts`: `fullCommit`, `pinOf`, `requirePin`; `WarmedBuild`, `toWarmedBuild`,
+  `assertCached`, `ResolvedArtifact.pinRef`).
 - The APVM pin, or which products/editions exist.
 
 ### docs/guides/authoring-tests.md

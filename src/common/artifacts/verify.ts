@@ -36,7 +36,7 @@ export interface RoleReport {
   readonly checks: readonly CheckResult[];
   /** The resolved artifact, when resolution succeeded; absent for a failed resolution. */
   readonly artifact?: ResolvedArtifact;
-  /** Informational (reported, never asserted): version, source, origin, ref, commit. */
+  /** Informational (reported, never asserted): version, source, origin, ref, commit, pin, sha256. */
   readonly info: Readonly<Record<string, string>>;
 }
 
@@ -331,7 +331,13 @@ function infoFor(artifact: ResolvedArtifact): Record<string, string> {
     origin: artifact.origin,
     ...(artifact.ref !== undefined ? { ref: artifact.ref } : {}),
     ...(artifact.commit !== undefined ? { commit: artifact.commit } : {}),
+    // A commit pin only repeats the commit; a release pin names the tag a selector chose.
+    ...(artifact.pinRef !== undefined &&
+    artifact.pinRef !== `commit:${artifact.commit ?? ""}`
+      ? { pin: artifact.pinRef }
+      : {}),
     ...(artifact.version !== undefined ? { version: artifact.version } : {}),
+    ...(artifact.sha256 !== undefined ? { sha256: artifact.sha256 } : {}),
   };
 }
 
