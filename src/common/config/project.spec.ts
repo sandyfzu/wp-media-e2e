@@ -353,3 +353,31 @@ test.describe("createProductConfig — pinned by E2E_CELL", () => {
     }
   });
 });
+
+// The drain gate reads "cannot tell" as "not stopped", so a stop file it could never see would leave
+// every stop to an interrupt. The factory refuses one as the run starts, once, in every process.
+test.describe("createProductConfig — the drain's stop file", () => {
+  test("builds with a stop file whose folder exists, the file itself not yet made", async () => {
+    const built = await build([], {
+      E2E_INTERNAL_STOP_FILE: join(elsewhere, "stop"),
+    });
+    expect(built.bddConfigs).toEqual([bddDir("a"), bddDir("b")]);
+  });
+
+  test("refuses a relative stop file, naming the variable", async () => {
+    await expect(
+      build([], { E2E_INTERNAL_STOP_FILE: "runs/1/stop" }),
+    ).rejects.toThrow(
+      'E2E_INTERNAL_STOP_FILE must be an absolute path with no surrounding whitespace, got "runs/1/stop"',
+    );
+  });
+
+  test("refuses a stop file in a folder that does not exist, naming the folder", async () => {
+    const stopFile = join(elsewhere, "missing", "stop");
+    await expect(
+      build([], { E2E_INTERNAL_STOP_FILE: stopFile }),
+    ).rejects.toThrow(
+      `its folder ${join(elsewhere, "missing")} cannot be read (ENOENT)`,
+    );
+  });
+});

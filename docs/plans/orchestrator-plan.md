@@ -382,6 +382,8 @@ verified live where possible, with its evidence in §8.
 installed until the next run's Before hook removes it; killing only the Playwright parent leaves its
 worker alive to finish the teardown (V7). Check how Playwright handles SIGINT/SIGTERM (V8), then
 define stop (graceful), kill (hard), and what runs do when the orchestrator stops or crashes (§3).
+**Suite parts done 2026-10-08** (the drain; the Before hook stopping a killed run's work) — Phase 0
+plan §5.
 
 **0D — Reports say what they tested** (§2 Reports)
 

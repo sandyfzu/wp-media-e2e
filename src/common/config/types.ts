@@ -289,14 +289,19 @@ export interface ProductConfig {
    */
   readonly siteDbResidue?: SiteDbResidue;
   /**
-   * How to stop work this product may still be doing on a site when a scenario ends — a backup job
-   * that a scenario failing midway left running, say — before the shared teardown removes it.
+   * How to stop work this product may still be doing on a site — a backup job that a scenario
+   * failing midway left running, or that a killed run never got to stop — before the shared `@plugin`
+   * hooks remove the plugin: the teardown after a scenario, and the install before one.
    *
    * Work that runs in web requests outlives the scenario that started it, and uninstalling the
    * plugin underneath it races it: the request can re-create the rows the uninstall just deleted, or
-   * go on writing files the teardown is clearing. So the teardown asks the product to stop first.
+   * go on writing files the teardown is clearing. So both hooks ask the product to stop first.
    * Declared here rather than imported by the hooks, for the same reason as {@link debugLog}. Omit
    * when the product runs nothing in the background.
+   *
+   * Must settle within the hooks' allowance for it (`LEFT_WORK_ALLOWANCE_MS`, 90 s), probes
+   * included: the install shares the Before hook with it, and a hook that times out is abandoned
+   * mid-way rather than cancelled.
    */
   readonly stopRunningWork?: StopRunningWork;
   readonly services?: ServiceConfig;

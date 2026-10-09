@@ -99,6 +99,46 @@ Worker-side code that needs the "was this cell explicitly targeted?" answer shou
 `--project=artifacts:<cell>` selection, and it is the gate on whether per-run `E2E_*`
 overrides apply (a broad sweep must not inherit one cell's override).
 
+## Stopping a run: the drain
+
+A run is stopped gracefully by **draining** it. Whoever started it names a stop file in
+`E2E_INTERNAL_STOP_FILE` and creates the file to ask the run to stop. From then on an automatic
+fixture, `drainGate` in [`fixtures.ts`](../../src/common/fixtures.ts), skips every scenario's **first
+attempt** with a `stopped` annotation, while the scenario in flight finishes as it would have, retries
+included. The policy is [`config/drain.ts`](../../src/common/config/drain.ts) (`stopFileFromEnv`,
+`assertStopFileFolder`, `drainReason`, `wasDrained`). Unset, there is no gate.
+
+- **A gate that never closes fails silently** — every stop becomes an interrupt — so the path must be
+  absolute with no surrounding whitespace, and the config factory refuses, as the run starts, a stop
+  file whose folder is missing, not a folder, or not searchable (`existsSync` reads "cannot tell" as
+  "absent").
+- **First attempts only**: a retry finishes a scenario that already ran, so skipping it would turn
+  that scenario's failure into "flaky". Nor is an attempt skipped once something in it has failed
+  (the gate then runs late, see below): Playwright would report the skip as its verdict and skip its
+  retry unrun, so a broken site would read "flaky" (measured).
+- **Order**: Playwright's own automatic fixtures, registered before ours, set up the context options
+  first. `storageState` therefore names `drainGate` as a dependency, so the gate precedes the one
+  option that can throw (a placeholder site's refusal). A worker fixture still precedes it; when one
+  fails, the gate runs only as the After hooks are prepared — the case the rule above covers.
+- A skip in a fixture runs **no Before hook** but **still runs the After hooks** (measured), so the
+  `@plugin` After hook returns at once for a drained scenario: it installed nothing.
+- The reports stay complete and true: drained scenarios read "skipped" with no error, and the exit
+  status reflects what ran (0 when nothing that ran failed). One wrinkle for a reader of steps: the
+  skip unwinds through the "Before Hooks" step, which carries it as an error (`Test is skipped: …`;
+  Allure draws that step red). Judge a scenario by its result's status, never by its steps' errors.
+
+The end-to-end behaviour is pinned by `config/drain.run.spec.ts`, which runs a synthetic product's
+scenarios on a placeholder site through the real `bddgen`, runner and shared hooks.
+
+If the drain takes too long, the caller escalates: **one** SIGINT to the runner, then SIGKILL to its
+**process group**. Never SIGTERM (the runner has no handler and writes no report), never a second
+SIGINT (the workers are orphaned and the scenario in flight drops), and never a SIGKILL of the
+runner alone (its workers finish orphaned). A plain SIGINT abandons the running step, so its
+teardown runs beside it. A killed run reaches no teardown; the next `@plugin` scenario's Before hook
+stops whatever the plugin is still doing before it removes the plugin
+(`ProductConfig.stopRunningWork`), with a budget of its own for it (`LEFT_WORK_ALLOWANCE_MS`), so
+recovering from a kill is complete.
+
 ## The product list
 
 [`src/projects/products.ts`](../../src/projects/products.ts) is the one list of products. It is

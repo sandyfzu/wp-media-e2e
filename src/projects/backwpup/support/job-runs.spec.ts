@@ -14,12 +14,14 @@ import { HISTORY_ROWS_PHP } from "./history";
 import { PROBE_FAILURE_TOLERANCE } from "./polling";
 import {
   RUN_STATE_PHP,
+  STOP_BUDGETS,
   parseRunState,
   runProgress,
   stopRunningJobs,
   waitForJobRunning,
   waitForRunToEnd,
 } from "./job-runs";
+import { LEFT_WORK_ALLOWANCE_MS } from "../../../common/hooks/plugin-lifecycle";
 import type { RunState, StopBudgets } from "./job-runs";
 import type { LocalTransport } from "../../../common/config/types";
 
@@ -307,7 +309,17 @@ test.describe("waitForRunToEnd", () => {
 });
 
 test.describe("stopRunningJobs", () => {
-  // The common case, paid on every scenario's teardown.
+  // The shared Before hook gives a product's stop this much on top of its install, and a stop that
+  // overruns it abandons the install mid-way. The budgets bound the waits; the probes around them
+  // (a handful at ~1.3 s each over SSH, more when some fail) need the rest.
+  test("fits its worst case inside the shared hooks' allowance for leftover work", () => {
+    const probes = 20_000;
+    expect(
+      STOP_BUDGETS.stopMs + STOP_BUDGETS.settleMs + probes,
+    ).toBeLessThanOrEqual(LEFT_WORK_ALLOWANCE_MS);
+  });
+
+  // The common case, paid before every install and after every scenario.
   test("asks one question and stops nothing on an idle site", async () => {
     script(0, [state([row("completed")])]);
     await expect(stopRunningJobs(local(), QUICK)).resolves.toBeUndefined();
@@ -331,7 +343,7 @@ test.describe("stopRunningJobs", () => {
     const stopped = await stopRunningJobs(local(), QUICK);
 
     expect(stopped).toBe(
-      "a backup of job 3 was still running when the scenario ended; it was stopped before the " +
+      "a backup of job 3 was still running; it was stopped before the " +
         "plugin was removed.",
     );
     expect(kills()).toBe(1);
@@ -360,7 +372,7 @@ test.describe("stopRunningJobs", () => {
     await expect(
       stopRunningJobs(local(), { ...QUICK, stopMs: 300 }),
     ).rejects.toThrow(
-      /a backup of job 3 was still running .* still running 0\.3 s after being told to stop — removing the plugin now would race it\. The last stop request: `wp backwpup kill` exited 0/,
+      /a backup of job 3 was still running, and it was still running 0\.3 s after being told to stop — removing the plugin now would race it\. The last stop request: `wp backwpup kill` exited 0/,
     );
   });
 
@@ -376,7 +388,7 @@ test.describe("stopRunningJobs", () => {
     const stopped = await stopRunningJobs(local(), QUICK);
 
     expect(stopped).toBe(
-      "a run of job 3 was still recording its end when the scenario ended; it was left to finish " +
+      "a run of job 3 was still recording its end; it was left to finish " +
         "before the plugin was removed.",
     );
     expect(kills()).toBe(0);

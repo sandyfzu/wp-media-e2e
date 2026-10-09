@@ -24,6 +24,7 @@ import {
   routingMetadata,
 } from "./metadata";
 import { reporters } from "./reporting";
+import { assertStopFileFolder, stopFileFromEnv } from "./drain";
 import {
   NO_CELL,
   REPO_ROOT,
@@ -165,6 +166,11 @@ export function createProductConfig(
   // And for how to stop work it may still be doing on a site, which the shared teardown asks for
   // before it removes the plugin — a function, so this registry is its only possible channel.
   registerStopRunningWork(product.name, product.stopRunningWork);
+
+  // A stop file the drain gate could never see fails the run here, once, as it starts — not every
+  // scenario, and not silently, as a gate that never closes would.
+  const stopFile = stopFileFromEnv();
+  if (stopFile !== undefined) assertStopFileFolder(stopFile);
 
   const pin = pinnedCell();
   const cells = cellsToBuild(product, pin);

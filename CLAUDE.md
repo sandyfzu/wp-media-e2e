@@ -34,7 +34,7 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 ```text
 src/
 ├── common/                 # product-agnostic, shared by every product
-│   ├── config/             # env, sites loading, run-context, the cell pin, metadata, devices, file-owner rule, the config factory
+│   ├── config/             # env, sites loading, run-context, the cell pin, the drain, metadata, devices, file-owner rule, the config factory
 │   ├── reporting/          # the suite's own Playwright reporters (cell-notice.ts)
 │   ├── auth/               # auth.setup.ts (login → storageState)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
@@ -44,7 +44,7 @@ src/
 │   ├── pages/              # cross-product Page Object Model (e.g. plugins.page.ts)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
-│   ├── __fixtures__/       # spec helpers (child-node.ts: run code in a fresh Node)
+│   ├── __fixtures__/       # spec helpers (child-node.ts: run code in a fresh Node; drain/: the drain spec's scenarios)
 │   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -83,6 +83,11 @@ playwright*.config.ts       # entry configs (default, per-product, unit)
   cannot satisfy, fails naming `E2E_CELL`; so does a pinned run that inherited another run's
   `PLAYWRIGHT_BDD_CONFIGS`. Each run prints a `[cell]` line saying which it is (unless a
   command-line `--reporter` replaces the configured reporters).
+- **Stopping a run** — the **drain**: creating the stop file `E2E_INTERNAL_STOP_FILE` names
+  (absolute, in a folder that exists — checked as the run starts; set by the orchestrator) skips each
+  scenario's first attempt as `stopped` while the one in flight finishes (`config/drain.ts`, the
+  `drainGate` fixture, which `storageState` depends on so it runs first). Escalate with **one**
+  SIGINT to the runner, then SIGKILL to its process group — never SIGTERM, never a second SIGINT.
 
 Full detail — the `parallelIndex` invariant, the config factory, the credential
 registry, and artifact lifecycle — is in
@@ -171,6 +176,7 @@ shared fixtures:
 | `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                                                              |
 | `pluginArtifact`          | test   | `pluginArtifact(role)` → the resolved zip under test; `.slug` addresses the plugin, `.zipPath` feeds `stageAndInstallPlugin`. |
 | `releaseBoundSite`        | worker | Automatic teardown: removes the site's staging area, closes SSH connections. Best-effort — never fails a passing run.         |
+| `drainGate`               | test   | Automatic: once the run's stop file (`E2E_INTERNAL_STOP_FILE`) exists, skips each scenario's first attempt as `stopped`.      |
 | `baseURL` (override)      | —      | Points navigation at the bound site.                                                                                          |
 | `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                              |
 | device options (override) | —      | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else the desktop default.    |
@@ -227,7 +233,9 @@ module so it is unit-testable without the runtime.
 **`@plugin`** ([`plugin.hooks.ts`](src/common/hooks/plugin.hooks.ts)) — tag a scenario
 `@plugin` and it gets:
 
-- **Before** — `debug.log` cleared, any existing copy of the plugin uninstalled (so the
+- **Before** — `debug.log` cleared, any **work the plugin is still running** stopped
+  (`ProductConfig.stopRunningWork` — a job a killed run left behind; reported, and a failure only
+  if it would not stop), any existing copy of the plugin uninstalled (so the
   install is genuinely fresh, DB footprint included), then the cell's own resolved
   artifact staged and installed with `--activate`, its files handed back to the ownership the
   **site** uses (WP-CLI installs as the transport's user, which the web server is not — see
@@ -258,8 +266,11 @@ module so it is unit-testable without the runtime.
   fails, and the others are still logged. Having to stop running work is reported, not failed;
   work that _would not_ stop is a cleanup failure. Left-over data the transport's user is not
   _permitted_ to remove is reported, not failed — see
-  [wordpress-automation.md](docs/architecture/wordpress-automation.md).
-- The scenario timeout is extended **additively** to cover both hooks (remote WP-CLI plus
+  [wordpress-automation.md](docs/architecture/wordpress-automation.md). A scenario the drain
+  skipped is left alone: it installed nothing.
+- The Before hook has a budget of its own on top of the shared one for stopping a killed run's
+  work (`LEFT_WORK_ALLOWANCE_MS`, which every `stopRunningWork` must fit). The scenario timeout is
+  extended **additively** to cover both hooks (remote WP-CLI plus
   an SFTP upload is slow), so a scenario keeps any budget it asked for.
 
 **MUST — `src/common/hooks/**/*.hooks.ts` belongs in every product's `steps` globs.**
@@ -729,6 +740,8 @@ Update it when you change anything about:
   `registerSiteResidue`, `registerSiteDbResidue`, `registerSiteDataDirResolver`,
   `registerStopRunningWork`).
 - Artifact directories, `RUN_ID` handling, or the `*_ROOT` env vars.
+- Stopping a run: the drain (`config/drain.ts`, `E2E_INTERNAL_STOP_FILE`, the `drainGate` fixture)
+  and the signals that escalate it.
 
 ### docs/architecture/wordpress-automation.md
 

@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+
 import { test as base, createBdd } from "playwright-bdd";
 
 import { readResolvedArtifact } from "./artifacts/consume";
@@ -5,6 +7,11 @@ import type { ArtifactRole, ResolvedArtifact } from "./artifacts/types";
 import { deviceForTags } from "./config/devices";
 import { getPool, readRouting } from "./config/metadata";
 import { isPlaceholderSite } from "./config/sites";
+import {
+  STOPPED_ANNOTATION,
+  drainReason,
+  stopFileFromEnv,
+} from "./config/drain";
 import { releaseSite } from "./wp/teardown";
 import type { Edition, SiteConfig } from "./config/types";
 
@@ -32,6 +39,12 @@ interface TestFixtures {
    * unsupported or the setup did not run for this cell.
    */
   pluginArtifact: (role: ArtifactRole) => ResolvedArtifact;
+  /**
+   * Automatic: skips a scenario's first attempt, annotated {@link STOPPED_ANNOTATION}, once the
+   * run's stop file exists — the drain (see `config/drain.ts`). No gate when the run names none.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- Playwright's type for a fixture that produces no value; it only gates.
+  drainGate: void;
 }
 
 interface WorkerFixtures {
@@ -78,6 +91,26 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     { scope: "worker", auto: true, box: true },
   ],
 
+  // Automatic, so every scenario passes the gate before its Before hooks: a skip thrown here runs no
+  // `beforeEach`, while the `afterEach` still runs (measured), which is why the `@plugin` After hook
+  // checks `wasDrained` first. `storageState` depends on it, so it also precedes the one context
+  // option that can throw. Boxed: it is plumbing, not a report line.
+  drainGate: [
+    // eslint-disable-next-line no-empty-pattern -- no fixture deps; the gate reads testInfo and the environment.
+    async ({}, use, testInfo) => {
+      const reason = drainReason(stopFileFromEnv(), testInfo, existsSync);
+      if (reason !== undefined) {
+        testInfo.annotations.push({
+          type: STOPPED_ANNOTATION,
+          description: reason,
+        });
+        testInfo.skip(true, reason);
+      }
+      await use();
+    },
+    { auto: true, box: true },
+  ],
+
   // Scenario-facing handle to the bound site; fails loudly when the project has no pool.
   site: async ({ boundSite }, use) => {
     if (boundSite === undefined) {
@@ -118,7 +151,14 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
   },
 
   // Override: `@noauth` scenarios start with an empty session; all others reuse the site's saved login.
-  storageState: async ({ $tags, boundSite, storageState }, use) => {
+  // It names `drainGate` so the gate is set up first: Playwright's own automatic fixtures, registered
+  // before ours, set up the context options before any of ours, so without this a placeholder site's
+  // refusal below would fail a scenario the drain should skip (measured).
+  storageState: async (
+    // `drainGate` is named for its ordering alone; it produces no value.
+    { $tags, boundSite, storageState, drainGate: _drainGate },
+    use,
+  ) => {
     if ($tags.includes("@noauth")) {
       await use({ cookies: [], origins: [] });
       return;

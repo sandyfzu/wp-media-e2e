@@ -2,7 +2,8 @@
 
 > **Status:** in implementation, in §9's order. **Done:** 0B.3 (2026-10-05, §4.3), 0A.2
 > (2026-10-06, §3.2), 0A.1 (2026-10-06, §3.1), 0B.1 (2026-10-08, §4.1), 0D.2 with 0B.2 (2026-10-08,
-> §6.2, §4.2; audited the same day). The rest is
+> §6.2, §4.2; audited the same day), 0C's suite parts (2026-10-08, §5;
+> audited the same day). The rest is
 > investigated: every item has a verified finding and a recommended solution, with the
 > alternatives it beat.
 > **Date:** 2026-09-25.
@@ -846,6 +847,21 @@ drops the scenario); Playwright's internal `PWTEST_*` timeouts (not public API);
 or a systemd scope per run (a restarted orchestrator cannot wait on processes that are not its
 children).
 
+**Implemented 2026-10-08** (V181–V184; audited the same day, V185–V191, §5.2). The gate is
+`config/drain.ts` (`stopFileFromEnv`, `assertStopFileFolder`, `drainReason`, `wasDrained`) bound by the
+automatic `drainGate` fixture, which `storageState` depends on so it runs first; the config factory
+refuses, as the run starts, a stop file the gate could never see (relative, padded with whitespace, or
+in a missing or unsearchable folder). The `@plugin`
+Before hook stops running work after clearing `debug.log` (so what the stop makes PHP write is judged)
+and before `ensurePluginAbsent`; work found there is reported as `before "<scenario>"`, and work that
+would not stop fails the Before hook without removing or installing anything. The Before hook gets
+`LEFT_WORK_ALLOWANCE_MS` (90 s) on top of its 120 s for that stop, the bound every
+`ProductConfig.stopRunningWork` must fit. A step's part-way
+reinstall (`replacePluginUnderTest`) does not stop work: inside a scenario, its own work is its
+business. BackWPup's stop messages no longer say "when the scenario ended", since the hook prefix
+now says before or after. The orchestrator's half — the stop state machine, the budgets, the
+post-kill cleanup chain — belongs to the orchestrator.
+
 **Verify when implemented.** Unit: the gate as a pure function (file present or absent, variable
 unset, retry 0 or 1); the After hook's early return; the Before path stopping work first. The
 orchestrator's stop state machine, with an injected clock and a fake `kill`: drain → one SIGINT →
@@ -866,6 +882,7 @@ staging area, `debug.log`, `wp` processes).
 | L3 | SIGKILL to the group | the plugin, footprint, staging zip, the scenario's padding tables and perhaps the job left; the next normal run recovers them, the padding as its worker starts (phase-6 V188; V50's gap is visible there) |
 | L4 | one SIGINT inside the After hook | a teardown cut short; one normal run restores the site |
 | L2 | the drain, once built | the scenario in flight finishes, the next is skipped as stopped; exit 0/1; the site as found |
+| L3' | SIGKILL to the group, then at once the shared install with the product's stop (the next run's Before path) | the job the kill left running is stopped before the removal; one normal run restores the site |
 
 Results, 2026-09-25 at `develop@af1ab5c` (built from scratch in 4.2 min by the first run). They test the
 suite's teardown and recovery, which this feature keeps independent of WP-Cron (the whole job runs in
@@ -878,6 +895,69 @@ one request), so they did not wait for cron parity:
 | L3 | SIGKILL of the group at +61.8 s → group empty at once. Left: the plugin installed and active, its whole footprint (26 options, `wp_bwpup_backups`, 3 roles, 11 capabilities), both data folders, the staged zip; the job had ended within 15 s. The next normal run passed and restored the site (its uninstall ran the plugin's own cleanup, so the sweep found nothing). V50's race was not exercised — the job was over before that run began |
 | L4 | SIGINT after the teardown's uninstall, before its last duty → exit 130 in 0.8 s. Left: both data folders (on a files job: gigabytes on a shared disk); the staging area was removed by the worker's teardown. The scenario, every step passed, reads interrupted. One normal run restored the site |
 | Final | the site as found; nothing running |
+
+Results, 2026-10-08 at `feat/orchestrator` with 0C, BackWPup `develop@1dceea8`, spawned directly
+(`bddgen`, then the Playwright CLI, `detached`), both cells at once:
+
+| Step | Measured |
+| --- | --- |
+| L2 (`free@nginx`, `bwu2`) | `cli-running-job.feature`, 4 scenarios. Stop file created the moment the first job was seen running (+91 s) → that scenario finished and **passed**; the other 3 **skipped**, annotated `stopped`; runner exit **0** 38 s later, group empty 0.35 s after. The 3 skips took under 2 s in all — the After hook returned (one teardown is ≥ 20 s). Playwright HTML, Cucumber (1.06 MB) and Allure written, the reason in Allure. **The site as found** |
+| L3' (`pro@nginx`, `bwu3`) | SIGKILL of the group the moment job 3 was seen running (+90 s); then `installPluginUnderTest` with `stopRunningJobs`, as the next Before hook calls it: **`[hooks] before "…": a backup of job 3 was still running; it was stopped before the plugin was removed.`** 6.5 s after the kill; the whole install 73.4 s (L2 running on the same server). Left after it: a fresh plugin, its footprint, the killed run's 80 padding tables, data folders, staging. One normal run of the scenario passed and **restored the site as found** |
+
+V50's race could not be reached through a second full run: `bddgen`, the setups and the worker's padding
+sweep take longer than the 11 s paced job, so L3' calls the Before path's own function directly. The
+audit's L3'' (§5.2) then reached it through the real hook, by lengthening the killed run's job.
+
+### 5.2 Audit (2026-10-08, V185–V191)
+
+An adversarial pass over the code, the tests (by mutation) and the claims, each finding reproduced in a
+lab or on a cell before it was fixed.
+
+- **The Before hook's budget could be overrun, and an overrun is not a timeout** (V185). BackWPup's
+  stop is bounded by 30 s + 30 s plus probes (~70 s); the install beside it measured 44–73 s; the
+  hook had 120 s. playwright-bdd times a hook with `Promise.race` and never cancels it, so an overrun
+  install would go on beside the teardown. **Fixed:** `LEFT_WORK_ALLOWANCE_MS` (90 s) on top for the
+  Before hook, added to the scenario's extension; the bound is now `stopRunningWork`'s documented
+  contract, and a spec fails if BackWPup's budgets outgrow it. Measured through the real hook after
+  a kill: 63.1 s, stop included.
+- **The gate was not first** (V186). Playwright's own automatic fixtures, registered before ours, set
+  up the context options — our `storageState` override included — before `drainGate`. On a placeholder
+  site that override throws, so a drained scenario failed; the gate then ran as the After hooks were
+  prepared, its skip cancelled them, and Playwright reported the retry skipped without running it:
+  "flaky". **Fixed:** `storageState` depends on `drainGate`.
+- **A gate that runs late misreports a broken site** (V187). A worker fixture still precedes the gate
+  (BackWPup's `contentCopyLeftover` refuses a damaged site); measured in the lab: failed, then a retry
+  skipped unrun — "flaky". **Fixed:** the gate skips only an attempt whose status is still `passed`;
+  the lab then reads failed, failed, as without a drain.
+- **A stop file the gate could never see was accepted** (V188): `"/tmp/stop "`, `"/tmp/stop\n"` and a
+  path in a missing folder — `existsSync` answers `false` when it cannot tell, so every stop would
+  have become an interrupt. **Fixed:** surrounding whitespace is refused, and the factory checks the
+  folder exists, is a directory and is searchable.
+- **The bindings had no test** (V189): removing the After hook's early return, the ordering, the retry
+  rule or the gate itself left every unit test green. **Fixed:** `config/drain.run.spec.ts` runs a
+  synthetic product's two scenarios (`__fixtures__/drain/`) on a placeholder site through the real
+  `bddgen`, runner and hooks, in a temporary folder, network-free, in ~2 s; each of those four
+  mutations fails it.
+- **Docs:** a comment claimed the teardown does not fail on work that would not stop (it does, after
+  its other duties); `ProductConfig.stopRunningWork`, its registry and BackWPup's budgets still spoke
+  of the teardown alone. **Fixed.**
+- **For 0E** (V190): a drained scenario's result reads `skipped` with no error, but its "Before Hooks"
+  step carries the skip as an error (`Test is skipped: …`; Allure draws it red). The stream must judge
+  a scenario by its result's status, never by step errors.
+- **Confirmed sound:** the setup projects and every unit spec import `@playwright/test` directly, so the
+  gate reaches scenarios only; no feature runs in serial mode; the After hook ran and returned in
+  0–1 ms per drained scenario on L2 (Allure); the stop's attachment lands under the Before hook's step;
+  the spec's temporary folder (a `node_modules` symlink included) is removed without following links.
+- **Outside 0C, not fixed:** Playwright titles a `fill()` step with its value, so the login's
+  `Fill "<password>"` reaches every report's steps (Allure's result files included). CLAUDE.md already
+  calls report artifacts sensitive; it matters once the orchestrator shares reports (Phase 0.5).
+
+Live, on the final code, both cells at once (V191):
+
+| Step | Measured |
+| --- | --- |
+| L2 (`free@nginx`, `bwu2`) | Stop file at +94 s, job running → the scenario in flight passed, 3 skipped as `stopped`, runner exit 0 40 s later, group empty 0.03 s after. **The site as found** |
+| L3'' (`pro@nginx`, `bwu3`) | 500 empty `wp_e2e_audit_NNN` tables first, so the paced dump outlasts a run's start-up; SIGKILL of run A's group once job 3 ran; run B (a plugin-deletion scenario) started at once. Its **real Before hook**: `[hooks] before "Deleting an active plugin…": a backup of job 3 was still running; it was stopped before the plugin was removed.` — the hook 63.1 s in all, the attachment in its step; the scenario passed. Audit tables dropped (500 → 0). **Both sites as found** |
 
 ## 6. 0D — Reports say what they tested
 
@@ -1084,6 +1164,8 @@ above.
 - Status: `interrupted` if the final attempt was, else passed, failed (timeouts included), flaky or
   skipped. The first error is the first failing Gherkin step, else the innermost failing hook, else —
   a crash, or a timeout outside any step — the last step begun; ANSI codes stripped, length capped.
+  Only for a scenario that did not pass or skip: a drained one reads `skipped` with no error, yet its
+  "Before Hooks" step carries the skip as an error (V190); a `stopped` annotation says it was drained.
 - One `appendFileSync` per line, the file created fresh in `onBegin`. A failed write warns once and
   never throws (V67); `onEnd` returns nothing, since a returned status would replace the run's.
 - The orchestrator reads complete lines from an offset and ignores unknown types and fields; `v` is
@@ -1101,9 +1183,11 @@ reporter's text; final lines only (they lose "running now" and the retries).
 attribution (a step, a Background step, a `test.step` nested in a Gherkin step, hooks, a timeout, a
 crash), the final-status table, ANSI stripping and truncation, the class driven into a temporary file
 (order, counts, `didNotRun`; an unwritable path warns once and throws nothing), and the reader (a
-partial last line, a bad line, an unknown type). No site: the prototype's features, with a SIGINT, a
-SIGTERM and a failing setup. Live: a real cell, where a `DebugLogFatalError` is attributed to
-`AfterEach Hooks`.
+partial last line, a bad line, an unknown type). A drained scenario — `skipped`, a `stopped`
+annotation, its "Before Hooks" step carrying `Test is skipped: …` as an error (V190) — ends as
+`skipped`, drained, with **no** first error. No site: the prototype's features, with a SIGINT, a
+SIGTERM, a failing setup and a drain (`config/drain.run.spec.ts` runs one). Live: a real cell, where a
+`DebugLogFatalError` is attributed to `AfterEach Hooks`.
 
 ## 8. 0F — Report pruning
 
@@ -1199,6 +1283,7 @@ on `bwu2`/`bwu3`, one cell at a time.
 5. 0D.2 with 0B.2 — the full commit, the digest, and the built commit (the artifacts code). **Done
    2026-10-08.**
 6. 0C's suite parts: the Before path stopping running work (worth having now), then the drain.
+   **Done 2026-10-08.**
 7. 0D.3, the site's versions.
 8. 0D.1 and 0E, run facts and the results stream (the reporting code).
 9. 0F, pruning.
@@ -1245,7 +1330,7 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V47 | The process group outlives the runner while orphaned workers tear down; `kill(-pgid, 0)` → `ESRCH` marks the end | ✅ lab | Case 26: runner gone at 18.9 s, group empty at 39.4 s |
 | V48 | A drain gate — skip first attempts once a stop file exists, the After hook returning for gated scenarios — lets the scenario in flight finish (retries included) and skips the rest with a reason, the reports true; gating retries too turns a failure into flaky | ✅ lab prototype | Cases 23–25, 27; `runner/index.js:605–630`; `workerProcessEntry.js:1644`, `:1813` |
 | V49 | systemd `KillMode=mixed`: a stop signals the main process only; after a crash nothing is left to SIGTERM, so the cgroup is SIGKILLed at once | ✅ source (systemd, via Context7) · ⏳ the server's version | `unit.c` `unit_kill_context`; `service.c` |
-| V50 | The `@plugin` Before path never stops the product's running work | ✅ source · ⏳ live (L3 could not reach the race: the job ended within 15 s of the kill) | `plugin-lifecycle.ts:208–215` against the teardown's `:338–339` |
+| V50 | The `@plugin` Before path never stops the product's running work — **fixed 2026-10-08** (V184) | ✅ source · ✅ live through V184 (L3 could not reach the race: the job ended within 15 s of the kill) | `plugin-lifecycle.ts:208–215` against the teardown's `:338–339` |
 | V51 | One SIGINT during a real `@plugin` scenario on `free@nginx` leaves the site as found and every report written | ✅ live 2026-09-25 (L1) | §5.1: `site-state` before and after; the report folder |
 | V52 | The HTML report's only up-front slot is its title (`title` or `PLAYWRIGHT_HTML_TITLE`, read in its `onEnd`); custom metadata sits in a collapsed panel | ✅ source + rendered | `runner/index.js:3471–3485`; rendered screenshots |
 | V53 | Reporters are built in config order from a shallow copy of their options; `onEnd` is awaited in turn, `onExit` after all. `config.metadata` and `PLAYWRIGHT_HTML_TITLE` set in the first reporter's `onEnd` reach the HTML report; setup attachments reach `onTestEnd` even when the setup then skips or fails | ✅ source + measured | `runner/index.js:5208–5220`, `:1642–1653`; lab probes |
@@ -1358,3 +1443,14 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V178 | Mutations, each failing the tests aimed at it: 4 the review found surviving (hash the source; `fromCache`, `gitRef`, `sourceValue` mapping; writer dropping `commit`; `pinRef` order) and 15 on the fixes — commit before release (7 fail), case-sensitive selectors (2), no pin version (2), `assertCached` ignoring missing or empty (1, 1), the writer, parser or `builtArtifact` dropping `pinRef` (1, 3, 3), the info line always or never naming `pin` (1, 1), the warmer skipping `assertCached`, its redaction, its variants or its token check (1 each). Hashing the source survives by design (removed claim) | ✅ 2026-10-08 | Mutations applied in place, restored from copies |
 | V179 | APVM `cli/v3.0.0` (the source the reviews read) has the installed darwin-arm64 binary's SHA-256; the local APVM checkout is at `cli/v3.2.0-6`, so the source was read at the tag | ✅ 2026-10-08 | `git show cli/v3.0.0:…`; the review's binary digest |
 | V180 | Gates after the audit: typecheck, lint and format clean; unit 1596 passed, 8 skipped | ✅ 2026-10-08 | The worktree |
+| V181 | Playwright 1.63 / playwright-bdd 9.2.1: a skip thrown by an automatic test fixture runs no `beforeEach` (so no Before hook) but still runs `afterEach` (the After hooks) with the fixtures it asks for; a retry is unaffected; the skip's annotations reach the JSON and Allure reports | ✅ lab + measured | A scratch spec (`retries: 1`, a stop file written by the first test); a placeholder `wp-rocket/apache` run with a stop file: 3 scenarios skipped as `stopped`, exit 0; a relative path fails at config load naming the variable |
+| V182 | Unit: the drain policy (12 cases: unset/blank/relative/padded paths, retry 0/1/2, the filesystem untouched when the answer is decided) and the Before path's stop (order after the log clear and before the removal, an absent plugin, the report, a stop that fails touching nothing). Mutations: the stop moved after the install fails 3; the retry gate dropped fails 1. Gates: typecheck, lint, format clean; unit 1612 passed, 8 skipped | ✅ 2026-10-08 | `config/drain.spec.ts`; `hooks/plugin-lifecycle.spec.ts` |
+| V183 | **L2 live**: the drain lets the scenario in flight finish, skips the rest as `stopped`, exits 0 with every report written, and leaves the site as found | ✅ live 2026-10-08 | §5.1, `bwu2` |
+| V184 | **V50 closed**: after a SIGKILL of the group, the Before path finds the job still running and stops it before the removal (6.5 s); the install then took 73.4 s beside another run on the server — which, with the stop's ~70 s worst case, overran the 120 s hook (V185) | ✅ live 2026-10-08 | §5.1, `bwu3` |
+| V185 | The Before hook's worst case — BackWPup's stop (30 s + 30 s + probes ≈ 70 s) beside a 44–73 s install — exceeded its 120 s; playwright-bdd's hook timeout is a `Promise.race` that leaves the hook running. Fixed with a 90 s allowance (Before 210 s), held to by a spec on BackWPup's budgets | ✅ source + measured | `playwright-bdd/dist/utils/index.js` `callWithTimeout`; `job-runs.ts` `STOP_BUDGETS`; §5.1 |
+| V186 | Playwright sets up its context options (our `storageState` override) before our automatic fixtures; a throwing override then fails a drained scenario, the late gate cancels its After hooks, and the retry is reported skipped unrun ("flaky"). Fixed by `storageState` depending on `drainGate` | ✅ lab + probe | Scratch spec with a throwing `storageState`; a placeholder `@plugin` probe before and after |
+| V187 | A worker fixture failing during a drain read "flaky" (failed, retry skipped unrun); with the gate skipping only an attempt still `passed`: failed, failed | ✅ lab | Scratch spec with a throwing worker fixture |
+| V188 | `"/tmp/stop "`, `"/tmp/stop\n"` and a missing folder were accepted; now refused, and an unsearchable folder too — `existsSync` reads a file in it as absent (asserted in the spec) | ✅ measured | `drain.spec.ts`, `project.spec.ts` |
+| V189 | Mutations: the After hook's early return, the `storageState` ordering, gating retries, a gate that never skips — each fails `drain.run.spec.ts` (2 s, network-free); the stop-file checks, the factory's call, the allowance, the late-gate rule and BackWPup's budget fit each fail their unit spec | ✅ 2026-10-08 | 12 mutations, each restored |
+| V190 | A drained scenario: result `skipped`, `errors: []`; its "Before Hooks" step carries `Test is skipped: …` as an error (reporter API and Allure) | ✅ lab + live | Step reporter; L2's Allure results |
+| V191 | Live on the final code: L2 drains as before; L3'' stops a killed run's job through the real Before hook (63.1 s); both sites as found. Gates: typecheck, lint, format clean; unit 1624 passed, 8 skipped | ✅ live 2026-10-08 | §5.2, `bwu2`, `bwu3` |
