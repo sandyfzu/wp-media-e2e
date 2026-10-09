@@ -35,6 +35,7 @@ The recommended solution per item. "—" means no suite change: the orchestrator
 | 0D.1 reports say it up front | A *run facts* reporter, listed first: the HTML report's title, Allure's `environment.properties`, a banner on the Cucumber report, `run-facts.json` | new `src/common/reporting/`; `reporting.ts`, `scripts/allure.mjs` |
 | 0D.2 commit and digest — **done** | Record the full commit, and a SHA-256 of **every** resolved zip | new `digest.ts`; `resolve.ts`, `types.ts`, `consume.ts`, `verify.ts` |
 | 0D.3 the site's versions | Read Site Health's "Copy site info" in the auth setup; keep only whitelisted keys | new page object + parser; `auth.setup.ts` |
+| 0D.4 no credential in a report | Type a secret with `evaluate`, never `fill()`, and check it in the page; the auth setup traces without DOM snapshots; scenario traces' session cookies settled by a measured choice | new secret-input helper; `login.ts`, `storage.sidebar.ts`, `project.ts` |
 | 0E results stream | A JSON-lines reporter (schema v1), always on, writing `<report dir>/results.jsonl` — nothing on the terminal; plus an end-of-run summary for people | new `src/common/reporting/results-stream.ts`, `run-summary.ts`; `reporting.ts` |
 | 0F pruning | At most 20 reports per cell (FIFO, at each run's end), none older than 30 days, the newest complete one kept up to 6 months; `npm run report:prune` for every cell | new `run-id.ts`, `retention.ts`, `prune-reports.ts` |
 
@@ -948,9 +949,9 @@ lab or on a cell before it was fixed.
   gate reaches scenarios only; no feature runs in serial mode; the After hook ran and returned in
   0–1 ms per drained scenario on L2 (Allure); the stop's attachment lands under the Before hook's step;
   the spec's temporary folder (a `node_modules` symlink included) is removed without following links.
-- **Outside 0C, not fixed:** Playwright titles a `fill()` step with its value, so the login's
-  `Fill "<password>"` reaches every report's steps (Allure's result files included). CLAUDE.md already
-  calls report artifacts sensitive; it matters once the orchestrator shares reports (Phase 0.5).
+- **Outside 0C, scheduled as 0D.4 (§6.4):** Playwright titles a `fill()` step with its value, so the
+  login's `Fill "<password>"` reaches every report's steps (Allure's result files included), and a
+  retained trace holds the password and the session cookies.
 
 Live, on the final code, both cells at once (V191):
 
@@ -1096,6 +1097,64 @@ digest).
 **Verify when implemented.** The parser on a captured text (headers with counts, the backtick wrapping,
 missing keys); the page object's locator-contract spec; live on both cells, values equal to the ones
 above.
+
+### 6.4 0D.4 — No credential in a report
+
+Found in the 0C audit (§5.2), outside 0C, and scheduled with 0D.3: both change the auth setup's login.
+
+**Finding** (V192–V196):
+
+- **Every real run's reports hold the site's login password.** The auth setup types it with `fill()`,
+  whose step Playwright titles `Fill "<password>"`: it is in that setup's Allure result and in the HTML
+  report's embedded data — not in the Cucumber report (setup projects are left out of it, V54), nor in
+  a passing run's `test-results/`.
+- **A failed attempt's retained trace holds more**, and the HTML report copies it into its `data/`: the
+  password in the fill's call, its log and the next action's DOM snapshot; and in a scenario's trace,
+  the WordPress session cookies (`wordpress_logged_in_…` 95 times, `wordpress_sec_…` 24 in one
+  report) — an admin session until it expires.
+- **Playwright 1.63 masks nothing.** `Fill`, `Type` and `Insert` render the value into the step's
+  title and params; a boxed step hides nothing; its docs say only to treat traces and reports as
+  sensitive.
+- **Measured fix (lab):** entering the value with `locator.evaluate` — the native `value` setter, then
+  `input` and `change` events — leaves no title, param or Allure entry. The trace still gets it two
+  ways: the next action's DOM snapshot, and `inputValue()`'s result. Entering by `evaluate`,
+  checking the value **in the page** (only a boolean comes back), and a trace without DOM snapshots
+  (`snapshots: { dom: false }`, which also stops network recording) left reporter steps, Allure and
+  trace clean.
+- **Phase 0.5 sends no report off the server** — Datator gets counts, names, statuses and first errors,
+  Slack an `scp` path — so the exposure is a report folder copied or served elsewhere. Still, every
+  report carries the password today, and nothing says so but CLAUDE.md.
+
+**Recommended.**
+
+- A shared helper in `src/common/pages/` — enter a secret into a field by `evaluate`, and check in
+  the page that the field holds it — used for every secret the suite types: the login's password
+  (`login.ts`, whose kept-value check becomes the in-page check), and the storage credentials
+  BackWPup's `storage.sidebar.ts` types (6H). Usernames, paths and the rest keep `fill()`. A side effect
+  to confirm live: `evaluate` writes the field directly, so the login page's re-focus cannot divert
+  the password — the race `login.ts` guards against today.
+- The auth setup project traces with `snapshots: { dom: false }`: it only logs in, so it loses little
+  (screenshots stay), and its trace then holds no password and no `Set-Cookie`.
+- **Scenario traces and their session cookies — measure, then choose:** (a) keep them, and say in
+  every report that a trace is a credential; (b) `snapshots: { dom: false }` for orchestrator runs —
+  no cookie, but no DOM or network to debug with; (c) end the run's session at the end of the run
+  (WordPress's `WP_Session_Tokens::destroy` with the token from the saved login's cookie, over WP-CLI),
+  so a cookie in a trace is dead by the time anyone reads it, without touching other users' sessions.
+  (c) looks best — debugging intact, nothing live in the artifacts — if it holds up live.
+- Correct the docs: CLAUDE.md's "Traces carry site credentials" note, and the modernization plan's
+  claim that no credential appears in any report (its acceptance line and risk table).
+
+**Rejected.** A boxed `test.step` around `fill()` (hides nothing, V194); `pressSequentially` or
+`keyboard.insertText` (titled with the value too); redacting reports after the fact (Allure writes per
+attempt, the HTML report embeds zips, and a missed format leaks); traces off everywhere (no
+diagnostics for the failures that need them).
+
+**Verify when implemented.** Unit: the helper on a `setContent` form — value set, `input`/`change`
+fired, the in-page check true and false. A canary run through the real runner, like
+`config/drain.run.spec.ts`: no occurrence in the reporter's steps, the Allure results, the HTML report
+(its embedded data and `data/` zips) or a forced failure's trace. Live on both cells: the login still
+settles, and a scan of a real run's report folder and of a failed setup's trace finds no password;
+for (c), a session destroyed at the run's end no longer opens wp-admin.
 
 ## 7. 0E — Machine-readable results
 
@@ -1284,7 +1343,8 @@ on `bwu2`/`bwu3`, one cell at a time.
    2026-10-08.**
 6. 0C's suite parts: the Before path stopping running work (worth having now), then the drain.
    **Done 2026-10-08.**
-7. 0D.3, the site's versions.
+7. 0D.3 and 0D.4 — the site's versions, and no credential in a report: both change the auth setup's
+   login.
 8. 0D.1 and 0E, run facts and the results stream (the reporting code).
 9. 0F, pruning.
 
@@ -1454,3 +1514,8 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V189 | Mutations: the After hook's early return, the `storageState` ordering, gating retries, a gate that never skips — each fails `drain.run.spec.ts` (2 s, network-free); the stop-file checks, the factory's call, the allowance, the late-gate rule and BackWPup's budget fit each fail their unit spec | ✅ 2026-10-08 | 12 mutations, each restored |
 | V190 | A drained scenario: result `skipped`, `errors: []`; its "Before Hooks" step carries `Test is skipped: …` as an error (reporter API and Allure) | ✅ lab + live | Step reporter; L2's Allure results |
 | V191 | Live on the final code: L2 drains as before; L3'' stops a killed run's job through the real Before hook (63.1 s); both sites as found. Gates: typecheck, lint, format clean; unit 1624 passed, 8 skipped | ✅ live 2026-10-08 | §5.2, `bwu2`, `bwu3` |
+| V192 | Every real run's reports hold the login password: the auth setup's `Fill "<password>"` step in its Allure result and in the HTML report's embedded data — 2 locations per run (two reports scanned); none in the Cucumber report or a passing run's `test-results/` | ✅ measured | A scan by count, never printing the value: `bwu3`'s L3'' report, `bwu2`'s of 2026-10-06 |
+| V193 | A failed scenario's retained trace, copied into the HTML report's `data/`, holds the WordPress session cookies: `wordpress_logged_in_…` ×95, `wordpress_sec_…` ×24 | ✅ measured | `reports/backwpup/free@nginx/2026-10-06T03-20-53-829Z-10230` |
+| V194 | Playwright 1.63 titles `Fill`/`Type`/`Insert` with the value (`renderParams`) and passes it in the step's params; `box: true` hides nothing; no masking API — the docs say to treat traces and reports as sensitive | ✅ source + lab + docs | `playwright-core` `coreBundle.js` metainfo; Context7 `/microsoft/playwright/v1.63.0` |
+| V195 | Entering by `evaluate` leaves no reporter title or param and no Allure entry; the trace keeps the value in the next action's DOM snapshot and in `inputValue()`'s result; `evaluate` + an in-page check + `snapshots: { dom: false }` leaves reporter steps, Allure and trace clean | ✅ lab | Scratch specs with a canary value, scanned per channel |
+| V196 | Phase 0.5 ships no report off the server: Datator gets counts, names, statuses and first errors; Slack an `scp` path | ✅ source | Phase 0.5 plan §2 |

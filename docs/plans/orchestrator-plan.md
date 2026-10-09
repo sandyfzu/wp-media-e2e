@@ -395,6 +395,9 @@ plan §5.
 - **0D.3 — the site's own versions**, read once per run from Site Health → Info (the "Copy site info"
   text: `php_version`, `php_sapi`, `httpd_software`, WordPress and database versions) in the auth
   setup, which is already logged in. Never WP-CLI's PHP: it differs on both nginx cells (V28).
+- **0D.4 — no credential in a report** (found in the 0C audit): the login's `fill()` step carries the
+  site password into every report, and a retained trace holds it and the WordPress session cookies.
+  Scheduled with 0D.3 — Phase 0 plan §6.4.
 
 **0E — Machine-readable results.** A stream of each scenario's result — feature, name, tags, status,
 retries, duration, first failing step's message — and the final totals, for live progress and
