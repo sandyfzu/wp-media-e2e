@@ -3,7 +3,8 @@
 > **Status:** in implementation, in §9's order. **Done:** 0B.3 (2026-10-05, §4.3), 0A.2
 > (2026-10-06, §3.2), 0A.1 (2026-10-06, §3.1), 0B.1 (2026-10-08, §4.1), 0D.2 with 0B.2 (2026-10-08,
 > §6.2, §4.2; audited the same day), 0C's suite parts (2026-10-08, §5;
-> audited the same day), 0D.3 and 0D.4 (2026-10-09, §6.3, §6.4; audited the same day, §6.5). The rest is
+> audited the same day), 0D.3 and 0D.4 (2026-10-09, §6.3, §6.4; audited the same day, §6.5), 0E
+> (2026-10-12, §7.1; audited the same day, §7.2). The rest is
 > investigated: every item has a verified finding and a recommended solution, with the
 > alternatives it beat.
 > **Date:** 2026-09-25.
@@ -36,7 +37,7 @@ The recommended solution per item. "—" means no suite change: the orchestrator
 | 0D.2 commit and digest — **done** | Record the full commit, and a SHA-256 of **every** resolved zip | new `digest.ts`; `resolve.ts`, `types.ts`, `consume.ts`, `verify.ts` |
 | 0D.3 the site's versions — **done** | Read Site Health's "Copy site info" in the auth setup; keep only whitelisted keys | new page object + parser; `auth.setup.ts` |
 | 0D.4 no credential in a report — **done** | Type a secret with `evaluate`, never `fill()`, and check it in the page; the auth setup traces without DOM snapshots and without the failure snapshot; each run's setup ends the session the previous run saved | new `secret-field.ts`, `session.ts`, `authenticate.ts`; `login.ts`, `auth.setup.ts`, `storage.sidebar.ts`, `project.ts` |
-| 0E results stream | A JSON-lines reporter (schema v1), always on, writing `<report dir>/results.jsonl` — nothing on the terminal; plus an end-of-run summary for people | new `src/common/reporting/results-stream.ts`, `run-summary.ts`; `reporting.ts` |
+| 0E results stream — **done** | A JSON-lines reporter (schema v1), always on, writing `<report dir>/results.jsonl` — nothing on the terminal; plus an end-of-run summary for people | new `src/common/reporting/results-stream.ts`, `run-summary.ts` and their pure parts; `reporting.ts`, `project.ts` |
 | 0F pruning | At most 20 reports per cell (FIFO, at each run's end), none older than 30 days, the newest complete one kept up to 6 months; `npm run report:prune` for every cell | new `run-id.ts`, `retention.ts`, `prune-reports.ts` |
 
 ## 1. Method
@@ -1348,6 +1349,77 @@ annotation, its "Before Hooks" step carrying `Test is skipped: …` as an error 
 SIGTERM, a failing setup and a drain (`config/drain.run.spec.ts` runs one). Live: a real cell, where a
 `DebugLogFatalError` is attributed to `AfterEach Hooks`.
 
+### 7.1 Implemented (2026-10-12, V225–V231)
+
+As recommended above, with these specifics:
+
+- **Modules.** `reporting/results.ts` holds what both reporters decide — the final attempt, the status,
+  the first error, a scenario's place, the tally — so the stream and the summary cannot disagree.
+  `results-schema.ts` (the v1 types), `results-stream.ts` (the reporter and `JsonLinesFile`),
+  `results-reader.ts` (`parseResults`: complete lines only, unknown lines counted and skipped),
+  `run-summary.ts`, `setup-facts.ts` (the setups' attachments read back — for 0D.1 too) and
+  `run-description.ts` (the facts the config factory hands every own reporter: product, cell, edition,
+  `RUN_ID`, report folder). `config/project-names.ts` names a cell's projects and tells a setup from a
+  scenario; `setup/attachments.ts` holds the two attachment names, so a reporter never loads a page
+  object (which imports `@playwright/test`).
+- **Schema v1 fields.** Durations are `durationMs` (every attempt summed on `scenario.end`); a retry
+  carries the attempt's own `attemptStatus`; `setup.end` names its `setup` (`auth`, `artifacts`); a
+  drained scenario carries `drained: true`, one whose due retry never ran `retryNotRun: true` (§7.2);
+  an error is `{ message, where, step? }` with `where` one of
+  `step`, `hook`, `last-step`, `test`; `run.begin` has `mode` (`test`/`list`).
+- **Order.** The stream sits second, after the `[cell]` notice — which has no `onEnd`, so `run.end`
+  still lands before every report's.
+- **Summary.** As drafted, without the `Pruned` line (0F adds it). The plugin's name comes from a new
+  `pluginName` in the artifacts setup's attachment (the expected `Plugin Name:`, which a passing role's
+  zip was proven to carry). A run of every cell prefixes each fact with its cell. Each failed setup's
+  first line sits under one `Setup` label; the full report is printed above it by `list`.
+- **Live** (V230): both cells at once; every failure attributed to its step or hook, the summaries
+  as drafted. `free@nginx`'s two deletion scenarios failed on BackWPup Free's own leftover options —
+  the same without 0E (an A/B run of the last commit), so a product or site matter, reported apart.
+- **Measured while building it** (V225–V227): the step trees below the attribution rules — a named
+  hook is titled by its name, a hook that times out leaves its error on `BeforeEach Hooks` and none on
+  the hook, a failing fixture sits under `Before Hooks › Fixture "<name>"`; Playwright hands every
+  reporter `_mode` (`list` for `--list`), undocumented, which a run spec now guards; its `outcome()`
+  sets interrupted and skipped attempts aside.
+
+### 7.2 Audit (2026-10-12, V232–V238)
+
+Every claim re-measured on Playwright 1.63 — labs driving the real reporters, the dispatcher's source —
+each fix proven by a test that fails with it undone (V236), then live again on both cells.
+
+- **A retry was predicted by the guess Playwright's own reporters make, not by what its dispatcher
+  does** (V232, V233). Three cases measured: a screenshot with no baseline is never retried
+  (`shouldNotRetryTest`), so the stream wrote `scenario.retry` and never `scenario.end`, and counted a
+  failure as "did not run"; after a failed `beforeAll` (or a worker crash between tests) Playwright
+  reports the remaining tests `skipped` — `expectedStatus` still `passed`, `parallelIndex` −1 — then
+  retries them, so a scenario ended twice; and a retry still queued when a run stops never runs.
+  **Fixed:** `willRetry` applies the dispatcher's rule (`JobDispatcher._onDone`,
+  `runner/index.js:5900–5965`: a failure, or a skip the test did not choose, while retries remain;
+  never an interrupted attempt); `RunTally` keeps each test's last final status; `settle()` ends, as
+  the run ends, every test whose due retry never ran — its `scenario.end` (or `setup.end`) then carries
+  `retryNotRun`. Playwright 1.63 retries at once by default (`retryStrategy: "immediate"`,
+  `common/index.js:496`), so `--max-failures` stops a run with no retry queued; the no-baseline case is
+  the deterministic one, and the run spec now runs it.
+- **Playwright's call log quotes attribute values** (V234): a locator error's message carries
+  `locator resolved to <input value="…"/>` — on the restore wizard, the database password. **Fixed:** the
+  stream drops the call log (the reports keep it). An assertion's own `Received:` stays: the stream is
+  documented as sensitive as the reports.
+- **The summary printed what sites report as is** (V235): an escape sequence or a newline in Site
+  Health's text, or a setup's error, reached the terminal. **Fixed:** `plain()` on every such value.
+  Also: an interrupted setup was called failed (no longer); report paths assumed the repository root
+  as the working directory and were unquoted (now relative to it, quoted when a shell would split them).
+- **Hardening.** A failed append could glue the next line to a fragment (the next line now starts on a
+  fresh one); an attachment path that is a FIFO would block the runner — undoing that check hung a spec
+  for 10 minutes — so only regular files are read; a cut could split a surrogate pair; a folder named
+  `..x` read as outside its project; the run description's optional fields were unchecked.
+- **Tests.** `run-description.ts` had none (added). The run spec asserts on every run that each test ends
+  once, before `run.end`, whose counts are the ends written — and it linked the whole `src` into its
+  temporary folder, so a missing screenshot baseline would have been written into the repository: it
+  now links `src/common` alone.
+- **Confirmed, no change:** a soft assertion's error reaches its step (`infectParentStepsWithError`); a
+  skip the test chose sets `expectedStatus: "skipped"` (runtime skip, drain); a missing baseline puts
+  its error on no step, so `last-step` names the step that ran.
+
 ## 8. 0F — Report pruning
 
 **Finding** (V68, V69):
@@ -1445,7 +1517,8 @@ on `bwu2`/`bwu3`, one cell at a time.
    **Done 2026-10-08.**
 7. 0D.3 and 0D.4 — the site's versions, and no credential in a report: both change the auth setup's
    login. **Done 2026-10-09.**
-8. 0D.1 and 0E, run facts and the results stream (the reporting code).
+8. 0D.1 and 0E, run facts and the results stream (the reporting code). **0E done 2026-10-12**; 0D.1
+   reuses its attachment parsers (`setup-facts.ts`) and run description.
 9. 0F, pruning.
 
 0A.3, 0A.4 and 0A.5 belong to the orchestrator: no suite change but the optional loader check.
@@ -1647,3 +1720,17 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V222 | Each audit fix undone fails a test: the switch restored after any outcome (2 failed), set for the whole process (1), the value set through the element's setter (1), any cookie domain (3), no budget on ending a session (1), the button wait's own budget (1), HTTP errors unchecked (2), `+` not a space (1), base64 at one alignment (1), a hidden field accepted (1) | ✅ mutation | Ten mutations |
 | V223 | Live after the fixes, both cells: previous sessions dead, new ones live, the password and tokens 0 times in each report and `test-results/`; the failed-setup probe again: its session dead, password 0 times, the token only in the trace's call log, no page snapshot, empty network entries; overlay and its files removed | ✅ live 2026-10-09 | Runs of 03:40Z and the `probe@nginx` run after them |
 | V224 | Gates after the audit: typecheck, lint and format clean; unit 1705 passed, 8 skipped | ✅ 2026-10-09 | The four gates |
+| V225 | Step trees (Playwright 1.63, playwright-bdd 9.2): a Gherkin step is a `test.step` titled with its keyword; a Background's steps sit under `Before Hooks › Background`; a hook's error on `Before/After Hooks › BeforeEach/AfterEach Hooks › <hook>` (named hooks titled by name); a fixture's on `Before Hooks › Fixture "<name>"`; a hook timeout on `BeforeEach Hooks`, none on the hook; a step timeout and a crash leave no step error; a skip puts `Test is skipped: …` on its step | ✅ lab | Two probe runs, 15 scenarios, a step-tree reporter |
+| V226 | Every reporter's options carry `_mode` — `list` under `--list`, else `test` — and `configDir`; nothing else tells `--list` from a run interrupted before its first test | ✅ source + run spec | `runner/index.js:5195–5260`; `results-stream.run.spec.ts` |
+| V227 | `willRetry` is `outcome() === "unexpected" && results.length <= retries`; `outcome()` sets interrupted and skipped attempts aside | ✅ source | `runner/index.js:1295`, `:605–631` |
+| V228 | Through the real runner, offline: every outcome attributed (step, After hook by name, flaky's retry, drained with no error), counts and `didNotRun`; SIGINT → the attempt `interrupted`, `run.end interrupted`, `■ INTERRUPTED` last; SIGTERM → complete lines only, no `run.end`, no summary; both setups failing → two `setup.end failed`, 6 did not run, `✘ COULD NOT TEST`; `--list` → `mode: "list"`, no summary | ✅ run spec | `results-stream.run.spec.ts`, 5 cases, ~15 s |
+| V229 | Each rule undone fails a test: the interrupted-attempt guard, an error for a skipped scenario, the summary's `--list` silence, the stream left out of `reporters()`, the Gherkin step's precedence, the cut at a non-reportable step, the `drained` flag, the interrupted verdict (8 mutations); a limit shorter than the cut marker was a real bug, fixed | ✅ mutation | Eight mutations |
+| V230 | Live, both cells at once (`--grep "Deleting (a deactivated|an active) plugin"`): every attempt streamed and attributed — a failed assertion to its Gherkin step, `SiteDbResidueRemovalFailedError` to `Before Hooks › BeforeEach Hooks › install the plugin under test`; `run.end` counts match; the summaries name `BackWPup Pro 9.99.99 · develop @ 1dceea8966` and `https://bwu3… · WordPress 7.1.3 · PHP 8.5.11 64bit` (`pro@nginx`: ✔ PASSED, 3.3 min), and BackWPup 9.99.99 on `bwu2` (`free@nginx`: ✘ FAILED, 6.5 min). That failure is not 0E's: a copy of the last commit without 0E (`git archive HEAD`) fails the same scenario the same way — BackWPup Free (develop @ 1dceea8966) leaves ~25 options after its deletion on `bwu2`, where it passed on 2026-10-06 and -07. Reported, not investigated here | ✅ live 2026-10-12 | `live-0e-*` reports; the A/B run |
+| V231 | Gates: typecheck, lint, format clean; unit 1803 passed, 8 skipped (the run spec included) | ✅ 2026-10-12 | The four gates |
+| V232 | Lab on Playwright 1.63: a screenshot with no baseline fails and is never retried (1 attempt of 2 allowed); after a failed `beforeAll`, the next test is reported `skipped`, `expectedStatus` `passed`, `parallelIndex` −1, then retried; a runtime skip ends with `expectedStatus` `skipped`; a soft assertion's error is on its step. Before the fix: no `scenario.end` for the first, two for the second | ✅ lab | Dump reporter beside the stream; `results-stream.run.spec.ts` |
+| V233 | The dispatcher retries a test in `_failedTests` (a failure, or a skip it imposed) not marked non-retriable, while `results.length < retries + 1`; `retryStrategy` defaults to `immediate` | ✅ source | `runner/index.js:5755–5775`, `:5861–5965`; `common/index.js:496` |
+| V234 | A locator error's message quotes the element's markup, attribute values included (`value="s3cr3tAttr"`, 2 lines per attempt); after the fix the stream holds it only in an assertion's `Received:` | ✅ lab | The same lab, re-run |
+| V235 | Site-reported text with an OSC 8 link, CR/LF, a tab, DEL and C1 printed raw by the summary; now one plain line | ✅ unit | `run-summary.spec.ts` |
+| V236 | Each fix undone fails a test: the imposed-skip retry, the retries bound, settling (stream and summary), the call-log strip, the line resync, `plain()` (twice), the interrupted setup, the regular-file check (hung 10 min), the surrogate cut, the `..` folder, the `pinned` check, the quoted path (15 mutations) | ✅ mutation | Fifteen mutations, each restored |
+| V237 | Through the real runner, offline, 6 cases: each run's stream ends every test once, before `run.end`, whose counts are the ends written; the no-baseline scenario ends `failed`, 1 attempt, `retryNotRun`, its error on the last step begun; nothing written into the repository | ✅ run spec | `results-stream.run.spec.ts`, ~19 s |
+| V238 | Live after the fixes, both cells at once: `free@nginx` — 3 attempts, 2 `scenario.retry`, one `scenario.end failed` (BackWPup Free's leftover options, V230); `pro@nginx` — passed; both streams consistent, no call log, no ANSI; the summaries as before. Gates: typecheck, lint, format clean; unit 1827 passed, 8 skipped | ✅ live 2026-10-12 | `audit-0e-*` reports; the four gates |

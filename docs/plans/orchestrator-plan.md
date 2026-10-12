@@ -403,7 +403,8 @@ plan §5.
 **0E — Machine-readable results.** A stream of each scenario's result — feature, name, tags, status,
 retries, duration, first failing step's message — and the final totals, for live progress and
 `run.finished` (§2 Output and logs, Events), from a small reporter in the suite, always on (decided:
-the Phase 0 plan's P4), writing JSON lines.
+the Phase 0 plan's P4), writing JSON lines — `<report dir>/results.jsonl`, schema v1 — plus an
+end-of-run summary on the terminal. **Done 2026-10-12** — Phase 0 plan §7.1.
 
 **0F — Report pruning.** The pruning module the orchestrator's retention uses (§3), plus
 `npm run report:prune` for dev machines: age-based, each cell's newest report kept up to the cap.

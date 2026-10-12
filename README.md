@@ -147,6 +147,12 @@ Every run writes a layered set of reports into `reports/<product>/<cell>/<RUN_ID
   embeds the interactive trace viewer (serve it over http, not `file://`).
 - **`allure-results/`** — raw results for **Allure**, the analytics layer (history/trends, flaky
   detection, dashboard).
+- **`results.jsonl`** — every attempt and the run's totals, one JSON line each, written as the run
+  goes: what a script or the orchestrator watches. Schema in
+  [`results-schema.ts`](src/common/reporting/results-schema.ts).
+
+A run ends with a summary below everything else: the verdict (`✘ COULD NOT TEST` when a setup
+failed), the counts, the plugin and sites it tested, and how to open each report.
 
 Generate the Allure report from the most recent run:
 

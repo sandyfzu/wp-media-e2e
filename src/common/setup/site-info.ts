@@ -40,9 +40,6 @@ export type SiteInfoEntry =
       readonly error: string;
     };
 
-/** The attachment's name, which the reports and the run's facts look for. */
-export const SITE_INFO_ATTACHMENT = "site-info.json";
-
 /** A section header: `### wp-core ###`, or `### wp-plugins-active (7) ###` with a count. */
 const SECTION_HEADER = /^### (\S+)(?: \(\d+\))? ###$/;
 

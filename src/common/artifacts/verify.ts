@@ -45,6 +45,11 @@ export interface ArtifactReport {
   readonly roles: readonly RoleReport[];
   /** True iff every role resolved and passed every identity check. */
   readonly ok: boolean;
+  /**
+   * The `Plugin Name:` the cell's edition expects (`BackWPup Pro`) — the name a passing role's zip
+   * was proven to carry, which the reports print beside its version.
+   */
+  readonly pluginName: string;
   /** The successfully-resolved artifacts, for persistence (`resolution.json`) and the registry. */
   readonly resolved: readonly ResolvedArtifact[];
   /** The same artifacts keyed by role, for the in-process registry. */
@@ -104,7 +109,13 @@ export function verifyResolved(
   }
 
   const ok = roles.every(roleOk);
-  return { roles, ok, resolved, artifacts: toCellArtifacts(resolved) };
+  return {
+    roles,
+    ok,
+    pluginName: expected.pluginName,
+    resolved,
+    artifacts: toCellArtifacts(resolved),
+  };
 }
 
 // ── Single-artifact identity checks ───────────────────────────────────────────
@@ -458,6 +469,7 @@ export function reportSummary(
     product,
     cell,
     ok: report.ok,
+    pluginName: report.pluginName,
     roles: report.roles.map((role) => ({
       role: role.role,
       ok: roleOk(role),

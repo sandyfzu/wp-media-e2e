@@ -6,11 +6,8 @@ import type { Browser, TestInfo, test as base } from "@playwright/test";
 import type { SiteConfig } from "../config/types";
 import { withinBudget } from "../deadline";
 import { errorMessage } from "../guards";
-import {
-  SITE_INFO_ATTACHMENT,
-  describeSiteInfo,
-  readSiteInfo,
-} from "../setup/site-info";
+import { SITE_INFO_ATTACHMENT } from "../setup/attachments";
+import { describeSiteInfo, readSiteInfo } from "../setup/site-info";
 import type { SiteInfoEntry } from "../setup/site-info";
 import { loginViaUi } from "./login";
 import { endSavedSessions } from "./session";

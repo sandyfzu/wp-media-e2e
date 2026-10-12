@@ -4,6 +4,7 @@ import { test as setup } from "@playwright/test";
 import type { TestInfo } from "@playwright/test";
 
 import { getPool, readRouting } from "../config/metadata";
+import { ARTIFACTS_ATTACHMENT } from "../setup/attachments";
 import { isPlaceholderSite } from "../config/sites";
 import { REPO_ROOT, dirs, isCellTargeted } from "../config/run-context";
 import { resolveIdentity } from "./manifest";
@@ -98,7 +99,7 @@ async function attachSummary(
   summary: unknown,
 ): Promise<void> {
   try {
-    await testInfo.attach("artifacts-resolution.json", {
+    await testInfo.attach(ARTIFACTS_ATTACHMENT, {
       body: JSON.stringify(summary, null, 2),
       contentType: "application/json",
     });

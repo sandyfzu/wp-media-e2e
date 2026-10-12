@@ -23,11 +23,13 @@ import {
   registerStopRunningWork,
   routingMetadata,
 } from "./metadata";
+import { cellProjectNames } from "./project-names";
 import { reporters } from "./reporting";
 import { assertStopFileFolder, stopFileFromEnv } from "./drain";
 import {
   NO_CELL,
   REPO_ROOT,
+  RUN_ID,
   cellOwningOutput,
   dirs,
   outputDirFor,
@@ -96,19 +98,6 @@ function editionFilter(edition: Edition | undefined): string | undefined {
   if (edition === "pro") return "not @free";
   if (edition === "free") return "not @pro";
   return undefined;
-}
-
-/** A cell's three project names: its auth setup, its artifacts setup, and its scenarios. */
-function cellProjectNames(cell: string): {
-  readonly setup: string;
-  readonly artifacts: string;
-  readonly scenarios: string;
-} {
-  return {
-    setup: `setup:${cell}`,
-    artifacts: `artifacts:${cell}`,
-    scenarios: cell,
-  };
 }
 
 /**
@@ -275,11 +264,17 @@ export function createProductConfig(
       selectedCellConfig && selectedCellConfig.sites.length > 0
         ? selectedCellConfig.sites.length
         : 1,
-    reporter: reporters(resolve(REPO_ROOT, reportDir), {
+    reporter: reporters({
       product: product.name,
       ...(selected !== undefined ? { cell: selected } : {}),
+      ...(selectedCellConfig?.edition !== undefined
+        ? { edition: selectedCellConfig.edition }
+        : {}),
       pinned: pin !== undefined,
+      runId: RUN_ID,
+      reportCell: selected ?? NO_CELL,
       reportDir,
+      reportPath: resolve(REPO_ROOT, reportDir),
     }),
     // Committed-baseline visual checks (`toHaveScreenshot`): comparison tolerance + where the
     // per-product/cell baselines live. WP Rocket's A/B check (visual/ab.ts) diffs live renders and

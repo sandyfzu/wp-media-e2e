@@ -454,6 +454,22 @@ test.describe("report formatting", () => {
     ).toContain(`"sha256":"${sha256}"`);
   });
 
+  test("the attached summary names the plugin the edition expects, for the run's summary", () => {
+    const zip = makeZip("wpr-name.zip", {
+      "wp-rocket/wp-rocket.php": pluginFile("WP Rocket", "3.17.4"),
+    });
+    const report = verifyResolved(
+      [resolved("plugin", zip, { ref: "develop" })],
+      WPR_MANIFEST,
+      undefined,
+    );
+    expect(report.pluginName).toBe("WP Rocket");
+    expect(reportSummary(report, "wp-rocket", "nginx")).toMatchObject({
+      ok: true,
+      pluginName: "WP Rocket",
+    });
+  });
+
   test("the info line names a release's pin, the tag its selector chose", () => {
     const zip = makeZip("wpr-release.zip", {
       "wp-rocket/wp-rocket.php": pluginFile("WP Rocket", "3.17.4"),

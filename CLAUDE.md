@@ -35,7 +35,7 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 src/
 ├── common/                 # product-agnostic, shared by every product
 │   ├── config/             # env, sites loading, run-context, the cell pin, the drain, metadata, devices, file-owner rule, the config factory
-│   ├── reporting/          # the suite's own Playwright reporters (cell-notice.ts)
+│   ├── reporting/          # the suite's own reporters: cell-notice.ts, results-stream.ts (results.jsonl), run-summary.ts; their pure parts (results.ts, setup-facts.ts) and the stream's schema + reader
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ending a saved login's session)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── text.ts             # small shared string helpers (escapeRegExp)
@@ -89,6 +89,15 @@ playwright*.config.ts       # entry configs (default, per-product, unit)
   scenario's first attempt as `stopped` while the one in flight finishes (`config/drain.ts`, the
   `drainGate` fixture, which `storageState` depends on so it runs first). Escalate with **one**
   SIGINT to the runner, then SIGKILL to its process group — never SIGTERM, never a second SIGINT.
+- **Watching a run** — every run streams its results to `<report dir>/results.jsonl`, one JSON line
+  per event (`run.begin`, `setup.end`, `scenario.begin`/`retry`/`end`, `run.error`, `run.end`; schema
+  v1, `reporting/results-schema.ts`) as it happens, silently; no `run.end` means the runner died. The
+  terminal ends with a summary (`reporting/run-summary.ts`): the verdict — `COULD NOT TEST` when a
+  setup failed — the counts, the plugin and sites tested, and where the reports are. Both judge a
+  scenario by its result, never by a step's error (a skip carries one); predict a retry by the
+  dispatcher's rule and settle, as the run ends, one that never ran (`retryNotRun`); and never write a
+  step's parameters, a Playwright API step's title or a call log — the stream is still as sensitive as
+  the reports.
 
 Full detail — the `parallelIndex` invariant, the config factory, the credential
 registry, and artifact lifecycle — is in
@@ -763,6 +772,9 @@ Update it when you change anything about:
 - Artifact directories, `RUN_ID` handling, or the `*_ROOT` env vars.
 - Stopping a run: the drain (`config/drain.ts`, `E2E_INTERNAL_STOP_FILE`, the `drainGate` fixture)
   and the signals that escalate it.
+- The run's own reporters: the `[cell]` notice, the results stream (`results.jsonl`, its schema and
+  reader, `reporting/results.ts`) and the end-of-run summary; the project names that tell a setup from
+  a scenario (`config/project-names.ts`).
 
 ### docs/architecture/wordpress-automation.md
 

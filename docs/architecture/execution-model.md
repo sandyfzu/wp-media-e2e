@@ -139,6 +139,54 @@ stops whatever the plugin is still doing before it removes the plugin
 (`ProductConfig.stopRunningWork`), with a budget of its own for it (`LEFT_WORK_ALLOWANCE_MS`), so
 recovering from a kill is complete.
 
+## Watching a run: the results stream and the summary
+
+Two reporters of the suite's own, both always on, both handed the run's facts (`RunDescription`,
+`reporting/run-description.ts`) by the config factory as their options:
+
+- **The results stream** ([`reporting/results-stream.ts`](../../src/common/reporting/results-stream.ts))
+  appends one JSON line per event to `<report dir>/results.jsonl` as it happens — `run.begin`,
+  `setup.end`, `scenario.begin` (per attempt), `scenario.retry`, `scenario.end` (once, final; for a
+  retry that never ran, as the run ends, with `retryNotRun`),
+  `run.error`, `run.end`. Schema v1 in [`results-schema.ts`](../../src/common/reporting/results-schema.ts);
+  every line has `v`, `type` and `at`, and a reader ignores what it does not know
+  ([`results-reader.ts`](../../src/common/reporting/results-reader.ts) reads complete lines only).
+  Silent on the terminal; listed before the reports, so `run.end` lands before their slow `onEnd`.
+  A write that fails warns once on stderr and never fails the run. No `run.end` means the runner died
+  (SIGTERM, SIGKILL); `mode: "list"`, or no tests at all, marks a run that ran nothing.
+- **The end-of-run summary** ([`reporting/run-summary.ts`](../../src/common/reporting/run-summary.ts))
+  is the reporter listed last and prints in `onExit` — below everything else, Playwright's counts
+  included: the verdict (`✔ PASSED`, `✘ FAILED`, `✘ COULD NOT TEST` for a failed setup, `■ INTERRUPTED`,
+  `NO TESTS`), the scenarios' counts and the duration, each failed setup's first line, the plugin
+  and the sites tested (read back from the setups' attachments, `setup-facts.ts`) and the three
+  reports, as paths from the working directory (quoted when a shell would split them). What a site or
+  setup reported is printed as plain text — no escape sequence or control character — and an
+  interrupted setup is not called failed. Silent for `--list`; a SIGTERM ends a run before any `onExit`.
+
+Both read the run through the same pure module, [`reporting/results.ts`](../../src/common/reporting/results.ts),
+so they never disagree:
+
+- **Final attempt:** the rule Playwright's dispatcher applies (`willRetry`), not the one its own
+  reporters guess with: with retries left, an attempt that failed runs again, and so does one
+  Playwright skipped without running it (a failed `beforeAll`, a crashed worker — then retried); one
+  the test skipped itself, or an interrupted one, never does. A due retry that never runs — the run
+  stopped first, or the error is one Playwright does not retry (a screenshot with no baseline) — is
+  settled as the run ends (`RunTally.settle`): its `scenario.end` comes then, with `retryNotRun`.
+- **Status:** `interrupted` if the last attempt was; else `passed`, `failed` (timeouts included),
+  `flaky` or `skipped` from Playwright's outcome. A drained scenario is `skipped` with `drained: true`.
+- **First error** — only for a test that failed or was interrupted (a skip puts its reason on a step
+  as an error): the first failing Gherkin step, a Background's included; else the innermost failing
+  hook or fixture (`After Hooks › AfterEach Hooks › <hook>`, where a `DebugLogFatalError` lands); else,
+  when no step carries one — a timeout inside a step, a crashed worker, a missing screenshot baseline —
+  the last step begun. ANSI and Playwright's call log stripped (its element markup quotes attribute
+  values), at most 2,000 characters. Still as sensitive as the reports: an assertion's message quotes
+  what it compared.
+- **Never written:** step parameters, Playwright API steps' titles, attachments, output — Playwright
+  titles a `fill()` with its value.
+- **Counts:** scenarios and setups apart (a setup's project is `setup:<cell>` or `artifacts:<cell>`,
+  `config/project-names.ts`); what never got a final result is `didNotRun` — every scenario of a cell
+  whose setup failed, or those a stopped run never reached.
+
 ## The product list
 
 [`src/projects/products.ts`](../../src/projects/products.ts) is the one list of products. It is
@@ -235,7 +283,7 @@ resolves all paths via `dirs(product, cell)`. Two lifecycles:
 
 | Kind                       | Path shape                                          | Lifecycle                                                     |
 | -------------------------- | --------------------------------------------------- | ------------------------------------------------------------ |
-| **report** (accumulates)   | `<REPORT_ROOT>/<product>/<cell>/<RUN_ID>/`          | One per run; pruned later by a `report:prune` utility.       |
+| **report** (accumulates)   | `<REPORT_ROOT>/<product>/<cell>/<RUN_ID>/`          | One per run — the three reports and `results.jsonl`; pruned later by a `report:prune` utility. |
 | **output**                 | `<OUTPUT_ROOT>/<product>/<cell>/`, or `…/<product>/_all/<cell>/` | Ephemeral: Playwright empties it as a run that selects one of its projects starts (see below). |
 | **auth / bdd**             | `<*_ROOT>/<product>/<cell>/`                         | Ephemeral, stable per `(product, cell)`; overwritten in place. |
 | **artifacts** (ephemeral)  | `<ARTIFACTS_ROOT>/<product>/<cell>/`                | **Wiped whole** and re-resolved each run; holds the role zips under test + `resolution.json`. |
