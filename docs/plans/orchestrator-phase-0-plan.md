@@ -3,7 +3,7 @@
 > **Status:** in implementation, in §9's order. **Done:** 0B.3 (2026-10-05, §4.3), 0A.2
 > (2026-10-06, §3.2), 0A.1 (2026-10-06, §3.1), 0B.1 (2026-10-08, §4.1), 0D.2 with 0B.2 (2026-10-08,
 > §6.2, §4.2; audited the same day), 0C's suite parts (2026-10-08, §5;
-> audited the same day). The rest is
+> audited the same day), 0D.3 and 0D.4 (2026-10-09, §6.3, §6.4; audited the same day, §6.5). The rest is
 > investigated: every item has a verified finding and a recommended solution, with the
 > alternatives it beat.
 > **Date:** 2026-09-25.
@@ -34,8 +34,8 @@ The recommended solution per item. "—" means no suite change: the orchestrator
 | 0C stopping a run | Spawn the Playwright CLI directly, in its own process group. Stop = **drain** (a stop file skips each scenario's first attempt), then **one** SIGINT, then SIGKILL of the group; never SIGTERM. The `@plugin` Before path stops running work first | `fixtures.ts`, `plugin-lifecycle.ts`, `plugin.hooks.ts` |
 | 0D.1 reports say it up front | A *run facts* reporter, listed first: the HTML report's title, Allure's `environment.properties`, a banner on the Cucumber report, `run-facts.json` | new `src/common/reporting/`; `reporting.ts`, `scripts/allure.mjs` |
 | 0D.2 commit and digest — **done** | Record the full commit, and a SHA-256 of **every** resolved zip | new `digest.ts`; `resolve.ts`, `types.ts`, `consume.ts`, `verify.ts` |
-| 0D.3 the site's versions | Read Site Health's "Copy site info" in the auth setup; keep only whitelisted keys | new page object + parser; `auth.setup.ts` |
-| 0D.4 no credential in a report | Type a secret with `evaluate`, never `fill()`, and check it in the page; the auth setup traces without DOM snapshots; scenario traces' session cookies settled by a measured choice | new secret-input helper; `login.ts`, `storage.sidebar.ts`, `project.ts` |
+| 0D.3 the site's versions — **done** | Read Site Health's "Copy site info" in the auth setup; keep only whitelisted keys | new page object + parser; `auth.setup.ts` |
+| 0D.4 no credential in a report — **done** | Type a secret with `evaluate`, never `fill()`, and check it in the page; the auth setup traces without DOM snapshots and without the failure snapshot; each run's setup ends the session the previous run saved | new `secret-field.ts`, `session.ts`, `authenticate.ts`; `login.ts`, `auth.setup.ts`, `storage.sidebar.ts`, `project.ts` |
 | 0E results stream | A JSON-lines reporter (schema v1), always on, writing `<report dir>/results.jsonl` — nothing on the terminal; plus an end-of-run summary for people | new `src/common/reporting/results-stream.ts`, `run-summary.ts`; `reporting.ts` |
 | 0F pruning | At most 20 reports per cell (FIFO, at each run's end), none older than 30 days, the newest complete one kept up to 6 months; `npm run report:prune` for every cell | new `run-id.ts`, `retention.ts`, `prune-reports.ts` |
 
@@ -1098,6 +1098,19 @@ digest).
 missing keys); the page object's locator-contract spec; live on both cells, values equal to the ones
 above.
 
+**Implemented** (2026-10-09, V197–V199). As recommended, plus:
+
+- `SiteHealthPage` (`goto`, `siteInfoText`) aborts the directory-sizes call under both permalink forms
+  (`/wp-json/…` and `?rest_route=`), and checks the text in code — a failed attribute matcher would
+  print all 6.5 KB into the report.
+- `setup/site-info.ts`: `parseSiteInfo` (sections; a field only from its own section, never a list's
+  tab-indented line; `undefined` read as absent), `describeSiteInfo` (the `[site]` line — "unknown"
+  for a missing version, never blank) and `readSiteInfo`, which never throws: a failure is an
+  `{ baseURL, error }` entry. The whitelist adds the database `extension` (mysqli).
+- The setup prints one `[site]` line per site and attaches `site-info.json` even when a later site's
+  login fails, so the reports keep what was read — the input 0D.1 folds in.
+- The values moved since V58: WordPress 7.1.3 and PHP 8.5.11 on both cells (V199).
+
 ### 6.4 0D.4 — No credential in a report
 
 Found in the 0C audit (§5.2), outside 0C, and scheduled with 0D.3: both change the auth setup's login.
@@ -1144,6 +1157,45 @@ Found in the 0C audit (§5.2), outside 0C, and scheduled with 0D.3: both change 
 - Correct the docs: CLAUDE.md's "Traces carry site credentials" note, and the modernization plan's
   claim that no credential appears in any report (its acceptance line and risk table).
 
+**Implemented** (2026-10-09, V200–V207). The helper and the setup trace as recommended; the canary
+found two more channels, and the session choice changed:
+
+- **`pages/secret-field.ts`** — `enterSecret` (editable check, the prototype's `value` setter, `input`
+  and `change`) and `holdsSecret` (compared in the page; a boolean comes back). `login.ts` types the
+  password with them; the username keeps `fill()`. `StorageSidebar.fillSecret` for storage keys (no
+  scenario uses one yet). Under `tsx` too: the healthcheck logs in through it.
+- **The setup project** traces with `snapshots: { dom: false }` (`project.ts`, `SETUP_TRACE`).
+- **New channel — the failure snapshot** (V202): on a failed test Playwright 1.63 writes
+  `error-context.md` with the page's accessibility tree, which prints every textbox's value, a password
+  field's included; every report copies it. Taken when a context is still open at the test's end — a
+  setup that **times out** mid-login. Turned off by `PLAYWRIGHT_NO_COPY_PROMPT`, read per worker each
+  time; undocumented, so the canary proves it still works. *(Set at the top of the setup file as first
+  implemented, it reached the scenarios too — fixed in the audit, §6.5: `keepSecretsOutOfFailureSnapshots`
+  turns it off per setup test, back on only after one that passed.)*
+- **New channel — `storageState()`'s result** (V203): a traced call, whatever the snapshot setting,
+  so a failed setup's trace holds the cookies of every session it saved before failing. The setup
+  (`auth/authenticate.ts`, `authenticatePool`) therefore **ends those sessions before it reports the
+  failure** — nothing can use them, the scenarios do not run.
+- **Session cookies — option (c), moved to the next run's start** (V204, V205): a `teardown` project
+  at the run's end would kill the saved login the documented `--no-deps` loop reuses, and does not run
+  on SIGINT (measured). So the auth setup ends the session **the cell's previous run saved** before it
+  logs in (`auth/session.ts`: the token from the saved `wordpress_logged_in_…` cookie,
+  `WP_Session_Tokens::destroy`, WordPress loaded `--skip-plugins`, re-read to prove it gone; no other
+  session of the user touched). At most one session per site is live — the newest report's — and a
+  killed run's is ended by the next run. Best-effort: a failure warns; the session still expires in
+  two days (the login is not remembered).
+- **The canary** — `auth/secrets.run.spec.ts` runs the real runner and reporters on a synthetic
+  product whose setup project calls the setup's own `authenticatePool` against a local mock
+  WordPress, with a `fill()` control found in every channel searched; each of the four fixes, undone,
+  fails it (V206).
+- Docs corrected: CLAUDE.md's note, `authoring-tests.md` ("Typing a secret"), `execution-model.md`, the
+  modernization plan's acceptance line and risk row, the orchestrator plan's dashboard note.
+
+**Still in a report** (accepted, documented): a scenario's retained trace — its DOM snapshots and
+network — holds the session cookies until the cell's next run, and anything a scenario rendered or
+typed (BackWPup's restore wizard renders the database password). The healthcheck's logins hold no
+report and are not ended; they expire.
+
 **Rejected.** A boxed `test.step` around `fill()` (hides nothing, V194); `pressSequentially` or
 `keyboard.insertText` (titled with the value too); redacting reports after the fact (Allure writes per
 attempt, the HTML report embeds zips, and a missed format leaks); traces off everywhere (no
@@ -1155,6 +1207,54 @@ fired, the in-page check true and false. A canary run through the real runner, l
 (its embedded data and `data/` zips) or a forced failure's trace. Live on both cells: the login still
 settles, and a scan of a real run's report folder and of a failed setup's trace finds no password;
 for (c), a session destroyed at the run's end no longer opens wp-admin.
+
+### 6.5 Audit of 0D.3 and 0D.4 (2026-10-09, V209–V224)
+
+Every claim re-measured — labs on Playwright 1.63, the cells' WordPress 7.1.3 source and WP-CLI, local
+PHP 8.1 — each fix proven by a test that fails with it undone (V222), then live again on both cells.
+
+- **The failure-snapshot switch reached the scenarios** (V209, V210). A setup worker hands every
+  variable it changed to its dependent projects' workers when it stops (Playwright's produced
+  environment, `common/index.js:1913–1934`), so the switch set at the top of the setup file — and the
+  runner imports that file too — turned off every **scenario's** failure snapshot. Removing it in
+  `afterAll` is too early: a failed test's `afterEach`/`afterAll` run before its snapshot is taken
+  (the password printed again). **Fixed:** `keepSecretsOutOfFailureSnapshots(setup)` turns it off in
+  `beforeEach` and back on in `afterEach` only when the test ended as expected; a failed setup keeps it,
+  and its scenarios never run. Measured for a pass, a throw and a timeout; the canary now runs a real
+  timeout and a dependent scenario.
+- **A hung best-effort step could fail the setup** (V211). Ending a session has no time limit (no
+  WP-CLI call has one), and reading the versions gave the page load and the button wait 30 s each,
+  inside a per-site budget of 60 s the login already uses. **Fixed:** `withinBudget` (new
+  `src/common/deadline.ts`) bounds ending sessions (20 s); `readSiteInfo` shares one 20 s deadline;
+  the setup's timeout adds `BEST_EFFORT_ALLOWANCE_PER_SITE_MS` (60 s) per site.
+- **Site Health answering an error waited out the whole budget** (V212): 20.1 s for a 404. WordPress
+  answers a user who may not view it with 403 (`site-health.php:48`). **Fixed:** `SiteHealthPage.goto`
+  fails at once on an HTTP error, naming the status (125 ms).
+- **A saved login was trusted for any site** (V213). If the pool's order changes, `site-N.json` holds
+  another host's session, and its token was sent to this site's WP-CLI. **Fixed:** only cookies whose
+  domain covers the site's host count (a parent `COOKIE_DOMAIN` included).
+- **A renamed auth cookie was silently skipped** (V214): the name `wordpress_logged_in_` is a default
+  (`LOGGED_IN_COOKIE`). **Fixed:** the cookie is recognised by its value's shape — `login|digits|token|
+  HMAC`, the token alphanumeric, the HMAC 64 (or 40) hex, as on the cells.
+- **A space in a login** (V215): PHP's `setcookie` encodes with `rawurlencode` (8.1: `%20`), which was
+  read correctly; a bare `+` is now read as a space too — neither encoder leaves a literal `+` bare.
+- **`--skip-plugins` still loads must-use plugins** (V216) — `session.ts` said otherwise; corrected.
+  Neither cell swaps the session store (`session_token_manager`), with plugins loaded or not.
+- **`enterSecret` accepted a hidden field** (V217), where `fill()` waits for a visible one; it now
+  requires visible and editable. Its comment on the prototype setter was muddled; corrected and proven
+  with a React-style value tracker (a plain assignment is no change to it; `enterSecret` is).
+- **Untested pieces** — `authenticatePool` (now 7 specs against a mock WordPress), the scanner the
+  canary rests on (6 specs: base64 at each alignment, nested zips, the embedded report zip, symlinks),
+  `withinBudget` (4). The mock is shared with the canary (`__fixtures__/mock-wordpress.ts`).
+- **Confirmed, no change:** `evaluate`'s argument is never in a trace (V218); without DOM snapshots
+  the trace's network log is empty (V219); `WP_Session_Tokens::get` is `null` for an expired or unknown
+  token and `destroy` removes that one (V220); the failed setup's screenshot of Site Health shows
+  collapsed sections only — the database user, host and name sit in its hidden DOM, which the setup's
+  trace does not record (V221).
+- **Out of scope, reported:** a failed **scenario's** `error-context.md` prints every field's value in
+  its page snapshot, as its trace's DOM snapshots do — the restore wizard's database password included.
+  It predates 0D.4; turning snapshots off for scenarios would cost every failure its page context, a
+  choice for the user.
 
 ## 7. 0E — Machine-readable results
 
@@ -1344,7 +1444,7 @@ on `bwu2`/`bwu3`, one cell at a time.
 6. 0C's suite parts: the Before path stopping running work (worth having now), then the drain.
    **Done 2026-10-08.**
 7. 0D.3 and 0D.4 — the site's versions, and no credential in a report: both change the auth setup's
-   login.
+   login. **Done 2026-10-09.**
 8. 0D.1 and 0E, run facts and the results stream (the reporting code).
 9. 0F, pruning.
 
@@ -1519,3 +1619,31 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V194 | Playwright 1.63 titles `Fill`/`Type`/`Insert` with the value (`renderParams`) and passes it in the step's params; `box: true` hides nothing; no masking API — the docs say to treat traces and reports as sensitive | ✅ source + lab + docs | `playwright-core` `coreBundle.js` metainfo; Context7 `/microsoft/playwright/v1.63.0` |
 | V195 | Entering by `evaluate` leaves no reporter title or param and no Allure entry; the trace keeps the value in the next action's DOM snapshot and in `inputValue()`'s result; `evaluate` + an in-page check + `snapshots: { dom: false }` leaves reporter steps, Allure and trace clean | ✅ lab | Scratch specs with a canary value, scanned per channel |
 | V196 | Phase 0.5 ships no report off the server: Datator gets counts, names, statuses and first errors; Slack an `scp` path | ✅ source | Phase 0.5 plan §2 |
+| V197 | Site Health's copy text on `bwu2`: one button, 6,524 bytes, 13 sections, the format of `WP_Debug_Data::format()` (backtick lines, `### section (N) ###`, tab-indented list lines) | ✅ live 2026-10-09 | A scratch login and read, printing structure and whitelisted lines only |
+| V198 | The parser, terminal line and best-effort read: 18 specs (sections, list lines, CRLF, `undefined`, no text; the page object's role/name, both permalink forms aborted, two buttons, an empty attribute) | ✅ unit | `site-info.spec.ts`, `site-health.page.spec.ts` |
+| V199 | Live, both cells: `[site] … WordPress 7.1.3 · PHP 8.5.11 64bit (fpm-fcgi) · nginx/1.24.0 · database 8.0.46-0ubuntu0.24.04.4 (mysqli)`, and the same six values in `site-info.json` in Allure's results | ✅ live 2026-10-09 | `free@nginx` and `pro@nginx` runs of 03:01Z |
+| V200 | `enterSecret`/`holdsSecret`: value set, `input` then `change` bubbling, a value replaced, a read-only field and a `<div>` refused naming the element, never the value; the login suite unchanged (6/6, the focus race included); `fillSecret` on the captured S3 secret field | ✅ unit | `secret-field.spec.ts`, `login.spec.ts`, `locator-contract.spec.ts` |
+| V201 | The setup project's trace is `{ mode: "retain-on-failure", snapshots: { dom: false } }`; the artifacts and scenario projects keep the run's | ✅ unit | `project.spec.ts` |
+| V202 | Playwright 1.63 writes the page's accessibility tree into `error-context.md` on a failure, with every textbox's value — a password field's included — when a context is open at the test's end; `PLAYWRIGHT_NO_COPY_PROMPT` (read in `_takePageSnapshot`) turns it off | ✅ source + canary | `playwright/lib/index.js:657–674`; the canary before the fix: the password in `error-context.md` and its report copies |
+| V203 | `storageState()`'s result is a traced call: the cookie value is in `1-trace.trace` with DOM snapshots off; with them on it is in the network entries too | ✅ canary | The canary's trace entries; the "DOM snapshots on" mutation |
+| V204 | A `teardown` project runs after its setup's dependents, also when one fails or a sibling setup fails, and with `--project=setup:<cell>` alone; not with `--no-deps`, and **not after a SIGINT** | ✅ lab | A scratch config, six selections and one SIGINT |
+| V205 | Live, both cells: today's saved logins were live (wp-admin 200) before the run and dead after its setup (302 to `wp-login.php`); the new ones live. Each run's report folder and `test-results/` hold the password 0 times and each token 0 times; the healthcheck logs in 2/2 through `enterSecret` under `tsx`. A report of 2026-10-07 still holds the password in V192's two places (the scan works on real reports) | ✅ live 2026-10-09 | A scratch probe counting matches, never printing values |
+| V206 | The canary passes; each fix undone fails it: the password by `fill()`, DOM snapshots on, the failure snapshot on, a failed setup keeping its sessions | ✅ mutation | `secrets.run.spec.ts`, four mutations |
+| V207 | Live failed setup (a temporary overlay cell: `bwu2`, then `bwu2` with a wrong password): the first session saved, the second login rejected, "ended this run's session, as the setup failed"; that session dead; its report and trace hold the password 0 times, the token only in the trace's call log, and `error-context.md` no page snapshot. Overlay, auth file, report and output removed after | ✅ live 2026-10-09 | `probe@nginx` run of 03:05Z |
+| V208 | Gates on the final code: typecheck, lint and format clean; unit 1676 passed, 8 skipped | ✅ 2026-10-09 | The four gates |
+| V209 | A setup worker's changed variables reach its dependent projects' workers (`__env_produced__` diffs the environment at `__stop__`, before worker fixtures tear down); set at a setup file's top or in its test, `PLAYWRIGHT_NO_COPY_PROMPT` reached the scenario worker, whose failure snapshot was then missing | ✅ source + lab | `common/index.js:1913–1934`, `runner/index.js:6556–6576`; a two-project lab |
+| V210 | Turned off in `beforeEach`, back on in `afterEach` only for a test that ended as expected: a passing setup leaves the scenario its snapshot (variable unset); a throwing and a timed-out setup write no page snapshot. Restored in `afterAll` instead, the failed setup's snapshot printed the value | ✅ lab + canary | Three-mode lab; `secrets.run.spec.ts` |
+| V211 | No WP-CLI call has a time limit; the setup's per-site budget (60 s) could be spent by the versions read (2 × 30 s) — now 20 s shared, session ends 20 s each, and 60 s more per site in the setup's timeout | ✅ source + unit | `exec.ts`; `authenticate.spec.ts` (a hung `wp` cut off at 0.2 s), `site-info.spec.ts` (shared deadline) |
+| V212 | WordPress answers 403 to a user who may not view Site Health; a 404 or 403 now fails the read in 125 ms instead of 20.1 s | ✅ source + unit | `wp-admin/site-health.php:48` on `bwu2`; `site-health.page.spec.ts`, `authenticate.spec.ts` |
+| V213 | A saved login for another host is ignored; a parent-domain cookie counts | ✅ unit | `session.spec.ts`, `authenticate.spec.ts` |
+| V214 | The cells' auth cookies: host-only, value `login|expiration|token|hmac`, token 43 alphanumerics, HMAC 64 hex — the shape now matched, whatever the cookie's name | ✅ live | `bwu2`'s saved login (lengths and classes only) |
+| V215 | PHP 8.1's `setcookie` sends a space as `%20`, a `+` as `%2B`, `|` as `%7C` | ✅ measured | PHP's built-in server and `curl -D -` |
+| V216 | `wp --skip-plugins` still includes the mu-plugins (`get_included_files()` on `bwu2`); `session_token_manager` is `WP_User_Meta_Session_Tokens` on both cells, plugins loaded or skipped | ✅ live | WP-CLI on `bwu2`, `bwu3` |
+| V217 | `enterSecret` refuses a hidden field; a React-style tracker sees its change and ignores a plain assignment | ✅ unit | `secret-field.spec.ts` |
+| V218 | `evaluate`'s argument is in no trace entry; with DOM snapshots on, the value appears once, from the snapshot | ✅ lab | A two-project lab scanning trace entries |
+| V219 | With `snapshots: { dom: false }` every `.network` entry is empty and no resource is kept — in a lab and in the live failed setup's trace | ✅ lab + live | Trace entry sizes |
+| V220 | `WP_Session_Tokens::get` returns `null` for an unknown or expired session (`is_still_valid`), `destroy` unsets that verifier alone | ✅ source | `class-wp-session-tokens.php:82–85, 172–175, 202–204`, `class-wp-user-meta-session-tokens.php:61–64, 74–80` on `bwu2` |
+| V221 | Site Health's Info tab at the setup's viewport shows collapsed sections; the "Database username" row is in the DOM, not visible | ✅ live | A screenshot of `bwu2`, viewed |
+| V222 | Each audit fix undone fails a test: the switch restored after any outcome (2 failed), set for the whole process (1), the value set through the element's setter (1), any cookie domain (3), no budget on ending a session (1), the button wait's own budget (1), HTTP errors unchecked (2), `+` not a space (1), base64 at one alignment (1), a hidden field accepted (1) | ✅ mutation | Ten mutations |
+| V223 | Live after the fixes, both cells: previous sessions dead, new ones live, the password and tokens 0 times in each report and `test-results/`; the failed-setup probe again: its session dead, password 0 times, the token only in the trace's call log, no page snapshot, empty network entries; overlay and its files removed | ✅ live 2026-10-09 | Runs of 03:40Z and the `probe@nginx` run after them |
+| V224 | Gates after the audit: typecheck, lint and format clean; unit 1705 passed, 8 skipped | ✅ 2026-10-09 | The four gates |

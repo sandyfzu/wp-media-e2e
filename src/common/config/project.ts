@@ -64,6 +64,19 @@ const isCI = process.env.CI !== undefined && process.env.CI !== "";
 const RETRIES = intEnv("E2E_RETRIES", 2, 0, 10);
 
 /**
+ * The auth setup's trace: kept for a failed attempt, like every project's, but without DOM snapshots.
+ *
+ * A snapshot records every form field's value — the login's password included, however it was
+ * entered — and turning snapshots off also stops the trace recording network traffic, which carries
+ * the session cookies WordPress sets. The setup only logs in and reads Site Health, so its trace
+ * loses little: the actions, their timings and the screenshots stay.
+ */
+const SETUP_TRACE = {
+  mode: "retain-on-failure",
+  snapshots: { dom: false },
+} as const;
+
+/**
  * Assigns each pooled site its per-run `storageState` path under the cell's auth dir. The path
  * is absolute: Playwright and `fs` resolve a relative one against the working directory, which
  * would put the logins wherever the run was started.
@@ -214,7 +227,7 @@ export function createProductConfig(
         name: names.setup,
         testDir: "src/common/auth",
         testMatch: /auth\.setup\.ts$/,
-        use: { ...DESKTOP },
+        use: { ...DESKTOP, trace: SETUP_TRACE },
         outputDir,
         metadata: routing,
       },

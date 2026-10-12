@@ -70,6 +70,10 @@ interface Built {
   readonly storageState?: string;
   /** `PLAYWRIGHT_BDD_CONFIGS` as the build left it — what a child of this process inherits. */
   readonly bddEnv: string;
+  /** Project name → the trace option it sets itself (absent: the run's own). */
+  readonly traces: Record<string, unknown>;
+  /** The run's own trace option. */
+  readonly runTrace: unknown;
 }
 
 /** A working directory that is not the repository's. */
@@ -111,6 +115,8 @@ async function build(
       pools,
       storageState: pools.includes("a") ? getPool("demo", "a")[0].storageState : undefined,
       bddEnv: process.env.PLAYWRIGHT_BDD_CONFIGS ?? "",
+      traces: Object.fromEntries(config.projects.map((p) => [p.name, p.use?.trace ?? null])),
+      runTrace: config.use.trace,
     }));
     `,
     { cwd: elsewhere, env: { RUN_ID: "run-1", ...env } },
@@ -204,6 +210,23 @@ test.describe("createProductConfig — paths that never follow the working direc
     expect((await build(["--project=a"])).storageState).toBe(
       resolve(REPO_ROOT, ".auth/demo/a/site-0.json"),
     );
+  });
+});
+
+test.describe("createProductConfig — traces", () => {
+  test("the auth setup traces without DOM snapshots; the other projects keep the run's trace", async () => {
+    // A DOM snapshot records every field's value, the login's password included, and network
+    // recording carries the session cookies: the setup project, which only logs in, keeps neither.
+    const built = await build(["--project=a"]);
+    expect(built.runTrace).toBe("retain-on-failure");
+    expect(built.traces).toEqual({
+      "setup:a": { mode: "retain-on-failure", snapshots: { dom: false } },
+      "artifacts:a": null,
+      a: null,
+      "setup:b": { mode: "retain-on-failure", snapshots: { dom: false } },
+      "artifacts:b": null,
+      b: null,
+    });
   });
 });
 

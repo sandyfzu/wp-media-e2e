@@ -36,15 +36,16 @@ src/
 ├── common/                 # product-agnostic, shared by every product
 │   ├── config/             # env, sites loading, run-context, the cell pin, the drain, metadata, devices, file-owner rule, the config factory
 │   ├── reporting/          # the suite's own Playwright reporters (cell-notice.ts)
-│   ├── auth/               # auth.setup.ts (login → storageState)
+│   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ending a saved login's session)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── text.ts             # small shared string helpers (escapeRegExp)
+│   ├── deadline.ts         # withinBudget: a time limit for a best-effort step
 │   ├── steps/              # generic step definitions
 │   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
-│   ├── pages/              # cross-product Page Object Model (e.g. plugins.page.ts)
+│   ├── pages/              # cross-product Page Object Model (plugins.page.ts, site-health.page.ts) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
-│   ├── __fixtures__/       # spec helpers (child-node.ts: run code in a fresh Node; drain/: the drain spec's scenarios)
+│   ├── __fixtures__/       # spec helpers (child-node.ts: run code in a fresh Node; drain/: the drain spec's scenarios; secret-scan.ts + secrets/: the no-credential canary; mock-wordpress.ts: wp-login and Site Health served locally)
 │   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -317,7 +318,7 @@ Its spec fails when it and `src/projects/`, the root `playwright.<product>.confi
 the `test:<product>` scripts disagree.
 
 **Auth fixture / setup:** [`src/common/auth/auth.setup.ts`](src/common/auth/auth.setup.ts)
-is a dependency project that runs before any BDD scenarios. It does two things in order:
+is a dependency project that runs before any BDD scenarios. It does three things in order:
 
 1. **Pre-flight transport verification** — for each real site, verifies that its
    transport is reachable and functional (SSH connectivity + WP-CLI + rootDir access;
@@ -341,25 +342,45 @@ is a dependency project that runs before any BDD scenarios. It does two things i
    banner ([`setup/elevation-report.ts`](src/common/setup/elevation-report.ts)), printed once per
    run, silent when every site can elevate or has opted out, and naming the ownership cost only for
    the sites that actually needed a handover.
-2. **Authentication** — logs into each real site once through the WordPress UI and
-   saves the session to that site's `storageState`, which the BDD project reuses.
+2. **Authentication** ([`auth/authenticate.ts`](src/common/auth/authenticate.ts)) — per real
+   site, first **ends the session the cell's previous run saved** (`auth/session.ts`: that one
+   token, for that site's host only, through `WP_Session_Tokens`, so no other session of the user is
+   touched), then logs in once through the WordPress UI and saves the session to that site's
+   `storageState`, which the BDD project reuses. A setup that fails ends the sessions it saved before
+   failing. Not at the run's end: the `--no-deps` loop reuses the saved login, and an interrupted run
+   skips its teardown. Best-effort and bounded (`BEST_EFFORT_ALLOWANCE_PER_SITE_MS`, added to the
+   setup's timeout): a session that cannot be ended is a warning, and expires in two days.
+3. **Site versions** — reads Site Health's "Copy site info" text
+   ([`SiteHealthPage`](src/common/pages/site-health.page.ts)) and keeps a whitelist — WordPress, PHP
+   as the web server runs it, its SAPI, the web server, the database and its extension
+   ([`setup/site-info.ts`](src/common/setup/site-info.ts)) — printed as a `[site]` line and attached
+   as `site-info.json`. Best-effort: a failure is a warning and an `error` entry, never a failed setup.
 
 The shared login ([`auth/login.ts`](src/common/auth/login.ts)) confirms each credential
 field actually kept its value before submitting. `fill()` writes into whatever element has
 focus at that instant, and WordPress's login page re-focuses the username field, so a
-re-focus landing mid-fill otherwise diverts the password into the username box and the run
-fails much later as "login never settled".
+re-focus landing mid-fill otherwise diverts text into the wrong field and the run
+fails much later as "login never settled". The password goes in through
+[`enterSecret`](src/common/pages/secret-field.ts) and is checked with `holdsSecret`, both in the page.
 
-> **Traces carry site credentials.** Playwright records every `fill()` argument, so a
-> retained trace (`trace: "retain-on-failure"`) contains the site password — and BackWPup's restore
-> wizard renders the site's **database** password into its connection step's markup, which a trace's
-> DOM snapshots keep. Pro's restore deep link, and any message naming BackWPup's restore working
+> **No site password in a report; traces still need care.** Playwright titles a `fill()`, `type()`
+> or `pressSequentially()` step with its text and has no masking, so **every secret is typed with
+> `enterSecret`** (`StorageSidebar.fillSecret` for a storage key): set in the page, checked in the page,
+> never a step's title, parameter or result. The auth setup traces **without DOM snapshots** (a snapshot
+> records every field's value, and turning them off stops network recording), and turns off, for each
+> of its tests, the failure page snapshot `error-context.md` would print field values into
+> (`keepSecretsOutOfFailureSnapshots`: `PLAYWRIGHT_NO_COPY_PROMPT`, undocumented; back on only after a
+> test that passed, since a setup worker hands its changed variables to the scenarios' workers) —
+> [`secrets.run.spec.ts`](src/common/auth/secrets.run.spec.ts) proves all of this through the real
+> runner and reporters. What remains: a **scenario's** retained trace keeps its DOM snapshots and
+> network, and its `error-context.md` its page snapshot, so they hold the WordPress **session
+> cookies** (trace) — live until the cell's next run ends that session, or WordPress's two-day expiry —
+> and any value a scenario typed or the page showed in a field; BackWPup's restore wizard renders the
+> site's **database** password into its connection step's markup. Pro's restore deep link, and any message naming BackWPup's restore working
 > directory, carry that directory's 20-hex name: on nginx the only thing keeping it, and the database
 > credentials its `restore.dat` holds during a restore, from being served (the teardown removes it
-> after every scenario). Treat
-> `test-results/` and report artifacts as sensitive, exactly like the sites file. Login
-> failures are asserted in code rather than with `toHaveValue` so at least the failure
-> _message_ never quotes the password.
+> after every scenario). Treat `test-results/` and report artifacts as sensitive, exactly like the
+> sites file.
 
 The entire setup is skipped when only placeholder sites exist. Details:
 [authoring-tests.md](docs/guides/authoring-tests.md#fixtures-srccommonfixturests).

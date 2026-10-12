@@ -168,7 +168,13 @@ projects, two sibling setup projects and the BDD project that depends on both:
 
 - **`setup:<cell>`** — a plain Playwright project (not BDD) that runs
   [`auth.setup.ts`](../../src/common/auth/auth.setup.ts) to authenticate the
-  cell's pool.
+  cell's pool: it ends the previous run's saved session, logs in, and attaches the site's
+  versions (`site-info.json`). It traces **without DOM snapshots** (`snapshots: { dom: false }`,
+  which also stops network recording), since a snapshot records the password field's value; its
+  retained trace still holds `storageState()`'s result, so a failed setup ends the sessions it saved.
+  Its tests also turn off Playwright's failure page snapshot (`keepSecretsOutOfFailureSnapshots`),
+  back on only after one that passed: a setup worker hands the variables it changed to its dependent
+  projects' workers, so left on it would strip the scenarios of theirs.
 - **`artifacts:<cell>`** — a sibling setup project (no browser) that runs
   [`artifacts.setup.ts`](../../src/common/artifacts/artifacts.setup.ts): it
   resolves the cell's plugin zips under test (build a git ref via APVM, or copy a
@@ -274,7 +280,7 @@ E2E_CELL=apache npm run test:wp-rocket
               ├─ E2E_CELL → holds apache alone (unknown pin / stray --project → fail)
               ├─ selectedCells() → ["apache"]  (fail fast if >1)
               ├─ global workers  = apache pool size
-              ├─ project setup:apache     → preflight + auth.setup.ts (login → storageState)
+              ├─ project setup:apache     → preflight + auth.setup.ts (end last session, login → storageState, site versions)
               ├─ project artifacts:apache → resolve + verify plugin zips (→ .artifacts/…/resolution.json)
               └─ project apache → depends on BOTH setups → bddgen specs → run, each worker bound to one site
 ```

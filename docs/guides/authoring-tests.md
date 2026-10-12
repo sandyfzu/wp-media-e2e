@@ -22,7 +22,7 @@ src/
 │   ├── fixtures.ts               # the base test instance + Given/When/Then exports
 │   ├── steps/                    # generic steps (e.g. world.steps.ts)
 │   ├── hooks/                    # shared scenario hooks (*.hooks.ts) + their policy modules
-│   ├── pages/                    # cross-product page objects (e.g. plugins.page.ts)
+│   ├── pages/                    # cross-product page objects (plugins.page.ts, site-health.page.ts) + secret-field.ts
 │   ├── visual/                   # visual helpers (ab.ts, screenshot.ts, …)
 │   ├── config/devices.ts         # desktop & @mobile device profiles
 │   ├── artifacts/                # the plugin zips under test (see ../architecture/plugin-artifacts.md)
@@ -290,6 +290,20 @@ UI interactions belong in page objects, not inline in steps: cross-product ones 
 wp-admin Plugins screen and exposes `goto`, `isInstalled`, `isActive`, `activate`,
 `deactivate`, `delete` (the asserted UI flow), and `ensureAbsent` (idempotent cleanup).
 Methods throw the typed errors from [`wp/errors.ts`](../../src/common/wp/errors.ts) on failure.
+[`SiteHealthPage`](../../src/common/pages/site-health.page.ts) reads Site Health's "Copy site info"
+text, which the auth setup turns into the site's versions.
+
+### Typing a secret
+
+Playwright titles a `fill()`, `type()` or `pressSequentially()` step with the text it enters, so the
+value lands in the HTML report, the Allure results and every retained trace — a boxed step hides
+nothing. Type a password, a key or a token with
+[`enterSecret`](../../src/common/pages/secret-field.ts) and check it with `holdsSecret`: the value is
+set and compared in the page, never a step's title, parameter or result, and the field must be visible
+and editable, as for `fill()`. A page object wraps them for its own fields — `StorageSidebar.fillSecret`
+for a storage provider's key. A **scenario's** trace still records the value in its DOM snapshots, and
+a failed scenario's `error-context.md` in its page snapshot: treat both as credentials. Everything that is not
+a secret keeps `fill()`, whose report entry helps.
 
 ### Registering a product's page objects as fixtures
 

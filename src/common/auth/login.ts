@@ -1,6 +1,8 @@
 import { expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
+import { enterSecret, holdsSecret } from "../pages/secret-field";
+
 /**
  * WordPress UI login, hardened against the flakiness that made the raw
  * "click then read the URL" flow fail intermittently.
@@ -49,22 +51,18 @@ function isAdminEmailInterstitial(url: string): boolean {
 }
 
 /**
- * Types the credentials into the login form and confirms both fields actually kept them.
+ * Enters the credentials into the login form and confirms both fields actually kept them.
+ *
+ * The password goes in through {@link enterSecret} and is checked with {@link holdsSecret}, both in
+ * the page, so it never becomes a step's title, a call's parameter or a call's result — the places
+ * the HTML report, the Allure results and a trace copy it from. The username keeps `fill()`.
  *
  * `fill()` inserts its text into whatever element holds focus **at that moment**, not into the
  * element it resolved. WordPress's own login page re-focuses the username field from an inline
- * script (and login-hardening plugins re-focus later still), so a re-focus landing mid-fill
- * silently diverts the password into the username box: the form then submits with an empty
- * password and the run fails as "login never settled", pointing nowhere near the cause.
- *
- * Retrying the pair until both fields read back correctly absorbs that race, and turns a page that
- * genuinely never settles into an explicit "did not keep its value" failure.
- *
- * The password is compared in code rather than with `toHaveValue`, because a failed matcher prints
- * the value it expected, and a failure message is the one place that is easy to keep clean. It is
- * **not** a claim that the password stays out of artifacts generally: Playwright records every
- * `fill()` argument in the trace, so a retained trace carries the site's credentials and must be
- * treated as sensitive — the same as the sites file they come from.
+ * script (and login-hardening plugins re-focus later still), so a re-focus landing mid-fill can
+ * divert text into the wrong field. Retrying the pair until both fields read back correctly absorbs
+ * that race, and turns a page that genuinely never settles into an explicit "did not keep its value"
+ * failure — one that never quotes the password.
  */
 async function enterCredentials(
   page: Page,
@@ -76,14 +74,14 @@ async function enterCredentials(
 
   await expect(async () => {
     await usernameField.fill(credentials.username);
-    await passwordField.fill(credentials.password);
+    await enterSecret(passwordField, credentials.password);
     expect(
       await usernameField.inputValue(),
       "the username field did not keep its value; the login page moved focus mid-fill",
     ).toBe(credentials.username);
     expect(
-      (await passwordField.inputValue()) === credentials.password,
-      "the password field did not keep its value; the login page moved focus mid-fill",
+      await holdsSecret(passwordField, credentials.password),
+      "the password field did not keep its value; a script on the login page changed it",
     ).toBe(true);
   }).toPass({ timeout });
 }

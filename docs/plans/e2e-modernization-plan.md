@@ -940,7 +940,9 @@ report bucket; per-cell setup/auth projects with placeholder-skip; and the `run-
 the stable, overwrite-in-place `<product>/<cell>` paths (§3.5). *Acceptance:* a developer can run **any**
 cell manually with **no env vars** and the `@noauth` smoke is green on a fresh checkout; running two
 **different** cells at once never conflicts; ephemeral build/state dirs **overwrite in place** while
-reports accumulate per cell; no credential appears in any report — no orchestrator yet.
+reports accumulate per cell; no credential appears in any report — no orchestrator yet. *(Corrected
+2026-10-09: the login's `fill()` put the site password in every real run's reports until the
+orchestrator's Phase 0 item 0D.4 — see the [Phase 0 plan](orchestrator-phase-0-plan.md) §6.4.)*
 
 **Phase 3 — WordPress automation layer.** `exec.ts` (execa/node-ssh, `exitCode` on every mode, plus the
 per-transport **file transfer** `copyIntoTarget` and `wpRootDir` — WP-CLI reads files from the *site's*
@@ -1060,7 +1062,7 @@ recipe. Scope and approach:
 | Plugin cleanup vs. deletion-under-test | Med | Cleanup hooks use the **idempotent** `ensurePluginAbsent` (already-absent ⇒ no-op), so teardown never fails on an already-deleted plugin; deletion-under-test asserts presence first. Arm `page.once("dialog")` before the click; handle WP Rocket's second confirmation page; detect state via `count()`; re-assert removal (`PluginDeletionFailedError`). |
 | Visual-regression baselines differ across OS/CI | High | Generate snapshots in the CI image/container; commit per-platform; tune `maxDiffPixelRatio`; mask dynamic content. |
 | `docker` mode setup (Apache + Nginx) | Med | The default `ssh` mode needs no Docker. `docker` requires a custom compose + Nginx vhost; pin image tags; never publish the php-fpm port. |
-| Credentials leaking into shared reports | Med | Pools reach workers via an in-process registry; project `metadata` carries only `{ product, cell }` (D10, §3.3). Verified: no secret appears in the generated report (plaintext or base64-decoded). |
+| Credentials leaking into shared reports | Med | Pools reach workers via an in-process registry; project `metadata` carries only `{ product, cell }` (D10, §3.3). Verified: no secret appears in the generated report (plaintext or base64-decoded). **Corrected 2026-10-09:** the pool never did, but the login's `fill()` step carried the password into every real run's HTML and Allure reports, and retained traces hold the session cookies — fixed and canary-tested in the orchestrator's 0D.4 ([Phase 0 plan](orchestrator-phase-0-plan.md) §6.4). |
 | Edition tests run against the wrong edition | Low | Each cell declares its `edition`, which selects both the installed package and the per-cell tag filter (`not @free`/`not @pro`); a cell can neither install the wrong package nor generate the other edition's specs (§4.5). |
 
 ---

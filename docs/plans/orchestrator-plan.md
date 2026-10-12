@@ -233,8 +233,8 @@ commander 15, croner 10, pino 10, react 19.3, vite 8.3, tailwindcss 4.3).
 - **The dashboard** — the same features in a polished web UI, plus opening reports and uploading zips.
   Bind: local only (reached over an SSH tunnel), local network (VPN, Tailscale), or remote. Only the
   **SSH tunnel is confirmed** (2026-10-05), so it is the default and the mode built first; VPN and
-  Tailscale are unconfirmed. Off a private network it requires TLS — reports and traces carry site
-  passwords. Over the tunnel (`ssh -L 8080:127.0.0.1:<port> runner`, then `http://localhost:8080`):
+  Tailscale are unconfirmed. Off a private network it requires TLS — a scenario's retained trace carries the
+  site's session cookies (live until the cell's next run) and any secret its DOM held (0D.4). Over the tunnel (`ssh -L 8080:127.0.0.1:<port> runner`, then `http://localhost:8080`):
   - **Bind `127.0.0.1`** on the runner, and name `127.0.0.1` in `-L` — `localhost` there may resolve
     to `::1`.
   - **No login** (decided 2026-10-05): reaching the runner's loopback — an SSH login, or an account
@@ -395,9 +395,10 @@ plan §5.
 - **0D.3 — the site's own versions**, read once per run from Site Health → Info (the "Copy site info"
   text: `php_version`, `php_sapi`, `httpd_software`, WordPress and database versions) in the auth
   setup, which is already logged in. Never WP-CLI's PHP: it differs on both nginx cells (V28).
+  **Done 2026-10-09** — Phase 0 plan §6.3.
 - **0D.4 — no credential in a report** (found in the 0C audit): the login's `fill()` step carries the
   site password into every report, and a retained trace holds it and the WordPress session cookies.
-  Scheduled with 0D.3 — Phase 0 plan §6.4.
+  **Done 2026-10-09** — Phase 0 plan §6.4.
 
 **0E — Machine-readable results.** A stream of each scenario's result — feature, name, tags, status,
 retries, duration, first failing step's message — and the final totals, for live progress and
