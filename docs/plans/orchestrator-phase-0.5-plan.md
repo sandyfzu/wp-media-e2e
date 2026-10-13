@@ -1,6 +1,6 @@
 # Orchestrator Phase 0.5 — The minimal orchestrator
 
-> **Status:** planned; **nothing implemented**. Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> **Status:** in implementation, in §7's order. **Done:** step 0, the scaffold (2026-10-12, §7.1; audited 2026-10-13, §7.2). Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -358,8 +358,11 @@ orchestrator/
   `orchestrator/**/*.spec.ts` (with `node_modules` still excluded); ESLint's TypeScript globs already
   match. New dependencies: `commander` 15, `zod` 4 (both ESM; Node ≥ 22.12 and none, V127). Hono,
   SQLite, pino and React wait for the phases that need them.
-- It imports from the suite only modules without import side effects: the product list (0B.3), the
-  sites loader, 0F's `run-id.ts` and `retention.ts`. Never `run-context.ts`, nor `resolve.ts`,
+- It imports from the suite only modules that leave the process as it was: the product list (0B.3),
+  the sites loader, 0F's `run-id.ts` and `retention.ts` (V340). The product list is not free of
+  effects: importing it reads every product's sites files once, prints a `[sites]` warning for a
+  product with none, and **throws** on one that is not valid JSON (V342) — so M1 imports it inside
+  its error handling, and a broken sites file is a config error, not a crash. Never `run-context.ts`, nor `resolve.ts`,
   `consume.ts` or `project.ts`, which import it (V84, V130). Importing any of those would load
   `.env` into the orchestrator's own process and stamp its `RUN_ID`. The child environment's
   allowlist (Phase 0 §2) keeps that state out of runs, but it should not exist at all.
@@ -371,7 +374,8 @@ orchestrator/
   - **a spec** that imports every orchestrator module except the command's entry (which runs on
     import) in a child Node, and asserts the environment is unchanged. This is the
     `products.spec.ts` probe (V130), moved into a shared test helper. It catches a side effect an
-    allowed module picks up later.
+    allowed module picks up later. As built, the spec also judges every import where it leads and
+    walks all an admitted module can load (§7.1–§7.2).
 - `.gitignore`: `/.orchestrator/`.
 
 ## 6. Running it on the runner
@@ -401,6 +405,7 @@ Each step ships with its unit specs and passes the four gates (CLAUDE.md).
 0. The scaffold, before any module, so none lands unchecked: `orchestrator/` in `tsconfig.json`'s
    `include` (or `tsc` skips it) and in the unit config, the `.gitignore` line, and both import
    guards (§5). Prove each guard fails on a forbidden import, e.g. one of `run-context.ts`.
+   **Done 2026-10-12** (§7.1).
 1. M2 configuration — schema, loader, example.
 2. M4's pure parts — identity, environment, the outcome table; M6's builder and bus.
 3. M7 and M8 formatters (pure), then their senders.
@@ -408,6 +413,75 @@ Each step ships with its unit specs and passes the four gates (CLAUDE.md).
 5. M3 and M1 — the loop and the command; M9 — lock, counter, retention, logs.
 6. Docs: a new `docs/guides/orchestrator.md` (operating it: §6, the config, stopping), `CLAUDE.md`
    (structure, the script, the docs map), `README.md`, `.env.example` untouched (no `E2E_*`).
+
+### 7.1 Step 0 — Implemented (2026-10-12, V332–V335)
+
+As planned, plus (as first built; §7.2 records what the audit changed):
+
+- **One allowlist, two readers.** The admitted suite modules live in `orchestrator/suite-imports.json`
+  (repository paths), read by ESLint's block (`import … with { type: "json" }`, turned into the
+  pattern's alternatives) and by the spec, so both read one list. Admitted now: §5's four —
+  `run-id.ts`, `sites.ts`, `retention.ts`, `products.ts` — each proved to leave `process.env` as it
+  was (V333). Test code (`*.spec.ts`, `__fixtures__/`) is exempt from both: it never runs in the
+  process.
+- **The spec** (`orchestrator/import-boundary.spec.ts`) resolves every import form with TypeScript's
+  scanner — anything leaving `orchestrator/` that is not admitted fails, root files such as
+  `playwright.config.ts` included, which the lint rule (it sees `src/` spellings only) does not catch
+  — then imports the admitted modules in a fresh Node, and every orchestrator module but the root
+  `cli.ts` in another, a change charged to the first import that made it.
+- **Shared helpers**, as §5 asked: the probe moved out of `products.spec.ts` into
+  `src/common/__fixtures__/env-probe.ts` (`envChangesOnImport`, its own spec keeping the check that it
+  sees `run-context.ts` load `.env` and stamp `RUN_ID`), and `src/common/import-boundary.spec.ts`'s
+  scanner into `import-scan.ts` (`localImports`, `isInside`), now also counting absolute specifiers.
+- **The unit config** has one project per folder (`src`, `orchestrator`): a `testDir` at the
+  repository turns off Playwright's `.gitignore` filtering and would run every worktree's specs (V334,
+  V338). A path filter is a regex on the absolute path, so in this worktree `orchestrator/` matches
+  every spec; use `--project=orchestrator`.
+
+### 7.2 Audit (2026-10-13, V336–V346)
+
+Two adversarial reviewers, each in its own copy of the worktree, plus my own checks; every finding
+reproduced before it was believed, every fix proved by a test that fails with it undone (V344), and
+every reviewer bypass rebuilt against the final tests (V343).
+
+- **The scanner was blind (high).** `ts.preProcessFile` is a token scanner: a regex literal holding a
+  backtick, `/*` or a quote hid every import after it — in both boundary specs (V336). Both now read
+  TypeScript's syntax tree (`importsIn`), which also reports a computed `import()` path; the
+  orchestrator's scan refuses one, and so does `src/common/`'s outside test code (none today, V341).
+- **The scan judged spelling, not destination.** It now resolves each import with the repository's
+  own TypeScript options (`createResolver`: `.js` → `.ts`, `#` imports, `paths`, index files) and
+  judges where it leads (V337); a path that leads nowhere outside `orchestrator/` is refused.
+- **Holes:** production code could import its own test code, which neither guard reads — refused now
+  by both; `.mts`/`.cts`/`.tsx`/`.js` files were read by neither — the scan reads every dialect,
+  ESLint the ones it can parse; the allowlist accepted `src/../x.ts`, `./` spellings, specs and
+  fixtures — refused now (`allowlistProblems`).
+- **An admitted module could gain a lazy import** of `run-context.ts`, invisible to an import-time
+  probe. The spec walks everything the admitted modules can load (`localClosure`: 38 files, V341) and
+  refuses one that reaches `load-env.ts` or `run-context.ts`, or a load it cannot follow.
+- **The probe saw only `process.env`, at the import's instant, and trusted stdout.** `probeImports`
+  (was `envChangesOnImport`) also compares process listeners — one `SIGINT` listener turns off Node's
+  exit on Ctrl-C — the working directory and the exit code; gives each import one turn of the event
+  loop and reads once more when the process goes idle; and returns through a file, so a module that
+  prints, or ends the process, cannot forge or garble the verdict (V340). Its tests now show a
+  variable changed and removed, not only added, and the charging rule with a module that would
+  change something on its own (`load-env.ts`).
+- **ESLint** matches only relative, absolute and `file:` paths (a package's own `src/` is fine),
+  accepts an admitted module's `.js`/`.ts` spelling, refuses test code, a computed `import()` and
+  `createRequire`, and reads `.mts`, `.cts`, `.js`, `.mjs`, `.cjs`. A spec runs the real
+  `eslint.config.js` block through ESLint's `Linter` over one table of imports beside the scan's
+  verdict, so where the two differ is written down: ESLint misses a literal `import()` (V345),
+  `typeof import()`, root files and `#` imports; it is stricter on a `../` detour.
+- **Corrected claims:** the unit config's reason (V338); UI mode ticks only the first project until
+  a choice is saved (V338); the `.prettierignore` line was redundant, Prettier already honours
+  `.gitignore` — removed (V339); "free of import side effects" overclaimed — the product list reads
+  and validates sites files at import (V342, §5).
+- **Stated limits** (the boundary catches mistakes, not evasion): a `require` made by `createRequire`
+  under another name, a `Worker`, code read and evaluated, a module's output and globals, an unref'd
+  timer, and anything a package does. A type-only import from the suite needs admitting like any
+  other: admit its types module.
+- **Out of scope, reported:** an absolute `ARTIFACTS_ROOT` is joined under the checkout
+  (`artifacts.setup.ts`, `consume.ts`: `join(REPO_ROOT, …)`), so `results-stream.run.spec.ts`, which
+  passes one, leaves empty `private/var/folders/…` folders in the checkout on every unit run (V346).
 
 ## 8. What later phases change, and keep
 
@@ -469,3 +543,18 @@ Each step ships with its unit specs and passes the four gates (CLAUDE.md).
 | V125 | The suite holds 61 BackWPup scenarios in 12 features (9 of them in the two `@pro` features 6F.4 added); WP Rocket has 3 scaffolding scenarios, all `@noauth`. A full BackWPup run took about 50 minutes per cell at 42 scenarios | ✅ | `src/projects/*/features/*.feature`; phase-6 plan: 42/42 in 51.9 min (`pro@nginx`) and 49.2 min (`free@nginx`) |
 | V126 | The suite never sets `headless`, so Playwright's default (headless) applies; only `*:headed` scripts and the healthcheck's `--headed` show a browser — no X server needed | ✅ source | `grep` of `src/`, `playwright*.config.ts`, `package.json`, `healthcheck.ts` |
 | V127 | `commander` 15.0.0 is ESM with `node >= 22.12.0`; `zod` 4.6.5 is ESM with no engine constraint | ✅ registry | `npm view` |
+| V332 | Each guard fails on a forbidden import, and only then: ESLint flags a static import of `run-context.ts`, `../../src`, `../../src/`, `guards`, a type-only `types` and a missing module, passes `products` (with or without `.ts`), `run-id` and `sites`, exempts a spec — and misses a dynamic `import()`, as expected; the spec's scan flags the static and the dynamic one; its probe reports a module that sets a variable and one importing `run-context.ts` (`E2E_PROBE_SENTINEL`, `RUN_ID`); a root `cli.ts` that sets one is skipped, a `sub/cli.ts` is not | ✅ 2026-10-12 | Throwaway files under `orchestrator/zz/`, `npx eslint orchestrator/`, `--project orchestrator`; removed after. ESLint's spelling rules changed in the audit (V337) |
+| V333 | The four admitted modules (`run-id.ts`, `sites.ts`, `retention.ts`, `products.ts`) leave `process.env` unchanged on import; the probe with its `.env` write removed fails its own two checks | ✅ 2026-10-12 | `orchestrator/import-boundary.spec.ts`; `env-probe.spec.ts` against a mutated `env-probe.ts` |
+| V334 | Playwright 1.63.0's file discovery skips `node_modules/` but walks dot-folders: a `testDir: "."` config listed `.dotprobe/a.spec.ts`, not `node_modules/zzprobe/a.spec.ts` — with an explicit `testDir`, which turns `.gitignore` filtering off (V338) | ✅ 2026-10-12 | A throwaway `playwright.zzprobe.config.ts`, `--list`; removed after |
+| V335 | Playwright's ESM loader refuses a JSON import without `with { type: "json" }` ("needs an import attribute"); TypeScript 6.0.3 and ESLint 10.11.0 (its config) accept the attribute | ✅ 2026-10-12 | The first unit run; `tsc`, `eslint .` |
+| V336 | `ts.preProcessFile` misses every import after a regex literal holding a backtick (`/`/g`), `/*` (`/\/*$/`) or a quote (`/"/`); TypeScript's syntax tree reads them all. Reproduced in an orchestrator module that passed every gate before the fix and leaked `.env` and `RUN_ID` when called | ✅ 2026-10-13 | A script over both readers; reviewer A's `slack-format.ts`; the regex cases in `src/common/import-boundary.spec.ts` |
+| V337 | `tsc` refuses an import ending in `.ts` (TS5097, no `allowImportingTsExtensions`) and accepts `.js`; ESLint compiles a `no-restricted-imports` `regex` case-insensitively (`"iu"`); TypeScript's bundler resolution maps `.js` to `.ts`, resolves `#` imports from `package.json`, and returns no resolution for `node:` builtins (ambient types) | ✅ 2026-10-13 | `tsc` on probe files; ESLint source (reviewer A); `import-scan.spec.ts` |
+| V338 | Playwright 1.63.0 sets `respectGitIgnore` to `!projectConfig.testDir && !config.testDir`; its UI mode, with no saved project choice, ticks the first project only, and saves the choice per config file | ✅ 2026-10-13 | `playwright/lib/common/index.js:610`; `playwright-core/lib/vite/traceViewer/uiMode.CU5KtEkS.js` (`…r.set(r.entries().next().value[0],!0)`) |
+| V339 | Prettier 3.9 honours `.gitignore`: a malformed `.orchestrator/config.json` passes `--check` without the `.prettierignore` line, and fails once `.gitignore` no longer lists it | ✅ 2026-10-13 | Reviewer B, a probe folder and the copy |
+| V340 | Under `node --import tsx`, the first TS import adds no process listener (baseline: `newListener` 2, `removeListener` 2, `warning` 1); the four admitted modules add none, keep the working directory and exit code, and leave nothing running (`beforeExit` fires) | ✅ 2026-10-13 | A child probe importing a trivial module, then each admitted one, one turn apart |
+| V341 | The admitted modules can load 38 repository files and three packages (`@playwright/test`, execa, node-ssh), none of them `load-env.ts` or `run-context.ts`, with no computed `import()`; the only computed `import()` under `src/` is in `run-facts.spec.ts` | ✅ 2026-10-13 | A closure walk with TypeScript's resolver, then `localClosure` in the spec |
+| V342 | Importing `src/projects/products.ts` with a wp-rocket `sites.json` of `{ broken` throws `[sites] "…/sites.json" is not valid JSON`; with no sites file it prints a `[sites]` warning | ✅ 2026-10-13 | Reproduced by both reviewers and again in my copy |
+| V343 | Every reviewer bypass, rebuilt against the final tests, fails the spec: a regex literal hiding a lazy import; `cli.ts` importing `__fixtures__/` code that imports `run-context.ts`; a computed `import()` by product name; an `.mts` re-export; a `SIGINT` listener and `chdir` at import; a module forging `[]` at exit; a change made 50 ms later; a lazy `import("./run-context")` appended to `sites.ts`; a `#suite/*` import through `package.json` `imports` | ✅ 2026-10-13 | A harness in a copy of the worktree, `--project=orchestrator`, baseline green after each restore |
+| V344 | 25 mutations of the fixes — scanner back to `preProcessFile`, `require`/`typeof import()`/parentheses/computed/`file:` unread, `__fixtures__` not test code, builtins unresolved, closure silent, probe blind to listeners/cwd, no turn, baseline after its own listener, allowlist checks dropped, own test code importable, lexical judging, `.ts`-only lister, declaration files probed, five ESLint rule changes — each fails at least one test | ✅ 2026-10-13 | A mutation harness in a copy of the worktree; the baseline mutation was rewritten once, having changed nothing |
+| V345 | ESLint 10.11.0's core `no-restricted-imports` does not check an `import()` expression: a literal `import("../../src/common/config/run-context")` gets no error | ✅ 2026-10-13 | The `Linter` table in `orchestrator/import-boundary.spec.ts` |
+| V346 | `artifacts.setup.ts:73` and `consume.ts:148` build the artifacts folder as `join(REPO_ROOT, dirs().artifacts)`, so an absolute `ARTIFACTS_ROOT` lands under the checkout; `results-stream.run.spec.ts` passes one, and the worktree holds only empty `private/var/folders/…/artifacts/resultsprobe` folders (0 files) | ✅ 2026-10-13 | `find private -type f` (0); source; not fixed (out of scope) |

@@ -6,6 +6,21 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 import eslintConfigPrettier from "eslint-config-prettier/flat";
 
+import suiteImports from "./orchestrator/suite-imports.json" with { type: "json" };
+
+/**
+ * The `src/` modules the orchestrator may import, as the alternatives of a regular expression:
+ * relative to `src/`, without `.ts`, regex characters escaped.
+ */
+const admittedSuiteModules = suiteImports
+  .map((path) =>
+    path
+      .replace(/^src\//, "")
+      .replace(/\.ts$/, "")
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+  )
+  .join("|");
+
 export default defineConfig([
   globalIgnores([
     ".features-gen/",
@@ -75,6 +90,55 @@ export default defineConfig([
                 "src/common/ must not import product code. Declare what the shared code needs on ProductConfig and pass it through the config factory's registries instead.",
             },
           ],
+        },
+      ],
+    },
+  },
+
+  // The orchestrator is a long-lived process that must keep the process-wide state it started with,
+  // and `run-context.ts` — with every module importing it — loads `.env` and stamps `RUN_ID` into the
+  // importing process. So its code imports from `src/` only the modules
+  // `orchestrator/suite-imports.json` lists (an allowlist: each new one is a decision), never test
+  // code, and never a module whose path it computes. Test code never runs in that process and is
+  // exempt. This rule reads only a static import's spelling, and is stricter than the spec where
+  // spelling misleads it (a `../` detour back into an admitted module); it misses `typeof import()`,
+  // a literal `import()` and anything outside `src/`. `orchestrator/import-boundary.spec.ts` resolves
+  // every form and imports the code itself.
+  {
+    files: ["orchestrator/**/*.{ts,mts,cts,js,mjs,cjs}"],
+    ignores: ["orchestrator/**/*.spec.*", "orchestrator/**/__fixtures__/**"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: ["node:module", "module"].map((name) => ({
+            name,
+            importNames: ["createRequire"],
+            message:
+              "A require() made by createRequire loads whatever its argument names, unchecked: import the module instead.",
+          })),
+          patterns: [
+            {
+              // A path (relative, absolute or `file:`) into a `src/` folder, unless it names an
+              // admitted module, with or without its `.js` or `.ts`. Never a package's own `src/`.
+              regex: `^(\\.{1,2}/|/|file:)(.*/)?src(/(?!(${admittedSuiteModules})(\\.[jt]s)?$)|/?$)`,
+              message:
+                "The orchestrator imports from src/ only the modules orchestrator/suite-imports.json lists: run-context.ts, and every module importing it, loads .env and stamps RUN_ID into the importing process. Admit a module there once orchestrator/import-boundary.spec.ts proves it leaves the process as it was.",
+            },
+            {
+              regex: "(^|/)__fixtures__(/|$)|\\.spec(\\.[cm]?[jt]sx?)?$",
+              message:
+                "Test code is exempt from the orchestrator's import boundary, so its own code must never import it.",
+            },
+          ],
+        },
+      ],
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "ImportExpression[source.type!='Literal']",
+          message:
+            "Write the path as a plain string: a computed import() path cannot be checked against orchestrator/suite-imports.json.",
         },
       ],
     },

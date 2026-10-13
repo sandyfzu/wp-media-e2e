@@ -51,6 +51,9 @@ Thumbs.db
 # playwright-bdd generated specs
 /.features-gen/
 
+# The orchestrator's state: its config (secrets), lock, logs and run records
+/.orchestrator/
+
 # Per-product site pools & secrets (committed example only)
 src/projects/*/config/sites.json
 src/projects/*/config/sites.*.json

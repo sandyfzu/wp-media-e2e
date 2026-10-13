@@ -1,0 +1,6 @@
+[
+  "src/common/config/run-id.ts",
+  "src/common/config/sites.ts",
+  "src/common/reporting/retention.ts",
+  "src/projects/products.ts"
+]

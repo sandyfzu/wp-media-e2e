@@ -439,10 +439,13 @@ second before the budget runs out"). That is a race, not a check.
 
 ## Unit / integration tests
 
-Files matching `*.spec.ts` anywhere under `src/` are unit tests run by
-`npm run test:unit` (config: [`playwright.unit.config.ts`](../../playwright.unit.config.ts))
-— the shared `common/` layer **and** each product's own specs, so a product page object's
-locator contract is covered by the same command. They run with **no external
+Files matching `*.spec.ts` anywhere under `src/` or `orchestrator/` are unit tests run by
+`npm run test:unit` (config: [`playwright.unit.config.ts`](../../playwright.unit.config.ts), one
+project per folder: `src`, `orchestrator`). That covers the shared `common/` layer, each product's
+own specs — so a product page object's locator contract runs with the same command — and the
+orchestrator's. Select a folder with `--project=orchestrator` (the `=` matters: `--project` takes
+several values and would swallow a file filter after it); a file filter is a regex on the absolute
+path. UI mode ticks only the first project until a choice is saved. They run with **no external
 environment**: the WP-CLI layer is exercised through a stub `wp` on `PATH`, and page
 objects against `page.setContent()` fixtures. They are kept separate from the BDD product
 configs, whose generated specs live in `.features-gen/` (outside `src/`). Add a
@@ -452,8 +455,19 @@ one that drops tables, say — can be driven against a fake `$wpdb` with the loc
 such a spec skips where PHP is not installed, as in CI.
 
 Some things can only be measured in a process nothing else has touched: what importing a
-module does to the environment, or how a config builds under a given `--project`.
+module does to the process, or how a config builds under a given `--project`.
 [`runInChildNode`](../../src/common/__fixtures__/child-node.ts) runs such code in a fresh Node
 under tsx, with only `PATH` and `HOME` and a 15 s limit, and returns the JSON it prints
-(`project.spec.ts`, `products.spec.ts`). Unit runs write their output to `<OUTPUT_ROOT>/_unit`,
-a folder of their own, so running them never empties a cell run's output.
+(`project.spec.ts`, `products.spec.ts`). [`probeImports`](../../src/common/__fixtures__/import-probe.ts)
+uses the same child: it imports files one after another, from a folder whose `.env` sets a sentinel,
+and reports what each import changed — variables, process listeners, the working directory, the exit
+code — then what changed once the process went idle; it reads that from a file, not stdout, so
+nothing a module prints can forge or garble it. That is
+how a module is proved to leave the process as it was (`products.spec.ts`,
+`orchestrator/import-boundary.spec.ts`). An import boundary is checked with
+[`import-scan.ts`](../../src/common/__fixtures__/import-scan.ts): `importsIn` reads every module a
+file loads from TypeScript's syntax tree — a dynamic `import()` and a `typeof import()` included,
+which ESLint does not see, and a computed path reported as such — `createResolver` resolves it as
+the repository's TypeScript does, and `localClosure` walks everything a module can load. Unit runs
+write their output to `<OUTPUT_ROOT>/_unit`, a folder of their own, so running them never empties a
+cell run's output.

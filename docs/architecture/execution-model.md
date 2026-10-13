@@ -248,9 +248,12 @@ over `PRODUCT`), the healthcheck, the artifact warm, and the orchestrator later
 (`productByName`, `playwrightConfigFor`). A product's own `playwright.<product>.config.ts`
 imports only that product, so its runs never load another product's sites files.
 
-- **Import effects.** Importing the list loads every product's sites files and reads `BWP_*`,
-  but never loads `.env` or stamps `RUN_ID`. A long-lived process can import it and keep its
-  own environment. Importing `run-context.ts`, and so `resolve.ts` or `consume.ts`, does both.
+- **Import effects.** Importing the list loads every product's sites files — printing a `[sites]`
+  warning for a product that has none, and **throwing** on one that is not valid JSON — and reads
+  `BWP_*`, all once. It never loads `.env`, stamps `RUN_ID`, adds a process listener or changes the
+  working directory, so a long-lived process can import it and keep its own state — inside its error
+  handling, so a broken sites file is reported rather than fatal. Importing `run-context.ts`, and so
+  `project.ts`, `resolve.ts` or `consume.ts`, loads `.env` and stamps `RUN_ID`.
 - **Drift guard.** `products.spec.ts` fails when the list disagrees with `src/projects/`'s
   folders, or a product's features or own steps lie outside its folder. It also fails when a
   product lacks a root entry config that builds it (checked in a child Node) or a `test:<product>`
@@ -258,7 +261,14 @@ imports only that product, so its runs never load another product's sites files.
   unlisted product.
 - **Boundary.** Nothing in `src/common/**` may import `src/projects/`, the list included.
   ESLint flags a static import as it is typed. `src/common/import-boundary.spec.ts` also catches
-  a dynamic `import()` or a `typeof import()` type, which ESLint cannot see.
+  a dynamic `import()` or a `typeof import()` type, which ESLint cannot see, read from TypeScript's
+  syntax tree, and refuses a computed `import()` path outside test code.
+- **The orchestrator's boundary.** `orchestrator/**` imports from the suite only the modules
+  `orchestrator/suite-imports.json` admits — the list among them. ESLint refuses the rest by
+  spelling; `orchestrator/import-boundary.spec.ts` judges each import where it really leads,
+  walks everything an admitted module can load (none may reach `load-env.ts` or `run-context.ts`,
+  even lazily), and imports the code in a fresh Node to prove the process left as it was
+  (`probeImports`: environment, process listeners, working directory, exit code).
 
 ## The config factory
 

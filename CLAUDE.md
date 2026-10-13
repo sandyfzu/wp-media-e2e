@@ -45,7 +45,7 @@ src/
 │   ├── pages/              # cross-product Page Object Model (plugins.page.ts, site-health.page.ts) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
-│   ├── __fixtures__/       # spec helpers (child-node.ts: run code in a fresh Node; report-tree.ts: fake report trees; drain/: the drain spec's scenarios; secret-scan.ts + secrets/: the no-credential canary; mock-wordpress.ts: wp-login and Site Health served locally)
+│   ├── __fixtures__/       # spec helpers (child-node.ts: run code in a fresh Node; import-probe.ts: what importing a module does to the process; import-scan.ts: every module a file loads, resolved, and what that reaches; report-tree.ts: fake report trees; drain/: the drain spec's scenarios; secret-scan.ts + secrets/: the no-credential canary; mock-wordpress.ts: wp-login and Site Health served locally)
 │   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -57,6 +57,7 @@ src/
         ├── steps/          # product-specific steps
         └── support/        # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
 
+orchestrator/               # the orchestrator (being built): suite-imports.json, the suite modules it may import, + its import-boundary spec
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)
 playwright*.config.ts       # entry configs (default, per-product, unit)
@@ -139,7 +140,7 @@ npm run test:backwpup -- --project=<cell>     # also one cell, but regenerates e
                                               # never beside another run of the same product
 npm run test:ui                    # Playwright UI mode
 npm run test:headed                # headed browser
-npm run test:unit                  # unit/integration specs (src/**/*.spec.ts)
+npm run test:unit                  # unit/integration specs (src/**/*.spec.ts, orchestrator/**/*.spec.ts)
 npm run test:unit:ui
 
 # Fleet health check
@@ -351,6 +352,17 @@ only by the entry points that span products — `playwright.config.ts`, the heal
 artifact warm and, later, the orchestrator. Importing it never loads `.env` or stamps `RUN_ID`.
 Its spec fails when it and `src/projects/`, the root `playwright.<product>.config.ts` files or
 the `test:<product>` scripts disagree.
+
+The orchestrator is a long-lived process and must keep the process-wide state it started with, while
+`run-context.ts`, and every module importing it, loads `.env` and stamps `RUN_ID` as it is imported.
+So the orchestrator's code imports from the suite only the modules
+[`orchestrator/suite-imports.json`](orchestrator/suite-imports.json) lists — never test code, never a
+computed `import()` path. ESLint reads the list (`no-restricted-imports`, by spelling; test code
+exempt); [`orchestrator/import-boundary.spec.ts`](orchestrator/import-boundary.spec.ts) judges every
+import form where it really leads, walks all an admitted module can load (never `load-env.ts` or
+`run-context.ts`, even lazily), and imports the admitted modules and the orchestrator's code but the
+root `cli.ts` in a fresh Node to prove environment, process listeners, working directory and exit
+code unchanged. Admit a module only once that spec passes with it.
 
 **Auth fixture / setup:** [`src/common/auth/auth.setup.ts`](src/common/auth/auth.setup.ts)
 is a dependency project that runs before any BDD scenarios. It does three things in order:
