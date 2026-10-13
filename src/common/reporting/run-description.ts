@@ -15,6 +15,13 @@ export interface RunDescription extends CellNoticeOptions {
   readonly reportCell: string;
   /** The run's report folder, absolute: where the reporters write. */
   readonly reportPath: string;
+  /** What the run is called, for display only (`E2E_RUN_NAME`, which an orchestrator sets). */
+  readonly runName?: string;
+  /**
+   * The plugin ref the run was asked to test, for display only (`E2E_REQUESTED_REF`): an orchestrator
+   * pins the run to the commit it built, and this keeps the ref a person asked for (`develop`).
+   */
+  readonly requestedRef?: string;
 }
 
 /**
@@ -41,7 +48,7 @@ export function readRunDescription(
   ] as const) {
     if (typeof value[key] !== "string") return { missing: key };
   }
-  for (const key of ["cell", "edition"] as const) {
+  for (const key of ["cell", "edition", "runName", "requestedRef"] as const) {
     if (value[key] !== undefined && typeof value[key] !== "string") {
       return { missing: key };
     }

@@ -1,8 +1,12 @@
 import { test, expect } from "@playwright/test";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import { isObject } from "../guards";
 import type { RunDescription } from "../reporting/run-description";
+import {
+  ALLURE_RESULTS_DIR,
+  CUCUMBER_REPORT_FILE,
+} from "../reporting/run-facts";
 import { reporters } from "./reporting";
 
 /**
@@ -94,5 +98,34 @@ test.describe("reporters — the results stream and the summary", () => {
       expect(isAbsolute(names[index] ?? "")).toBe(true);
       expect(list[index]?.[1]).toEqual(RUN);
     }
+  });
+});
+
+test.describe("reporters — the run facts", () => {
+  test("come before every report, whose onEnd reads the title and metadata theirs sets, with the run's facts", () => {
+    const list = reporters(RUN);
+    const names = list.map(([name]) => name);
+    const facts = names.findIndex((name) =>
+      name.endsWith("/src/common/reporting/run-facts.reporter.ts"),
+    );
+    expect(facts).toBeGreaterThan(names.indexOf("list"));
+    for (const report of [
+      "html",
+      "playwright-bdd/reporter/cucumber",
+      "allure-playwright",
+    ]) {
+      expect(facts, report).toBeLessThan(names.indexOf(report));
+    }
+    expect(isAbsolute(names[facts] ?? "")).toBe(true);
+    expect(list[facts]?.[1]).toEqual(RUN);
+  });
+
+  test("write where the reports are: Allure's results and the Cucumber file the facts reporter names", () => {
+    expect(optionsOf("allure-playwright").resultsDir).toBe(
+      join(REPORT_DIR, ALLURE_RESULTS_DIR),
+    );
+    expect(optionsOf("playwright-bdd/reporter/cucumber").outputFile).toBe(
+      join(REPORT_DIR, CUCUMBER_REPORT_FILE),
+    );
   });
 });

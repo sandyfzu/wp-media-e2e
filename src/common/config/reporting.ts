@@ -26,6 +26,11 @@ function ownReporter(file: string): string {
  *                          happen; silent. Before the reports, so its last line lands before
  *                          their slow `onEnd` (`reporting/results-stream.ts`).
  *  - `list`              — concise terminal output.
+ *  - run facts           — what the run tested (plugin, SHA-256, site, verdict) up front in every
+ *                          report: the HTML title and metadata, Allure's environment, a Cucumber
+ *                          banner, `run-facts.json`. Before the reports: the HTML report reads, in
+ *                          its own `onEnd`, the title and metadata this one sets in its `onEnd`
+ *                          (`reporting/run-facts.reporter.ts`).
  *  - Playwright `html`   — the interactive runner report (trace viewer, video).
  *  - Cucumber `html`     — the Gherkin-centric report, dual-mode via REPORT_MODE:
  *      • default       → `externalAttachments: false` — one portable, self-contained
@@ -62,6 +67,7 @@ export function reporters(run: RunDescription): ReporterDescription[] {
     [ownReporter("cell-notice.ts"), run],
     [ownReporter("results-stream.ts"), run],
     ["list"],
+    [ownReporter("run-facts.reporter.ts"), run],
     ["html", { outputFolder: `${reportDir}/playwright`, open: "never" }],
     cucumberReporter("html", {
       outputFile: `${reportDir}/cucumber/index.html`,

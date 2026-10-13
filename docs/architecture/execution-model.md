@@ -160,8 +160,8 @@ Two reporters of the suite's own, both always on, both handed the run's facts (`
   `NO TESTS`), the scenarios' counts and the duration, each failed setup's first line, the plugin
   and the sites tested (read back from the setups' attachments, `setup-facts.ts`) and the three
   reports, as paths from the working directory (quoted when a shell would split them). What a site or
-  setup reported is printed as plain text — no escape sequence or control character — and an
-  interrupted setup is not called failed. Silent for `--list`; a SIGTERM ends a run before any `onExit`.
+  setup reported is printed as plain text — no escape sequence or control character — with every
+  credential masked (`displayText`), and an interrupted setup is not called failed. Silent for `--list`; a SIGTERM ends a run before any `onExit`.
 
 Both read the run through the same pure module, [`reporting/results.ts`](../../src/common/reporting/results.ts),
 so they never disagree:
@@ -179,13 +179,54 @@ so they never disagree:
   hook or fixture (`After Hooks › AfterEach Hooks › <hook>`, where a `DebugLogFatalError` lands); else,
   when no step carries one — a timeout inside a step, a crashed worker, a missing screenshot baseline —
   the last step begun. ANSI and Playwright's call log stripped (its element markup quotes attribute
-  values), at most 2,000 characters. Still as sensitive as the reports: an assertion's message quotes
+  values), credentials masked, then at most 2,000 characters. Still as sensitive as the reports: an assertion's message quotes
   what it compared.
 - **Never written:** step parameters, Playwright API steps' titles, attachments, output — Playwright
   titles a `fill()` with its value.
 - **Counts:** scenarios and setups apart (a setup's project is `setup:<cell>` or `artifacts:<cell>`,
   `config/project-names.ts`); what never got a final result is `didNotRun` — every scenario of a cell
   whose setup failed, or those a stopped run never reached.
+
+## Saying what a run tested: the run facts
+
+A third reporter of the suite's own, [`reporting/run-facts.reporter.ts`](../../src/common/reporting/run-facts.reporter.ts),
+puts what the run tested up front in every report. Its facts and their formats are pure, in
+[`reporting/run-facts.ts`](../../src/common/reporting/run-facts.ts): the product, cell and edition, the
+`RUN_ID`, the display-only `E2E_RUN_NAME` and `E2E_REQUESTED_REF`, the plugin zips (ref, full commit,
+zip, SHA-256 — the artifacts setup's attachment) and each site's versions (the auth setup's), read back
+through `setup-facts.ts`; the verdict is the summary's (`verdictOf`).
+
+- **Where it sits:** after `list`, before the reports — the HTML report reads the title and metadata in
+  its own `onEnd`, after this one's. Not first: the `[cell]` notice must print before `list`'s
+  "Running …", and the stream must end before every report.
+- **When it writes:** `onBegin` — what is known, into `config.metadata` (flat keys), `<report dir>/run-facts.json`
+  and `<report dir>/allure-results/environment.properties`; each setup's `onTestEnd` — its attachment and
+  end, both files rewritten whole (temporary file + rename), so a killed run's say `running`; `onEnd` —
+  the verdict, the final files and metadata, and `PLAYWRIGHT_HTML_TITLE` (unless the environment set
+  one); `onExit` — the banner, spliced before the Cucumber report's last `</body>` (only its last 64 KB
+  are read) and moved to the top by a script that carries no value. Nothing for `--list`.
+- **What it says:** one line — `backwpup · pro@nginx (pro) · BackWPup Pro 9.99.99 · develop @ 1dceea8966 ·
+  WordPress 7.1.3 · PHP 8.5.11 64bit · <run name or RUN_ID>`, with `RUNNING`, `INTERRUPTED`,
+  `COULD NOT TEST` or `NO TESTS` appended (the reports cannot say those themselves: Cucumber never says
+  interrupted, and omits setups) — as the HTML title, the Cucumber banner and Allure's `--name`
+  (`scripts/allure.mjs`); every fact, most important first, as Allure's Metadata (it shows eight), the
+  HTML report's metadata and the banner's disclosure. A fact not known says why (`unknown: auth setup
+  failed`, `… skipped`, `… did not run`), never blank.
+- **What it keeps out:** of the sites file, only `baseURL`; every value is one plain line, credentials
+  masked, HTML-escaped in the banner and escaped for the properties file (separators, `\`,
+  controls, non-ASCII as `\uXXXX` — Allure's own reader reads them back exact). `captureGitInfo` stays
+  off: it records authors' emails and, under CI, a diff.
+- **Never fails a run:** every step is caught and the first failure warns once on stderr. Nothing is
+  written for `--list`, nor with a command-line `--reporter`, which replaces every configured reporter.
+
+**Credentials** are masked, before any cut, by one helper — `redactSecrets` in
+[`text.ts`](../../src/common/text.ts) — wherever the suite's own reporters show what a setup, a step, a
+site or the environment said: the results stream (`cleanMessage`), the summary and the facts
+(`displayText`), the site-info attachment and APVM's output. It masks a GitHub token, a URL's user and
+password (to the authority's last `@`) and a credential URL parameter (`?access_token=`) — the shapes
+measured: Playwright's navigation errors quote a basic-auth `baseURL` whole, and git quotes a URL
+parameter (it hides a URL's user and password itself; APVM never puts its token in a URL). Playwright's
+own reports, traces and Allure's results keep an error as Playwright wrote it.
 
 ## The product list
 
@@ -283,7 +324,7 @@ resolves all paths via `dirs(product, cell)`. Two lifecycles:
 
 | Kind                       | Path shape                                          | Lifecycle                                                     |
 | -------------------------- | --------------------------------------------------- | ------------------------------------------------------------ |
-| **report** (accumulates)   | `<REPORT_ROOT>/<product>/<cell>/<RUN_ID>/`          | One per run — the three reports and `results.jsonl`; pruned later by a `report:prune` utility. |
+| **report** (accumulates)   | `<REPORT_ROOT>/<product>/<cell>/<RUN_ID>/`          | One per run — the three reports, `results.jsonl` and `run-facts.json`; pruned later by a `report:prune` utility. |
 | **output**                 | `<OUTPUT_ROOT>/<product>/<cell>/`, or `…/<product>/_all/<cell>/` | Ephemeral: Playwright empties it as a run that selects one of its projects starts (see below). |
 | **auth / bdd**             | `<*_ROOT>/<product>/<cell>/`                         | Ephemeral, stable per `(product, cell)`; overwritten in place. |
 | **artifacts** (ephemeral)  | `<ARTIFACTS_ROOT>/<product>/<cell>/`                | **Wiped whole** and re-resolved each run; holds the role zips under test + `resolution.json`. |

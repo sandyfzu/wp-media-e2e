@@ -24,6 +24,7 @@ import {
   routingMetadata,
 } from "./metadata";
 import { cellProjectNames } from "./project-names";
+import type { RunDescription } from "../reporting/run-description";
 import { reporters } from "./reporting";
 import { assertStopFileFolder, stopFileFromEnv } from "./drain";
 import {
@@ -77,6 +78,21 @@ const SETUP_TRACE = {
   mode: "retain-on-failure",
   snapshots: { dom: false },
 } as const;
+
+/**
+ * What the run is called and the plugin ref it was asked for, from the two display-only variables an
+ * orchestrator sets (`E2E_RUN_NAME`, `E2E_REQUESTED_REF`) — it pins the run itself to the commit it
+ * built, so the ref a person asked for would otherwise be lost. The reports show them; nothing acts
+ * on them. A blank one is absent.
+ */
+function displayOnlyFacts(): Pick<RunDescription, "runName" | "requestedRef"> {
+  const runName = env("E2E_RUN_NAME");
+  const requestedRef = env("E2E_REQUESTED_REF");
+  return {
+    ...(runName !== "" ? { runName } : {}),
+    ...(requestedRef !== "" ? { requestedRef } : {}),
+  };
+}
 
 /**
  * Assigns each pooled site its per-run `storageState` path under the cell's auth dir. The path
@@ -275,6 +291,7 @@ export function createProductConfig(
       reportCell: selected ?? NO_CELL,
       reportDir,
       reportPath: resolve(REPO_ROOT, reportDir),
+      ...displayOnlyFacts(),
     }),
     // Committed-baseline visual checks (`toHaveScreenshot`): comparison tolerance + where the
     // per-product/cell baselines live. WP Rocket's A/B check (visual/ab.ts) diffs live renders and

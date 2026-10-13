@@ -4,12 +4,13 @@
 //
 // With no product/cell it picks the most recently written results across all cells. The report
 // is written next to that run's Playwright/Cucumber reports (`reports/<product>/<cell>/<run>/
-// allure`); the trend chart comes from a cell-level history file that accumulates across runs.
+// allure`); the trend chart comes from a cell-level history file that accumulates across runs. Its
+// name is the run's one-line facts (`run-facts.json`: plugin, commit, site, run), else product · cell.
 // Respects REPORT_ROOT (same as the test config) so it finds custom report roots,
 // `.env`'s included: it loads `.env` as a run does, which is why it runs under tsx.
 import "../src/common/config/load-env";
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const argv = process.argv.slice(2);
@@ -26,7 +27,34 @@ function subdirs(dir) {
     .map((entry) => entry.name);
 }
 
-// Collect every run that has non-empty Allure results, optionally filtered to one product/cell.
+/**
+ * The report's name: the run's title line from its `run-facts.json`, or `fallback` when the run left
+ * none readable (an older run, or one whose facts could not be written).
+ */
+function reportName(runDir, fallback) {
+  try {
+    const facts = JSON.parse(
+      readFileSync(join(runDir, "run-facts.json"), "utf8"),
+    );
+    const title = typeof facts?.title === "string" ? facts.title.trim() : "";
+    return title === "" ? fallback : title;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Whether a folder holds Allure results: at least one test result. A run that ran nothing — `--list`,
+ * "No tests found" — may still leave the run facts' `environment.properties` there.
+ */
+function hasResults(resultsDir) {
+  return (
+    existsSync(resultsDir) &&
+    readdirSync(resultsDir).some((name) => name.endsWith("-result.json"))
+  );
+}
+
+// Collect every run that has Allure results, optionally filtered to one product/cell.
 const runs = [];
 for (const prod of subdirs(reportRoot)) {
   if (product && prod !== product) continue;
@@ -35,11 +63,12 @@ for (const prod of subdirs(reportRoot)) {
     const cellDir = join(reportRoot, prod, cellName);
     for (const runId of subdirs(cellDir)) {
       const resultsDir = join(cellDir, runId, "allure-results");
-      if (existsSync(resultsDir) && readdirSync(resultsDir).length > 0) {
+      if (hasResults(resultsDir)) {
         runs.push({
           product: prod,
           cell: cellName,
           cellDir,
+          runDir: join(cellDir, runId),
           resultsDir,
           output: join(cellDir, runId, "allure"),
           mtime: statSync(resultsDir).mtimeMs,
@@ -81,7 +110,8 @@ const generateArgs = [
   "-c",
   "allurerc.mjs",
   "--name",
-  `${target.product} · ${target.cell}`, // report header identifies the cell
+  // The report's header says what was tested; at least, which cell.
+  reportName(target.runDir, `${target.product} · ${target.cell}`),
 ];
 if (open) generateArgs.push("--open");
 const generated = spawnSync(allureBin, generateArgs, {

@@ -2,6 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 
 import type { TestResult } from "@playwright/test/reporter";
 
+import { isSha256 } from "../artifacts/digest";
 import { isNonEmptyString, isObject } from "../guards";
 import type { SiteVersions } from "../setup/site-info";
 
@@ -36,6 +37,8 @@ export type PluginFact =
       readonly pin?: string;
       /** The zip's file name — what names an operator-provided zip. */
       readonly zip?: string;
+      /** The zip's SHA-256 (64 lowercase hex): what names the bytes tested. */
+      readonly sha256?: string;
       /** How the zip was chosen: `default-ref`, `env-ref`, `env-zip`. */
       readonly source?: string;
     }
@@ -134,6 +137,8 @@ function pluginFactOf(
     }),
     // The setup's info names a pin only when it says more than the commit.
     ...pickStrings(info, { pin: "pin" }),
+    // A digest is believed only in the form the resolver writes it.
+    ...(isSha256(artifact.sha256) ? { sha256: artifact.sha256 } : {}),
   };
 }
 

@@ -74,6 +74,8 @@ interface Built {
   readonly traces: Record<string, unknown>;
   /** The run's own trace option. */
   readonly runTrace: unknown;
+  /** The config's `captureGitInfo`; `null` when unset. */
+  readonly captureGitInfo: unknown;
 }
 
 /** A working directory that is not the repository's. */
@@ -117,6 +119,7 @@ async function build(
       bddEnv: process.env.PLAYWRIGHT_BDD_CONFIGS ?? "",
       traces: Object.fromEntries(config.projects.map((p) => [p.name, p.use?.trace ?? null])),
       runTrace: config.use.trace,
+      captureGitInfo: config.captureGitInfo ?? null,
     }));
     `,
     { cwd: elsewhere, env: { RUN_ID: "run-1", ...env } },
@@ -227,6 +230,25 @@ test.describe("createProductConfig — traces", () => {
       "artifacts:b": null,
       b: null,
     });
+  });
+});
+
+test.describe("createProductConfig — what the reports say about the run", () => {
+  test("the display-only run name and requested ref reach the reporters; a blank one is absent", async () => {
+    const [named, blank] = await Promise.all([
+      build([], { E2E_RUN_NAME: "nightly", E2E_REQUESTED_REF: "develop" }),
+      build([], { E2E_RUN_NAME: " ", E2E_REQUESTED_REF: "" }),
+    ]);
+    expect(named.notice).toMatchObject({
+      runName: "nightly",
+      requestedRef: "develop",
+    });
+    expect(blank.notice).not.toHaveProperty("runName");
+    expect(blank.notice).not.toHaveProperty("requestedRef");
+  });
+
+  test("never captures git info, which records authors' emails and, under CI, a diff", async () => {
+    expect((await build([])).captureGitInfo).toBeNull();
   });
 });
 

@@ -2,6 +2,7 @@ import type { Page } from "@playwright/test";
 
 import { errorMessage } from "../guards";
 import { SiteHealthPage } from "../pages/site-health.page";
+import { redactSecrets } from "../text";
 
 /**
  * The versions a site actually runs, as its reports record them: WordPress, PHP **as the web server
@@ -109,10 +110,12 @@ export function describeSiteInfo(entry: SiteInfoEntry): string {
 
 /**
  * Reads a logged-in site's versions from Site Health. Never throws: a failure is the entry's
- * `error`, so the versions stay best-effort and never fail the setup that asks.
+ * `error`, so the versions stay best-effort and never fail the setup that asks. The entry is what the
+ * reports keep, so its URL and error have every credential masked — a sites file's URL may carry
+ * basic-auth credentials, which a navigation error quotes.
  *
  * @param page - a page logged in to the site, whose context's `baseURL` is the site.
- * @param baseURL - the site's URL, recorded with the result.
+ * @param baseURL - the site's URL, recorded with the result, masked.
  * @param budgetMs - how long the whole read may take: the page load and the wait for its button
  *   share it.
  */
@@ -122,6 +125,7 @@ export async function readSiteInfo(
   budgetMs: number,
 ): Promise<SiteInfoEntry> {
   const deadline = Date.now() + budgetMs;
+  const site = redactSecrets(baseURL);
   try {
     const siteHealth = new SiteHealthPage(page);
     await siteHealth.goto({ timeout: budgetMs });
@@ -132,14 +136,19 @@ export async function readSiteInfo(
       }),
     );
     if (Object.keys(versions).length === 0) {
-      return { baseURL, error: "Site Health's site info named no version" };
+      return {
+        baseURL: site,
+        error: "Site Health's site info named no version",
+      };
     }
-    return { baseURL, versions };
+    return { baseURL: site, versions };
   } catch (error) {
     // The first line: Playwright appends a multi-line call log to its messages.
-    const message = errorMessage(error).split("\n")[0]?.trim() ?? "";
+    const message = redactSecrets(
+      errorMessage(error).split("\n")[0]?.trim() ?? "",
+    );
     return {
-      baseURL,
+      baseURL: site,
       error: message === "" ? "reading Site Health failed" : message,
     };
   }

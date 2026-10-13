@@ -150,6 +150,17 @@ Every run writes a layered set of reports into `reports/<product>/<cell>/<RUN_ID
 - **`results.jsonl`** — every attempt and the run's totals, one JSON line each, written as the run
   goes: what a script or the orchestrator watches. Schema in
   [`results-schema.ts`](src/common/reporting/results-schema.ts).
+- **`run-facts.json`** — what the run tested: the plugin (ref, full commit, zip, **SHA-256**), each
+  site's WordPress, PHP, web server and database, the run's name and verdict. Rewritten as each setup
+  ends, so a killed run's still says what it had (`"status": "running"`).
+
+**Every report says up front what it tested**, in one line —
+`backwpup · pro@nginx (pro) · BackWPup Pro 9.99.99 · develop @ 1dceea8966 · WordPress 7.1.3 · PHP 8.5.11 64bit · <run>`
+(plus `RUNNING`, `INTERRUPTED`, `COULD NOT TEST` or `NO TESTS`, which the reports cannot say themselves): the Playwright
+report's title (its Metadata panel lists every fact with `#?show-metadata-other` in the URL), a banner
+above the Cucumber report (expand it for every fact), and the Allure report's name and Metadata. A fact
+that is not known says why (`site unknown: auth setup failed`). `E2E_RUN_NAME` names the run;
+`E2E_REQUESTED_REF` shows the ref asked for (both display only); a `PLAYWRIGHT_HTML_TITLE` you set wins.
 
 A run ends with a summary below everything else: the verdict (`✘ COULD NOT TEST` when a setup
 failed), the counts, the plugin and sites it tested, and how to open each report.
@@ -162,7 +173,7 @@ npm run report:allure -- wp-rocket apache          # a specific product/cell
 npm run report:allure -- wp-rocket apache --open   # generate and serve in the browser
 ```
 
-The report lands in `reports/<product>/<cell>/<RUN_ID>/allure/`. **Trends accumulate across runs**
+The report lands in `reports/<product>/<cell>/<RUN_ID>/allure/`, named by the run's facts line. **Trends accumulate across runs**
 via a per-cell history file (`reports/<product>/<cell>/allure-history.jsonl`), so the trend chart
 fills in from the second run onward; flaky tests are flagged per run from retries. Report content
 (categories, dashboard widgets, single-file output) is configured in [`allurerc.mjs`](allurerc.mjs).

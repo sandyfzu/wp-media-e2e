@@ -153,6 +153,21 @@ test.describe("cleanMessage", () => {
     );
   });
 
+  test("masks credentials, before the cut could leave one without the @ that marks it", () => {
+    // Verbatim, as Playwright 1.63 reported a navigation to a basic-auth URL.
+    expect(
+      cleanMessage(
+        "page.goto: net::ERR_UNSAFE_PORT at http://u:SECRETPW@127.0.0.1:9/wp-login.php\nCall log:\n" +
+          '\u001b[2m  - navigating to "http://u:SECRETPW@127.0.0.1:9/wp-login.php"\u001b[22m\n',
+      ),
+    ).toBe(
+      "page.goto: net::ERR_UNSAFE_PORT at http://***@127.0.0.1:9/wp-login.php",
+    );
+    // Cut inside the password: masked first, nothing of it is left.
+    const message = `${"x".repeat(5)} https://user:SECRETPASSWORD@host`;
+    expect(cleanMessage(message, 40)).not.toMatch(/SECRET/);
+  });
+
   test("cuts at the limit, saying so, and keeps a short message whole", () => {
     const long = "x".repeat(MESSAGE_LIMIT + 50);
     const cut = cleanMessage(long);

@@ -185,6 +185,24 @@ test.describe("parsePluginFacts", () => {
     });
   });
 
+  test("the zip's SHA-256, only in the form the resolver writes it", () => {
+    const digest = "0123456789abcdef".repeat(4);
+    const withDigest = (sha256: unknown): unknown => {
+      const copy = structuredClone(RESOLVED);
+      const role = copy.roles[0];
+      if (role === undefined) throw new Error("no role");
+      Object.assign(role.artifact, { sha256 });
+      return copy;
+    };
+    expect(parsePluginFacts(withDigest(digest))[0]).toMatchObject({
+      sha256: digest,
+    });
+    // Upper case, short, or not a string: no digest is said rather than a wrong one.
+    for (const bad of [digest.toUpperCase(), digest.slice(1), 42]) {
+      expect(parsePluginFacts(withDigest(bad))[0]).not.toHaveProperty("sha256");
+    }
+  });
+
   test("a failed role: its first failing check, one line", () => {
     const failed = {
       ok: false,

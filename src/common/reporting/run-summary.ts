@@ -12,6 +12,7 @@ import type {
 
 import { cellOfProject, type SetupKind } from "../config/project-names";
 import { errorMessage } from "../guards";
+import { redactSecrets } from "../text";
 import {
   ARTIFACTS_ATTACHMENT,
   SITE_INFO_ATTACHMENT,
@@ -185,8 +186,8 @@ export function describeCounts(counts: Counts): string {
 }
 
 /**
- * One plugin zip in a phrase: its name and version, then where it came from; plain text
- * ({@link plain}).
+ * One plugin zip in a phrase: its name and version, then where it came from; shown as
+ * {@link displayText} says — a failed resolution's error can quote anything.
  *
  * @param fact - the zip, as the artifacts setup recorded it.
  * @example
@@ -195,10 +196,10 @@ export function describeCounts(counts: Counts): string {
  * ```
  */
 export function describePlugin(fact: PluginFact): string {
-  return plain(pluginPhrase(fact));
+  return displayText(pluginPhrase(fact));
 }
 
-/** {@link describePlugin}'s phrase, before it is made plain. */
+/** {@link describePlugin}'s phrase, before it is made {@link displayText}. */
 function pluginPhrase(fact: PluginFact): string {
   if (!fact.ok) return `resolution failed — ${fact.error}`;
   const name = [fact.name ?? "plugin", fact.version].filter(Boolean).join(" ");
@@ -220,17 +221,18 @@ function pluginPhrase(fact: PluginFact): string {
 }
 
 /**
- * One site in a phrase: its URL, WordPress and PHP — the full set is in the reports. Plain text
- * ({@link plain}): the versions are what the site says.
+ * One site in a phrase: its URL, WordPress and PHP — the full set is in the reports. Shown as
+ * {@link displayText} says: the versions are what the site says, and a sites file's URL may carry
+ * basic-auth credentials.
  *
  * @param fact - the site, as the auth setup recorded it.
  */
 export function describeSite(fact: SiteFact): string {
   if ("error" in fact) {
-    return plain(`${fact.baseURL} · versions unknown — ${fact.error}`);
+    return displayText(`${fact.baseURL} · versions unknown — ${fact.error}`);
   }
   const { wordpress, php } = fact.versions;
-  return plain(
+  return displayText(
     [
       fact.baseURL,
       `WordPress ${wordpress ?? "unknown"}`,
@@ -251,8 +253,13 @@ function labelled(
   );
 }
 
-/** A phrase cut to `limit` characters, never inside a surrogate pair. */
-function cut(text: string, limit: number): string {
+/**
+ * A phrase cut to `limit` characters, an ellipsis included, never inside a surrogate pair.
+ *
+ * @param text - the phrase.
+ * @param limit - the most characters it may take.
+ */
+export function cut(text: string, limit: number): string {
   if (text.length <= limit) return text;
   const end = limit - 1;
   const last = text.charCodeAt(end - 1);
@@ -272,6 +279,17 @@ const CONTROL = /[\u0000-\u001f\u007f-\u009f]+/g;
  */
 export function plain(text: string): string {
   return stripVTControlCharacters(text).replace(CONTROL, " ").trim();
+}
+
+/**
+ * A value as the summary and the reports show what a site, a setup or the environment said: one
+ * {@link plain} line, every credential in it masked ({@link redactSecrets}). Cut it short only after:
+ * a cut can split a credential from what marks it.
+ *
+ * @param text - the value.
+ */
+export function displayText(text: string): string {
+  return redactSecrets(plain(text));
 }
 
 /**
@@ -382,7 +400,7 @@ export function renderSummary(
       input.setupFailures.map((failure) =>
         style(
           "red",
-          `${failure.project} failed — ${cut(plain(failure.message), SETUP_MESSAGE_LIMIT)}`,
+          `${failure.project} failed — ${cut(displayText(failure.message), SETUP_MESSAGE_LIMIT)}`,
         ),
       ),
     ),

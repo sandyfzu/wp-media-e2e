@@ -190,3 +190,22 @@ test.describe("readSiteInfo", () => {
     });
   });
 });
+
+test.describe("readSiteInfo — a site whose URL carries basic-auth credentials", () => {
+  const BASE_URL = "http://admin:SECRETPW@wp.test";
+  test.use({ baseURL: BASE_URL });
+
+  test("records its URL, and the navigation error quoting it, with the credentials masked", async ({
+    page,
+  }) => {
+    await page.route(/site-health\.php/, (route) => route.abort());
+    const entry = await readSiteInfo(page, BASE_URL, 2_000);
+    expect(entry).toEqual({
+      baseURL: "http://***@wp.test",
+      error: expect.stringMatching(
+        /^page\.goto: .* at http:\/\/\*\*\*@wp\.test\//,
+      ),
+    });
+    expect(JSON.stringify(entry)).not.toContain("SECRETPW");
+  });
+});
