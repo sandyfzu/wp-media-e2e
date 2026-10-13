@@ -1,6 +1,7 @@
-# Driven by `reporting/results-stream.run.spec.ts` on a placeholder site, through the real `bddgen`,
-# runner and the suite's reporters — never collected by a product, whose features live under
-# `src/projects/`. Every scenario is `@noauth`: nothing here touches a site.
+# Driven by `reporting/results-stream.run.spec.ts` and `reporting/run-pruning.run.spec.ts` on a
+# placeholder site, through the real `bddgen`, runner and the suite's reporters — never collected by a
+# product, whose features live under `src/projects/`. Every scenario is `@noauth`: nothing here
+# touches a site.
 Feature: The results stream, end to end
 
   Background:

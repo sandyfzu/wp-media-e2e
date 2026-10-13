@@ -30,6 +30,12 @@ test.describe("readRunDescription", () => {
     expect(readRunDescription(everyCell)).toEqual(everyCell);
     const named = { ...RUN, runName: "nightly", requestedRef: "develop" };
     expect(readRunDescription(named)).toEqual(named);
+    for (const reportsKeep of [0, 20]) {
+      expect(readRunDescription({ ...RUN, reportsKeep })).toEqual({
+        ...RUN,
+        reportsKeep,
+      });
+    }
   });
 
   test("names the first field missing or of the wrong type", () => {
@@ -43,6 +49,10 @@ test.describe("readRunDescription", () => {
       [{ ...RUN, runName: 7 }, "runName"],
       [{ ...RUN, requestedRef: ["develop"] }, "requestedRef"],
       [{ ...RUN, pinned: "yes" }, "pinned"],
+      [{ ...RUN, reportsKeep: -1 }, "reportsKeep"],
+      [{ ...RUN, reportsKeep: 1.5 }, "reportsKeep"],
+      [{ ...RUN, reportsKeep: "20" }, "reportsKeep"],
+      [{ ...RUN, reportsKeep: null }, "reportsKeep"],
     ];
     for (const [options, field] of cases) {
       expect(readRunDescription(options), JSON.stringify(options)).toEqual({

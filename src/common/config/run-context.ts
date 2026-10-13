@@ -3,8 +3,10 @@ import "./load-env";
 import { fileURLToPath } from "node:url";
 
 import { isNonEmptyString, isObject } from "../guards";
+import { DEFAULT_REPORT_ROOT } from "../reporting/retention";
 import { pinnedCell } from "./cell-pin";
 import { env } from "./env";
+import { formatRunId, isUsableRunId } from "./run-id";
 
 /**
  * Absolute repo root, derived from this module's own location
@@ -27,7 +29,9 @@ export const REPO_ROOT: string = fileURLToPath(
  * the per-run report token. Artifacts split into two lifecycles:
  *
  *  - report  → ACCUMULATES under `<REPORT_ROOT>/<product>/<cell>/<RUN_ID>` (one per
- *              run; pruned to the newest N by a later `report:prune` utility).
+ *              run). Each run prunes its cell's folder as it ends — at most `E2E_REPORTS_KEEP`
+ *              (20), none older than 30 days but the newest complete one, kept up to 182 days
+ *              (`reporting/retention.ts`); `npm run report:prune` prunes every cell.
  *  - output / auth / bdd → EPHEMERAL, stable per (product, cell); overwritten in place
  *              each run, so they never accumulate.
  *
@@ -41,13 +45,38 @@ export const REPO_ROOT: string = fileURLToPath(
 /** Filesystem-safe, lexically-sortable run token. Used ONLY to namespace the report directory. */
 function stamp(): string {
   // e.g. 2026-06-19T14-03-22-123Z-48217
-  return `${new Date().toISOString().replace(/[:.]/g, "-")}-${String(process.pid)}`;
+  return formatRunId(new Date(), String(process.pid));
 }
 
-/** Resolves the run token: a non-blank inherited `RUN_ID`, else a fresh stamp pinned into env. */
+/**
+ * `value` quoted for an error message, every control character escaped: `JSON.stringify` leaves
+ * DEL, C1 (`U+009B` opens a terminal escape sequence) and the line separators `U+2028`/`U+2029` raw.
+ */
+function quoted(value: string): string {
+  return JSON.stringify(value).replace(
+    /[\u007f-\u009f\u2028\u2029]/g,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
+/**
+ * Resolves the run token: a non-blank inherited `RUN_ID`, else a fresh stamp pinned into env.
+ *
+ * @throws {@link Error} naming `RUN_ID` when the inherited one cannot name a report folder
+ *   ({@link isUsableRunId}): a `/` would write the report outside its cell's folder.
+ */
 function resolveRunId(): string {
   const provided = process.env.RUN_ID;
-  if (isNonEmptyString(provided)) return provided;
+  if (isNonEmptyString(provided)) {
+    if (!isUsableRunId(provided)) {
+      throw new Error(
+        `RUN_ID=${quoted(provided)} cannot name a report folder: it must be one folder name — no "/" or ` +
+          '"\\", not starting with ".", no control character, at most 255 bytes. Unset it for a ' +
+          "fresh one.",
+      );
+    }
+    return provided;
+  }
   const stamped = stamp();
   // Pin it so every worker process (which re-imports this module) inherits one token.
   process.env.RUN_ID = stamped;
@@ -238,7 +267,7 @@ export interface RunDirs {
 export function dirs(product: string, cell: string): RunDirs {
   const cellNs = `${product}/${cell}`;
   return {
-    report: `${env("REPORT_ROOT", "reports")}/${cellNs}/${RUN_ID}`,
+    report: `${env("REPORT_ROOT", DEFAULT_REPORT_ROOT)}/${cellNs}/${RUN_ID}`,
     output: `${env("OUTPUT_ROOT", "test-results")}/${cellNs}`,
     auth: `${env("AUTH_ROOT", ".auth")}/${cellNs}`,
     bdd: `.features-gen/${cellNs}`,

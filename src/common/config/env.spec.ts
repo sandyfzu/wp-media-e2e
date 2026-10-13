@@ -25,11 +25,30 @@ test.describe("env / requireEnv", () => {
 });
 
 test.describe("intEnv", () => {
-  test("falls back when blank, and refuses a non-integer or out-of-range value by name", () => {
+  test("falls back when blank, reads plain decimal digits, and refuses anything else or out-of-range by name", () => {
     expect(intEnv(NAME, 7)).toBe(7);
     process.env[NAME] = "3";
     expect(intEnv(NAME, 7, 0, 10)).toBe(3);
-    for (const bad of ["3.5", "abc", "-1", "11"]) {
+    process.env[NAME] = " 4\n";
+    expect(intEnv(NAME, 7, 0, 10)).toBe(4);
+    process.env[NAME] = "-0";
+    expect(Object.is(intEnv(NAME, 7, 0, 10), 0)).toBe(true);
+    // `Number()` reads each of these as an integer in range; an operator never means them.
+    for (const bad of [
+      "3.5",
+      "abc",
+      "-1",
+      "11",
+      "1e1",
+      "0x5",
+      "0b11",
+      "0o7",
+      "5.0",
+      "+5",
+      "5_0",
+      "Infinity",
+      "99999999999999999999",
+    ]) {
       process.env[NAME] = bad;
       expect(() => intEnv(NAME, 7, 0, 10), bad).toThrow(
         `"${NAME}" must be an integer in [0, 10], got "${bad}".`,

@@ -26,10 +26,14 @@ export function requireEnv(name: string): string {
   return value;
 }
 
+/** An integer as an operator writes one: decimal digits, an optional leading `-`. */
+const DECIMAL_INTEGER = /^-?\d+$/;
+
 /**
  * Returns an integer environment variable within `[min, max]`. Falls back when unset or
- * blank; throws an actionable error on a non-integer or out-of-range value (so a typo
- * surfaces here, not as a silent `NaN` deep in a later layer).
+ * blank; throws an actionable error on anything but plain decimal digits (an optional `-`,
+ * surrounding whitespace ignored) or an out-of-range value, so a typo surfaces here, not as a
+ * silent `NaN` deep in a later layer. `Number()` alone would take `1e3`, `0x14` or `20.0`.
  */
 export function intEnv(
   name: string,
@@ -39,8 +43,10 @@ export function intEnv(
 ): number {
   const raw = process.env[name];
   if (!isNonEmptyString(raw)) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+  const digits = raw.trim();
+  // `+ 0` turns `-0` into `0`.
+  const parsed = DECIMAL_INTEGER.test(digits) ? Number(digits) + 0 : NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
     throw new Error(
       `Environment variable "${name}" must be an integer in [${String(min)}, ${String(max)}], got "${raw}".`,
     );

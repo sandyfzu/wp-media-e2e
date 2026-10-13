@@ -162,6 +162,8 @@ Two reporters of the suite's own, both always on, both handed the run's facts (`
   reports, as paths from the working directory (quoted when a shell would split them). What a site or
   setup reported is printed as plain text — no escape sequence or control character — with every
   credential masked (`displayText`), and an interrupted setup is not called failed. Silent for `--list`; a SIGTERM ends a run before any `onExit`.
+  Before printing, it prunes the run's report group ([Report retention](#report-retention)); a
+  `Pruned` line says what went, and only when something did.
 
 Both read the run through the same pure module, [`reporting/results.ts`](../../src/common/reporting/results.ts),
 so they never disagree:
@@ -324,13 +326,17 @@ resolves all paths via `dirs(product, cell)`. Two lifecycles:
 
 | Kind                       | Path shape                                          | Lifecycle                                                     |
 | -------------------------- | --------------------------------------------------- | ------------------------------------------------------------ |
-| **report** (accumulates)   | `<REPORT_ROOT>/<product>/<cell>/<RUN_ID>/`          | One per run — the three reports, `results.jsonl` and `run-facts.json`; pruned later by a `report:prune` utility. |
+| **report** (accumulates)   | `<REPORT_ROOT>/<product>/<cell>/<RUN_ID>/`          | One per run — the three reports, `results.jsonl` and `run-facts.json`; pruned as each run ends ([Report retention](#report-retention)). |
 | **output**                 | `<OUTPUT_ROOT>/<product>/<cell>/`, or `…/<product>/_all/<cell>/` | Ephemeral: Playwright empties it as a run that selects one of its projects starts (see below). |
 | **auth / bdd**             | `<*_ROOT>/<product>/<cell>/`                         | Ephemeral, stable per `(product, cell)`; overwritten in place. |
 | **artifacts** (ephemeral)  | `<ARTIFACTS_ROOT>/<product>/<cell>/`                | **Wiped whole** and re-resolved each run; holds the role zips under test + `resolution.json`. |
 
 - `RUN_ID` is auto-stamped (filesystem-safe, lexically sortable) unless pinned by
-  an orchestrator so a batch of cells shares one token.
+  an orchestrator so a batch of cells shares one token. One formatter and one strict parser,
+  [`config/run-id.ts`](../../src/common/config/run-id.ts): `<ISO time, ":" and "." as "-">-<suffix>`
+  (the pid, or the orchestrator's run id). A pinned one may be any single folder name — not
+  hidden, no `/`, no control character, at most 255 bytes, else the run fails naming `RUN_ID`; one
+  the parser cannot read is dated by its stream's `run.begin`.
 - The `<product>/<cell>` namespace is **always** appended, so two cells never share a
   directory, whatever the `*_ROOT` overrides (`REPORT_ROOT`, `OUTPUT_ROOT`, `AUTH_ROOT`,
   `ARTIFACTS_ROOT`). Two runs of one cell share every folder of it but the report, so a
@@ -357,6 +363,38 @@ resolves all paths via `dirs(product, cell)`. Two lifecycles:
   anything is deleted, rather than having the operator's file removed under them.
 - A cell-less run reports to an `_all` bucket so it is never mislabeled as a
   single cell.
+
+### Report retention
+
+[`reporting/retention.ts`](../../src/common/reporting/retention.ts) decides, per group
+(`<product>/<cell>`, `_all` included; a task, for the orchestrator), newest first by start time:
+
+1. an **empty** run — `--list` or "No tests found", told by `results.jsonl`'s `run.begin` — takes no
+   place under the cap and goes, unless protected;
+2. a **protected** run (the run in progress) is kept, and so is one dated in the **future**;
+3. the group's **newest complete** report (`playwright/index.html` written) is kept up to **182 days**,
+   whatever the cap — a cell whose last runs were all killed keeps one readable report;
+4. a run older than **30 days** goes (never under a day: a run in progress carries no marker); so does
+   one beyond the newest **`E2E_REPORTS_KEEP`** (20). Killed runs count. `0` lifts the cap only: the
+   age rules still run, and nothing turns a run's own pruning off.
+
+**When.** Each run prunes its own report folder's group as it ends, from the run summary's `onExit` —
+the last reporter's, after every report is written (`reporting/run-pruning.ts`) — and the summary's
+`Pruned` line says what went. So the 21st run removes the oldest; a failing or interrupted run still
+prunes (one SIGINT included), `--list` and a killed run do not (the next run does), and neither does a
+run whose command-line `--reporter` replaces the configured ones. Other cells are never touched: a cell
+that no longer runs is pruned by `npm run report:prune` (every cell, a dry run unless `--apply`;
+`--keep`, `--older-than`, `--keep-newest-for`, `--product`, `--cell`; exit 1 when a removal failed, 2
+for bad arguments).
+
+**How.** The listing never follows a link below the report root. A run is a folder holding a report
+part and dated by the suite's own hand — its RUN_ID name, else its `results.jsonl`'s first line,
+`run.begin` — never by a file's time: anything else (a `REPORT_ROOT` set to the repository finds
+`node_modules/<package>/dist`) is skipped, never removed. A removal renames the run to a hidden
+`.pruning-…` name in its group first — atomic, so no reader sees half a run — then removes it (a link
+inside is unlinked, its target untouched) and checks it is gone. A failure is reported, never thrown: pruning cannot fail a run. What an interrupted
+removal left is removed by a later prune, after an hour. `npm run report` and `report:allure` skip
+hidden folders.
 
 ## Mental model, end to end
 

@@ -12,18 +12,24 @@ import "../src/common/config/load-env";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const argv = process.argv.slice(2);
 const open = argv.includes("--open");
 const [product, cell] = argv.filter((arg) => !arg.startsWith("--"));
 
-const reportRoot = process.env.REPORT_ROOT || "reports";
+/** The checkout's root: a run resolves REPORT_ROOT against it, wherever it starts — so does this. */
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const reportRoot = resolve(repoRoot, process.env.REPORT_ROOT || "reports");
 
-/** Immediate subdirectory names of `dir` (empty when `dir` is absent). */
+/**
+ * Immediate subdirectory names of `dir` (empty when `dir` is absent). Hidden ones are left out: the
+ * report pruning renames a run it is removing to a hidden name first.
+ */
 function subdirs(dir) {
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
     .map((entry) => entry.name);
 }
 
@@ -97,7 +103,7 @@ console.log(`  results: ${target.resultsDir}`);
 console.log(`  output:  ${target.output}`);
 console.log(`  history: ${historyPath}`);
 
-const allureBin = resolve("node_modules", ".bin", "allure");
+const allureBin = resolve(repoRoot, "node_modules", ".bin", "allure");
 
 // `allure generate` reads the cell-level history file (ALLURE_HISTORY, configured in
 // allurerc.mjs) to render the trend, then writes this run back into it — so each run's report
@@ -108,7 +114,7 @@ const generateArgs = [
   "-o",
   target.output,
   "-c",
-  "allurerc.mjs",
+  resolve(repoRoot, "allurerc.mjs"),
   "--name",
   // The report's header says what was tested; at least, which cell.
   reportName(target.runDir, `${target.product} · ${target.cell}`),

@@ -26,6 +26,7 @@ import {
 import { cellProjectNames } from "./project-names";
 import type { RunDescription } from "../reporting/run-description";
 import { reporters } from "./reporting";
+import { DEFAULT_RETENTION, MAX_REPORTS_KEEP } from "../reporting/retention";
 import { assertStopFileFolder, stopFileFromEnv } from "./drain";
 import {
   NO_CELL,
@@ -65,6 +66,18 @@ const isCI = process.env.CI !== undefined && process.env.CI !== "";
  * and a setup that cannot succeed should say so at once rather than three times.
  */
 const RETRIES = intEnv("E2E_RETRIES", 2, 0, 10);
+
+/**
+ * How many reports the run's report folder keeps as the run ends (`reporting/run-pruning.ts`):
+ * `E2E_REPORTS_KEEP`, 20 by default, `0` for no cap — the age rules still apply. Read here, as the
+ * config is built, so a bad value fails the run at its start, naming the variable.
+ */
+const REPORTS_KEEP = intEnv(
+  "E2E_REPORTS_KEEP",
+  DEFAULT_RETENTION.keep,
+  0,
+  MAX_REPORTS_KEEP,
+);
 
 /**
  * The auth setup's trace: kept for a failed attempt, like every project's, but without DOM snapshots.
@@ -292,6 +305,7 @@ export function createProductConfig(
       reportDir,
       reportPath: resolve(REPO_ROOT, reportDir),
       ...displayOnlyFacts(),
+      reportsKeep: REPORTS_KEEP,
     }),
     // Committed-baseline visual checks (`toHaveScreenshot`): comparison tolerance + where the
     // per-product/cell baselines live. WP Rocket's A/B check (visual/ab.ts) diffs live renders and

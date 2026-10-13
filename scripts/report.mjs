@@ -11,17 +11,23 @@ import "../src/common/config/load-env";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const argv = process.argv.slice(2);
 const [product, cell] = argv.filter((arg) => !arg.startsWith("--"));
 
-const reportRoot = process.env.REPORT_ROOT || "reports";
+/** The checkout's root: a run resolves REPORT_ROOT against it, wherever it starts — so does this. */
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const reportRoot = resolve(repoRoot, process.env.REPORT_ROOT || "reports");
 
-/** Immediate subdirectory names of `dir` (empty when `dir` is absent). */
+/**
+ * Immediate subdirectory names of `dir` (empty when `dir` is absent). Hidden ones are left out: the
+ * report pruning renames a run it is removing to a hidden name first.
+ */
 function subdirs(dir) {
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
     .map((entry) => entry.name);
 }
 
@@ -63,7 +69,7 @@ const target = runs[0];
 console.log(`→ Playwright report for ${target.product}/${target.cell}`);
 console.log(`  ${target.htmlDir}`);
 
-const playwrightBin = resolve("node_modules", ".bin", "playwright");
+const playwrightBin = resolve(repoRoot, "node_modules", ".bin", "playwright");
 const shown = spawnSync(playwrightBin, ["show-report", target.htmlDir], {
   stdio: "inherit",
 });

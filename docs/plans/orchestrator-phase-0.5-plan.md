@@ -326,7 +326,8 @@ SIGINT. While `bddgen` runs, its group is killed outright: generation has nothin
 ```
 
 - **Reports** are pruned by the suite at each run's end (0F), per cell — one task per cell here, so
-  per task too. `runs.reportsKeep` sets `E2E_REPORTS_KEEP` (default 20, the suite's). At ~55 min a
+  per task too. `runs.reportsKeep` sets `E2E_REPORTS_KEEP` (default 20, the suite's; `0` lifts only the
+  cap, the 30- and 182-day rules still run). At ~55 min a
   cycle, 20 reports cover about 18 hours; AutoE2E kept 4 days — raise it if that history is wanted.
 - **Run folders** follow the same policy at each run's end, through 0F's pure `planRetention` (group:
   the task; never the run in progress).
@@ -414,7 +415,7 @@ Each step ships with its unit specs and passes the four gates (CLAUDE.md).
 | --- | --- | --- |
 | Tasks in a JSON file, read once | The task store (SQLite), edited through the API | The task fields and ids — imported as they are |
 | The run builds its plugin | The orchestrator builds and pins (`E2E_PLUGIN_REF=commit:<sha>`) | Everything else the run is given |
-| The suite prunes reports per cell | The orchestrator prunes per task (`E2E_REPORTS_KEEP=0`) | 0F's planner |
+| The suite prunes reports per cell | The orchestrator prunes per task, the suite's end-of-run pruning off — by a switch still to add (`E2E_REPORTS_KEEP=0` lifts only the cap; Phase 0 §8.3) | 0F's planner |
 | `start` in the foreground, in `tmux` | The same process under systemd; the command talks to it over the socket | Signals, stop, loop |
 | One event, two subscribers | More events; dashboard, `watch` | The bus and `run.finished` v1 |
 | Run records as JSON | Rows in the store | The record's fields |

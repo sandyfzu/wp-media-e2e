@@ -29,6 +29,7 @@ import {
   reporterMode,
   type RunDescription,
 } from "./run-description";
+import { describePruning, pruneRunGroup, type PruneLine } from "./run-pruning";
 import {
   parsePluginFacts,
   parseSiteFacts,
@@ -55,7 +56,11 @@ import {
  *   Playwright  npx playwright show-report reports/backwpup/pro@nginx/<RUN_ID>/playwright
  *   Cucumber    reports/backwpup/pro@nginx/<RUN_ID>/cucumber/index.html
  *   Allure      npm run report:allure -- backwpup pro@nginx --open
+ *   Pruned      1 old report, 4.3 MB — beyond the newest 20 (E2E_REPORTS_KEEP)
  * ```
+ *
+ * Before printing, it prunes the run's report folder's group (`run-pruning.ts`): the last reporter's
+ * `onExit` comes after every report is written, and `Pruned` says what went — only when something did.
  */
 
 /** What a run came to, in the summary's words. */
@@ -92,6 +97,8 @@ export interface SummaryInput {
   readonly setupFailures: readonly SetupFailure[];
   /** Each cell's facts, in the order its setups reported them. */
   readonly cells: ReadonlyMap<string, CellFacts>;
+  /** What the run's pruning removed or could not; nothing when it removed nothing. */
+  readonly pruned?: readonly PruneLine[];
 }
 
 /** Colours a piece of the summary; identity when colours are off (a spec, a pipe). */
@@ -415,6 +422,13 @@ export function renderSummary(
     ...labelled(style, "Allure", [
       `npm run report:allure -- ${run.product} ${run.reportCell} --open`,
     ]),
+    ...labelled(
+      style,
+      "Pruned",
+      (input.pruned ?? []).map((line) =>
+        line.warn ? style("yellow", plain(line.text)) : plain(line.text),
+      ),
+    ),
   ];
 }
 
@@ -482,7 +496,10 @@ export default class RunSummaryReporter implements Reporter {
     });
   }
 
-  /** Prints the summary, below everything else the run printed. Nothing to await. */
+  /**
+   * Prunes the run's report group, then prints the summary below everything else the run printed.
+   * Nothing to await.
+   */
   onExit(): Promise<void> {
     this.guard(() => {
       if (
@@ -501,6 +518,7 @@ export default class RunSummaryReporter implements Reporter {
           scenarios: this.tally.scenarios,
           setupFailures: this.setupFailures,
           cells: this.cells,
+          pruned: prune(this.run),
         },
         terminalStyle,
       );
@@ -564,6 +582,20 @@ export default class RunSummaryReporter implements Reporter {
       );
     }
   }
+}
+
+/**
+ * Prunes the run's report group (`run-pruning.ts`) and says what went. A run whose description
+ * carries no `reportsKeep` prunes nothing.
+ *
+ * @param run - the run.
+ */
+function prune(run: RunDescription): PruneLine[] {
+  if (run.reportsKeep === undefined) return [];
+  const outcome = pruneRunGroup(run.reportPath, run.reportsKeep, Date.now());
+  return describePruning(outcome, (path) =>
+    shellWord(displayPath(path, process.cwd())),
+  );
 }
 
 /** A cell's facts with the plugin zips its artifacts setup recorded, when it recorded any. */
