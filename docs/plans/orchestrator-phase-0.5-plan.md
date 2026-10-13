@@ -5,7 +5,7 @@
 > step 2, M4's pure parts and M6's builder and bus (2026-10-13, §7.8; audited the same day, §7.9); step 3, the
 > Slack and Datator formatters and senders (2026-10-13, §7.10; audited the same day, §7.11); step 4, M4's
 > launch and end and M5's stop machines (2026-10-13, §7.12; audited the same day, §7.13).
-> **Next:** step 5, M3 and M1 with M9. Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> **Next:** step 5, M3 and M1 with M9, in §7.14's sub-phases (5A first). Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -420,7 +420,7 @@ Each step ships with its unit specs and passes the four gates (CLAUDE.md).
 2. M4's pure parts — identity, environment, the outcome table; M6's builder and bus. **Done 2026-10-13** (§7.8).
 3. M7 and M8 formatters (pure), then their senders. **Done 2026-10-13** (§7.10; audited, §7.11).
 4. M4's launch and end, M5's stop state machine (an injected clock and `kill`). **Done 2026-10-13** (§7.12; audited, §7.13).
-5. M3 and M1 — the loop and the command; M9 — lock, counter, retention, logs.
+5. M3 and M1 — the loop and the command; M9 — lock, counter, retention, logs. Broken into 5A–5K (§7.14).
 6. Docs: a new `docs/guides/orchestrator.md` (operating it: §6, the config, stopping), `CLAUDE.md`
    (structure, the script, the docs map), `README.md`, `.env.example` untouched (no `E2E_*`).
 
@@ -1066,6 +1066,97 @@ and every fix proved by a mutation (V404).
   stranger's group to kill (V402). Record what identifies the leader — its start time, read at spawn —
   and treat a record whose leader no longer matches as stale. Serialise each run's record writes: a late
   `running` write must never replace `ended`.
+
+### 7.14 Step 5 — Broken down (2026-10-13)
+
+**TL;DR.** Five small parts first, each a module and its spec that need nothing else new: the logger,
+the lock and counter, the leader's identity with serialised records, run-folder retention, and the
+notification subscribers. Then two compositions: one run (5F) and the task loop (5G). Then the process
+itself (5H) and the command (5I). It ends with the live checks (5J) and an audit (5K). Every phase
+passes the four gates. Every module takes its clock, filesystem paths, `kill` and launch as arguments,
+so the fake suite (§7.12) can drive everything up to 5I with real signals and no site.
+
+**Stack:** what is already here (Node ≥ 24.16, TypeScript 6, zod 4, the Playwright unit runner), plus
+**commander 15.0.0**, the latest stable (`npm view`, 2026-10-13), added in 5I and nowhere else.
+
+| Phase | Goal | Depends | Parallel with |
+| --- | --- | --- | --- |
+| 5A | `log.ts`: the logger | — | 5B–5E |
+| 5B | `state/lock.ts`, `state/counter.ts` | — | 5A, 5C–5E |
+| 5C.1 | The leader's identity, serialised record writes (V402) | — | 5A, 5B, 5D, 5E |
+| 5C.2 | `state/orphans.ts`: the orphan check | 5C.1 | 5A, 5B, 5D, 5E |
+| 5D | `state/run-retention.ts`: run folders pruned | — | 5A–5C, 5E |
+| 5E | `notify/subscribe.ts`: Slack and Datator on the bus | 5A | 5B–5D |
+| 5F | `tasks/cycle.ts`: one run, from counter to `run.finished` | 5A–5E | — |
+| 5G | `tasks/loop.ts`: the cycle, cooldown, `--once` | 5F | 5I.1 |
+| 5H | `start.ts`: the process — lock, orphans, signals, loops, exit | 5G | 5I.1 |
+| 5I.1 | `--dry-run`'s report, pure | — (step 1) | 5A–5H |
+| 5I.2 | `cli.ts` with commander, the `orchestrator` script | 5H, 5I.1 | — |
+| 5J | Live checks (§9) on `bwu2`/`bwu3` | 5I.2 | — |
+| 5K | Audit: reviewers, mutations, V-rows | 5J | — |
+
+- **5A — The logger** (`orchestrator/log.ts`). A `Logger` interface (`line(scope, text)`) with two
+  outputs: the terminal and `orchestrator.log`. The file is appended through one queue and opened
+  without following a link, `0600`. Each line is `HH:MM:SS <scope> <text>` (§4.1) and passes through
+  `text.ts`'s safe line, masked by the config's secret values. A closed terminal (`EPIPE`, `EIO` after
+  SIGHUP) stops writes to the terminal; the file keeps them. **Done:** the spec covers the format, the
+  masking, the terminal failing while the file still writes, and an injected clock.
+- **5B — Lock and counter.** `orchestrator.lock` is created exclusively and holds the pid. A live pid
+  refuses the start and names that pid; a dead pid's lock is taken over. The lock goes when the
+  process ends. `tasks/<id>.json` stores the run counter through `writeJsonAtomic`, and the number is
+  saved **before** the run starts, so a crash never hands it out twice. A counter that cannot be read
+  is a refusal, never a silent reset to 1. **Done:** specs cover a race between two starts, a dead
+  pid, `EPERM` read as alive, a corrupt counter, and a mode of `0600`.
+- **5C.1 — The leader's identity (V402).** At spawn, read the leader's start time. Measure the source
+  on macOS and on Linux (Ubuntu 24.04) before choosing it (`ps -o lstart=`, `/proc/<pid>/stat`).
+  Record it next to `pgid` in the `running` record, and add `leaderMatches(record)`. Record writes go
+  through a per-run queue, and once `ended` is written, a later `running` write is dropped.
+  **Done:** a spec shows a late `onProcess` write never replaces `ended`, and that a reused pid with a
+  different start time reads as not matching.
+- **5C.2 — The orphan check.** Read every `runs/*/run.json` that is still `running`, through
+  `readRunningRecord`, and sort them into two kinds. **Orphan:** the group is alive (`groupAlive`) and
+  the leader matches. **Stale:** anything else; it is rewritten as ended-unknown, so it is not read
+  again. An orphan refuses the start, naming the task, the run and `kill -KILL -<pgid>`. **Done:** a
+  spec covers each kind, plus a malformed record (a warning, never a crash).
+- **5D — Run-folder retention.** List `runs/<task>-<n>/` for one task. Date each folder from its
+  record's `startedAt`, never its mtime. Then call `planRetention` and `applyRetention` with the
+  config's `reportsKeep`, never touching the run in progress (§4.9). **Done:** a spec runs on a fake
+  tree and covers an undated folder being kept and the current run being kept.
+- **5E — Subscribers.** `subscribeNotifications(bus, config, logger)`: subscribes Slack and Datator
+  when each is configured, with `secretValues(config)` and the bus's signal. It prints one line per
+  run, `slack ✓ · datator ✓ 201`, or `✗` with the masked reason. The Datator payload is returned so it
+  can be kept in `run.json`. **Done:** specs against `http-sink.ts` cover each one alone, both, one
+  failing, a timeout, and an unconfigured sender left out.
+- **5F — One run.** `runOnce(task, deps)`: takes the counter's next number, builds the identity and
+  the environment, then calls `launchRun` with `onProcess` writing the record (5C.1) and logging the
+  "started" line. Then `endRun` writes the `ended` record (with the payload), logs the outcome line,
+  publishes `run.finished`, and prunes (5D). It exposes `stop(level)` for 5H. The launch is injected.
+  **Done:** fake-suite specs show passed, failed, `bddgen` failing, a stop at each stage, and that a
+  throw from any dependency is logged and the run is still recorded.
+- **5G — The loop.** `runTask(task, deps)`: runs the cycle, then the cooldown counted from the run's
+  end, then the next cycle. A stop during the cooldown ends at once, and no run starts after a stop.
+  `--once` gives one cycle and its status. It logs the `next run HH:MM:SS (cooldown Nm)` line.
+  **Done:** specs with an injected clock cover the cooldown, a stop in the cooldown, a stop mid-run,
+  and `--once`.
+- **5H — The process.** `start(options, deps)`: loads the product list (`loadProductList`) and the
+  config, then takes the lock, runs the orphan check, sets up the bus and subscribers, and starts every
+  task's loop at once. It installs `SHUTDOWN_SIGNALS` → `shutdown.signal`, and on `onEscalate` stops
+  every run. It waits for every loop, then `bus.settle()`, `dispose`, and releases the lock. It returns
+  the exit code: `0`/`1` with `--once`, `130` when stopped, `1` on a config error. `process` is
+  injected (signals and exit). **Done:** fake-suite specs cover two tasks at once, a refused lock, a
+  refused orphan, one, two and three SIGINTs, SIGTERM, and that all handlers are removed at the end.
+- **5I.1 — Dry run.** `dryRunReport(checked)`, pure: each task, its sites and their servers, and the
+  warnings, never a secret. **Done:** a spec over the example config.
+- **5I.2 — The command.** `cli.ts`: commander 15, `start [--config] [--task…] [--once] [--dry-run]`,
+  and `"orchestrator": "tsx orchestrator/cli.ts"`. It is the boundary spec's one exclusion, and
+  `suite-imports.json` stays unchanged. **Done:** a child-process spec covers `--help`, an unknown
+  task, `--dry-run` on the example config, and exit codes.
+- **5J — Live (§9).** First, name to the user the sites to be used. Then: both cells `--once`
+  together; two cycles at a 1-minute cooldown; one Ctrl-C mid-scenario (drained, `stopped`, site as
+  found); two Ctrl-C; SIGTERM; SIGKILL of the orchestrator, then a start that refuses on the orphan.
+  Slack and Datator go to the local sink and the local Datator only (D5, D6). Run under `caffeinate -i`.
+- **5K — Audit.** As for steps 1–4: a reviewer on security and one on correctness, each on its own
+  copy; mutations of every phase; findings fixed and proven; V-rows in §11.
 
 ## 8. What later phases change, and keep
 
