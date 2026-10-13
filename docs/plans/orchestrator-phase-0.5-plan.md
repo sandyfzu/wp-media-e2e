@@ -1,6 +1,7 @@
 # Orchestrator Phase 0.5 — The minimal orchestrator
 
-> **Status:** in implementation, in §7's order. **Done:** step 0, the scaffold (2026-10-12, §7.1; audited 2026-10-13, §7.2). Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> **Status:** in implementation, in §7's order. **Done:** step 0, the scaffold (2026-10-12, §7.1; audited 2026-10-13, §7.2). **Next:** step 0.1,
+> what that audit left open (§7.3). Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -406,6 +407,9 @@ Each step ships with its unit specs and passes the four gates (CLAUDE.md).
    `include` (or `tsc` skips it) and in the unit config, the `.gitignore` line, and both import
    guards (§5). Prove each guard fails on a forbidden import, e.g. one of `run-context.ts`.
    **Done 2026-10-12** (§7.1).
+0.1. What the step-0 audit left open (§7.3): 0.1a the product list loaded where a broken sites file is
+   a config error; 0.1b an absolute `ARTIFACTS_ROOT` kept where it points; 0.1c the boundary's cheap
+   remaining routes closed, the rest stated.
 1. M2 configuration — schema, loader, example.
 2. M4's pure parts — identity, environment, the outcome table; M6's builder and bus.
 3. M7 and M8 formatters (pure), then their senders.
@@ -482,6 +486,112 @@ every reviewer bypass rebuilt against the final tests (V343).
 - **Out of scope, reported:** an absolute `ARTIFACTS_ROOT` is joined under the checkout
   (`artifacts.setup.ts`, `consume.ts`: `join(REPO_ROOT, …)`), so `results-stream.run.spec.ts`, which
   passes one, leaves empty `private/var/folders/…` folders in the checkout on every unit run (V346).
+
+### 7.3 Step 0.1 — What the step-0 audit left open
+
+**TL;DR.** Three small, independent fixes before M2. **0.1a**: the orchestrator loads the product list
+through one function of its own, so a broken sites file stops it with one line naming the file
+instead of a stack trace. **0.1b**: the suite resolves `ARTIFACTS_ROOT` as it already resolves
+`REPORT_ROOT` and `AUTH_ROOT`, so an absolute root stays where it points — and a unit run stops
+leaving empty folders in the checkout. **0.1c**: the import boundary refuses the three builtins the
+orchestrator never needs and which open a route around it (`module`, `worker_threads`, `vm`), and
+`eval`; what remains is stated.
+
+| Sub-step | Depends on | Parallel with | Touches |
+| --- | --- | --- | --- |
+| 0.1a | 0 | 0.1b, 0.1c | new `orchestrator/config/product-list.ts` (+ spec), `orchestrator/config/errors.ts` |
+| 0.1b | — | 0.1a, 0.1c | `src/common/artifacts/artifacts.setup.ts`, `consume.ts` (+ spec), `configuration.md`, TSDoc |
+| 0.1c | 0 | 0.1a, 0.1b | `eslint.config.js`, `orchestrator/__fixtures__/import-boundary.ts`, `orchestrator/import-boundary.spec.ts` |
+
+#### 0.1a — The product list, loaded where a failure is a config error (V342)
+
+**Finding.** Importing `src/projects/products.ts` builds every product's config at import, and with it
+runs `loadSites` for every product: it reads each sites file once (credentials included), prints a
+`[sites]` warning for a product with none, reads `BWP_*`, and **throws** on a file that is not valid
+JSON (`[sites] "…/sites.json" is not valid JSON`). A static import would let a broken WP Rocket sites
+file kill the orchestrator at startup, with a stack trace, even when it runs only BackWPup cells.
+
+**Recommended.**
+
+- `orchestrator/config/product-list.ts`: `loadProductList(importList?)` — the one place the
+  orchestrator gets `PRODUCTS`, `productByName` and `playwrightConfigFor`. The default `importList` is
+  a literal `import("../../src/projects/products")` (an admitted path, which both guards judge); a
+  throw becomes a `ConfigError` (`orchestrator/config/errors.ts`, which M2 reuses) saying the product
+  list could not be loaded, with the cause's own words — they name the sites file. The command calls it
+  once, at start, inside its error handling (M1): exit `1`, one line. `[sites]` warnings print once,
+  there.
+- Its spec injects the importer: a list returned as is; a throw turned into a `ConfigError` keeping the
+  cause's message; the real importer returns the real list. It is the first orchestrator module, so
+  the boundary spec's walk and probe stop being vacuous with it.
+
+**Rejected.**
+
+- A static import: the crash above, and a sites edit that can never be reported as a config error.
+- Making the product list lazy (each product's sites read on first use), which would also let a
+  broken WP Rocket file leave BackWPup cells running: it changes the import contract of every entry
+  point that spans products (the bare config, the healthcheck, the artifact warm), which validate
+  every product up front by design. Worth reconsidering only if a broken other-product file proves a
+  real problem on the runner.
+
+**Done when** `loadProductList` and its spec are in, the boundary spec covers the module (no effects
+at import, no forbidden import), and the four gates pass.
+
+#### 0.1b — An absolute `ARTIFACTS_ROOT` (V346)
+
+**Finding.** `dirs()` (`run-context.ts`) returns each root with `<product>/<cell>` appended, relative or
+absolute as the variable was given. `REPORT_ROOT` and `AUTH_ROOT` are made absolute with
+`resolve(REPO_ROOT, …)` (`project.ts:123`, `:324`), which keeps an absolute root; the artifacts folder
+with `join(REPO_ROOT, …)` (`artifacts.setup.ts:73`, `consume.ts:148`), which nests it under the
+checkout. `results-stream.run.spec.ts:155` passes an absolute `ARTIFACTS_ROOT`, so every unit run
+leaves empty `private/<tmpdir>/…/artifacts/resultsprobe` folders in the checkout; an operator's absolute
+root would put the zips under a mirrored path inside it.
+
+**Recommended.**
+
+- `resolve(REPO_ROOT, …)` at both call sites, as for the report and auth roots; the TSDoc of
+  `RunDirs.artifacts` (`run-context.ts`) and `resolve.ts:47` say so; `configuration.md` says each
+  `*_ROOT` is relative to the repository or absolute.
+- A spec that pins an absolute `ARTIFACTS_ROOT` and expects the artifacts folder and
+  `resolution.json` at that root, failing with `join`.
+- Once a unit run is shown to leave no `private/` folder, remove the empty leftovers from the checkout
+  (`find private -type f` must print nothing first).
+
+**Rejected.** Refusing an absolute root: the report and auth roots accept one, and a root outside the
+checkout (another disk) is a legitimate choice.
+
+**Done when** both call sites resolve, the spec fails with `join` and passes with `resolve`, a full
+unit run leaves no `private/` folder, and the four gates pass.
+
+#### 0.1c — The boundary's stated limits (V343)
+
+**Finding.** The guards catch mistakes, not evasion, and the step-0 spec states what they cannot see:
+a `require` made by `createRequire` under another name — a dynamic `import("node:module")` or
+`process.getBuiltinModule("module")` gets one past the ESLint ban on importing `createRequire`; a
+`Worker` sharing the environment (`SHARE_ENV`); code read and evaluated (`eval`, `vm`; `new Function`
+and string timers are already refused by `@typescript-eslint/no-implied-eval`, a plain `eval()` is
+not — `no-eval` is off, measured); a
+module's output and globals; an unref'd timer; anything a package does.
+
+**Recommended.** Close the routes that cost a few lines and that the orchestrator never needs; state
+the rest.
+
+- Refuse, in every form, the builtins `module`, `worker_threads` and `vm` (`node:` prefixed or
+  not): ESLint's `no-restricted-imports` `paths`, whole modules (replacing the `createRequire`-only
+  entries), and the scan, which judges the specifier — so a dynamic `import("node:module")` is
+  refused too. The orchestrator spawns processes; it needs neither threads, a VM nor `require`.
+- Refuse `process.getBuiltinModule` (a function on Node 24.21, measured): ESLint `no-restricted-properties`,
+  and the scan reports the call from the syntax tree.
+- Turn on `no-eval` for `orchestrator/**`.
+- Each one a row of the spec's import table (both readers' verdicts), each proved by a mutation.
+- **Stated, not closed:** a module's output and globals (the product list prints `[sites]` warnings
+  by design); an unref'd timer; what a package does — none can be judged without running everything.
+
+**Rejected.** Capturing output in the probe: the product list's warnings are by design, so it would
+fail an admitted module. Accepting every limit as it stands: each cheap route closed removes a whole
+way around the boundary for a few lines.
+
+**Done when** the new refusals are in both readers and the spec's table, each mutation-proved; the
+spec's stated limits list only what stays open; the four gates pass.
 
 ## 8. What later phases change, and keep
 
