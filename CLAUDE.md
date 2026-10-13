@@ -26,6 +26,7 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 | BDD                | **Cucumber/Gherkin** via **`playwright-bdd`** (`bddgen` generates specs)                                                                                        |
 | WP-CLI transport   | **execa** (local/docker), **node-ssh** (ssh)                                                                                                                    |
 | Visual diff        | **pixelmatch** + **pngjs**                                                                                                                                      |
+| Config validation  | **zod 4** (the orchestrator's config)                                                                                                                           |
 | Reporting          | Playwright HTML, Cucumber HTML, **Allure** (`allure`, `allure-playwright`)                                                                                      |
 | Quality            | **ESLint** (typescript-eslint, strict + type-checked), **Prettier**, **husky** + **lint-staged**                                                                |
 
@@ -57,7 +58,7 @@ src/
         ├── steps/          # product-specific steps
         └── support/        # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
 
-orchestrator/               # the orchestrator (being built): suite-imports.json, the suite modules it may import, + its import-boundary spec; config/ (product-list.ts: the product list loaded as a config error, errors.ts: ConfigError)
+orchestrator/               # the orchestrator (being built): suite-imports.json, the suite modules it may import, + its import-boundary spec; config.example.json; config/ (product-list.ts: the product list loaded as a config error, errors.ts: ConfigError; its config file: schema.ts (zod), parse.ts (messages; keys shown only as names), json-keys.ts (keys JSON would lose), check.ts (against the suite's products and cells), load.ts)
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)
 playwright*.config.ts       # entry configs (default, per-product, unit)

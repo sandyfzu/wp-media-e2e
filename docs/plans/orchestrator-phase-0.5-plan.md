@@ -1,7 +1,8 @@
 # Orchestrator Phase 0.5 — The minimal orchestrator
 
 > **Status:** in implementation, in §7's order. **Done:** step 0, the scaffold (2026-10-12, §7.1; audited 2026-10-13, §7.2); step 0.1,
-> what that audit left open (2026-10-13, §7.3–§7.4; audited the same day, §7.5). **Next:** step 1, M2 configuration. Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> what that audit left open (2026-10-13, §7.3–§7.4; audited the same day, §7.5); step 1, M2 configuration (2026-10-13, §7.6; audited the same day, §7.7).
+> **Next:** step 2, M4's pure parts and M6's builder and bus. Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -151,7 +152,7 @@ committed `orchestrator/config.example.json` documents it.
     "datator": { "url": "https://datator.wp-media.me/e2e_tests/results/", "apiKey": "…" }
   },
   "reports": { "sshHost": "auto-e2e" },
-  "serverWarningThreshold": 4
+  "serverWarningThreshold": 5
 }
 ```
 
@@ -187,7 +188,7 @@ committed `orchestrator/config.example.json` documents it.
   folder `runs/<run id>/` holds `run.log`, `run.json` and the stop file.
 - **Launch** — Phase 0's run contract (its §2), unchanged: `node node_modules/playwright-bdd/dist/cli/index.js
   --config playwright.<product>.config.ts`, then, if it exited `0`, `node node_modules/@playwright/test/cli.js
-  test --config playwright.<product>.config.ts` (plus `--grep` when the task has one). Each `detached`
+  test --config playwright.<product>.config.ts` (plus `--grep=<grep>` when the task has one — one argument, so a value starting with `-` cannot read as an option, V368). Each `detached`
   (its own process group and session, V121), both writing to `run.log` with a header line (command,
   variable names — never values — start, exit code or signal). The working directory is the checkout.
 - **Environment, from an allowlist** — never the orchestrator's own:
@@ -346,7 +347,8 @@ belong with Phase 1's service.
 ```text
 orchestrator/
   cli.ts                  commander: start
-  config/                 schema (zod), loader, config.example.json
+  config.example.json     the committed example (§4.2)
+  config/                 schema (zod), checks against the suite, loader
   tasks/loop.ts           the cycle
   runs/                   identity, env, launch, stop, outcome, record
   events/                 bus, run-finished (types + builder)
@@ -411,7 +413,7 @@ Each step ships with its unit specs and passes the four gates (CLAUDE.md).
 0.1. What the step-0 audit left open (§7.3): 0.1a the product list loaded where a broken sites file is
    a config error; 0.1b an absolute `ARTIFACTS_ROOT` kept where it points; 0.1c the boundary's cheap
    remaining routes closed, the rest stated. **Done 2026-10-13** (§7.4).
-1. M2 configuration — schema, loader, example.
+1. M2 configuration — schema, loader, example. **Done 2026-10-13** (§7.6; audited, §7.7).
 2. M4's pure parts — identity, environment, the outcome table; M6's builder and bus.
 3. M7 and M8 formatters (pure), then their senders.
 4. M4's launch and end, M5's stop state machine (an injected clock and `kill`).
@@ -662,6 +664,102 @@ Every claim re-measured, every fix proved by a mutation that fails the test mean
   and globals; timers and functions after the import; packages. Not a route: a string timer — Node
   refuses one (V354).
 
+### 7.6 Step 1 — Implemented (2026-10-13, V359–V364)
+
+M2 as planned (§4.2), in four modules under `orchestrator/config/` and the example beside them. As
+corrected by the audit (§7.7), which added a fifth, `json-keys.ts`:
+
+- **`schema.ts`** — the zod schema: every rule the file alone can settle. Every object is strict, so a
+  misspelt key is an error, never a setting silently ignored. Ids unique, product × cell unique (a
+  repeat is named at its own path: `tasks[2].cell: repeats tasks[0]'s product and cell`); zod skips
+  these two while a field has an *aborting* issue — a wrong type, a refused key, an aborting check —
+  and runs them beside any other (V360). **`parse.ts`** turns the issues into one `ConfigError`, one `path: problem` line each.
+  **`check.ts`** needs the suite: the product exists, the cell is one of its, and every site of the
+  cell is real; it reads only a product's `name` and `sites`, so its spec uses stand-ins, and gives the
+  caller back the product it passed. **`load.ts`** reads the file and composes the three:
+  `loadConfig(file, PRODUCTS)` → the config, its tasks joined to product and cell, the state directory
+  (the file's own), and the warnings.
+- **No message quotes a value** — the file holds the run's secrets. Zod's own messages name types and
+  bounds (V360), every message of ours is written the same way, and a spec puts a secret-shaped value
+  into every field and finds it in none of the lines. A product or cell the suite does not know is
+  named by its path. A key is shown only when it is a name (`describeKey`, §7.7), never raw. A file
+  that is not JSON is named by where the error is when V8 says so in digits, never by `JSON.parse`'s
+  message, which quotes the text (V361).
+- **Decided here:**
+  - `serverWarningThreshold` defaults to **5**: up to four suites at once share a QA server well, so
+    the warning starts at five (§4.2's example first said 4). At most 1000.
+  - `cooldownMinutes`: whole minutes, **1 to 1440**, default 5. Zero would hammer a broken site; a
+    day or more is a schedule, which later phases add. Every bounded number has one message,
+    `must be a whole number from A to B`, whichever way it misses.
+  - A cell runs only if **every** site of its pool is real: a placeholder in a real pool is a mistake,
+    and a worker bound to it would fail.
+  - `secrets`: `GITHUB_TOKEN`, `GH_TOKEN` and **any `BWP_*`** (Phase 0 §2: by prefix, never a hand-kept
+    list). A value becomes an environment variable: at most 32,768 characters, no control character
+    or broken Unicode. A token is printable ASCII without spaces; a `BWP_*` value keeps its spaces, as
+    the suite reads a storage password (V365).
+  - Slack: `https://hooks.slack.com/services/<hook>` only — an incoming webhook, the payload §4.7
+    sends. Both URLs are written exactly as `URL` reads them back, with no user, password, port, query
+    or fragment; Datator's path ends with `/`, its key is printable ASCII (an HTTP header's value).
+  - `grep` is checked as Playwright reads it: `/source/flags` with `g` or `i`, anything else as a
+    source with `gi` (V362).
+  - `reports.sshHost`: a host or `user@host`, neither part starting with `-`, so it can never read as
+    an `scp` option.
+  - `runs.retries` 0–10 (the suite's `E2E_RETRIES` bounds); `runs.reportsKeep` 0–`MAX_REPORTS_KEEP`
+    (retention's).
+  - The file: at most 1 MiB, UTF-8; a leading byte-order mark is skipped; a mode with any group or
+    other bit is a warning naming `chmod 600`; a missing file says to copy the example.
+  - A version set with a `release:` ref is a warning — the suite ignores it, as it warns itself.
+  - Servers are counted by an SSH site's host, lowercased; a Docker or local site is "this machine".
+- **The example** has a second task on `free@apache` instead of `free@nginx`: its spec checks every
+  task names a cell of the product's `sites.example.json`, so a fresh checkout's `--dry-run` reaches the
+  placeholder check, not "no cell".
+- **zod 4.6.7** (V359), a dev dependency like every package here.
+- **Proved** by 26 mutations, each failing a test (V363); a full unit run passes, the import boundary
+  importing the new modules unchanged (V364).
+
+### 7.7 Audit of step 1 (2026-10-13, V365–V371)
+
+Two reviewers, one on security and one on correctness, each on its own copy; every finding reproduced,
+then fixed, and every fix proved by a mutation (V370). None blocking; no secret value reached any
+message.
+
+- **Keys printed raw (medium).** Zod quotes an unknown key as written, so a key holding a newline
+  forged a line of the error and one holding `ESC[2J` cleared the terminal; a token pasted in a key's
+  place (`"ghp_…": "GITHUB_TOKEN"`) was printed. Now every key in a message or path goes through
+  `describeKey`: shown only when it is a name of at most 40 characters not shaped like a GitHub token,
+  else `a key of N characters`.
+- **Storage passwords refused (medium).** Surrounding whitespace was refused in every secret, but the
+  suite reads `BWP_FTP_PASSWORD` and `BWP_S3_SECRET_ACCESS_KEY` untrimmed on purpose (V365). Only
+  tokens are now strict.
+- **The file could change under the reader (low).** `stat` then `readFile` by path: a link swapped in
+  between loaded a 30 MiB file 200 times in 400, and one swapped to a FIFO hung the process. Now one
+  non-blocking handle is opened, checked, measured and read, never past the cap: 0 in 400, no hang
+  (V367).
+- **Keys lost without a word (low).** JSON keeps the last of two equal keys, so a second `"secrets"`
+  replaced the first; zod's record drops `__proto__`. `lostKeys` (`json-keys.ts`) scans the text
+  JSON already accepted and refuses both, with their paths (V366).
+- **"One line" only for C0 (low).** U+2028, U+0085, C1 controls, bidi overrides, zero-width
+  characters and lone surrogates passed. Text fields now refuse `\p{Cc}`, `\p{Cf}`, `\p{Zl}`,
+  `\p{Zp}`, `\p{Cs}`; secrets `\p{Cc}`, `\p{Cs}`.
+- **Invalid UTF-8 changed a secret (low).** Decoding replaced a Latin-1 `é` with U+FFFD. Now refused.
+- **URLs read as text (low).** Datator's `/` was tested on the raw string, so `…/results#/` passed with
+  path `/results` — the 301 the rule prevents; newlines, spaces, a query (`?api_key=`), backslashes
+  and an empty Slack hook passed too. Now a URL must be written as `URL` reads it back, with no user,
+  password, port, query or fragment.
+- **Smaller (low):** `sshHost` accepted `a@-oProxyCommand` and `a@b@c` (OpenSSH refuses both, V368);
+  a ref or version may no longer start with `-`; Datator's key must be what `Headers` takes (V369); a
+  secret is capped below Linux's 128 KiB per environment string; `1e300` read "must be a whole
+  number"; the product and cell a file names are no longer quoted; a mixed or empty pool had the wrong
+  message; the `chmod` hint is shell-quoted; the code named plans and phases.
+- **Wrong in this plan:** §7.6 and V360 said the uniqueness checks run only once every field is valid;
+  they run beside any issue that does not abort (V360, corrected). `formatIssues` keeps the schema's
+  order, not the file's.
+- **For step 4:** Playwright's command line takes a value starting with `-` as `--grep`'s argument, and
+  `--grep --` swallowed the next argument (V368): pass `--grep=<value>`.
+- **Kept, on purpose:** an equivalent mutant (Datator's `/` read from the path or the text, once the
+  text must equal the parsed URL); keys up to 40 name characters are shown, so a short random key
+  pasted as a key would be. Linux's limit is from its source, not measured here (no Linux host).
+
 ## 8. What later phases change, and keep
 
 | Here | Later | Kept |
@@ -749,3 +847,16 @@ Every claim re-measured, every fix proved by a mutation that fails the test mean
 | V356 | Playwright 1.63.0 resolves a project's `outputDir` with `path.resolve(configDir, …)`; playwright-bdd 9.2.1 resolves its `outputDir` the same way | ✅ 2026-10-13 | `playwright/lib/common/index.js:587` (`pathResolve`, `:616`); `playwright-bdd/dist/config/index.js:81` (`resolveOutputDir`) |
 | V357 | 29 mutations of step 0.1 and its audit fixes — V351's 18, plus: a static import of the list, a cause's message kept, `join` back in `cellArtifactsDir`, a builtin added to the fixture only, `Function` not refused, no `no-new-func`, computed keys unread, `package.json` or `.cjs` not counted as CommonJS, declaration files counted — each fails the test meant to catch it; the static import fails only the new laziness test | ✅ 2026-10-13 | The mutation harness in a copy of the worktree, `--project=orchestrator` (and the two `src` specs for `join`), baseline green before and after |
 | V358 | With `join`, the real artifacts setup of the run spec's cell `y` creates `private/…/artifacts/resultsprobe/y` under the checkout, and the new assertions fail; with `resolve`, nothing is created there | ✅ 2026-10-13 | The `join` mutation in a copy of the worktree, which then held `private/var` |
+| V359 | `zod` 4.6.7 is the latest release (2026-10-12), ESM, with no dependencies; it and 4.6.5 were published by GitHub Actions as a trusted publisher, with SLSA provenance | ✅ registry | `npm view zod@4.6.7 dependencies dist.attestations _npmUser` |
+| V360 | Zod 4.6.7's messages name types and bounds, never the input (`Invalid input: expected string, received number`) — but `Unrecognized key: "…"` quotes a key raw (`util.js` `stringifyPrimitive`), so it is rebuilt (§7.7); a refused record key arrives as `invalid_key` "Invalid key in record", the key schema's message inside it; an object's `superRefine` is skipped only after an aborting issue (wrong type, refused key, `abort: true`) and runs beside any other — corrected by the audit, which reproduced both; `abort: true` stops a field's later checks | ✅ 2026-10-13 | A tsx probe over the schema; `schema.spec.ts` |
+| V361 | Node 24.21.0's `JSON.parse`: an unexpected token is reported by quoting the text, with no position (`Unexpected token 's', "{"a": s3cret }" is not valid JSON`); other errors give `at position N (line L column C)`; an empty text gives `Unexpected end of JSON input` | ✅ 2026-10-13 | `node -e` probe; `load.spec.ts` |
+| V362 | Playwright 1.63.0 reads `--grep` with `forceRegExp`: `/source/flags` (flags `g`, `i`) as written, anything else as `new RegExp(pattern, "gi")`; with `v` added, `[(]` would be refused | ✅ source | `playwright/lib/util.js:152`, `playwright/lib/common/index.js:353`; `node -e` |
+| V363 | 26 mutations of step 1 — id alphabet, either uniqueness rule, the secret names, Datator's slash, Slack's path, a URL's port, the cooldown floor and default, a non-strict object, `grep`'s flags, the `invalid_key` message, path quoting, `in` for `Object.hasOwn`, placeholder counting, an empty pool, server case and duplicates, the threshold's `>=`, the `release:` condition, the mode mask, `JSON.parse`'s message, the BOM, the size cap, the state directory, path resolution — each fails a test. `grep`'s flags survived first; a `[(]` case now kills it | ✅ 2026-10-13 | A mutation harness in a copy of the worktree, `orchestrator/config`, baseline green before and after |
+| V364 | The four gates pass; a full unit run: 2132 passed, 8 skipped by their environment guards — the import-boundary spec among them, importing every new module in a child Node | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V365 | The suite reads `BWP_FTP_PASSWORD` and `BWP_S3_SECRET_ACCESS_KEY` through `env()`, which does not trim, on purpose: "`env()` also serves credentials … whose trailing whitespace can be part of the secret" | ✅ source | `src/common/artifacts/request.ts:68–70`; `backwpup.config.ts:30,36` |
+| V366 | Node 24.21.0's `JSON.parse` keeps the last of two equal keys with no error; zod 4.6.7's `z.record` skips an own `__proto__` key (no issue, no pollution: the prototype stays `Object.prototype`); strict objects report it | ✅ 2026-10-13 | Reviewer probes `proto2.ts`, `files.ts`; `json-keys.spec.ts`, `load.spec.ts` |
+| V367 | `stat` then `readFile` by path: a symbolic link swapped between a small config and a 30 MiB one loaded the large one 200 times in 400; swapped to a FIFO, `readFile` blocked and the process outlived `process.exit`. With one `open(O_RDONLY \| O_NONBLOCK)` handle: 0 in 400, and 50 FIFO swaps never hang — a FIFO opens at once and `fstat` says it is not a file | ✅ 2026-10-13, macOS | Reviewer A's `race.ts`, `race-fifo3.ts`, before and after; `load.spec.ts` (a FIFO with no writer) |
+| V368 | OpenSSH 10.3 refuses `ssh -G 'u@-oProxyCommand'` ("hostname contains invalid characters"); Playwright 1.63.0's CLI takes `-foo`, `-h` and `--list` as `--grep`'s value, and `--grep --` swallowed the next argument | ✅ 2026-10-13 | Reviewer A |
+| V369 | `new Headers({ "X-API-Key": "keyĀ" })` throws "Cannot convert argument to a ByteString", without the value; `TextDecoder("utf-8", { fatal: true })` refuses a stray `0xE9`, a truncated sequence and an encoded surrogate, and drops a leading BOM; `/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u` matches a lone surrogate, U+0085, U+009B, U+2028, U+202E and U+200B but not an emoji pair | ✅ 2026-10-13 | Reviewer A; `node -e` probes; `load.spec.ts`, `schema.spec.ts` |
+| V370 | 48 mutations of the audit's fixes — the key scanner (index, repeats, `__proto__`, commas, escapes, paths), `describeKey` (token prefixes, length), the rebuilt message, path masking, each Unicode class in text and secrets, the secret cap, `-`, every URL condition (exact form, user, password, port, query, fragment, Slack's hook path), Datator's key, token strictness, whole numbers, `sshHost`'s user part, the threshold cap, the non-blocking open, the read limit, the size test, fatal decoding, lost keys, shell quoting, the mode mask, the pool messages — and reviewer B's 7 survivors of the first specs: all fail a test but one equivalent (Datator's `/` from the path or the text). Four survived first; three tests were added for them, and the fourth turned out to be a malformed mutant (perl expanded `@-`) that still showed a missing case | ✅ 2026-10-13 | The mutation harness in a reviewer's copy, `orchestrator/config`, baseline green before and after |
+| V371 | The four gates pass after the audit; a full unit run: 2167 passed, 8 skipped by their environment guards — the orchestrator's 116 among them, the import-boundary spec importing `json-keys.ts` in a child Node | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format`, `test:unit` |
