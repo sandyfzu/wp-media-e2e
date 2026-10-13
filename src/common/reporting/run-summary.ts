@@ -426,7 +426,9 @@ export function renderSummary(
       style,
       "Pruned",
       (input.pruned ?? []).map((line) =>
-        line.warn ? style("yellow", plain(line.text)) : plain(line.text),
+        line.warn
+          ? style("yellow", displayText(line.text))
+          : displayText(line.text),
       ),
     ),
   ];

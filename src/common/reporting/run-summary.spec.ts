@@ -696,6 +696,21 @@ test.describe("the run's pruning, in the summary", () => {
     );
   });
 
+  test("renderSummary: a Pruned line masks a credential, as every other line does", () => {
+    const [line] = renderSummary(
+      input({
+        pruned: [
+          {
+            text: "could not prune https://u:hunter22@h/x — EACCES",
+            warn: true,
+          },
+        ],
+      }),
+    ).slice(-1);
+    expect(line).toContain("could not prune");
+    expect(line).not.toContain("hunter22");
+  });
+
   test("the reporter prunes its own cell's folder as the run ends, and says so; never for --list", () => {
     const root = tempRoot("e2e-summary-prune-");
     try {

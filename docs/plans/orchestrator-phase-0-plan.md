@@ -5,7 +5,7 @@
 > §6.2, §4.2; audited the same day), 0C's suite parts (2026-10-08, §5;
 > audited the same day), 0D.3 and 0D.4 (2026-10-09, §6.3, §6.4; audited the same day, §6.5), 0E
 > (2026-10-12, §7.1; audited the same day, §7.2), 0D.1 (2026-10-12, §6.1.1; audited the same day,
-> §6.1.2, §6.1.3), 0F (2026-10-12, §8.1; audited the same day, §8.2, §8.3). The rest is
+> §6.1.2, §6.1.3), 0F (2026-10-12, §8.1; audited the same day, §8.2, §8.3); the two audited together, §8.4. The rest is
 > investigated: every item has a verified finding and a recommended solution, with the
 > alternatives it beat.
 > **Date:** 2026-09-25.
@@ -1704,6 +1704,25 @@ test that fails with it undone (V299).
   test pins it). The pruning has no time limit of its own: a hung filesystem would hold the run's exit
   until the orchestrator's SIGKILL (a removal then left is finished by a later prune).
 
+### 8.4 Combined audit of 0D.1 and 0F (2026-10-12, V300–V306)
+
+Both branches applied together (uncommitted), the seams between them audited, and the 0F auditor's
+out-of-scope findings fixed; each fix proven by a test that fails with it undone.
+
+- **Merge**: conflicts only where both added beside each other — the run description's fields, the
+  config factory's, the docs; every side kept. Reporters in order: `[cell]`, the stream, `list`, the run
+  facts, the reports, the summary — the facts' `onExit` splices its own banner before the summary's prunes
+  other runs (V300).
+- **The `Pruned` lines were made plain but not masked**, unlike every other summary line: now
+  `displayText` (V301).
+- **`intEnv` took what `Number()` takes** — `1e3`, `0x14`, `20.0`, `+5`: `E2E_REPORTS_KEEP=1e3` read as
+  1000, and so for `E2E_RETRIES`. Now plain decimal digits only (V302).
+- **A refused `RUN_ID` was quoted by `JSON.stringify`**, which leaves DEL, C1 (`U+009B` opens a terminal
+  escape) and `U+2028`/`U+2029` raw: now escaped (V303).
+- **`report`/`report:allure` resolved `REPORT_ROOT`, the CLIs and `allurerc.mjs` from the working
+  directory**, the suite from the checkout: now from the checkout, wherever they start (V304).
+- Live, combined (V305, V306).
+
 ## 9. Implementation order
 
 Each step ships with its unit tests, passes the four gates, and gets the live check its section names,
@@ -1997,3 +2016,10 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V297 | The CLI parser on 27 inputs: duplicates, `--keep=`, `-1`, `10001`, `1e3`, `1.5d`, `0m`, `1439m`, unknown options, `--`, `--apply=yes`, positional junk all exit 2 naming the problem; `007` reads 7. Two dry runs over the main checkout left its 6 025 entries' mtime, ctime, inode and size unchanged | ✅ measured | `lab-args.ts`; `stat` snapshots |
 | V298 | Dry run over the main checkout after the fixes, unchanged from V278: 198 runs, 920.2 MB; 146 to remove (673.1 MB: 106 older than 30 days, 40 beyond the cap), 9 newest-complete kept; `--keep 0` 106 (537.9 MB). Every name there is a RUN_ID | ✅ dry run | `npm run report:prune`, `REPORT_ROOT` on the main checkout |
 | V299 | Each fix undone fails a test (16 mutations, all killed): dating by file age, a later line's `run.begin`, the short-path guard, the formatter's read-back, C1 allowed, both age boundaries, the cap's, keep = 0 capping, the future rule, no rename, the leftover grace, links followed, protection after the empty rule, an interrupted run not pruning (run spec). V276 re-run unchanged (run 21 removes 1, 1.6 MB; a failing run removes 1; SIGKILL 137 removes none, 21 folders; the next removes 2, keeps the killed one; `apache`/`_all` 3 each). Gates: typecheck, lint, format clean; unit 1901 passed, 8 skipped | ✅ 2026-10-12 | `mutate.py`; `e2e21.sh`; the four gates |
+| V300 | The merge of 0D.1 and 0F: 7 files in conflict, all additive; gates on the result clean, unit 1983 passed, 8 skipped | ✅ 2026-10-12 | The four gates |
+| V301 | A `Pruned` failure line quoting `https://u:<pw>@h` printed the password; now masked — the test fails with `plain` back | ✅ unit + mutation | `run-summary.spec.ts` |
+| V302 | `Number()` reads `1e3`, `0x14`, `0b11`, `20.0`, `+5` as integers; `intEnv` now refuses each (and `0o7`, `5_0`, `Infinity`, 20 digits) by name, reads `" 4\n"` as 4 and `-0` as 0 — the test fails with `Number()` back | ✅ unit + mutation | `env.spec.ts` |
+| V303 | `RUN_ID="run\u009b31m\u007f\u2028x"`: the error now shows each as `\uXXXX` and holds none raw — the test fails with `JSON.stringify` back | ✅ unit + mutation | `run-context.spec.ts` |
+| V304 | From a scratch folder, `report:allure` with a relative `REPORT_ROOT` resolves it in the checkout, and generates with `allurerc.mjs` (both plugins present), named by `run-facts.json` | ✅ measured | Scratch run |
+| V305 | Placeholder `wp-rocket/nginx`, keep 2, three runs: the third prints `Pruned 1 old report, 1.6 MB — beyond the newest 2`; each run leaves `run-facts.json`, its properties and banner; loose report parts at cell level (a botched copy) are skipped "holds no report part", never removed | ✅ measured | `integ-run-*`; `report:prune` dry run |
+| V306 | Live, `free@nginx` and `pro@nginx` at once (`--grep "The version command names\|@smoke"`, keep 3, 9 earlier runs each): both PASSED; each pruned 6 (48.1 MB, 52.6 MB) and kept the newest 3, itself and `allure-history.jsonl` included; the zip's SHA-256 (`3f6fd5dd…`, `bb348eaa…`) in `run-facts.json`, `environment.properties` and the banner; no site password or GitHub token in the reports or `test-results/` (raw, base64, inside zips); both sites' plugins, BackWPup options and tables, `.e2e_*` folders and disk as before | ✅ live 2026-10-12 | `integ-live2-*`; `state.sh` before/after |
