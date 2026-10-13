@@ -225,4 +225,13 @@ test.describe("the drain, through the real runner", () => {
     // Nothing that ran failed for good, so the run passes.
     expect(outcome.exitCode).toBe(0);
   });
+
+  test("refuses to start with a stop file already there: it would skip every scenario and pass", () => {
+    const stopFile = join(work, "stale-stop");
+    writeFileSync(stopFile, "");
+    // `bddgen` loads the config first, so the refusal comes before anything is generated or run.
+    expect(() => runProduct(stopFile)).toThrow(
+      /E2E_INTERNAL_STOP_FILE=.*stale-stop" exists already, as the run starts/,
+    );
+  });
 });

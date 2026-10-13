@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   STOPPED_ANNOTATION,
   STOP_FILE_ENV,
+  assertNotStoppedYet,
   assertStopFileFolder,
   drainReason,
   stopFileFromEnv,
@@ -139,6 +140,28 @@ test.describe("assertStopFileFolder", () => {
     expect(() => {
       assertStopFileFolder(join(locked, "stop"));
     }).toThrow(/its folder .*locked may not be searched by this process/);
+  });
+});
+
+test.describe("assertNotStoppedYet", () => {
+  test("refuses a stop file that exists as the run starts, naming the variable and the file", () => {
+    expect(() => {
+      assertNotStoppedYet(STOP, false, () => true);
+    }).toThrow(`${STOP_FILE_ENV}="${STOP}" exists already, as the run starts`);
+  });
+
+  test("accepts one not created yet, and never refuses in a worker, which may start after a stop", () => {
+    expect(() => {
+      assertNotStoppedYet(STOP, false, () => false);
+    }).not.toThrow();
+    let asked = false;
+    expect(() => {
+      assertNotStoppedYet(STOP, true, () => {
+        asked = true;
+        return true;
+      });
+    }).not.toThrow();
+    expect(asked).toBe(false);
   });
 });
 

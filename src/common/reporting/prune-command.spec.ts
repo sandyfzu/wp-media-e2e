@@ -206,7 +206,7 @@ test.describe("runPrune — on a real tree", () => {
     const out = lines.join("\n");
     expect(out).toMatch(/keep {4}nightly .*\(dated by its stream\)$/m);
     expect(out).toContain(
-      "copied-by-hand — not a run: its name is no RUN_ID, and it holds no results stream",
+      "copied-by-hand — not a run: its name is no RUN_ID, and no results stream dates it",
     );
   });
 

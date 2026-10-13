@@ -201,8 +201,9 @@ export function projectSelection(): string[] {
  * selection like `--project='pro*'` runs a cell that no exact comparison here matches. That is
  * deliberate: such a selection is treated as broad, which for the artifacts setup means overrides
  * warn-and-drop rather than silently applying to cells the operator never named (and it keeps
- * `--project='*'` ⇒ serial). A pinned run has one cell whatever `--project` adds, so it is always
- * targeted. Name the cell exactly, or pin it, to target it.
+ * `--project='*'` ⇒ serial). Beside a cell named exactly, though, a value that reaches another cell
+ * that way is refused (`createProductConfig`). A pinned run has one cell whatever `--project` adds, so
+ * it is always targeted. Name the cell exactly, or pin it, to target it.
  */
 export function selectedCells(): string[] {
   const pin = pinnedCell();

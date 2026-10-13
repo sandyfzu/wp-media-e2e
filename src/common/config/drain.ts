@@ -1,4 +1,4 @@
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 
 import { errorMessage, isNonEmptyString, isObject } from "../guards";
@@ -19,7 +19,9 @@ import type { TestInfo } from "@playwright/test";
  *
  * A gate that can never close fails silently — every stop then becomes an interrupt — so the path
  * is checked strictly: here as it is read, and its folder once as the config loads
- * ({@link assertStopFileFolder}).
+ * ({@link assertStopFileFolder}). A gate closed from the start fails silently too — every scenario
+ * skipped, a run that tested nothing exiting 0 — so a stop file that exists as the run starts is
+ * refused ({@link assertNotStoppedYet}).
  *
  * This module is the policy; `../fixtures.ts` binds it to every scenario as an automatic fixture,
  * and the `@plugin` After hook uses {@link wasDrained} to leave alone a scenario that never began.
@@ -63,8 +65,9 @@ export function stopFileFromEnv(
 /**
  * Refuses a stop file the gate could never see: one whose folder is missing, is not a folder, or may
  * not be searched by this process. `existsSync` answers `false` when it cannot tell, so any of these
- * would leave the gate open for the whole run. Run once, as the config loads; only the folder is
- * checked, since the file itself appears later, when someone stops the run.
+ * would leave the gate open for the whole run. Run as the config loads; only the folder is checked,
+ * since the file itself appears later, when someone stops the run. Whoever names the file keeps its
+ * folder for the run's lifetime: one removed mid-run leaves the gate open again, silently.
  *
  * @param stopFile - the run's stop file, from {@link stopFileFromEnv}.
  * @throws {@link Error} naming the variable, the folder and what is wrong with it.
@@ -94,6 +97,30 @@ export function assertStopFileFolder(stopFile: string): void {
   } catch {
     throw refusal("may not be searched by this process");
   }
+}
+
+/**
+ * Refuses a stop file that exists as the run starts: a leftover of an earlier run, or a reused path.
+ * Every scenario would be skipped, and a run that tested nothing would exit 0. Only where the run
+ * starts — the runner, `bddgen` — never in a test worker, which loads the config again whenever
+ * Playwright starts one, a stop asked for mid-run included.
+ *
+ * @param stopFile - the run's stop file, from {@link stopFileFromEnv}.
+ * @param inWorker - whether this process is a test worker (`TEST_WORKER_INDEX` is set).
+ * @param exists - whether a path exists; `fs.existsSync` in the runtime.
+ * @throws {@link Error} naming the variable and the file, outside a worker, when the file exists.
+ */
+export function assertNotStoppedYet(
+  stopFile: string,
+  inWorker: boolean,
+  exists: (path: string) => boolean = existsSync,
+): void {
+  if (inWorker || !exists(stopFile)) return;
+  throw new Error(
+    `${STOP_FILE_ENV}=${JSON.stringify(stopFile)} exists already, as the run starts: every scenario ` +
+      "would be skipped as stopped, and a run that tested nothing would pass. Remove it, or name a " +
+      "fresh one, before starting the run.",
+  );
 }
 
 /**

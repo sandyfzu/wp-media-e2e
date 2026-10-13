@@ -1,13 +1,42 @@
 import { test, expect } from "@playwright/test";
 
-import { createBuildReporter, requiresToken } from "./apvm";
+import { createBuildReporter, redactBuildText, requiresToken } from "./apvm";
 
-/** The APVM boundary's pure parts (masking its output is `text.ts`'s `redactSecrets`). */
+/** The APVM boundary's pure parts (masking by shape is `text.ts`'s `redactSecrets`). */
 
 test("requiresToken flags only the private-source projects", () => {
   expect(requiresToken("backwpup")).toBe(true);
   expect(requiresToken("wp-rocket")).toBe(false);
   expect(requiresToken("imagify")).toBe(false);
+});
+
+test.describe("redactBuildText", () => {
+  /** A legacy (pre-2021) GitHub token: 40 hex digits, the shape of any commit. */
+  const LEGACY = "0123456789abcdef0123456789abcdef01234567";
+
+  test("masks the process's GitHub tokens by value, keeping a commit of the same shape", () => {
+    const saved = { gh: process.env.GITHUB_TOKEN, alt: process.env.GH_TOKEN };
+    process.env.GITHUB_TOKEN = LEGACY;
+    process.env.GH_TOKEN = "  ";
+    try {
+      const commit = "fedcba9876543210fedcba9876543210fedcba98";
+      expect(
+        redactBuildText(`token ${LEGACY} refused while fetching ${commit}`),
+      ).toBe(`token *** refused while fetching ${commit}`);
+      // Still masked by shape too.
+      expect(redactBuildText("https://u:p@github.com/o/r.git")).toBe(
+        "https://***@github.com/o/r.git",
+      );
+    } finally {
+      for (const [name, value] of [
+        ["GITHUB_TOKEN", saved.gh],
+        ["GH_TOKEN", saved.alt],
+      ] as const) {
+        if (value === undefined) Reflect.deleteProperty(process.env, name);
+        else process.env[name] = value;
+      }
+    }
+  });
 });
 
 test.describe("createBuildReporter", () => {

@@ -1,5 +1,5 @@
 import { isAbsolute, relative, sep } from "node:path";
-import { stripVTControlCharacters, styleText } from "node:util";
+import { styleText } from "node:util";
 
 import type {
   FullConfig,
@@ -7,12 +7,16 @@ import type {
   Reporter,
   Suite,
   TestCase,
+  TestError,
   TestResult,
 } from "@playwright/test/reporter";
 
 import { cellOfProject, type SetupKind } from "../config/project-names";
 import { errorMessage } from "../guards";
-import { redactSecrets } from "../text";
+import { plain, redactSecrets } from "../text";
+
+// Shared with the facts, the prune command and the Site Health reader; re-exported for its importers.
+export { plain };
 import {
   ARTIFACTS_ATTACHMENT,
   SITE_INFO_ATTACHMENT,
@@ -65,7 +69,12 @@ import {
 
 /** What a run came to, in the summary's words. */
 export type Verdict =
-  "passed" | "failed" | "could-not-test" | "interrupted" | "no-tests";
+  | "passed"
+  | "failed"
+  | "could-not-test"
+  | "interrupted"
+  | "stopped"
+  | "no-tests";
 
 /** What one cell's setups found out. */
 export interface CellFacts {
@@ -95,6 +104,11 @@ export interface SummaryInput {
   readonly durationMs: number;
   readonly scenarios: Counts;
   readonly setupFailures: readonly SetupFailure[];
+  /**
+   * The errors raised outside any test — a test file that would not load, a global setup that threw —
+   * each its first line; "No tests found" is not one ({@link RunTally.runError}). Absent: none.
+   */
+  readonly runErrors?: readonly string[];
   /** Each cell's facts, in the order its setups reported them. */
   readonly cells: ReadonlyMap<string, CellFacts>;
   /** What the run's pruning removed or could not; nothing when it removed nothing. */
@@ -130,21 +144,32 @@ const VERDICTS: Readonly<
   failed: { text: "✘ FAILED", color: "red" },
   "could-not-test": { text: "✘ COULD NOT TEST", color: "red" },
   interrupted: { text: "■ INTERRUPTED", color: "yellow" },
+  stopped: { text: "■ STOPPED", color: "yellow" },
   "no-tests": { text: "NO TESTS", color: "yellow" },
 };
 
 /**
  * The run's verdict. An interrupt is said first — the person who pressed Ctrl+C knows why the rest
- * failed — then a failed setup, which means the cell could not be tested at all.
+ * failed — then a failed setup, which means the cell could not be tested at all. A run that planned
+ * no scenario says "no tests" only when nothing went wrong: a test file that would not load leaves
+ * none planned too, and that run failed. Then a stop: a drained scenario never ran, so a run the drain
+ * cut short never says it passed — its counts still say what failed before the stop.
  *
- * @param input - the run's status, its scenarios' counts and its failed setups.
+ * @param input - the run's status, its scenarios' counts, its failed setups and its errors outside
+ *   any test.
  */
 export function verdictOf(
-  input: Pick<SummaryInput, "status" | "scenarios" | "setupFailures">,
+  input: Pick<
+    SummaryInput,
+    "status" | "scenarios" | "setupFailures" | "runErrors"
+  >,
 ): Verdict {
   if (input.status === "interrupted") return "interrupted";
   if (input.setupFailures.length > 0) return "could-not-test";
-  if (input.scenarios.total === 0) return "no-tests";
+  if (input.scenarios.total === 0) {
+    return (input.runErrors?.length ?? 0) > 0 ? "failed" : "no-tests";
+  }
+  if (input.scenarios.drained > 0) return "stopped";
   if (
     input.status !== "passed" ||
     input.scenarios.failed > 0 ||
@@ -183,7 +208,8 @@ export function describeCounts(counts: Counts): string {
     [counts.interrupted, "interrupted"],
     [counts.flaky, "flaky"],
     [counts.passed, "passed"],
-    [counts.skipped, "skipped"],
+    [counts.skipped - counts.drained, "skipped"],
+    [counts.drained, "stopped"],
     [counts.didNotRun, "did not run"],
   ];
   const said = parts
@@ -271,21 +297,6 @@ export function cut(text: string, limit: number): string {
   const end = limit - 1;
   const last = text.charCodeAt(end - 1);
   return `${text.slice(0, last >= 0xd800 && last <= 0xdbff ? end - 1 : end)}…`;
-}
-
-/** Every control character: C0 (newlines and tabs included), DEL and C1. */
-// eslint-disable-next-line no-control-regex -- matching control characters is the point.
-const CONTROL = /[\u0000-\u001f\u007f-\u009f]+/g;
-
-/**
- * A value as one line of plain text: escape sequences removed, every other control character a
- * space. The summary prints what sites and setups reported — Site Health's text, an error — and
- * none of it may move the cursor, recolour the terminal or break a line.
- *
- * @param text - the value.
- */
-export function plain(text: string): string {
-  return stripVTControlCharacters(text).replace(CONTROL, " ").trim();
 }
 
 /**
@@ -401,6 +412,7 @@ export function renderSummary(
     ...labelled(style, "Result", [
       `${describeCounts(input.scenarios)}, in ${formatDuration(input.durationMs)}`,
     ]),
+    ...labelled(style, "Error", errorLines(style, input.runErrors ?? [])),
     ...labelled(
       style,
       "Setup",
@@ -432,6 +444,18 @@ export function renderSummary(
       ),
     ),
   ];
+}
+
+/** How many errors outside any test the summary lists; the rest are counted. */
+const RUN_ERRORS_SHOWN = 3;
+
+/** The errors raised outside any test, as red lines: the first few, then how many more. */
+function errorLines(style: Styler, errors: readonly string[]): string[] {
+  const shown = errors
+    .slice(0, RUN_ERRORS_SHOWN)
+    .map((error) => style("red", cut(displayText(error), SETUP_MESSAGE_LIMIT)));
+  const more = errors.length - shown.length;
+  return more > 0 ? [...shown, `and ${String(more)} more`] : shown;
 }
 
 /** Colours for the terminal: Node's `styleText` drops them for a pipe, `NO_COLOR` and the like. */
@@ -485,6 +509,17 @@ export default class RunSummaryReporter implements Reporter {
   }
 
   /**
+   * Keeps an error raised outside any test for the verdict and the `Error` lines.
+   *
+   * @param error - the error.
+   */
+  onError(error: TestError): void {
+    this.guard(() => {
+      this.tally.runError(error);
+    });
+  }
+
+  /**
    * Ends the tests whose retry never ran, and keeps how the run ended, for `onExit`.
    *
    * @param result - the run's status and duration.
@@ -519,6 +554,7 @@ export default class RunSummaryReporter implements Reporter {
           durationMs: this.ended.duration,
           scenarios: this.tally.scenarios,
           setupFailures: this.setupFailures,
+          runErrors: this.tally.runErrors,
           cells: this.cells,
           pruned: prune(this.run),
         },

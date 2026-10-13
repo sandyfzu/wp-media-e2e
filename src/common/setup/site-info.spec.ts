@@ -91,6 +91,24 @@ test.describe("parseSiteInfo", () => {
     expect(parseSiteInfo(sparse)).toEqual(rest);
   });
 
+  test("keeps a field's first value: a later section's text cannot pose as an earlier field", () => {
+    const text = [
+      "### wp-core ###",
+      "version: 7.1.3",
+      "### wp-plugins-active (1) ###",
+      "Evil: line one",
+      "### wp-core ###",
+      "version: 1.0-fake",
+    ].join("\n");
+    expect(parseSiteInfo(text).wordpress).toBe("7.1.3");
+  });
+
+  test("removes control characters from a value: the site's text is printed to a terminal", () => {
+    const text =
+      "### wp-server ###\nhttpd_software: nginx\u001b]0;pwned\u0007/1.24\u001b[2J\u202e";
+    expect(parseSiteInfo(text).webServer).toBe("nginx/1.24");
+  });
+
   test("finds nothing in a text that is not Site Health's", () => {
     expect(parseSiteInfo("")).toEqual({});
     expect(parseSiteInfo("version: 7.1.3\nphp_version: 8")).toEqual({});

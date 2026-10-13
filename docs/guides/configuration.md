@@ -186,7 +186,7 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 | `OUTPUT_ROOT` | `test-results`         | Ephemeral Playwright artifact root: `<product>/<cell>` for a run targeting that cell, `<product>/_all/<cell>` for any other run, `_unit` for unit tests. |
 | `AUTH_ROOT`   | `.auth`                | Ephemeral `storageState` root.                                          |
 | `ARTIFACTS_ROOT` | `.artifacts`        | Resolved plugin-zip root (**wiped & rebuilt each run**; see Plugin artifacts). |
-| `E2E_INTERNAL_STOP_FILE` | _(unset)_ → no drain | **Internal**, set by the orchestrator. An absolute path, no surrounding whitespace, in a folder that exists; once that file exists, every scenario's first attempt is skipped as `stopped` while the one in flight finishes (the drain — see [execution-model.md](../architecture/execution-model.md#stopping-a-run-the-drain)). Any other value fails the run as it starts. |
+| `E2E_INTERNAL_STOP_FILE` | _(unset)_ → no drain | **Internal**, set by the orchestrator. An absolute path, no surrounding whitespace, in a folder that exists for the run's lifetime, the file itself not there yet as the run starts; once that file exists, every scenario's first attempt is skipped as `stopped` while the one in flight finishes (the drain — see [execution-model.md](../architecture/execution-model.md#stopping-a-run-the-drain)). Any other value fails the run as it starts. |
 | `E2E_SITE_STAGING_DIR` | `.e2e_temp`   | Where artifacts are staged **on each site** (absolute, or relative to its WordPress root). A site's own `transport.stagingDir` wins over this. |
 
 ### Plugin artifacts (build & verify)

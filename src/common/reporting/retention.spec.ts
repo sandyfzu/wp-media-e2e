@@ -27,8 +27,10 @@ import {
   describeReason,
   formatBytes,
   formatSpan,
+  isoInstant,
   listGroupRuns,
   listReportRuns,
+  outsideRoot,
   planRetention,
   removeLeftovers,
   type RetentionDecision,
@@ -256,16 +258,24 @@ test.describe("planRetention — the policy, case by case", () => {
     ).toEqual([["list", "keep:protected"]]);
   });
 
-  test("15. a future-dated run is kept, and counts toward the cap", () => {
+  test("15. a future-dated run is kept, takes no place under the cap, and is never the newest complete report", () => {
     expect(
       plan(
-        [entry("future", -DAY_MS), entry("now", MIN), entry("old", 2 * MIN)],
+        [
+          entry("future", -DAY_MS),
+          entry("later", -365 * DAY_MS),
+          entry("now", MIN, { complete: false }),
+          entry("real", 2 * MIN),
+          entry("old", 3 * MIN),
+        ],
         policy({ keep: 2 }),
       ),
     ).toEqual([
+      ["later", "keep:future"],
       ["future", "keep:future"],
-      // The future-dated run is the newest complete one: no other is excepted.
       ["now", "keep:within-policy"],
+      // The newest complete report of the runs that have happened: a skewed clock cannot take it.
+      ["real", "keep:newest-complete"],
       ["old", "delete:beyond-cap"],
     ]);
   });
@@ -346,6 +356,23 @@ test.describe("the words", () => {
     expect(say("empty")).toBe("empty (--list, or no tests found)");
   });
 
+  test("isoInstant reads only the suite's own UTC instants", () => {
+    expect(isoInstant("2026-10-12T00:00:00.000Z")).toBe(
+      Date.parse("2026-10-12T00:00:00.000Z"),
+    );
+    for (const value of [
+      "1",
+      "2026-10-12",
+      "2026-10-12T00:00:00.000",
+      "2026-10-12T00:00:00Z",
+      "2026-10-12T00:00:00.000+00:00",
+      "2026-02-30T00:00:00.000Z",
+      " 2026-10-12T00:00:00.000Z",
+    ]) {
+      expect(isoInstant(value), value).toBeNaN();
+    }
+  });
+
   test("formatSpan and formatBytes", () => {
     expect(formatSpan(30 * DAY_MS)).toBe("30 days");
     expect(formatSpan(DAY_MS)).toBe("1 day");
@@ -422,7 +449,7 @@ test.describe("listReportRuns — on a real tree", () => {
       "backwpup/pro@nginx/allure-history.jsonl": "a file, not a run",
       "backwpup/pro@nginx/linked-run": "a symlink, never followed",
       "backwpup/pro@nginx/nightly-killed":
-        "not a run: its name is no RUN_ID, and it holds no results stream",
+        "not a run: its name is no RUN_ID, and no results stream dates it",
       "backwpup/pro@nginx/not-a-run": "holds no report part",
       "backwpup/pro@nginx/only-a-link": "holds no report part",
     });
@@ -526,6 +553,7 @@ test.describe("listReportRuns — on a real tree", () => {
         Date.parse("2100-01-01T00:00:00Z"),
         (run) => run.group,
       ),
+      root,
     );
     expect(report.removed).toEqual([]);
     expect(
@@ -552,6 +580,26 @@ test.describe("listReportRuns — on a real tree", () => {
       chmodSync(join(root, "p", "locked"), 0o755);
       chmodSync(lockedRun, 0o755);
     }
+  });
+
+  test("a stream whose run.begin is not dated as the suite writes it dates nothing", () => {
+    const cell = join(root, "p", "c");
+    for (const [name, at] of [
+      ["zoneless", "2026-10-01T00:00:00"],
+      ["number", "1"],
+    ] as const) {
+      const run = makeRun(cell, name, { stream: "none" });
+      writeFileSync(
+        join(run, "results.jsonl"),
+        `${JSON.stringify({ v: 1, type: "run.begin", at, runId: name, product: "p", cell: "c", mode: "test", scenarios: 1, setups: 0, retries: 0, workers: 1 })}\n`,
+      );
+    }
+    const listing = listGroupRuns(cell, "p/c");
+    expect(listing.runs).toEqual([]);
+    expect(listing.skipped.map((s) => s.reason)).toEqual([
+      "not a run: its name is no RUN_ID, and no results stream dates it",
+      "not a run: its name is no RUN_ID, and no results stream dates it",
+    ]);
   });
 
   test("lists in-removal folders as leftovers, never as runs", () => {
@@ -620,7 +668,7 @@ test.describe("applyRetention — on a real tree", () => {
     makeRun(cell, "2026-10-11T00-00-00-000Z-1", { bytes: 1000 });
     makeRun(cell, "2026-10-10T00-00-00-000Z-1", { bytes: 2000 });
     writeFileSync(join(cell, "allure-history.jsonl"), "{}\n");
-    const report = applyRetention(planCell(1));
+    const report = applyRetention(planCell(1), root);
     expect(report.failed).toEqual([]);
     expect(report.removed.map((r) => r.decision.entry.path)).toEqual([
       join(cell, "2026-10-10T00-00-00-000Z-1"),
@@ -642,7 +690,7 @@ test.describe("applyRetention — on a real tree", () => {
     const doomed = makeRun(cell, "2026-10-10T00-00-00-000Z-1");
     symlinkSync(target, join(doomed, "allure-results", "link-to-dir"));
     symlinkSync(join(target, "keep.txt"), join(doomed, "link-to-file"));
-    const report = applyRetention(planCell(1));
+    const report = applyRetention(planCell(1), root);
     expect(report.removed).toHaveLength(1);
     expect(existsSync(doomed)).toBe(false);
     expect(readFileSync(join(target, "keep.txt"), "utf8")).toBe("keep");
@@ -658,7 +706,7 @@ test.describe("applyRetention — on a real tree", () => {
     const target = join(root, "target");
     renameSync(swapped, target);
     symlinkSync(target, swapped);
-    const report = applyRetention(decisions);
+    const report = applyRetention(decisions, root);
     expect(report.gone).toEqual([gone]);
     expect(report.removed).toEqual([]);
     expect(report.failed).toEqual([
@@ -675,7 +723,7 @@ test.describe("applyRetention — on a real tree", () => {
     const doomed = makeRun(cell, "2026-10-10T00-00-00-000Z-1");
     const decisions = planCell(1);
     chmodSync(cell, 0o555);
-    const report = applyRetention(decisions);
+    const report = applyRetention(decisions, root);
     chmodSync(cell, 0o755);
     expect(report.removed).toEqual([]);
     expect(report.failed).toHaveLength(1);
@@ -691,7 +739,7 @@ test.describe("applyRetention — on a real tree", () => {
     // Its Playwright folder's entries cannot be removed.
     chmodSync(join(doomed, "playwright"), 0o555);
     const now = Date.parse("2026-10-12T00:00:00Z");
-    const report = applyRetention(planCell(1), now);
+    const report = applyRetention(planCell(1), root, now);
     expect(report.removed).toEqual([]);
     expect(report.failed[0]?.error).toMatch(
       /^removed in part; the rest is in \.pruning-\d+-\d+-[0-9a-f]{8}, which a later prune removes: /,
@@ -707,17 +755,80 @@ test.describe("applyRetention — on a real tree", () => {
     chmodSync(join(leftover.path, "playwright"), 0o755);
     // Too young: another prune may still be at it.
     expect(
-      removeLeftovers(listing.leftovers, now + LEFTOVER_GRACE_MS - 1).removed,
+      removeLeftovers(listing.leftovers, root, now + LEFTOVER_GRACE_MS - 1)
+        .removed,
     ).toEqual([]);
-    const later = removeLeftovers(listing.leftovers, now + LEFTOVER_GRACE_MS);
+    const later = removeLeftovers(
+      listing.leftovers,
+      root,
+      now + LEFTOVER_GRACE_MS,
+    );
     expect(later.failed).toEqual([]);
     expect(later.removed.map((r) => r.path)).toEqual([leftover.path]);
     expect(readdirSync(cell)).toEqual(["2026-10-11T00-00-00-000Z-1"]);
   });
 
+  test("a cell folder swapped for a link after the listing redirects nothing out of the report tree", () => {
+    makeRun(cell, "2026-10-11T00-00-00-000Z-1");
+    const doomed = makeRun(cell, "2026-10-10T00-00-00-000Z-1");
+    const decisions = planCell(1);
+    // A folder of the same name elsewhere, reached once the cell folder is a link to its parent.
+    const outside = join(root, "outside");
+    const victim = makeRun(outside, "2026-10-10T00-00-00-000Z-1");
+    renameSync(cell, join(root, "p", "moved"));
+    symlinkSync(outside, cell);
+    const report = applyRetention(decisions, root);
+    expect(report.removed).toEqual([]);
+    expect(report.failed).toEqual([
+      {
+        path: doomed,
+        error:
+          "its folder now leads outside the report root (a link): left alone",
+      },
+    ]);
+    expect(existsSync(join(victim, "playwright", "index.html"))).toBe(true);
+  });
+
+  test("a leftover whose folder now leads outside the report root is left alone", () => {
+    const outside = join(root, "outside");
+    const name = ".pruning-1760000000000-42-0a1b2c3d";
+    makeRun(outside, name);
+    mkdirSync(join(root, "p"), { recursive: true });
+    symlinkSync(outside, cell);
+    const report = removeLeftovers(
+      [{ path: join(cell, name), since: 1760000000000 }],
+      root,
+      1760000000000 + LEFTOVER_GRACE_MS,
+    );
+    expect(report.removed).toEqual([]);
+    expect(report.failed).toHaveLength(1);
+    expect(existsSync(join(outside, name, "playwright"))).toBe(true);
+  });
+
+  test("outsideRoot: below a linked root is inside; the root, its own children, above it, or an unresolvable folder is not", () => {
+    makeRun(cell, "r");
+    const link = join(root, "link");
+    symlinkSync(root, link);
+    expect(outsideRoot(join(cell, "r"), root)).toBeUndefined();
+    expect(outsideRoot(join(link, "p", "c", "r"), link)).toBeUndefined();
+    // A folder in the root itself is no run's: a run sits two folders below it.
+    expect(outsideRoot(join(root, "r"), root)).toBe(
+      "not below the report root: left alone",
+    );
+    expect(outsideRoot(root, root)).toBe(
+      "not below the report root: left alone",
+    );
+    expect(outsideRoot(join(root, "..", "x", "r"), root)).toBe(
+      "not below the report root: left alone",
+    );
+    expect(outsideRoot(join(root, "absent", "r"), root)).toMatch(
+      /^its folder cannot be resolved, left alone: /,
+    );
+  });
+
   test("keep decisions are never acted on", () => {
     const kept = makeRun(cell, "2026-10-11T00-00-00-000Z-1");
-    const report = applyRetention(planCell(0));
+    const report = applyRetention(planCell(0), root);
     expect(report).toEqual({ removed: [], gone: [], failed: [] });
     expect(existsSync(kept)).toBe(true);
   });

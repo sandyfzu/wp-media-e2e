@@ -43,6 +43,7 @@ function canary(): string {
 
 const PASSWORD = canary();
 const TOKEN = canary();
+const TIMEOUT_TOKEN = canary();
 const CONTROL = canary();
 
 /**
@@ -148,6 +149,7 @@ function runSetup(): { exitCode: number | null; output: string } {
         ARTIFACTS_ROOT: join(work, "artifacts"),
         CANARY_PASSWORD: PASSWORD,
         CANARY_TOKEN: TOKEN,
+        CANARY_TIMEOUT_TOKEN: TIMEOUT_TOKEN,
         CANARY_CONTROL: CONTROL,
         CANARY_WORK: work,
         WP_STUB_LOG: join(work, "wp-calls.log"),
@@ -197,14 +199,18 @@ function errorContexts(): Map<string, string> {
   );
 }
 
-test("the probe ran as designed: three forced failures, the first site saved", () => {
-  expect(run.output).toContain("3 failed");
+test("the probe ran as designed: four forced failures, the first site of each pool saved", () => {
+  expect(run.output).toContain("4 failed");
   expect(run.output).toContain("Test timeout of 3000ms exceeded");
+  expect(run.output).toContain("Test timeout of 5000ms exceeded");
   expect(run.exitCode).toBe(1);
-  // The session cookie was really set, so its absence from the reports is not for want of one.
+  // The session cookies were really set, so their absence from the reports is not for want of one.
   expect(readFileSync(join(work, "auth/site-0.json"), "utf8")).toContain(TOKEN);
+  expect(readFileSync(join(work, "auth/site-2.json"), "utf8")).toContain(
+    TIMEOUT_TOKEN,
+  );
   // Each failure wrote its error context — the file a page snapshot would have gone into.
-  expect(errorContexts().size).toBe(3);
+  expect(errorContexts().size).toBe(4);
 });
 
 test("no failure snapshot is written in the setup, the timed-out test's included", () => {
@@ -248,6 +254,19 @@ test("the session token is only in the failed setup's trace calls, and that sess
   for (const at of places) expect(at).toMatch(/\.zip!(?:\d+-)?trace\.trace$/);
   // The setup failed after saving the first site, so it ended that session: the cookie is dead.
   expect(embeddedInWpCalls()).toContainEqual({ login: "admin", token: TOKEN });
+});
+
+test("a setup that times out after saving a session still ends it", () => {
+  // The timeout abandons the setup's body, its own clean-up included: the afterEach ends the session.
+  const places = findSecret(work, TIMEOUT_TOKEN).filter(
+    (at) => at.startsWith("reports/") || at.startsWith("test-results/"),
+  );
+  expect(places.length).toBeGreaterThan(0);
+  for (const at of places) expect(at).toMatch(/\.zip!(?:\d+-)?trace\.trace$/);
+  expect(embeddedInWpCalls()).toContainEqual({
+    login: "admin",
+    token: TIMEOUT_TOKEN,
+  });
 });
 
 test("the versions read before the failure are attached to the reports", () => {

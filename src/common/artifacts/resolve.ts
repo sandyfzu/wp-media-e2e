@@ -15,12 +15,12 @@ import { existsSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { errorMessage } from "../guards";
-import { redactSecrets } from "../text";
 import { REPO_ROOT, RUN_ID } from "../config/run-context";
 import {
   assertToken,
   createBuildReporter,
   getApvm,
+  redactBuildText,
   toArtifactOrigin,
 } from "./apvm";
 import { sha256File } from "./digest";
@@ -163,7 +163,7 @@ async function resolveRole(
       // Redact at the funnel too (idempotent): the APVM call sites already scrub their own
       // rejections, but anything else thrown in here — an `Apvm` that failed to initialise,
       // future code — reaches the aggregated report through this one path.
-      error: redactSecrets(errorMessage(error)),
+      error: redactBuildText(errorMessage(error)),
       ...(hint !== undefined ? { hint } : {}),
     };
   }

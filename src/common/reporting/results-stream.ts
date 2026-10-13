@@ -254,7 +254,8 @@ export function endEvent(
     scenario: place.scenario,
     path: place.path,
     ...(place.file !== undefined ? { file: place.file } : {}),
-    tags: test.tags,
+    // Playwright's tags repeat one a title also names (`@mobile` in "A @mobile scenario…").
+    tags: [...new Set(test.tags)],
     outcome: test.outcome(),
     ...(wasDrainedTest(test) ? { drained: true as const } : {}),
   };

@@ -112,6 +112,8 @@ export interface RunEnd {
   readonly durationMs: number;
   /** The scenarios' counts, setups apart. */
   readonly scenarios: Counts;
+  /** The errors raised outside any test, "No tests found" aside (`RunTally.runErrors`); absent: none. */
+  readonly runErrors?: readonly string[];
 }
 
 /** Each setup kind's name in a phrase. */
@@ -343,6 +345,7 @@ export function endFacts(
       status: end.status,
       scenarios: end.scenarios,
       setupFailures: facts.setupFailures,
+      runErrors: end.runErrors,
     }),
     endedAt: endedAt.toISOString(),
     durationMs: Math.round(end.durationMs),
@@ -358,6 +361,7 @@ function settled(state: SetupState): SetupState {
 const TITLE_STATES: Readonly<Partial<Record<RunState, string>>> = {
   running: "RUNNING",
   interrupted: "INTERRUPTED",
+  stopped: "STOPPED",
   "could-not-test": "COULD NOT TEST",
   "no-tests": "NO TESTS",
 };
@@ -440,6 +444,8 @@ export function statusFact(facts: RunFacts): string {
         .join("; ")}`;
     case "interrupted":
       return "interrupted — stopped before it finished";
+    case "stopped":
+      return "stopped — the scenarios not begun before the stop were skipped";
     case "no-tests":
       return "no tests ran";
     default:
@@ -664,6 +670,7 @@ const BANNER_ACCENTS: Readonly<Record<RunState, string>> = {
   failed: "#cf222e",
   "could-not-test": "#cf222e",
   interrupted: "#9a6700",
+  stopped: "#9a6700",
   "no-tests": "#9a6700",
 };
 

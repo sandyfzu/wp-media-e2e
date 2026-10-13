@@ -25,7 +25,7 @@ function infoTab(buttons: string, sizesUrl: string): string {
   </body></html>`;
 }
 
-const BUTTON = `<button type="button" class="button copy-button" data-clipboard-text="\`&#10;### wp-core ###&#10;&#10;version: 7.1.3&#10;\`">Copy site info to clipboard</button>`;
+const BUTTON = `<button type="button" class="button copy-button" data-clipboard-text="\`&#10;### wp-core ###&#10;&#10;version: 7.1.3&#10;site_url: https://private.example&#10;### wp-paths-sizes (2) ###&#10;wordpress_path: /var/www/private&#13;&#10;version: 9&#10;\`">Copy site info to clipboard</button>`;
 
 /** Serves the Info tab, and would serve directory sizes to any call that got through. */
 async function serve(page: Page, body: string): Promise<void> {
@@ -38,7 +38,7 @@ async function serve(page: Page, body: string): Promise<void> {
 }
 
 test.describe("SiteHealthPage — locator contract", () => {
-  test("reads the copy text from the one button, by role and name", async ({
+  test("reads only the asked-for fields from the one button, every section header kept", async ({
     page,
   }) => {
     await serve(
@@ -47,9 +47,24 @@ test.describe("SiteHealthPage — locator contract", () => {
     );
     const siteHealth = new SiteHealthPage(page);
     await siteHealth.goto();
-    expect(await siteHealth.siteInfoText()).toBe(
-      "`\n### wp-core ###\n\nversion: 7.1.3\n`",
+    // A field is its section's: `version` under wp-paths-sizes is not wp-core's.
+    expect(await siteHealth.siteInfoFields(["wp-core.version"])).toBe(
+      "### wp-core ###\nversion: 7.1.3\n### wp-paths-sizes (2) ###",
     );
+  });
+
+  test("returns nothing of the text it was not asked for, so no trace can record it", async ({
+    page,
+  }) => {
+    await serve(page, infoTab(BUTTON, "/x"));
+    const siteHealth = new SiteHealthPage(page);
+    await siteHealth.goto();
+    const kept = await siteHealth.siteInfoFields([
+      "wp-core.version",
+      "wp-paths-sizes.version",
+    ]);
+    expect(kept).not.toContain("private");
+    expect(kept).toContain("version: 9");
   });
 
   for (const [form, url] of [
@@ -91,9 +106,9 @@ test.describe("SiteHealthPage — locator contract", () => {
     await serve(page, infoTab("", "/x"));
     const siteHealth = new SiteHealthPage(page);
     await siteHealth.goto();
-    await expect(siteHealth.siteInfoText({ timeout: 500 })).rejects.toThrow(
-      /one 'Copy site info to clipboard' button/,
-    );
+    await expect(
+      siteHealth.siteInfoFields(["wp-core.version"], { timeout: 500 }),
+    ).rejects.toThrow(/one 'Copy site info to clipboard' button/);
   });
 
   test("fails when two buttons match, rather than pick one", async ({
@@ -102,9 +117,9 @@ test.describe("SiteHealthPage — locator contract", () => {
     await serve(page, infoTab(BUTTON + BUTTON, "/x"));
     const siteHealth = new SiteHealthPage(page);
     await siteHealth.goto();
-    await expect(siteHealth.siteInfoText({ timeout: 500 })).rejects.toThrow(
-      /one 'Copy site info to clipboard' button/,
-    );
+    await expect(
+      siteHealth.siteInfoFields(["wp-core.version"], { timeout: 500 }),
+    ).rejects.toThrow(/one 'Copy site info to clipboard' button/);
   });
 
   test("fails when the button holds no text", async ({ page }) => {
@@ -117,9 +132,9 @@ test.describe("SiteHealthPage — locator contract", () => {
     );
     const siteHealth = new SiteHealthPage(page);
     await siteHealth.goto();
-    await expect(siteHealth.siteInfoText()).rejects.toThrow(
-      /holds no site info/,
-    );
+    await expect(
+      siteHealth.siteInfoFields(["wp-core.version"]),
+    ).rejects.toThrow(/holds no site info/);
   });
 });
 

@@ -196,15 +196,18 @@ function readStream(cell: string, runId: string): string | undefined {
  * @param runId - the run's token, which names its report folder.
  * @param args - the runner's extra arguments.
  * @param stop - the signal to stop the run with.
+ * @param beforeRun - what to do between `bddgen` and the runner.
  */
 async function runCell(
   cell: string,
   runId: string,
   args: readonly string[],
   stop?: NodeJS.Signals,
+  beforeRun?: () => void,
 ): Promise<RunOutcome> {
   const env = runEnv(cell, runId);
   bddgen(env);
+  beforeRun?.();
   const child = spawn(
     process.execPath,
     [
@@ -459,15 +462,25 @@ test.describe("the results stream and the summary, through the real runner", () 
         skipped: 1,
         interrupted: 0,
         didNotRun: 0,
+        drained: 1,
       },
-      setups: { total: 2, skipped: 2, didNotRun: 0 },
+      setups: { total: 2, skipped: 2, didNotRun: 0, drained: 0 },
     });
 
-    // The summary is the run's last block.
+    // The summary is the run's last block. The drain skipped a scenario: the run was stopped, and
+    // says so first; its counts still say what failed before the stop.
     const summary = summaryOf(outcome.stdout);
-    expect(summary[0]).toMatch(/^━━ resultsprobe · x ━━ ✘ FAILED ━+$/);
+    expect(summary[0]).toMatch(/^━━ resultsprobe · x ━━ ■ STOPPED ━+$/);
+    const facts = JSON.parse(
+      readFileSync(
+        join(work, "reports", PRODUCT, "x", "full", "run-facts.json"),
+        "utf8",
+      ),
+    ) as { status: string; title: string };
+    expect(facts.status).toBe("stopped");
+    expect(facts.title).toMatch(/ · STOPPED$/);
     expect(summary[1]).toMatch(
-      /^ {2}Result {6}2 failed · 1 flaky · 2 passed · 1 skipped, in \d/,
+      /^ {2}Result {6}2 failed · 1 flaky · 2 passed · 1 stopped, in \d/,
     );
     expect(summary.at(-1)).toBe(
       `  Allure      npm run report:allure -- ${PRODUCT} x --open`,
@@ -575,6 +588,60 @@ test.describe("the results stream and the summary, through the real runner", () 
     expect(summaryOf(outcome.stdout)[1]).toMatch(
       /^ {2}Result {6}1 failed, in /,
     );
+  });
+
+  test("a spec file that will not load: run.error, and FAILED with its error — never NO TESTS", async () => {
+    // A generated spec that throws as it is imported — a fixtures module that does not load — stops
+    // Playwright planning any test at all.
+    const broken = join(
+      work,
+      ".features-gen",
+      PRODUCT,
+      "x",
+      "broken.feature.spec.js",
+    );
+    const outcome = await runCell("x", "loaderror", [], undefined, () => {
+      writeFileSync(broken, 'throw new Error("a spec file does not load");\n');
+    });
+    rmSync(broken, { force: true });
+    expect(outcome.exitCode).toBe(1);
+    const events = eventsOf(outcome);
+    expect(events.find((e) => e.type === "run.error")).toMatchObject({
+      message: expect.stringContaining("a spec file does not load"),
+    });
+    expect(events.at(-1)).toMatchObject({
+      type: "run.end",
+      status: "failed",
+      scenarios: { total: 0 },
+    });
+    const summary = summaryOf(outcome.stdout);
+    expect(summary[0]).toMatch(/^━━ resultsprobe · x ━━ ✘ FAILED ━+$/);
+    expect(summary.find((line) => line.startsWith("  Error"))).toMatch(
+      /a spec file does not load/,
+    );
+    const facts = JSON.parse(
+      readFileSync(
+        join(work, "reports", PRODUCT, "x", "loaderror", "run-facts.json"),
+        "utf8",
+      ),
+    ) as { status: string };
+    expect(facts.status).toBe("failed");
+  });
+
+  test("a selection that matches nothing: NO TESTS, in the summary and the facts", async () => {
+    const outcome = await runCell("x", "nomatch", [
+      "--grep",
+      "@nothing-has-this",
+    ]);
+    expect(outcome.exitCode).toBe(1);
+    expect(summaryOf(outcome.stdout)[0]).toMatch(/NO TESTS/);
+    const facts = JSON.parse(
+      readFileSync(
+        join(work, "reports", PRODUCT, "x", "nomatch", "run-facts.json"),
+        "utf8",
+      ),
+    ) as { status: string };
+    expect(facts.status).toBe("no-tests");
   });
 
   test("--list: the stream marks a run that runs nothing; no summary", async () => {

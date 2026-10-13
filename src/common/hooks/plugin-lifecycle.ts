@@ -17,7 +17,9 @@ import {
   getSiteDataDirResolver,
   getSiteDbResidue,
   getSiteResidue,
+  getStopRunningWork,
 } from "../config/metadata";
+import { withinBudget } from "../deadline";
 import { errorMessage } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
 import type { SiteDbResidue } from "../wp/db-residue";
@@ -265,9 +267,26 @@ export async function installPluginUnderTest(
       leftWork.stop,
       leftWork.report,
       "before",
+      leftWork.budgetMs,
     );
   }
   await replacePluginUnderTest(transport, artifact, residue);
+}
+
+/**
+ * What the Before hook hands {@link installPluginUnderTest}: the product's registered stop
+ * (`ProductConfig.stopRunningWork`) with the scenario to report to, or `undefined` for a product that
+ * declares none — then there is nothing to ask, and no round trip to pay.
+ *
+ * @param product - the product under test, from the project's routing metadata.
+ * @param report - the scenario's report sink.
+ */
+export function leftWorkOf(
+  product: string,
+  report: ScenarioReport,
+): LeftWork | undefined {
+  const stop = getStopRunningWork(product);
+  return stop === undefined ? undefined : { stop, report };
 }
 
 /**
@@ -279,6 +298,8 @@ export interface LeftWork {
   readonly stop: StopRunningWork;
   /** The scenario whose Before hook found the work. */
   readonly report: ScenarioReport;
+  /** How long the stop may take; {@link LEFT_WORK_ALLOWANCE_MS} unless a spec needs it shorter. */
+  readonly budgetMs?: number;
 }
 
 /**
@@ -475,16 +496,28 @@ export async function teardownPluginUnderTest(
  * @param transport - the target site's transport.
  * @param stopRunningWork - the product's `ProductConfig.stopRunningWork`.
  * @param report - the scenario to name in the message, and to attach it to.
+ * Bounded by {@link LEFT_WORK_ALLOWANCE_MS}: a stop whose WP-CLI call hangs would otherwise run the
+ * hook out of time, and a timed-out hook is abandoned, not cancelled — its removal would then run on
+ * beside whatever comes next. Past the allowance the stop fails, as work that would not stop does;
+ * the stop itself is not cancelled (nothing can cancel a remote command), so it may still finish.
+ *
  * @param when - whether the scenario is about to begin or has just ended, for the message.
- * @throws whatever `stopRunningWork` throws — work that would not stop.
+ * @param budgetMs - how long the stop may take.
+ * @throws whatever `stopRunningWork` throws — work that would not stop — or, past `budgetMs`, an
+ *   error saying so.
  */
 async function stopWorkLeftRunning(
   transport: Transport,
   stopRunningWork: StopRunningWork,
   report: ScenarioReport,
   when: "before" | "after",
+  budgetMs: number = LEFT_WORK_ALLOWANCE_MS,
 ): Promise<void> {
-  const stopped = await stopRunningWork(transport);
+  const stopped = await withinBudget(
+    stopRunningWork(transport),
+    budgetMs,
+    "stopping the plugin's running work",
+  );
   if (stopped === undefined) return;
   const message = `[hooks] ${when} "${report.title}": ${stopped}`;
   console.warn(message);

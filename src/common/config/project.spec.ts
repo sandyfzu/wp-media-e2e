@@ -180,6 +180,21 @@ test.describe("createProductConfig — output folders by selection", () => {
     );
   });
 
+  // Playwright matches `--project` ignoring case and expanding `*`: a cell named exactly beside one
+  // reached that way would size the run for the first while Playwright runs both.
+  test("refuses a cell named exactly beside another reached by case, a wildcard or its setup", async () => {
+    for (const other of [
+      "--project=B",
+      "--project=b*",
+      "--project=*",
+      "--project=setup:b",
+    ]) {
+      await expect(build(["--project=a", other]), other).rejects.toThrow(
+        "Multiple cells selected (a, b).",
+      );
+    }
+  });
+
   test("OUTPUT_ROOT replaces only the root", async () => {
     const { outputDirs } = await build(["--project=a"], {
       OUTPUT_ROOT: "/srv/e2e-output",
@@ -247,8 +262,12 @@ test.describe("createProductConfig — what the reports say about the run", () =
     expect(blank.notice).not.toHaveProperty("requestedRef");
   });
 
+  // Unset is not off: Playwright captures both under CI (`captureGitInfo?.commit === undefined && ci`).
   test("never captures git info, which records authors' emails and, under CI, a diff", async () => {
-    expect((await build([])).captureGitInfo).toBeNull();
+    expect((await build([])).captureGitInfo).toEqual({
+      commit: false,
+      diff: false,
+    });
   });
 });
 

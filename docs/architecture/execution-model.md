@@ -111,7 +111,9 @@ included. The policy is [`config/drain.ts`](../../src/common/config/drain.ts) (`
 - **A gate that never closes fails silently** — every stop becomes an interrupt — so the path must be
   absolute with no surrounding whitespace, and the config factory refuses, as the run starts, a stop
   file whose folder is missing, not a folder, or not searchable (`existsSync` reads "cannot tell" as
-  "absent").
+  "absent") — keep the folder for the run's lifetime — and a stop file that **already exists**, which
+  would skip every scenario and pass (`assertNotStoppedYet`). Not in a test worker: Playwright starts
+  one whenever a worker is replaced, after a stop as much as before.
 - **First attempts only**: a retry finishes a scenario that already ran, so skipping it would turn
   that scenario's failure into "flaky". Nor is an attempt skipped once something in it has failed
   (the gate then runs late, see below): Playwright would report the skip as its verdict and skip its
@@ -122,8 +124,9 @@ included. The policy is [`config/drain.ts`](../../src/common/config/drain.ts) (`
   fails, the gate runs only as the After hooks are prepared — the case the rule above covers.
 - A skip in a fixture runs **no Before hook** but **still runs the After hooks** (measured), so the
   `@plugin` After hook returns at once for a drained scenario: it installed nothing.
-- The reports stay complete and true: drained scenarios read "skipped" with no error, and the exit
-  status reflects what ran (0 when nothing that ran failed). One wrinkle for a reader of steps: the
+- The reports stay complete and true: drained scenarios read "skipped" with no error, the run's
+  verdict is `STOPPED` (summary, run facts, reports' titles) and `run.end` counts them as `drained`,
+  and the exit status reflects what ran (0 when nothing that ran failed). One wrinkle for a reader of steps: the
   skip unwinds through the "Before Hooks" step, which carries it as an error (`Test is skipped: …`;
   Allure draws that step red). Judge a scenario by its result's status, never by its steps' errors.
 
@@ -136,8 +139,8 @@ SIGINT (the workers are orphaned and the scenario in flight drops), and never a 
 runner alone (its workers finish orphaned). A plain SIGINT abandons the running step, so its
 teardown runs beside it. A killed run reaches no teardown; the next `@plugin` scenario's Before hook
 stops whatever the plugin is still doing before it removes the plugin
-(`ProductConfig.stopRunningWork`), with a budget of its own for it (`LEFT_WORK_ALLOWANCE_MS`), so
-recovering from a kill is complete.
+(`ProductConfig.stopRunningWork`), with a budget of its own for it (`LEFT_WORK_ALLOWANCE_MS`, enforced:
+a stop past it fails, as work that would not stop does), so recovering from a kill is complete.
 
 ## Watching a run: the results stream and the summary
 
@@ -157,7 +160,10 @@ Two reporters of the suite's own, both always on, both handed the run's facts (`
 - **The end-of-run summary** ([`reporting/run-summary.ts`](../../src/common/reporting/run-summary.ts))
   is the reporter listed last and prints in `onExit` — below everything else, Playwright's counts
   included: the verdict (`✔ PASSED`, `✘ FAILED`, `✘ COULD NOT TEST` for a failed setup, `■ INTERRUPTED`,
-  `NO TESTS`), the scenarios' counts and the duration, each failed setup's first line, the plugin
+  `■ STOPPED` when the drain skipped a scenario, `NO TESTS` — only when no error came from outside a
+  test: a spec that would not load plans none either, and is `FAILED`), the scenarios' counts (the
+  drain's skips said as `stopped`) and the duration, each error from outside a test (`Error`) and each
+  failed setup's first line, the plugin
   and the sites tested (read back from the setups' attachments, `setup-facts.ts`) and the three
   reports, as paths from the working directory (quoted when a shell would split them). What a site or
   setup reported is printed as plain text — no escape sequence or control character — with every
@@ -176,18 +182,21 @@ so they never disagree:
   settled as the run ends (`RunTally.settle`): its `scenario.end` comes then, with `retryNotRun`.
 - **Status:** `interrupted` if the last attempt was; else `passed`, `failed` (timeouts included),
   `flaky` or `skipped` from Playwright's outcome. A drained scenario is `skipped` with `drained: true`.
+  `tags` are Playwright's, each once: the Gherkin tags and any `@word` in a title.
 - **First error** — only for a test that failed or was interrupted (a skip puts its reason on a step
   as an error): the first failing Gherkin step, a Background's included; else the innermost failing
   hook or fixture (`After Hooks › AfterEach Hooks › <hook>`, where a `DebugLogFatalError` lands); else,
   when no step carries one — a timeout inside a step, a crashed worker, a missing screenshot baseline —
-  the last step begun. ANSI and Playwright's call log stripped (its element markup quotes attribute
+  the last step begun (also when an After hook then failed in its clean-up: the attempt's first error
+  is the cause). ANSI and Playwright's call log stripped (its element markup quotes attribute
   values), credentials masked, then at most 2,000 characters. Still as sensitive as the reports: an assertion's message quotes
   what it compared.
 - **Never written:** step parameters, Playwright API steps' titles, attachments, output — Playwright
   titles a `fill()` with its value.
 - **Counts:** scenarios and setups apart (a setup's project is `setup:<cell>` or `artifacts:<cell>`,
   `config/project-names.ts`); what never got a final result is `didNotRun` — every scenario of a cell
-  whose setup failed, or those a stopped run never reached.
+  whose setup failed, or those a stopped run never reached; `drained`, of the `skipped`, those the
+  drain skipped. Errors from outside any test (`onError`), "No tests found" aside, are kept too.
 
 ## Saying what a run tested: the run facts
 
@@ -209,15 +218,16 @@ through `setup-facts.ts`; the verdict is the summary's (`verdictOf`).
   are read) and moved to the top by a script that carries no value. Nothing for `--list`.
 - **What it says:** one line — `backwpup · pro@nginx (pro) · BackWPup Pro 9.99.99 · develop @ 1dceea8966 ·
   WordPress 7.1.3 · PHP 8.5.11 64bit · <run name or RUN_ID>`, with `RUNNING`, `INTERRUPTED`,
-  `COULD NOT TEST` or `NO TESTS` appended (the reports cannot say those themselves: Cucumber never says
+  `STOPPED`, `COULD NOT TEST` or `NO TESTS` appended (the reports cannot say those themselves: Cucumber never says
   interrupted, and omits setups) — as the HTML title, the Cucumber banner and Allure's `--name`
   (`scripts/allure.mjs`); every fact, most important first, as Allure's Metadata (it shows eight), the
   HTML report's metadata and the banner's disclosure. A fact not known says why (`unknown: auth setup
   failed`, `… skipped`, `… did not run`), never blank.
 - **What it keeps out:** of the sites file, only `baseURL`; every value is one plain line, credentials
   masked, HTML-escaped in the banner and escaped for the properties file (separators, `\`,
-  controls, non-ASCII as `\uXXXX` — Allure's own reader reads them back exact). `captureGitInfo` stays
-  off: it records authors' emails and, under CI, a diff.
+  controls, non-ASCII as `\uXXXX` — Allure's own reader reads them back exact). `captureGitInfo` is set
+  off in the config factory: unset, Playwright turns it on under CI, and the HTML report would carry
+  authors' emails and the pull request's diff.
 - **Never fails a run:** every step is caught and the first failure warns once on stderr. Nothing is
   written for `--list`, nor with a command-line `--reporter`, which replaces every configured reporter.
 
@@ -371,12 +381,15 @@ resolves all paths via `dirs(product, cell)`. Two lifecycles:
 
 1. an **empty** run — `--list` or "No tests found", told by `results.jsonl`'s `run.begin` — takes no
    place under the cap and goes, unless protected;
-2. a **protected** run (the run in progress) is kept, and so is one dated in the **future**;
+2. a **protected** run (the run in progress) is kept, and so is one dated in the **future** — which
+   takes no place under the cap and is never the newest complete report, so a skewed clock or a pinned
+   RUN_ID cannot push a real report out;
 3. the group's **newest complete** report (`playwright/index.html` written) is kept up to **182 days**,
    whatever the cap — a cell whose last runs were all killed keeps one readable report;
 4. a run older than **30 days** goes (never under a day: a run in progress carries no marker); so does
-   one beyond the newest **`E2E_REPORTS_KEEP`** (20). Killed runs count. `0` lifts the cap only: the
-   age rules still run, and nothing turns a run's own pruning off.
+   one beyond the newest **`E2E_REPORTS_KEEP`** (20). Killed runs count — and so would another run of
+   the same cell still in progress, which nothing on disk tells from a killed one: a cell takes one run
+   at a time. `0` lifts the cap only: the age rules still run, and nothing turns a run's own pruning off.
 
 **When.** Each run prunes its own report folder's group as it ends, from the run summary's `onExit` —
 the last reporter's, after every report is written (`reporting/run-pruning.ts`) — and the summary's
@@ -389,10 +402,12 @@ for bad arguments).
 
 **How.** The listing never follows a link below the report root. A run is a folder holding a report
 part and dated by the suite's own hand — its RUN_ID name, else its `results.jsonl`'s first line,
-`run.begin` — never by a file's time: anything else (a `REPORT_ROOT` set to the repository finds
+`run.begin`, whose `at` must read back exactly as the suite writes it — never by a file's time: anything else (a `REPORT_ROOT` set to the repository finds
 `node_modules/<package>/dist`) is skipped, never removed. A removal renames the run to a hidden
 `.pruning-…` name in its group first — atomic, so no reader sees half a run — then removes it (a link
-inside is unlinked, its target untouched) and checks it is gone. A failure is reported, never thrown: pruning cannot fail a run. What an interrupted
+inside is unlinked, its target untouched) and checks it is gone. Before the rename and again after it,
+the run's folder must still resolve below the report root (`outsideRoot`), so a cell or product folder
+swapped for a link after the listing cannot redirect a removal out of the tree. A failure is reported, never thrown: pruning cannot fail a run. What an interrupted
 removal left is removed by a later prune, after an hour. `npm run report` and `report:allure` skip
 hidden folders.
 

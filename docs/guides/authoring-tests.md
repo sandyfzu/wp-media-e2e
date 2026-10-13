@@ -291,7 +291,9 @@ wp-admin Plugins screen and exposes `goto`, `isInstalled`, `isActive`, `activate
 `deactivate`, `delete` (the asserted UI flow), and `ensureAbsent` (idempotent cleanup).
 Methods throw the typed errors from [`wp/errors.ts`](../../src/common/wp/errors.ts) on failure.
 [`SiteHealthPage`](../../src/common/pages/site-health.page.ts) reads Site Health's "Copy site info"
-text, which the auth setup turns into the site's versions.
+text, which the auth setup turns into the site's versions — only the fields asked for leave the page
+(`siteInfoFields`), since a trace records what a call returns and a locator's wait logs the element
+with its attributes.
 
 ### Typing a secret
 

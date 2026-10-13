@@ -18,7 +18,12 @@ import {
 } from "../__fixtures__/mock-wordpress";
 import type { MockWordPress } from "../__fixtures__/mock-wordpress";
 import type { SiteConfig } from "../config/types";
-import { authenticatePool, hideFailureSnapshot } from "./authenticate";
+import {
+  SavedSessions,
+  authenticatePool,
+  endSessionsWhenSetupFails,
+  hideFailureSnapshot,
+} from "./authenticate";
 import { sessionsInState } from "./session";
 
 /**
@@ -282,6 +287,72 @@ test.describe("authenticatePool", () => {
         attach: () => Promise.reject(new Error("disk full")),
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+test.describe("endSessionsWhenSetupFails", () => {
+  /** A ledger that counts its `endAll` calls instead of reaching a site. */
+  class CountingSessions extends SavedSessions {
+    calls = 0;
+    override endAll(): Promise<void> {
+      this.calls += 1;
+      return Promise.resolve();
+    }
+  }
+
+  /** Registers the hook on a stand-in setup test and returns it, with the ledger. */
+  function register(): {
+    hook: (fixtures: object, info: object) => Promise<void>;
+    saved: CountingSessions;
+  } {
+    let hook: ((fixtures: object, info: object) => Promise<void>) | undefined;
+    const saved = new CountingSessions();
+    const returned = endSessionsWhenSetupFails(
+      {
+        afterEach: (fn: unknown) => {
+          hook = fn as typeof hook;
+        },
+      },
+      saved,
+    );
+    expect(returned).toBe(saved);
+    if (hook === undefined) throw new Error("no afterEach registered");
+    return { hook, saved };
+  }
+
+  test("ends the saved sessions after a setup that timed out or failed", async () => {
+    for (const status of ["timedOut", "failed", "interrupted"]) {
+      const { hook, saved } = register();
+      await hook({}, { status, expectedStatus: "passed" });
+      expect(saved.calls, status).toBe(1);
+    }
+  });
+
+  test("leaves them live after a setup that passed or was skipped as expected", async () => {
+    for (const status of ["passed", "skipped"]) {
+      const { hook, saved } = register();
+      await hook({}, { status, expectedStatus: status });
+      expect(saved.calls, status).toBe(0);
+    }
+  });
+});
+
+test.describe("SavedSessions", () => {
+  test("ends each recorded session once: a second endAll does nothing", async () => {
+    const saved = new SavedSessions();
+    // No session file: nothing to end, and no WP-CLI call — only the bookkeeping is under test.
+    const absent = (index: number): SiteConfig => ({
+      baseURL: "https://x.example.test",
+      username: MOCK_LOGIN,
+      password: PASSWORD,
+      transport: { mode: "local", rootDir: tmpdir() },
+      storageState: join(tmpdir(), `e2e-absent-${String(index)}.json`),
+    });
+    saved.add(absent(0));
+    saved.add(absent(1));
+    expect(saved.size).toBe(2);
+    await saved.endAll(1_000);
+    expect(saved.size).toBe(0);
   });
 });
 

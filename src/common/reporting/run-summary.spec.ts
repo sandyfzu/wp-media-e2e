@@ -59,6 +59,7 @@ function counts(values: Partial<Counts>): Counts {
     skipped: 0,
     interrupted: 0,
     didNotRun: 0,
+    drained: 0,
     ...values,
   };
 }
@@ -122,6 +123,41 @@ test.describe("verdictOf", () => {
       { status: "failed", scenarios: counts({ total: 0 }) },
       "no-tests",
     ],
+    [
+      "a test file that would not load leaves none planned, and failed",
+      {
+        status: "failed",
+        scenarios: counts({ total: 0 }),
+        runErrors: ["Error: a step file does not load"],
+      },
+      "failed",
+    ],
+    [
+      "the drain skipped what had not begun",
+      { scenarios: counts({ total: 3, passed: 1, skipped: 2, drained: 2 }) },
+      "stopped",
+    ],
+    [
+      "stopped, a failure before the stop still in the counts",
+      {
+        status: "failed",
+        scenarios: counts({ total: 3, failed: 1, skipped: 2, drained: 2 }),
+      },
+      "stopped",
+    ],
+    [
+      "interrupted after a drain",
+      {
+        status: "interrupted",
+        scenarios: counts({ total: 3, skipped: 2, drained: 2 }),
+      },
+      "interrupted",
+    ],
+    [
+      "a test's own skip is no stop",
+      { scenarios: counts({ total: 2, passed: 1, skipped: 1 }) },
+      "passed",
+    ],
   ];
   for (const [name, overrides, expected] of cases) {
     test(`${name} → ${expected}`, () => {
@@ -139,6 +175,12 @@ test.describe("the phrases", () => {
     expect(formatDuration(852_000)).toBe("14.2m");
     expect(formatDuration(3_600_000)).toBe("1.0h");
     expect(formatDuration(8_280_000)).toBe("2.3h");
+  });
+
+  test("describeCounts: the drain's skips are said as stopped, apart from a test's own", () => {
+    expect(
+      describeCounts(counts({ total: 5, passed: 1, skipped: 4, drained: 3 })),
+    ).toBe("1 passed · 1 skipped · 3 stopped");
   });
 
   test("describeCounts: the worst first, zeros left out", () => {

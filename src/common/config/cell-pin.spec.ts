@@ -9,6 +9,7 @@ import {
   assertSelectionFitsPin,
   matchesProjectFilter,
   pinnedCell,
+  cellsReached,
 } from "./cell-pin";
 
 /**
@@ -240,5 +241,18 @@ test.describe("assertNoForeignBddConfigs", () => {
         assertNoForeignBddConfigs(inherited, "backwpup", "pro@nginx");
       }, inherited).not.toThrow();
     }
+  });
+});
+
+test.describe("cellsReached", () => {
+  test("every cell a selection reaches by Playwright's matching, in the cells' order", () => {
+    const cells = ["big", "small", "pro@nginx"];
+    expect(cellsReached(cells, ["big"])).toEqual(["big"]);
+    expect(cellsReached(cells, ["big", "SMALL"])).toEqual(["big", "small"]);
+    expect(cellsReached(cells, ["sm*"])).toEqual(["small"]);
+    expect(cellsReached(cells, ["*"])).toEqual(cells);
+    expect(cellsReached(cells, ["artifacts:PRO@nginx"])).toEqual(["pro@nginx"]);
+    expect(cellsReached(cells, ["other"])).toEqual([]);
+    expect(cellsReached(cells, [])).toEqual([]);
   });
 });

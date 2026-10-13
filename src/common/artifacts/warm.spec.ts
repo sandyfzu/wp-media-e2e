@@ -1,8 +1,12 @@
 import { test, expect } from "@playwright/test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   assertCached,
   createApvmWarmer,
+  isCachedFile,
   toWarmedBuild,
   warmArtifacts,
 } from "./warm";
@@ -429,6 +433,24 @@ test.describe("assertCached", () => {
     }).toThrow(/does not hold "\/tmp\/ws\/b\.zip"/);
   });
 
+  test("by default, holds only a non-empty regular file for a cached zip", () => {
+    const dir = mkdtempSync(join(tmpdir(), "e2e-cached-"));
+    try {
+      writeFileSync(join(dir, "full.zip"), "PK");
+      writeFileSync(join(dir, "empty.zip"), "");
+      mkdirSync(join(dir, "folder.zip"));
+      expect(isCachedFile(join(dir, "full.zip"))).toBe(true);
+      for (const name of ["empty.zip", "folder.zip", "absent.zip"]) {
+        expect(isCachedFile(join(dir, name)), name).toBe(false);
+      }
+      expect(() => {
+        assertCached(holding(join(dir, "empty.zip")));
+      }).toThrow(/does not hold/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("fails a warm that reported no zip at all", () => {
     expect(() => {
       assertCached(holding(), () => true);
@@ -476,6 +498,21 @@ test.describe("createApvmWarmer", () => {
       },
     ]);
     expect(build.pin).toEqual({ ref: `commit:${SHA}`, version: "9.99.99" });
+  });
+
+  test("pins the version it built, not the one it asked for", async () => {
+    const built = apvmOutput();
+    const { deps } = fakeApvm({
+      ...built,
+      result: { ...built.result, version: "9.99.99-built" },
+    });
+    const build = await createApvmWarmer({ ...deps, exists: () => true })(
+      PARAMS,
+    );
+    expect(build.pin).toEqual({
+      ref: `commit:${SHA}`,
+      version: "9.99.99-built",
+    });
   });
 
   test("sends no version or variants the plan did not have", async () => {

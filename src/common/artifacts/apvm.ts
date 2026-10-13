@@ -13,7 +13,8 @@ import { styleText } from "node:util";
 import { Apvm } from "apvm-napi";
 import type { JsBuildEvent } from "apvm-napi";
 
-import { redactSecrets } from "../text";
+import { env } from "../config/env";
+import { maskValues, redactSecrets } from "../text";
 import type { ArtifactOrigin } from "./types";
 
 /**
@@ -84,7 +85,20 @@ export function assertToken(
 
 // A private-repo build authenticates with a GitHub token, and raw builder output is third-party
 // text: everything kept from it reaches a console log and the error a Playwright HTML/Allure report
-// keeps, which CI publishes — so it is masked (`redactSecrets`) on its way out.
+// keeps, which CI publishes — so it is masked (`redactBuildText`) on its way out.
+
+/**
+ * A build's or a warm's text with every credential masked: by shape ({@link redactSecrets}), and the
+ * GitHub tokens this process holds by value — a legacy token is 40 hex digits, which no pattern can
+ * tell from a commit. A token APVM reads from its own config or `gh` is masked by shape alone.
+ *
+ * @param text - what APVM, git or a build step said.
+ */
+export function redactBuildText(text: string): string {
+  return redactSecrets(
+    maskValues(text, [env("GITHUB_TOKEN"), env("GH_TOKEN")]),
+  );
+}
 
 /** How many trailing command-output lines to retain for a failed build's error context. */
 const OUTPUT_TAIL = 40;
@@ -127,14 +141,14 @@ export function createBuildReporter(label: string): BuildReporter {
         console.log(
           `  ${styleText(["dim"], `[${label}]`)} ${String(event.phase)}` +
             (event.message !== undefined
-              ? `: ${redactSecrets(event.message)}`
+              ? `: ${redactBuildText(event.message)}`
               : ""),
         );
         break;
       case "warning":
         if (event.message !== undefined) {
           console.warn(
-            `  ${styleText(["yellow"], `[${label}] warning:`)} ${redactSecrets(event.message)}`,
+            `  ${styleText(["yellow"], `[${label}] warning:`)} ${redactBuildText(event.message)}`,
           );
         }
         break;
@@ -161,7 +175,7 @@ export function createBuildReporter(label: string): BuildReporter {
       );
     }
     // Scrub on the way out — this is the only place the buffer and the reason are exposed.
-    return redactSecrets(parts.join(""));
+    return redactBuildText(parts.join(""));
   };
 
   return { onProgress, failureContext };

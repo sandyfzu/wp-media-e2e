@@ -139,7 +139,8 @@ adds, so it is always targeted.
   it is the one funnel both share. The digest names the artifact; a commit only names its source,
   and two builds of one commit are different files (a build regenerates `languages/*.pot` and
   stamps every entry's mtime). The copy in the role dir is what is hashed — the bytes this run
-  installs.
+  installs, as long as nothing re-resolves the cell during the run (a cell takes one run at a time:
+  the digest is taken once, at resolution, and not re-checked at each install).
 - **A build records its full commit** (40 hex), never APVM's `commitShort`, and its `pinRef` — the
   ref that rebuilds exactly it (see [Pinning](#pre-warming)). A release download has no commit
   (APVM reports `release-<tag>` in that field); its `pinRef` (`release:5.7.7`) is the only record
@@ -324,7 +325,8 @@ was cached, the full commit, the version, the cached zips, the resolved ref — 
 - The version is the one **built**, never "the one requested": APVM's cache is keyed by commit and
   version, and an embedded-version product (WP Rocket) given none fetches its version file from
   GitHub before the cache — and clones when it cannot. Given its built version, the version
-  matches its source, so nothing is rewritten.
+  matches its source, so nothing is rewritten — unless the warm itself overrode the version
+  (`E2E_PLUGIN_VERSION`), when a cold rebuild from the pin rewrites it again, to the same value.
 - A build that cannot be pinned — no full SHA, or a release still named by a selector (APVM matches
   those ignoring case) — is a **failed** warm, as is one whose zips are not in the cache: APVM
   stores a build best-effort, and a cache it could not write leaves only gone temporary paths.

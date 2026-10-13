@@ -21,6 +21,7 @@ import {
 import type { CheckResult } from "./src/common/setup/preflight";
 import type { ElevationSupport } from "./src/common/wp/exec";
 import { disposeConnections } from "./src/common/wp/exec";
+import { redactSecrets } from "./src/common/text";
 import { PRODUCTS } from "./src/projects/products";
 
 /**
@@ -302,7 +303,7 @@ function siteLabel(
     "product" | "cell" | "index" | "baseURL" | "transport"
   >,
 ): string {
-  return `${result.product}/${result.cell} · site[${String(result.index)}] ${result.baseURL} [${transportLabel(result.transport)}]`;
+  return `${result.product}/${result.cell} · site[${String(result.index)}] ${redactSecrets(result.baseURL)} [${transportLabel(result.transport)}]`;
 }
 
 /** Prints the top banner and the fleet-wide counts about to be checked. */

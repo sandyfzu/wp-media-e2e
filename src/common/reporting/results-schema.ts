@@ -120,6 +120,10 @@ export interface ScenarioEndEvent extends EventBase {
   readonly path: readonly string[];
   /** The `.feature` file, relative to the repository. */
   readonly file?: string;
+  /**
+   * Playwright's tags, each once: the Gherkin tags, and any `@word` in the feature's or the scenario's
+   * title — Playwright reads those as tags too.
+   */
   readonly tags: readonly string[];
   readonly status: TestStatus;
   /** Playwright's own outcome, verbatim. */
@@ -145,6 +149,10 @@ export interface RunEndEvent extends EventBase {
   /** Playwright's status for the run. */
   readonly status: "passed" | "failed" | "timedout" | "interrupted";
   readonly durationMs: number;
+  /**
+   * The scenarios' counts. `drained` came later in v1, an addition a reader ignores: a stream written
+   * before it lacks the field, and a reader of old streams takes it as 0.
+   */
   readonly scenarios: Counts;
   readonly setups: Counts;
 }

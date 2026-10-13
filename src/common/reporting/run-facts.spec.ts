@@ -108,6 +108,7 @@ function counts(total: number, set: Partial<Counts> = {}): Counts {
     skipped: 0,
     interrupted: 0,
     didNotRun: 0,
+    drained: 0,
     ...set,
   };
 }

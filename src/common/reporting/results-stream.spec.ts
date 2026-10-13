@@ -291,6 +291,14 @@ test.describe("the events", () => {
     });
   });
 
+  test("names each tag once: Playwright repeats one the title also names", () => {
+    // "A @mobile scenario…" tagged @mobile: Playwright lists the title's @mobile, then the tag's.
+    const fake = fakeTest({ tags: ["@mobile", "@smoke", "@mobile"] });
+    expect(
+      eventFor(fake.test, addAttempt(fake, { status: "passed" })),
+    ).toMatchObject({ tags: ["@mobile", "@smoke"] });
+  });
+
   test("a flaky scenario ends with no error: its last attempt passed", () => {
     const fake = fakeTest({ retries: 1 });
     addAttempt(fake, { status: "failed", errors: ["Error: first"] });
@@ -389,6 +397,7 @@ test.describe("the events", () => {
         skipped: 0,
         interrupted: 0,
         didNotRun: 1,
+        drained: 0,
       },
       setups: {
         total: 0,
@@ -398,6 +407,7 @@ test.describe("the events", () => {
         skipped: 0,
         interrupted: 0,
         didNotRun: 0,
+        drained: 0,
       },
     });
   });

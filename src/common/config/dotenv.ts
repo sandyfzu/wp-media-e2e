@@ -19,6 +19,9 @@ export const DOTENV_SWITCH_ENV = "E2E_LOAD_DOTENV";
 /** The file loaded, relative to the working directory — Node's own default. */
 export const DOTENV_FILE = ".env";
 
+/** The UTF-8 byte-order mark, as `readFileSync(…, "utf8")` leaves it at a file's start. */
+const BOM = "\ufeff";
+
 /** What {@link loadDotenv} did. */
 export type DotenvOutcome =
   | { readonly kind: "off" }
@@ -70,7 +73,9 @@ export function readDotenvFile(path: string): string | undefined {
  * The switch itself is checked before the file is read, so a copy in the file cannot act. It is
  * still set when valid, so the processes a run forks inherit it as present and do not repeat the
  * warning (with `false`, they also skip the file, whose keys they inherited); an invalid one is
- * dropped rather than handed to them to throw on.
+ * dropped rather than handed to them to throw on. A leading byte-order mark — what some editors save
+ * a UTF-8 file with — is dropped: `parseEnv` would make it part of the first key, which no reader of
+ * that key would then find.
  *
  * @returns the keys set, and the switch's value if the file supplied a non-blank one.
  */
@@ -80,7 +85,8 @@ export function applyDotenv(
 ): { applied: string[]; ignoredSwitch: string | undefined } {
   const applied: string[] = [];
   let ignoredSwitch: string | undefined;
-  for (const [key, value] of Object.entries(parseEnv(content))) {
+  const text = content.startsWith(BOM) ? content.slice(BOM.length) : content;
+  for (const [key, value] of Object.entries(parseEnv(text))) {
     if (value === undefined || Object.hasOwn(target, key)) continue;
     if (key === DOTENV_SWITCH_ENV && isNonEmptyString(value)) {
       ignoredSwitch = value;

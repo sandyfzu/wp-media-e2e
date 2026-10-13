@@ -91,7 +91,7 @@ export function pinOf(built: BuiltRef): Pin | PinRefusal {
       ? { ref: `release:${value}` }
       : {
           refused:
-            `cannot pin this release download: "${value}" is not a resolved release tag, so a ` +
+            `cannot pin this release download: ${JSON.stringify(value)} is not a resolved release tag, so a ` +
             "run given it could download another release.",
         };
   }
@@ -100,8 +100,8 @@ export function pinOf(built: BuiltRef): Pin | PinRefusal {
     ? { ref: `commit:${commit}`, version: built.version }
     : {
         refused:
-          `cannot pin this build: its commit "${built.commit}" is not a full SHA (source: ${type} ` +
-          `"${value}"), so a run given it could build something else.`,
+          `cannot pin this build: its commit ${JSON.stringify(built.commit)} is not a full SHA ` +
+          `(source: ${type} ${JSON.stringify(value)}), so a run given it could build something else.`,
       };
 }
 

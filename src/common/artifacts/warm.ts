@@ -20,16 +20,16 @@
  * later, an orchestrator both call `warmArtifacts` with it.
  */
 
-import { existsSync } from "node:fs";
+import { statSync } from "node:fs";
 
 import {
   assertToken,
   createBuildReporter,
   getApvm,
+  redactBuildText,
   toArtifactOrigin,
 } from "./apvm";
 import { errorMessage } from "../guards";
-import { redactSecrets } from "../text";
 import { fullCommit, requirePin } from "./pin";
 import type { Pin } from "./pin";
 import { buildArtifactPlan } from "./request";
@@ -249,7 +249,7 @@ async function warmRequest(
       params,
       wantedBy,
       ok: false,
-      error: redactSecrets(errorMessage(error)),
+      error: redactBuildText(errorMessage(error)),
     };
   }
 }
@@ -312,12 +312,12 @@ export function toWarmedBuild(output: JsBuildOutput): WarmedBuild {
  * would send the run on a cold build it was meant to skip.
  *
  * @param build - the warm's result.
- * @param exists - whether a path exists (injected for tests).
+ * @param exists - whether a path holds a cached zip ({@link isCachedFile}; injected for tests).
  * @throws Error naming what is missing, when the warm cached nothing or a zip is not on disk.
  */
 export function assertCached(
   build: WarmedBuild,
-  exists: (path: string) => boolean = existsSync,
+  exists: (path: string) => boolean = isCachedFile,
 ): void {
   if (build.artifacts.length === 0) {
     throw new Error(
@@ -334,16 +334,34 @@ export function assertCached(
   }
 }
 
+/**
+ * Whether `path` is a non-empty regular file: what a cached zip is. A folder of that name, or a file a
+ * full disk left empty, would otherwise pass for the cache.
+ *
+ * @param path - where the warm says it cached a zip.
+ */
+export function isCachedFile(path: string): boolean {
+  try {
+    const stats = statSync(path);
+    return stats.isFile() && stats.size > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** What {@link createApvmWarmer} talks to: APVM, and the filesystem to confirm what it cached. */
 export interface WarmerDeps {
   /** The APVM instance to warm with — only its token check and `warmCache` are used. */
   readonly apvm: () => Promise<Pick<Apvm, "hasToken" | "warmCache">>;
-  /** Whether a path exists. */
+  /** Whether a path holds a cached zip ({@link isCachedFile}). */
   readonly exists: (path: string) => boolean;
 }
 
 /** The real {@link WarmerDeps}: the process-wide APVM and the local filesystem. */
-const DEFAULT_WARMER_DEPS: WarmerDeps = { apvm: getApvm, exists: existsSync };
+const DEFAULT_WARMER_DEPS: WarmerDeps = {
+  apvm: getApvm,
+  exists: isCachedFile,
+};
 
 /**
  * The real {@link WarmOne}: asserts a token for private-source products (before any clone),
@@ -376,7 +394,7 @@ export function createApvmWarmer(
       .catch((error: unknown) => {
         // Redact: a private-repo warm's error text can echo the authenticated remote URL.
         throw new Error(
-          `APVM warm of ${label} failed: ${redactSecrets(errorMessage(error))}${reporter.failureContext()}`,
+          `APVM warm of ${label} failed: ${redactBuildText(errorMessage(error))}${reporter.failureContext()}`,
         );
       });
     const build = toWarmedBuild(output);

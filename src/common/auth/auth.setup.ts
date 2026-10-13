@@ -6,6 +6,7 @@ import { verifyPool } from "../setup/preflight";
 import {
   BEST_EFFORT_ALLOWANCE_PER_SITE_MS,
   authenticatePool,
+  endSessionsWhenSetupFails,
   keepSecretsOutOfFailureSnapshots,
 } from "./authenticate";
 
@@ -33,6 +34,8 @@ import {
 
 // This setup types the sites' passwords: no failure snapshot may print them (see authenticate.ts).
 keepSecretsOutOfFailureSnapshots(setup);
+// A setup that fails — a timeout included — ends the sessions it saved: its trace holds their cookies.
+const saved = endSessionsWhenSetupFails(setup);
 
 setup("authenticate site pool", async ({ browser }, testInfo) => {
   const { product, cell } = readRouting(testInfo.project.metadata);
@@ -59,5 +62,5 @@ setup("authenticate site pool", async ({ browser }, testInfo) => {
   // to skip the dependent BDD project — preventing cascading failures.
   await verifyPool(pool, product, cell);
 
-  await authenticatePool(browser, real, testInfo);
+  await authenticatePool(browser, real, testInfo, undefined, saved);
 });

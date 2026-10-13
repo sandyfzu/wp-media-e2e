@@ -12,6 +12,7 @@ import {
   declaredResidue,
   extendedTimeout,
   installPluginUnderTest,
+  leftWorkOf,
   scenarioReport,
   teardownPluginUnderTest,
 } from "./plugin-lifecycle";
@@ -46,14 +47,11 @@ Before(
     // before spending any of the budget.
     $testInfo.setTimeout(extendedTimeout($testInfo.timeout));
     const { product } = readRouting($testInfo.project.metadata);
-    const stop = getStopRunningWork(product);
     await installPluginUnderTest(
       site.transport,
       pluginArtifact("plugin"),
       declaredResidue(product),
-      stop === undefined
-        ? undefined
-        : { stop, report: scenarioReport($testInfo) },
+      leftWorkOf(product, scenarioReport($testInfo)),
     );
   },
 );

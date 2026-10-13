@@ -1,7 +1,11 @@
 import { isAbsolute, relative, sep } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 
-import type { TestCase, TestResult } from "@playwright/test/reporter";
+import type {
+  TestCase,
+  TestError,
+  TestResult,
+} from "@playwright/test/reporter";
 
 import { STOPPED_ANNOTATION } from "../config/drain";
 import { setupKindOf, type SetupKind } from "../config/project-names";
@@ -40,6 +44,8 @@ export interface Counts {
   readonly interrupted: number;
   /** Planned but never finished: a failed setup's cell, or a run stopped before reaching them. */
   readonly didNotRun: number;
+  /** Of the `skipped`, those the drain skipped: the run was stopped before they began. */
+  readonly drained: number;
 }
 
 /** Where a failure's first error was found. */
@@ -271,9 +277,16 @@ function blamedStep(
     return { chain, where: inHook ? "hook" : "step" };
   }
 
-  // Nothing failed: the closing hooks ran after the failure, so the last top-level step that is not
-  // a hook was running — else, when only hooks began (a crash in one), the last of them. Its last
-  // reportable children narrow it down.
+  const begun = lastBegun(steps);
+  return begun === undefined ? undefined : { chain: begun, where: "last-step" };
+}
+
+/**
+ * The step that was running when a failure no step carries struck: the closing hooks ran after it,
+ * so the last top-level step that is not a hook — else, when only hooks began (a crash in one), the
+ * last of them — narrowed down by its last reportable children.
+ */
+function lastBegun(steps: readonly StepLike[]): StepChain | undefined {
   const begun =
     steps.filter((candidate) => candidate.category !== "hook").at(-1) ??
     steps.at(-1);
@@ -284,8 +297,11 @@ function blamedStep(
     if (next === undefined || !REPORTABLE_CATEGORIES.has(next.category)) break;
     chain = [...chain, next];
   }
-  return { chain, where: "last-step" };
+  return chain;
 }
+
+/** The top-level step Playwright runs the closing hooks and fixture teardowns in. */
+const CLOSING_HOOKS = "After Hooks";
 
 /**
  * The first error a test's attempt shows, and the step it is blamed on (see {@link blamedStep}).
@@ -302,7 +318,11 @@ export function firstError(result: {
 }): FirstError | undefined {
   const first = result.errors[0];
   const resultMessage = first?.message ?? first?.value;
-  const blamed = blamedStep(result.steps);
+  const blamed = laterHookAside(
+    blamedStep(result.steps),
+    result.steps,
+    resultMessage,
+  );
   const message =
     (blamed?.where === "step" || blamed?.where === "hook"
       ? stepMessage(blamed.chain.at(-1))
@@ -312,6 +332,32 @@ export function firstError(result: {
   return step === ""
     ? { message: cleanMessage(message), where: "test" }
     : { message: cleanMessage(message), where: blamed?.where ?? "test", step };
+}
+
+/**
+ * A failure blamed on a closing hook whose error is not the attempt's first: the attempt failed before
+ * the hook — a timeout inside a step, which no step carries — and the hook failed after, in its
+ * clean-up. The first error is the cause, so the blame goes to the step that was running.
+ *
+ * @param blamed - what {@link blamedStep} chose.
+ * @param steps - the attempt's top-level steps.
+ * @param resultMessage - the attempt's first error.
+ */
+function laterHookAside(
+  blamed: ReturnType<typeof blamedStep>,
+  steps: readonly StepLike[],
+  resultMessage: string | undefined,
+): ReturnType<typeof blamedStep> {
+  if (
+    blamed?.where !== "hook" ||
+    resultMessage === undefined ||
+    blamed.chain[0]?.title !== CLOSING_HOOKS ||
+    stepMessage(blamed.chain.at(-1)) === resultMessage
+  ) {
+    return blamed;
+  }
+  const begun = lastBegun(steps);
+  return begun === undefined ? blamed : { chain: begun, where: "last-step" };
 }
 
 /**
@@ -373,8 +419,14 @@ export interface SettledTest {
   readonly status: TestStatus;
 }
 
-/** The counts of `total` planned tests, from the final statuses of those that finished. */
-function countsOf(total: number, statuses: Iterable<TestStatus>): Counts {
+/** How one finished test is counted: its final status, and whether the drain skipped it. */
+interface FinalOutcome {
+  readonly status: TestStatus;
+  readonly drained: boolean;
+}
+
+/** The counts of `total` planned tests, from the final outcomes of those that finished. */
+function countsOf(total: number, outcomes: Iterable<FinalOutcome>): Counts {
   const counts = {
     total,
     passed: 0,
@@ -383,10 +435,12 @@ function countsOf(total: number, statuses: Iterable<TestStatus>): Counts {
     skipped: 0,
     interrupted: 0,
     didNotRun: 0,
+    drained: 0,
   };
   let finished = 0;
-  for (const status of statuses) {
+  for (const { status, drained } of outcomes) {
     counts[status] += 1;
+    if (drained) counts.drained += 1;
     finished += 1;
   }
   // A test the plan did not hold cannot happen, but a count must never go negative.
@@ -395,8 +449,21 @@ function countsOf(total: number, statuses: Iterable<TestStatus>): Counts {
 }
 
 /**
- * A run's ledger: what it planned, split into setups and scenarios, how each test finally ended, and
- * which tests still await a retry. A setup counts apart, so a run's "Result" speaks of scenarios.
+ * Whether an error outside any test is Playwright's "No tests found" — a selection that matched
+ * nothing — rather than a failure: a test file that would not load, a global setup that threw.
+ *
+ * @param error - what `onError` received.
+ */
+export function isNoTestsFound(error: Pick<TestError, "message">): boolean {
+  return /^(?:Error: )?No tests found\b/.test(
+    stripVTControlCharacters(error.message ?? "").trim(),
+  );
+}
+
+/**
+ * A run's ledger: what it planned, split into setups and scenarios, how each test finally ended,
+ * which tests still await a retry, and the errors raised outside any test. A setup counts apart, so
+ * a run's "Result" speaks of scenarios.
  *
  * A test's final status is the **last** one recorded for it: Playwright re-runs an ended test only
  * in a serial-mode suite (none of the features is one), and then its later end is the true one.
@@ -407,8 +474,10 @@ export class RunTally {
   /** Each finished test's final status, by id; a setup's carries its kind. */
   private readonly finals = new Map<
     string,
-    { readonly setup?: SetupKind; readonly status: TestStatus }
+    FinalOutcome & { readonly setup?: SetupKind }
   >();
+  /** The errors raised outside any test, "No tests found" aside, each its first line, masked. */
+  private readonly errors: string[] = [];
   /** The tests a retry is due for, by id, with their last attempt. */
   private readonly pending = new Map<
     string,
@@ -425,6 +494,27 @@ export class RunTally {
     this.planned = { scenarios: tests.length - setups, setups };
     this.finals.clear();
     this.pending.clear();
+    this.errors.length = 0;
+  }
+
+  /**
+   * Records an error raised outside any test (`onError`): a test file that would not load, a global
+   * setup that threw. "No tests found" is not recorded — a selection that matched nothing.
+   *
+   * @param error - what `onError` received.
+   */
+  runError(error: Pick<TestError, "message">): void {
+    if (isNoTestsFound(error)) return;
+    const first = stripVTControlCharacters(error.message ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line !== "");
+    this.errors.push(redactSecrets(first ?? "an error with no message"));
+  }
+
+  /** The errors raised outside any test, as {@link RunTally.runError} recorded them. */
+  get runErrors(): readonly string[] {
+    return [...this.errors];
   }
 
   /**
@@ -465,9 +555,7 @@ export class RunTally {
   get scenarios(): Counts {
     return countsOf(
       this.planned.scenarios,
-      [...this.finals.values()]
-        .filter((f) => f.setup === undefined)
-        .map((f) => f.status),
+      [...this.finals.values()].filter((f) => f.setup === undefined),
     );
   }
 
@@ -475,18 +563,17 @@ export class RunTally {
   get setups(): Counts {
     return countsOf(
       this.planned.setups,
-      [...this.finals.values()]
-        .filter((f) => f.setup !== undefined)
-        .map((f) => f.status),
+      [...this.finals.values()].filter((f) => f.setup !== undefined),
     );
   }
 
   /** Records a test's final status, replacing any earlier one. */
   private finish(test: TestCase, status: TestStatus): void {
     const setup = setupOf(test);
+    const drained = status === "skipped" && wasDrainedTest(test);
     this.finals.set(
       test.id,
-      setup === undefined ? { status } : { setup, status },
+      setup === undefined ? { status, drained } : { setup, status, drained },
     );
   }
 }

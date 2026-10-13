@@ -38,7 +38,7 @@ src/
 │   ├── reporting/          # the suite's own reporters: cell-notice.ts, results-stream.ts (results.jsonl), run-facts.reporter.ts (run-facts.json, report titles), run-summary.ts; their pure parts (results.ts, setup-facts.ts, run-facts.ts, report-files.ts) and the stream's schema + reader; report retention (retention.ts, report-tree.ts, run-pruning.ts, prune-command.ts)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ending a saved login's session)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
-│   ├── text.ts             # small shared string helpers (escapeRegExp, escapeHtml, redactSecrets — masking credentials)
+│   ├── text.ts             # small shared string helpers (escapeRegExp, escapeHtml, redactSecrets/maskValues — masking credentials, plain — one line of plain text)
 │   ├── deadline.ts         # withinBudget: a time limit for a best-effort step
 │   ├── steps/              # generic step definitions
 │   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
@@ -77,7 +77,8 @@ playwright*.config.ts       # entry configs (default, per-product, unit)
 - **Pool** — the interchangeable WordPress sites under a cell; each worker binds to
   one site by `parallelIndex`.
 - **Run unit** — one `(product × cell)`. **Run exactly one cell per invocation**; selecting
-  two at once fails fast. **Pin it with `E2E_CELL=<cell>`**: the config then holds that cell
+  two at once fails fast — a cell named beside another that `--project` reaches by Playwright's own
+  matching (any case, `*`, its `setup:`) included. **Pin it with `E2E_CELL=<cell>`**: the config then holds that cell
   alone, so `bddgen` regenerates only its specs and two cells of one product can run side by
   side. `--project=<cell>` still works, but `bddgen` then regenerates every cell's specs, which
   breaks another run of the product started beside it. An unknown pin, or a `--project` the pin
@@ -85,27 +86,35 @@ playwright*.config.ts       # entry configs (default, per-product, unit)
   `PLAYWRIGHT_BDD_CONFIGS`. Each run prints a `[cell]` line saying which it is (unless a
   command-line `--reporter` replaces the configured reporters).
 - **Stopping a run** — the **drain**: creating the stop file `E2E_INTERNAL_STOP_FILE` names
-  (absolute, in a folder that exists — checked as the run starts; set by the orchestrator) skips each
-  scenario's first attempt as `stopped` while the one in flight finishes (`config/drain.ts`, the
+  (absolute, in a folder that exists and is kept for the run's lifetime, the file itself **not** there
+  yet — both checked as the run starts; set by the orchestrator) skips each scenario's first attempt
+  as `stopped` while the one in flight finishes (`config/drain.ts`, the
   `drainGate` fixture, which `storageState` depends on so it runs first). Escalate with **one**
   SIGINT to the runner, then SIGKILL to its process group — never SIGTERM, never a second SIGINT.
 - **Watching a run** — every run streams its results to `<report dir>/results.jsonl`, one JSON line
   per event (`run.begin`, `setup.end`, `scenario.begin`/`retry`/`end`, `run.error`, `run.end`; schema
   v1, `reporting/results-schema.ts`) as it happens, silently; no `run.end` means the runner died. The
-  terminal ends with a summary (`reporting/run-summary.ts`): the verdict — `COULD NOT TEST` when a
-  setup failed — the counts, the plugin and sites tested, and where the reports are. Both judge a
+  terminal ends with a summary (`reporting/run-summary.ts`): the verdict — `INTERRUPTED`, then
+  `COULD NOT TEST` when a setup failed, `STOPPED` when the drain skipped a scenario (counted as
+  `drained` in `run.end`), `NO TESTS` only when no error came from outside a test (a spec that would
+  not load is `FAILED`, its error on an `Error` line) — the counts, the plugin and sites tested, and
+  where the reports are. Both judge a
   scenario by its result, never by a step's error (a skip carries one); predict a retry by the
   dispatcher's rule and settle, as the run ends, one that never ran (`retryNotRun`); and never write a
   step's parameters, a Playwright API step's title or a call log — the stream is still as sensitive as
-  the reports. Every credential a message quotes is masked (`redactSecrets`, `text.ts`), in the stream,
-  the summary and the run facts alike.
+  the reports. Every credential a message quotes is masked by its shape (`redactSecrets`, `text.ts`:
+  a URL's userinfo, a GitHub token, a credential URL parameter, an `Authorization` header, a WordPress
+  login cookie), in the stream, the summary and the run facts alike; one with no shape (a legacy
+  40-hex token, a bare password) only by its value (`maskValues` — APVM's output, against the
+  process's `GITHUB_TOKEN`/`GH_TOKEN`).
 - **What a run tested, up front** — the run-facts reporter (`reporting/run-facts.reporter.ts`, before
   the reports) says it in one line — product, cell, plugin version, ref and commit, WordPress and PHP,
   the run's name (`E2E_RUN_NAME`, display only; `E2E_REQUESTED_REF` shows the ref asked for) — as the
   HTML report's title, a banner on the Cucumber report and the Allure report's name; every fact (the
   zip's SHA-256 included) in their metadata and in `<report dir>/run-facts.json`, rewritten as each setup
   ends. A missing fact says why, never blank; only whitelisted values (of the sites file, `baseURL`);
-  everything caught, so it can never fail a run. Keep `captureGitInfo` off (it records emails, a diff).
+  everything caught, so it can never fail a run. `captureGitInfo` is set **off** in the config factory:
+  left unset, Playwright turns it on under CI and the HTML report carries authors' emails and a diff.
 - **Report retention** — each run prunes **its own cell's** report folder as it ends (the summary's
   `onExit`, `reporting/run-pruning.ts`; a `Pruned` line says what went): at most `E2E_REPORTS_KEEP`
   (20; `0` lifts the cap, not the age rules), none older than 30 days except the newest complete
@@ -373,11 +382,13 @@ is a dependency project that runs before any BDD scenarios. It does three things
    token, for that site's host only, through `WP_Session_Tokens`, so no other session of the user is
    touched), then logs in once through the WordPress UI and saves the session to that site's
    `storageState`, which the BDD project reuses. A setup that fails ends the sessions it saved before
-   failing. Not at the run's end: the `--no-deps` loop reuses the saved login, and an interrupted run
+   failing — one that times out too, from its `afterEach` (`endSessionsWhenSetupFails`), since a
+   timeout abandons the body. Not at the run's end: the `--no-deps` loop reuses the saved login, and an interrupted run
    skips its teardown. Best-effort and bounded (`BEST_EFFORT_ALLOWANCE_PER_SITE_MS`, added to the
    setup's timeout): a session that cannot be ended is a warning, and expires in two days.
 3. **Site versions** — reads Site Health's "Copy site info" text
-   ([`SiteHealthPage`](src/common/pages/site-health.page.ts)) and keeps a whitelist — WordPress, PHP
+   ([`SiteHealthPage`](src/common/pages/site-health.page.ts)), cut down **in the page** to the
+   whitelisted lines (a traced call records what it returns), and keeps that whitelist — WordPress, PHP
    as the web server runs it, its SAPI, the web server, the database and its extension
    ([`setup/site-info.ts`](src/common/setup/site-info.ts)) — printed as a `[site]` line and attached
    as `site-info.json`. Best-effort: a failure is a warning and an `error` entry, never a failed setup.

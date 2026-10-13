@@ -1,6 +1,12 @@
 import { test, expect } from "@playwright/test";
 
-import { escapeHtml, escapeRegExp, redactSecrets } from "./text";
+import {
+  escapeHtml,
+  escapeRegExp,
+  maskValues,
+  plain,
+  redactSecrets,
+} from "./text";
 
 /** A string escaped this way must match itself, literally, and nothing else. */
 test.describe("escapeRegExp", () => {
@@ -143,5 +149,55 @@ test.describe("redactSecrets", () => {
     const text = "http://a:b@h1 http://c:d@h2";
     expect(redactSecrets(text)).toBe("http://***@h1 http://***@h2");
     expect(redactSecrets(text)).toBe("http://***@h1 http://***@h2");
+  });
+});
+
+test.describe("plain", () => {
+  test("one line: escape sequences gone, control characters and line separators a space", () => {
+    expect(
+      plain("\u001b[31mred\u001b[0m\nnext\ttab\u0085c1\u2028ls\u2029ps"),
+    ).toBe("red next tab c1 ls ps");
+  });
+
+  test("drops the invisible format characters that make text display as something else", () => {
+    // U+202E shows what follows right to left: "nightly‮gnp.exe" reads as "nightlyexe.png".
+    expect(plain("nightly\u202egnp.exe")).toBe("nightlygnp.exe");
+    expect(plain("zero\u200bwidth\ufeff")).toBe("zerowidth");
+  });
+});
+
+test.describe("redactSecrets — headers, cookies and login forms", () => {
+  test("masks an Authorization header's credential, a WordPress login cookie and a pwd parameter", () => {
+    expect(redactSecrets("Authorization: Basic dXNlcjpwYXNz")).toBe(
+      "Authorization: Basic ***",
+    );
+    expect(redactSecrets("authorization: Bearer v1.abc-DEF_9")).toBe(
+      "authorization: Bearer ***",
+    );
+    expect(redactSecrets("Authorization: token 0123abcd0123abcd")).toBe(
+      "Authorization: token ***",
+    );
+    expect(
+      redactSecrets(
+        "cookie wordpress_logged_in_0a1b2c=admin%7C1790000000%7Ctok%7Cmac; path=/",
+      ),
+    ).toBe("cookie wordpress_logged_in_0a1b2c=***; path=/");
+    expect(redactSecrets("POST /wp-login.php?log=admin&pwd=hunter22")).toBe(
+      "POST /wp-login.php?log=admin&pwd=***",
+    );
+  });
+});
+
+test.describe("maskValues", () => {
+  test("masks each value wherever it appears; blank and short values are left alone", () => {
+    expect(
+      maskValues("a secret0123 and secret0123 again; short abc", [
+        "secret0123",
+        "abc",
+        "",
+        undefined,
+        "   ",
+      ]),
+    ).toBe("a *** and *** again; short abc");
   });
 });

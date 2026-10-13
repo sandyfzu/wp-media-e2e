@@ -156,14 +156,14 @@ Every run writes a layered set of reports into `reports/<product>/<cell>/<RUN_ID
 
 **Every report says up front what it tested**, in one line —
 `backwpup · pro@nginx (pro) · BackWPup Pro 9.99.99 · develop @ 1dceea8966 · WordPress 7.1.3 · PHP 8.5.11 64bit · <run>`
-(plus `RUNNING`, `INTERRUPTED`, `COULD NOT TEST` or `NO TESTS`, which the reports cannot say themselves): the Playwright
+(plus `RUNNING`, `INTERRUPTED`, `STOPPED`, `COULD NOT TEST` or `NO TESTS`, which the reports cannot say themselves): the Playwright
 report's title (its Metadata panel lists every fact with `#?show-metadata-other` in the URL), a banner
 above the Cucumber report (expand it for every fact), and the Allure report's name and Metadata. A fact
 that is not known says why (`site unknown: auth setup failed`). `E2E_RUN_NAME` names the run;
 `E2E_REQUESTED_REF` shows the ref asked for (both display only); a `PLAYWRIGHT_HTML_TITLE` you set wins.
 
 A run ends with a summary below everything else: the verdict (`✘ COULD NOT TEST` when a setup
-failed), the counts, the plugin and sites it tested, how to open each report, and which old reports
+failed, `■ STOPPED` when it was stopped), the counts, the plugin and sites it tested, how to open each report, and which old reports
 it pruned.
 
 **Old reports are pruned as each run ends**, for that run's cell only: at most `E2E_REPORTS_KEEP`

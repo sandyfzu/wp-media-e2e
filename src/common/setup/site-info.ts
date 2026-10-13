@@ -2,7 +2,7 @@ import type { Page } from "@playwright/test";
 
 import { errorMessage } from "../guards";
 import { SiteHealthPage } from "../pages/site-health.page";
-import { redactSecrets } from "../text";
+import { plain, redactSecrets } from "../text";
 
 /**
  * The versions a site actually runs, as its reports record them: WordPress, PHP **as the web server
@@ -23,6 +23,11 @@ const FIELDS = {
   database: ["wp-database", "server_version"],
   databaseExtension: ["wp-database", "extension"],
 } as const satisfies Record<string, readonly [string, string]>;
+
+/** Every field {@link FIELDS} reads, as `section.key`: all of the copy text that leaves the page. */
+export const SITE_INFO_FIELDS: readonly string[] = Object.values(FIELDS).map(
+  ([section, key]) => `${section}.${key}`,
+);
 
 /** The versions read from one site; a field Site Health did not report is absent. */
 export type SiteVersions = Partial<Record<keyof typeof FIELDS, string>>;
@@ -52,7 +57,10 @@ const FIELD_LINE = /^([\w-]+): ?(.*)$/;
  *
  * The text is WordPress's `WP_Debug_Data::format()` output: wrapped in lines of backticks, one
  * `### section ###` block per section, `key: value` lines, and tab-indented lines for a field whose
- * value is a list. WordPress writes `undefined` for an empty value; that is read as absent.
+ * value is a list. WordPress writes `undefined` for an empty value; that is read as absent. A field's
+ * **first** value is the one kept — a later section's multi-line value cannot pose as an earlier
+ * section's field — and control characters are removed: the value comes from the site under test and
+ * is printed to a terminal.
  *
  * @param text - the button's `data-clipboard-text`.
  * @returns the whitelisted fields found; none for a text that is not Site Health's.
@@ -70,8 +78,9 @@ export function parseSiteInfo(text: string): SiteVersions {
     const field = FIELD_LINE.exec(line);
     if (field === null || section === "") continue;
     const value = (field[2] ?? "").trim();
-    if (value !== "" && value !== "undefined") {
-      found.set(`${section}.${field[1] ?? ""}`, value);
+    const name = `${section}.${field[1] ?? ""}`;
+    if (value !== "" && value !== "undefined" && !found.has(name)) {
+      found.set(name, plain(value));
     }
   }
   const versions: SiteVersions = {};
@@ -130,7 +139,7 @@ export async function readSiteInfo(
     const siteHealth = new SiteHealthPage(page);
     await siteHealth.goto({ timeout: budgetMs });
     const versions = parseSiteInfo(
-      await siteHealth.siteInfoText({
+      await siteHealth.siteInfoFields(SITE_INFO_FIELDS, {
         // At least 1 ms: Playwright reads a timeout of 0 as "no limit".
         timeout: Math.max(1, deadline - Date.now()),
       }),

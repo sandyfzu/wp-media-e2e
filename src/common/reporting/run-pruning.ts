@@ -75,8 +75,9 @@ export function pruneRunGroup(
     const plan = planRetention(listing.runs, policy, now, (run) => run.group, [
       reportPath,
     ]);
-    const report = applyRetention(plan, now);
-    const leftovers = removeLeftovers(listing.leftovers, now);
+    const root = dirname(productDir);
+    const report = applyRetention(plan, root, now);
+    const leftovers = removeLeftovers(listing.leftovers, root, now);
     const counts = new Map<DeleteReason, number>();
     for (const { decision } of report.removed) {
       if (decision.action === "delete") {

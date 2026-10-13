@@ -6,6 +6,7 @@ import type {
   Reporter,
   Suite,
   TestCase,
+  TestError,
   TestResult,
 } from "@playwright/test/reporter";
 
@@ -128,6 +129,17 @@ export default class RunFactsReporter implements Reporter {
   }
 
   /**
+   * Keeps an error raised outside any test, for the verdict.
+   *
+   * @param error - the error.
+   */
+  onError(error: TestError): void {
+    this.guard(() => {
+      this.tally.runError(error);
+    });
+  }
+
+  /**
    * Settles the setups whose retry never ran, records the verdict, publishes the final facts and
    * hands the HTML report its title. Returns nothing: a returned status would replace the run's.
    *
@@ -146,6 +158,7 @@ export default class RunFactsReporter implements Reporter {
           status: result.status,
           durationMs: result.duration,
           scenarios: this.tally.scenarios,
+          runErrors: this.tally.runErrors,
         },
         new Date(),
       );

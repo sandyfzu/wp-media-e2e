@@ -10,6 +10,7 @@ import {
   assertNoForeignBddConfigs,
   assertPinKnown,
   assertSelectionFitsPin,
+  cellsReached,
   pinnedCell,
 } from "./cell-pin";
 import { DESKTOP } from "./devices";
@@ -27,7 +28,11 @@ import { cellProjectNames } from "./project-names";
 import type { RunDescription } from "../reporting/run-description";
 import { reporters } from "./reporting";
 import { DEFAULT_RETENTION, MAX_REPORTS_KEEP } from "../reporting/retention";
-import { assertStopFileFolder, stopFileFromEnv } from "./drain";
+import {
+  assertNotStoppedYet,
+  assertStopFileFolder,
+  stopFileFromEnv,
+} from "./drain";
 import {
   NO_CELL,
   REPO_ROOT,
@@ -198,20 +203,29 @@ export function createProductConfig(
   // before it removes the plugin — a function, so this registry is its only possible channel.
   registerStopRunningWork(product.name, product.stopRunningWork);
 
-  // A stop file the drain gate could never see fails the run here, once, as it starts — not every
-  // scenario, and not silently, as a gate that never closes would.
+  // A stop file the drain gate could never see fails the run here, as it starts — not every
+  // scenario, and not silently, as a gate that never closes would; so does one already there, which
+  // would skip every scenario. A worker (Playwright sets `TEST_WORKER_INDEX`) may start after a stop.
   const stopFile = stopFileFromEnv();
-  if (stopFile !== undefined) assertStopFileFolder(stopFile);
+  if (stopFile !== undefined) {
+    assertStopFileFolder(stopFile);
+    assertNotStoppedYet(stopFile, env("TEST_WORKER_INDEX") !== "");
+  }
 
   const pin = pinnedCell();
   const cells = cellsToBuild(product, pin);
 
   // Resolve the targeted cell. Selecting multiple cells in one invocation is unsafe
-  // (parallelIndex is global), so fail fast instead of silently mis-sizing workers.
-  const requested = selectedCells().filter((c) => cells.includes(c));
-  if (requested.length > 1) {
+  // (parallelIndex is global), so fail fast instead of silently mis-sizing workers. A cell named
+  // exactly targets it, so the run is sized for its pool — unless the selection also reaches another
+  // cell by Playwright's looser matching (`SMALL`, `sm*`, `*`), whose workers would then index past
+  // their own pool. A selection of wildcards alone is a broad, serial run, as without `--project`.
+  const selection = selectedCells();
+  const requested = selection.filter((c) => cells.includes(c));
+  const reached = cellsReached(cells, selection);
+  if (requested.length > 1 || (requested.length === 1 && reached.length > 1)) {
     throw new Error(
-      `Multiple cells selected (${requested.join(", ")}). Run one cell per ` +
+      `Multiple cells selected (${reached.join(", ")}). Run one cell per ` +
         "invocation, e.g. E2E_CELL=<cell> or --project=<cell>, so parallelIndex stays in range.",
     );
   }
@@ -286,6 +300,10 @@ export function createProductConfig(
 
   return defineConfig({
     forbidOnly: isCI,
+    // Off, and said so: left unset, Playwright turns both on under CI (GitHub Actions, GitLab,
+    // Jenkins), and the HTML report then carries the commit's author and committer emails and the
+    // pull request's diff.
+    captureGitInfo: { commit: false, diff: false },
     fullyParallel: true,
     // Global workers = the SELECTED cell's pool size, so parallelIndex ∈ 0…N-1 and
     // `pool[parallelIndex]` is always in range for a single-cell invocation.

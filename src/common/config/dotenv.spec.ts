@@ -43,6 +43,12 @@ function mustNotRead(): never {
 }
 
 test.describe("applyDotenv", () => {
+  test("drops a leading byte-order mark, so the first key is the one written", () => {
+    const target: NodeJS.ProcessEnv = {};
+    applyDotenv("\ufeffE2E_CELL=pro@nginx\nB=1\n", target);
+    expect(target).toEqual({ E2E_CELL: "pro@nginx", B: "1" });
+  });
+
   test("sets only the keys the environment lacks; a real variable wins, even a blank one", () => {
     const target: NodeJS.ProcessEnv = { KEPT: "real", BLANK: "" };
     const result = applyDotenv(

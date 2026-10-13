@@ -1,6 +1,20 @@
 import { randomBytes } from "node:crypto";
-import { readdirSync, renameSync, rmSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import {
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from "node:fs";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 
 import { parseRunId } from "../config/run-id";
 import { errorMessage } from "../guards";
@@ -23,11 +37,15 @@ import { RESULTS_FILE, type RunBeginEvent } from "./results-schema";
  * The policy, per group (a `<product>/<cell>` folder; a task, for the orchestrator), newest first:
  *
  *  1. an **empty** run — `--list`, or "No tests found" — never counts, and goes unless protected;
- *  2. a **protected** run (the run in progress) is kept, and so is one dated in the **future**;
+ *  2. a **protected** run (the run in progress) is kept, and so is one dated in the **future** — which
+ *     takes no place under the cap and is never the newest complete report, so a skewed clock or a
+ *     pinned RUN_ID cannot push a real report out;
  *  3. the group's **newest complete** report is kept while at most `keepNewestCompleteForMs` old,
  *     whatever the cap — so a cell whose last runs were all killed keeps one readable report;
  *  4. a run older than `maxAgeMs` (never under one day) goes; so does one at rank `keep` or beyond
- *     (`keep = 0`: no cap); anything else is kept. Killed runs count toward the cap.
+ *     (`keep = 0`: no cap); anything else is kept. Killed runs count toward the cap — and so does a
+ *     run of the same group still in progress, which only a protected path keeps: nothing on disk
+ *     tells it from a killed one, so a group takes one run at a time.
  *
  * A run whose start time is unknown (a caller's entry with no finite `time`) is always kept, outside
  * the cap; a listed run always has one — its RUN_ID's, else its stream's `run.begin`. Never a file's
@@ -361,9 +379,9 @@ function describeRun(
   const begin = readRunBegin(path);
   const parsed = parseRunId(name);
   const time =
-    parsed?.time ?? (begin === undefined ? Number.NaN : Date.parse(begin.at));
+    parsed?.time ?? (begin === undefined ? Number.NaN : isoInstant(begin.at));
   if (!Number.isFinite(time)) {
-    return "not a run: its name is no RUN_ID, and it holds no results stream";
+    return "not a run: its name is no RUN_ID, and no results stream dates it";
   }
   const empty =
     begin !== undefined &&
@@ -377,6 +395,20 @@ function describeRun(
     empty,
     complete: !empty && isComplete(path),
   };
+}
+
+/**
+ * An instant exactly as the suite writes `run.begin`'s `at` (`Date.prototype.toISOString`, UTC), in
+ * epoch ms; `NaN` for anything else. `Date.parse` alone would read a date with no zone as local time,
+ * a bare `"1"` as 2001, and roll 2026-02-30 over to March — none of which reads back the same.
+ *
+ * @param value - the `at` of a `run.begin`.
+ */
+export function isoInstant(value: string): number {
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value
+    ? time
+    : Number.NaN;
 }
 
 /**
@@ -438,13 +470,11 @@ export function planRetention<E extends RetentionEntry>(
   for (const group of [...groups.keys()].sort()) {
     const ordered = newestFirst(groups.get(group) ?? []);
     const newestComplete = ordered.find(
-      (entry) => !entry.empty && entry.complete && Number.isFinite(entry.time),
+      (entry) => entry.complete && ranked(entry, now),
     );
     let next = 0;
     for (const entry of ordered) {
-      // Only dated, non-empty runs take a place under the cap.
-      const rank =
-        entry.empty || !Number.isFinite(entry.time) ? undefined : next++;
+      const rank = ranked(entry, now) ? next++ : undefined;
       const verdict = decide(entry, {
         rank,
         now,
@@ -462,6 +492,15 @@ export function planRetention<E extends RetentionEntry>(
     }
   }
   return decisions;
+}
+
+/**
+ * Whether a run takes a place under the cap: dated, not empty, and not in the future — a run dated
+ * ahead (a skewed clock, a pinned RUN_ID) would otherwise hold a place, and push a real report out,
+ * until its date came.
+ */
+function ranked(entry: RetentionEntry, now: number): boolean {
+  return !entry.empty && Number.isFinite(entry.time) && entry.time <= now;
 }
 
 /** A group's runs, newest first; an undated run last, a tie broken by path (descending). */
@@ -575,11 +614,17 @@ export function formatSpan(ms: number): string {
  * Should the removal stop part-way, what is left keeps its hidden name; a later prune removes it once
  * {@link LEFTOVER_GRACE_MS} has passed ({@link removeLeftovers}).
  *
+ * A run is removed only while its folder still leads where the listing found it, below `root`
+ * ({@link outsideRoot}) — checked before the rename and again after it, so a folder above the run
+ * swapped for a link in between cannot redirect the removal out of the report tree.
+ *
  * @param plan - the decisions; only `delete` ones are acted on.
+ * @param root - the report root every run sits below, as it was listed.
  * @param now - the time to name the in-removal folders by, epoch ms.
  */
 export function applyRetention<E extends RetentionEntry>(
   plan: readonly RetentionDecision<E>[],
+  root: string,
   now: number = Date.now(),
 ): RemovalReport<E> {
   const removed: Removal<E>[] = [];
@@ -587,7 +632,7 @@ export function applyRetention<E extends RetentionEntry>(
   const failed: RemovalFailure[] = [];
   for (const decision of plan) {
     if (decision.action !== "delete") continue;
-    const outcome = removeRun(decision.entry.path, now);
+    const outcome = removeRun(decision.entry.path, root, now);
     if (outcome.kind === "removed") {
       removed.push({ decision, bytes: outcome.bytes });
     } else if (outcome.kind === "gone") {
@@ -606,7 +651,7 @@ type RemovalOutcome =
   | { readonly kind: "failed"; readonly error: string };
 
 /** Renames one run's folder out of sight, then removes it; see {@link applyRetention}. */
-function removeRun(path: string, now: number): RemovalOutcome {
+function removeRun(path: string, root: string, now: number): RemovalOutcome {
   const before = lstatOrUndefined(path);
   if (before === undefined) return { kind: "gone" };
   if (!before.isDirectory()) {
@@ -615,6 +660,8 @@ function removeRun(path: string, now: number): RemovalOutcome {
       error: "no longer a folder (a link or a file now): left alone",
     };
   }
+  const outside = outsideRoot(path, root);
+  if (outside !== undefined) return { kind: "failed", error: outside };
   const hidden = join(dirname(path), inRemovalName(now));
   try {
     renameSync(path, hidden);
@@ -629,21 +676,61 @@ function removeRun(path: string, now: number): RemovalOutcome {
   if (!isRealDirectory(hidden)) {
     return restoreSwapped(hidden, path);
   }
+  // Its folder may have been swapped for a link after the check above: then the rename went there.
+  const movedOut = outsideRoot(hidden, root);
+  if (movedOut !== undefined) return restoreSwapped(hidden, path, movedOut);
   return removeHidden(hidden);
 }
 
-/** Puts back what was swapped in for a run's folder between its check and its rename. */
-function restoreSwapped(hidden: string, path: string): RemovalOutcome {
+/**
+ * Why `path` must not be removed as a folder below `root`, or `undefined` when it may: it must sit
+ * below the root, and its parent must resolve to the root's own resolved path plus the same names —
+ * so no folder between the two is a link (the root itself may be one, as a listing allows).
+ *
+ * @param path - a run's folder, or a removal's hidden one.
+ * @param root - the report root.
+ */
+export function outsideRoot(path: string, root: string): string | undefined {
+  const parent = dirname(resolve(path));
+  const below = relative(resolve(root), parent);
+  if (below === "" || below === ".." || below.startsWith(`..${sep}`)) {
+    return "not below the report root: left alone";
+  }
+  if (isAbsolute(below)) return "not below the report root: left alone";
+  let expected: string;
+  let actual: string;
+  try {
+    expected = join(realpathSync(root), below);
+    actual = realpathSync(parent);
+  } catch (error) {
+    return `its folder cannot be resolved, left alone: ${errorMessage(error)}`;
+  }
+  return actual === expected
+    ? undefined
+    : "its folder now leads outside the report root (a link): left alone";
+}
+
+/**
+ * Puts back what was renamed although it must not be removed: a link or a file swapped in for a run's
+ * folder, or a folder reached through a link swapped in above it — between the check and the rename.
+ *
+ * @param hidden - where the rename put it.
+ * @param path - where it was.
+ * @param why - what was found; by default, a link or a file in the run folder's place.
+ */
+function restoreSwapped(
+  hidden: string,
+  path: string,
+  why = "replaced by a link or a file while being removed",
+): RemovalOutcome {
+  const said = why.replace(/: left alone$/, "");
   try {
     renameSync(hidden, path);
-    return {
-      kind: "failed",
-      error: "replaced by a link or a file while being removed: left alone",
-    };
+    return { kind: "failed", error: `${said}: left alone` };
   } catch (error) {
     return {
       kind: "failed",
-      error: `replaced by a link or a file while being removed, and left as ${hidden}: ${errorMessage(error)}`,
+      error: `${said}, and left as ${hidden}: ${errorMessage(error)}`,
     };
   }
 }
@@ -687,13 +774,16 @@ export interface LeftoverReport {
 
 /**
  * Removes what interrupted removals left, once {@link LEFTOVER_GRACE_MS} has passed since each was
- * renamed — a younger one may still be in the hands of the prune that renamed it.
+ * renamed — a younger one may still be in the hands of the prune that renamed it. Like a run, one is
+ * removed only while it still sits below `root` ({@link outsideRoot}).
  *
  * @param leftovers - from a listing.
+ * @param root - the report root they were listed under.
  * @param now - the time, epoch ms.
  */
 export function removeLeftovers(
   leftovers: readonly RemovalLeftover[],
+  root: string,
   now: number,
 ): LeftoverReport {
   const removed: { path: string; bytes: number }[] = [];
@@ -701,6 +791,11 @@ export function removeLeftovers(
   for (const leftover of leftovers) {
     if (now - leftover.since < LEFTOVER_GRACE_MS) continue;
     if (!isRealDirectory(leftover.path)) continue;
+    const outside = outsideRoot(leftover.path, root);
+    if (outside !== undefined) {
+      failed.push({ path: leftover.path, error: outside });
+      continue;
+    }
     const outcome = removeHidden(leftover.path);
     if (outcome.kind === "removed") {
       removed.push({ path: leftover.path, bytes: outcome.bytes });

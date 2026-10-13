@@ -309,7 +309,7 @@ export function runPrune(
     io.print(`Would remove ${tally}. Pass --apply to remove them.`);
     return EXIT.ok;
   }
-  return applyAndReport(plan, listing, now, show, io.print, tally);
+  return applyAndReport(plan, listing, root, now, show, io.print, tally);
 }
 
 /** Says which `--product`/`--cell` named nothing, or `undefined` when both found a folder. */
@@ -420,13 +420,14 @@ function printSkipped(
 function applyAndReport(
   plan: readonly RetentionDecision<ReportRun>[],
   listing: ReportListing,
+  root: string,
   now: number,
   show: (path: string) => string,
   print: (line: string) => void,
   tally: string,
 ): number {
-  const report = applyRetention(plan, now);
-  const leftovers = removeLeftovers(listing.leftovers, now);
+  const report = applyRetention(plan, root, now);
+  const leftovers = removeLeftovers(listing.leftovers, root, now);
   const freed =
     report.removed.reduce((sum, removal) => sum + removal.bytes, 0) +
     leftovers.removed.reduce((sum, removal) => sum + removal.bytes, 0);

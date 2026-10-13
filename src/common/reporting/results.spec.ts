@@ -14,6 +14,7 @@ import {
   cleanMessage,
   finalStatus,
   firstError,
+  isNoTestsFound,
   scenarioPlace,
   setupOf,
   wasDrainedTest,
@@ -364,6 +365,34 @@ test.describe("firstError — what a failure shows, and where", () => {
     });
   });
 
+  test("a timeout inside a step, then an After hook failing in its clean-up: the timeout is the cause", () => {
+    const timeout = "Test timeout of 1500ms exceeded.";
+    const teardown = "Error: the job would not stop";
+    const steps = [
+      beforeHooks(),
+      step("When the backup runs", "test.step"),
+      afterHooks({
+        error: teardown,
+        inside: [
+          step("AfterEach Hooks", "hook", {
+            error: teardown,
+            steps: [step("@plugin teardown", "test.step", { error: teardown })],
+          }),
+        ],
+      }),
+    ];
+    expect(
+      firstError({
+        errors: [{ message: timeout }, { message: teardown }],
+        steps,
+      }),
+    ).toEqual({
+      message: timeout,
+      where: "last-step",
+      step: "When the backup runs",
+    });
+  });
+
   test("the last step begun is narrowed into its reportable children", () => {
     const steps = [
       beforeHooks(),
@@ -590,6 +619,7 @@ test.describe("RunTally", () => {
       skipped: 0,
       interrupted: 1,
       didNotRun: 1,
+      drained: 0,
     });
     expect(tally.setups).toMatchObject({ total: 2, passed: 1, didNotRun: 1 });
     // Nothing awaits a retry: the flaky one got it.
@@ -649,6 +679,48 @@ test.describe("RunTally", () => {
       passed: 1,
       didNotRun: 0,
     });
+  });
+
+  test("counts the drain's skips apart, among the skipped", () => {
+    const drained = fakeTest({
+      id: "1",
+      annotations: [{ type: STOPPED_ANNOTATION }],
+    });
+    const ownSkip = fakeTest({ id: "2", annotations: [{ type: "skip" }] });
+    const tally = begun(drained, ownSkip);
+    for (const fake of [drained, ownSkip]) {
+      tally.attemptEnded(
+        fake.test,
+        addAttempt(fake, { status: "skipped", expectedStatus: "skipped" }),
+      );
+    }
+    expect(tally.scenarios).toMatchObject({ skipped: 2, drained: 1 });
+  });
+
+  test("keeps the errors raised outside any test, but not 'No tests found', each its first line, masked", () => {
+    const tally = begun();
+    tally.runError({ message: "Error: No tests found" });
+    tally.runError({ message: "\u001b[31mNo tests found\u001b[39m" });
+    tally.runError({
+      message:
+        "\n  Error: steps.ts: Cannot find https://u:p@h/x\n    at a.js:1",
+    });
+    tally.runError({});
+    expect(tally.runErrors).toEqual([
+      "Error: steps.ts: Cannot find https://***@h/x",
+      "an error with no message",
+    ]);
+    tally.begin([]);
+    expect(tally.runErrors).toEqual([]);
+  });
+
+  test("isNoTestsFound knows Playwright's words only", () => {
+    expect(isNoTestsFound({ message: "Error: No tests found" })).toBe(true);
+    expect(isNoTestsFound({ message: "No tests found." })).toBe(true);
+    expect(isNoTestsFound({ message: "Error: No tests foundry" })).toBe(false);
+    expect(isNoTestsFound({ message: "Error: boom. No tests found" })).toBe(
+      false,
+    );
   });
 
   test("begin starts afresh", () => {

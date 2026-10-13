@@ -1,6 +1,7 @@
 import { isObject } from "../guards";
 import { escapeRegExp } from "../text";
 import { env } from "./env";
+import { cellProjectNames } from "./project-names";
 
 /**
  * The cell pin: `E2E_CELL=<cell>` holds a run to one cell of its product.
@@ -74,6 +75,26 @@ export function matchesProjectFilter(filter: string, name: string): boolean {
 }
 
 /**
+ * The cells a `--project` selection reaches, by Playwright's own matching ({@link matchesProjectFilter}):
+ * each cell one of whose projects — its scenarios, `setup:`, `artifacts:` — some value selects. Wider
+ * than the values that name a cell exactly: `SMALL` or `sm*` reach the cell `small` too.
+ *
+ * @param cells - the product's cells, as the config builds them.
+ * @param selection - the run's `--project` values, verbatim.
+ * @returns the cells reached, in `cells`' order.
+ */
+export function cellsReached(
+  cells: readonly string[],
+  selection: readonly string[],
+): string[] {
+  return cells.filter((cell) =>
+    Object.values(cellProjectNames(cell)).some((name) =>
+      selection.some((filter) => matchesProjectFilter(filter, name)),
+    ),
+  );
+}
+
+/**
  * Refuses a `--project` that selects none of the pinned cell's projects. Playwright would refuse it
  * too, but as a bare "Project(s) … not found" that never names `E2E_CELL` — a puzzle when the pin
  * came from `.env`. A wildcard that selects none is refused here as well, which is stricter than
@@ -114,7 +135,10 @@ const GENERATED_TAIL = /\/\.features-gen\/(.+)$/;
  *
  * Compared by the folder's tail, `<product>/<cell>`, so a checkout reached through a symlink still
  * recognises its own entry; a key that is no generated-spec folder at all is not this check's to
- * judge, so a change in playwright-bdd's format cannot make every pinned run fail.
+ * judge, so a change in playwright-bdd's format cannot make every pinned run fail. The tail alone
+ * cannot tell the same cell's folder in another checkout (a run started from inside a sibling
+ * worktree's run): playwright-bdd resolves the folder against the config's own location, which this
+ * check cannot know before the config defines it. The orchestrator never hands a run this variable.
  *
  * @param inherited - the variable's value **before** this process defines its own BDD config.
  * @param product - the product's name.

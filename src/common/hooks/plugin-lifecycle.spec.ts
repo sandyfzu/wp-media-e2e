@@ -19,6 +19,7 @@ import {
   registerSiteDataDirResolver,
   registerSiteDbResidue,
   registerSiteResidue,
+  registerStopRunningWork,
 } from "../config/metadata";
 import {
   BEFORE_HOOK_TIMEOUT_MS,
@@ -27,6 +28,7 @@ import {
   MAX_ATTACHED_LOG_CHARS,
   boundLogForAttachment,
   declaredResidue,
+  leftWorkOf,
   extendedTimeout,
   installPluginUnderTest,
   replacePluginUnderTest,
@@ -339,6 +341,23 @@ test.describe("declaredResidue", () => {
     expect(
       declaredResidue("residue-spec-unregistered").resolveDataDirs,
     ).toBeUndefined();
+  });
+});
+
+test.describe("leftWorkOf", () => {
+  test("hands the install the product's registered stop with the scenario, and nothing for a product with none", () => {
+    const stop: StopRunningWork = () => Promise.resolve(undefined);
+    const report: ScenarioReport = {
+      title: "s",
+      failed: false,
+      attach: () => Promise.resolve(),
+    };
+    registerStopRunningWork("left-work-spec-product", stop);
+    expect(leftWorkOf("left-work-spec-product", report)).toEqual({
+      stop,
+      report,
+    });
+    expect(leftWorkOf("left-work-spec-unregistered", report)).toBeUndefined();
   });
 });
 
@@ -1102,6 +1121,30 @@ test.describe("installPluginUnderTest — work an earlier run left running", () 
         report: reportSink(),
       }),
     ).rejects.toThrow("the job would not stop");
+
+    expect(
+      wpCalls().some(
+        (c) =>
+          c.startsWith("plugin uninstall") || c.startsWith("plugin install"),
+      ),
+    ).toBe(false);
+    expect(isInstalled()).toBe(true);
+  });
+
+  // A stop whose WP-CLI call hangs must not run the hook out of time: a timed-out hook is abandoned,
+  // and its removal would go on beside the teardown.
+  test("fails a stop that does not settle within its allowance, removing and installing nothing", async () => {
+    seedInstalled();
+
+    await expect(
+      installPluginUnderTest(local, artifact(), files(), {
+        stop: () => new Promise<never>(() => undefined),
+        report: reportSink(),
+        budgetMs: 50,
+      }),
+    ).rejects.toThrow(
+      "stopping the plugin's running work had not finished after 0.05 s",
+    );
 
     expect(
       wpCalls().some(

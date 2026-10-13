@@ -5,7 +5,8 @@
 > §6.2, §4.2; audited the same day), 0C's suite parts (2026-10-08, §5;
 > audited the same day), 0D.3 and 0D.4 (2026-10-09, §6.3, §6.4; audited the same day, §6.5), 0E
 > (2026-10-12, §7.1; audited the same day, §7.2), 0D.1 (2026-10-12, §6.1.1; audited the same day,
-> §6.1.2, §6.1.3), 0F (2026-10-12, §8.1; audited the same day, §8.2, §8.3); the two audited together, §8.4. The rest is
+> §6.1.2, §6.1.3), 0F (2026-10-12, §8.1; audited the same day, §8.2, §8.3); the two audited together, §8.4;
+> every phase audited again together, §8.5. The rest is
 > investigated: every item has a verified finding and a recommended solution, with the
 > alternatives it beat.
 > **Date:** 2026-09-25.
@@ -1723,6 +1724,39 @@ out-of-scope findings fixed; each fix proven by a test that fails with it undone
   directory**, the suite from the checkout: now from the checkout, wherever they start (V304).
 - Live, combined (V305, V306).
 
+### 8.5 Full adversarial audit of every phase (2026-10-12, V307–V331)
+
+Every implemented phase re-audited at once — seven reviewers, one per phase group, each finding
+reproduced before it was believed — plus the seams between phases, by running the run contract end to
+end (§2: allowlisted environment, direct CLIs, pinned cell, stop file). Each fix ships with a test that
+fails with the fix undone; what was not fixed says why.
+
+- **Data loss (0F):** a future-dated run (a skewed clock, a pinned RUN_ID) held a place under the cap
+  and could be the "newest complete" report, so a real report went (V307). A cell or product folder
+  swapped for a link between the listing and the removal redirected the rename outside the report root
+  (V308). A stream's `run.begin` was dated by `Date.parse`, so `"1"` read as 2001 (V309). Another run of
+  the same cell, in progress, is still ranked under the cap: the contract forbids it, and the cap is the
+  policy decided with the user (P6), so it is documented, not changed (V310).
+- **Secrets (0D.3, 0D.4):** a setup that timed out left the saved admin sessions alive, their cookies in
+  its trace (V311); `[auth]`, the preflight report, the elevation banner and the healthcheck printed a
+  basic-auth `baseURL` unmasked (V312); the whole Site Health text sat in a failed setup's trace (V313);
+  the Site Health parser kept a later section's value and terminal escapes (V314); `plain` let bidi
+  overrides and line separators through (V315); `redactSecrets` missed `Authorization` headers, WordPress
+  login cookies, `pwd=`, and a legacy 40-hex token (V316); `captureGitInfo` unset is **on** under CI, so a
+  CI report carried authors' emails and the PR's diff (V317).
+- **Truth of the verdict (0E, 0D.1):** a run the drain stopped said `✔ PASSED` (V318); a spec that would
+  not load said `NO TESTS` (V319); `tags` repeated a tag a title also named (V320); a timeout followed by
+  a failing After hook blamed the hook (V321).
+- **Stopping (0C):** a stop file present as the run started skipped every scenario and exited 0 (V322);
+  `LEFT_WORK_ALLOWANCE_MS` bounded nothing (V323); the Before hook's wiring of the stop had no test (V324).
+- **Selection and settings (0A.1, 0B.1):** a cell named beside another reached by case, `*` or its
+  `setup:` sized the run for the first while Playwright ran both (V325); a `.env` saved with a BOM lost
+  its first key (V326).
+- **Artifacts (0B.2, 0D.2):** `assertCached` took a folder or an empty file for a cached zip; no test told
+  the built version from the requested one in a pin; refusals printed raw control characters (V327); two
+  doc claims overstated (V328).
+- **Tried and dropped, kept, or out of scope** (V329).
+
 ## 9. Implementation order
 
 Each step ships with its unit tests, passes the four gates, and gets the live check its section names,
@@ -2023,3 +2057,28 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V304 | From a scratch folder, `report:allure` with a relative `REPORT_ROOT` resolves it in the checkout, and generates with `allurerc.mjs` (both plugins present), named by `run-facts.json` | ✅ measured | Scratch run |
 | V305 | Placeholder `wp-rocket/nginx`, keep 2, three runs: the third prints `Pruned 1 old report, 1.6 MB — beyond the newest 2`; each run leaves `run-facts.json`, its properties and banner; loose report parts at cell level (a botched copy) are skipped "holds no report part", never removed | ✅ measured | `integ-run-*`; `report:prune` dry run |
 | V306 | Live, `free@nginx` and `pro@nginx` at once (`--grep "The version command names\|@smoke"`, keep 3, 9 earlier runs each): both PASSED; each pruned 6 (48.1 MB, 52.6 MB) and kept the newest 3, itself and `allure-history.jsonl` included; the zip's SHA-256 (`3f6fd5dd…`, `bb348eaa…`) in `run-facts.json`, `environment.properties` and the banner; no site password or GitHub token in the reports or `test-results/` (raw, base64, inside zips); both sites' plugins, BackWPup options and tables, `.e2e_*` folders and disk as before | ✅ live 2026-10-12 | `integ-live2-*`; `state.sh` before/after |
+| V307 | `planRetention`: a future-dated run takes no place under the cap and is never the newest complete report. Before: two complete runs a year ahead and cap 2 removed the real complete report from an hour before (`beyond-cap`). Test 15 rewritten for the new rule; mutation "future ranked" fails it | ✅ unit + repro | `retention.spec.ts`; auditor's `repro2.mts` |
+| V308 | `applyRetention`/`removeLeftovers` take the report root and refuse a folder that no longer resolves below it (`outsideRoot`), before the rename and after it — the second catches a swap in between and renames back. Before: the cell folder swapped for a link to `outside/` after the listing removed `outside/<RUN_ID>`. A linked root itself still allowed. Both checks undone: the swap test fails; either alone suffices | ✅ unit + mutation | `retention.spec.ts` (3 new) |
+| V309 | A stream dates a run only when its `run.begin`'s `at` reads back exactly as `toISOString` wrote it (`isoInstant`): `"1"`, a zoneless time, `+00:00`, 2026-02-30 date nothing. A redundant regex was dropped once the read-back alone was shown to refuse every form | ✅ unit + mutation | `retention.spec.ts` |
+| V310 | Not changed: the cap ranks an incomplete run of the group whatever its age, so a concurrent run of the same cell could go. A one-day grace for incomplete runs was written, then reverted: it changes the decided policy (P6: killed runs count) and the run contract forbids two runs of one cell. Documented in `retention.ts` and `execution-model.md` | ✅ decided | — |
+| V311 | A setup that times out abandons its body, so `authenticatePool`'s own clean-up never ran: the saved session lived (auditor: the token in three trace files, no `wp` call). Now `endSessionsWhenSetupFails` registers an `afterEach` that ends what the `SavedSessions` ledger holds whenever the setup did not end as expected; the ledger empties as it ends, so a throw's own clean-up is not repeated. Unit: the hook for `timedOut`/`failed`/`interrupted` and not for `passed`/`skipped`; both mutations (hook off, ledger not emptied) fail. The canary gained a pool that times out; it passes either way here, since closing the context aborts the hung `goto` and the abandoned body sometimes ends the session itself — the unit test is the proof | ✅ unit + run spec | `authenticate.spec.ts`, `secrets.run.spec.ts` |
+| V312 | `[auth] …: ended/could not end` (printed on every run after the first, kept in the setup's stdout attachment), the preflight failure report, the elevation banner and the healthcheck's site label now mask the `baseURL` (`redactSecrets`). Playwright still records a basic-auth `baseURL` in each trace's context options, which no suite code can mask | ✅ code | `authenticate.ts`, `preflight.ts`, `elevation-report.ts`, `healthcheck.ts` |
+| V313 | Measured (trace, `snapshots: false`): `getAttribute` puts the copy text in its result and in the "locator resolved to <button … data-clipboard-text=…>" log (3 hits); `locator.evaluate` still waits through `waitForSelector`, which logs it (2); one `page.evaluate` that finds the button and keeps the whitelisted lines in the page: 0. `SiteHealthPage.siteInfoFields(fields)` does that, after `toHaveCount(1)` (whose log names only the locator); only `SITE_INFO_FIELDS` and the section headers leave the page | ✅ measured + unit | `site-health.page.spec.ts` |
+| V314 | `parseSiteInfo` keeps a field's first value (a later multi-line value can no longer pose as `wp-core.version`) and passes each through `plain` (an OSC title sequence and a cursor move in `httpd_software` are gone) | ✅ unit | `site-info.spec.ts` |
+| V315 | `plain` moved to `text.ts` (the Site Health reader must not import a reporter), and now also turns `U+2028`/`U+2029` into a space and drops `\p{Cf}` — `U+202E` showed `nightly‮gnp.exe` as another name in titles and banners | ✅ unit | `text.spec.ts` |
+| V316 | `redactSecrets` also masks `Authorization: Basic/Bearer/token …` (scheme kept), `wordpress_logged_in_…=`/`wordpress_sec_…=` values and `pwd=`; `maskValues` masks a secret by value, and APVM's messages go through `redactBuildText` with the process's `GITHUB_TOKEN`/`GH_TOKEN` — a legacy 40-hex token, the shape of any commit, was printed raw | ✅ unit | `text.spec.ts`, `apvm.spec.ts` |
+| V317 | `captureGitInfo: { commit: false, diff: false }` in the config factory. Measured with `GITHUB_ACTIONS=true`: before, the HTML report held `gitCommit` with an author's email (the auditor also saw `gitDiff` with a PR event); after, neither. CI uploads `reports/` on failure. The spec asserted "unset" — the wrong invariant — and now asserts off | ✅ measured + unit | `project.spec.ts`; `integ/r4`, `r5` |
+| V318 | `Counts.drained` (of the skipped, the drain's) and a `stopped` verdict: `■ STOPPED` in the summary, `STOPPED` in the reports' titles, `stopped` in `run-facts.json`, after an interrupt and a failed setup, before failed/passed; the Result line says `N stopped`. `run.end` carries `drained` (an addition v1 readers ignore). The "every outcome" run spec now expects STOPPED (it drains one scenario) and the facts' status | ✅ unit + run spec | `run-summary.spec.ts`, `results.spec.ts`, `results-stream.run.spec.ts` |
+| V319 | Both reporters keep `onError`s (`RunTally.runError`; "No tests found" aside, first line, masked): a run with no scenario says `NO TESTS` only with no such error, else `FAILED` with an `Error` line. Real runner: a generated spec that throws on import → FAILED, the error shown, `run-facts.json` `failed`; `--grep` matching nothing → NO TESTS, `no-tests`. Each reporter's `onError` removed fails the case. In a BDD run a step file that throws fails each scenario instead (playwright-bdd imports steps in the worker) — FAILED already | ✅ run spec + mutation | `results-stream.run.spec.ts` |
+| V320 | `scenario.end.tags` is Playwright's `test.tags` once each: Playwright 1.63 prepends every `@word` of the feature and scenario titles (`common/index.js:2752–2760`), so "A @mobile scenario…" tagged `@mobile` listed it twice. Documented that a title's `@word` counts | ✅ unit | `results-stream.spec.ts` |
+| V321 | `firstError`: when the blamed hook is under `After Hooks` and its error is not the attempt's first (`result.errors[0]`, a timeout), the step that was running is blamed, with the timeout | ✅ unit | `results.spec.ts` |
+| V322 | `assertNotStoppedYet`: the config factory refuses a stop file that exists as the run starts, naming `E2E_INTERNAL_STOP_FILE` — not in a test worker (`TEST_WORKER_INDEX`), which Playwright starts again after a failure, a stop included. Real runner: a stale file stops `bddgen` with the message; the exemption removed fails the original drain run (its worker restarts after the stop) | ✅ unit + run spec + mutation | `drain.spec.ts`, `drain.run.spec.ts` |
+| V323 | `stopWorkLeftRunning` is bounded by `LEFT_WORK_ALLOWANCE_MS` (`withinBudget`): past it, the stop fails as work that would not stop does (Before: nothing removed or installed; After: a cleanup failure, the other duties still run). Test with a 50 ms budget | ✅ unit | `plugin-lifecycle.spec.ts` |
+| V324 | The Before hook's argument building is `leftWorkOf(product, report)`, tested against the registry; the binding is one call | ✅ unit | `plugin-lifecycle.spec.ts` |
+| V325 | `cellsReached` (Playwright's own matching over each cell's three projects): a cell named exactly beside another reached by `B`, `b*`, `*` or `setup:b` is refused as two cells; wildcards alone stay a broad serial run. Before: `--project=big --project=SMALL` sized workers for `big` while both ran | ✅ unit | `cell-pin.spec.ts`, `project.spec.ts` |
+| V326 | `applyDotenv` drops a leading BOM; before, `\ufeffE2E_CELL` was set and `E2E_CELL` was not | ✅ unit | `dotenv.spec.ts` |
+| V327 | `assertCached` takes only a non-empty regular file (`isCachedFile`); the warmer's pin carries the version **built** (a test where it differs from the one asked for); pin refusals quote their values (`JSON.stringify`) | ✅ unit | `warm.spec.ts` |
+| V328 | `plugin-artifacts.md`: the digest names the bytes installed only while nothing re-resolves the cell (it is not re-checked at install — re-hashing there would still race the install); a version override is rewritten by a cold rebuild from the pin | ✅ docs | — |
+| V329 | Tried and dropped: checking an inherited `PLAYWRIGHT_BDD_CONFIGS` key's checkout by realpath against the repository — playwright-bdd resolves the folder against the config's own location, so three specs' legitimate keys were refused; reverted, the limit documented (the orchestrator never passes the variable). Kept: `drain.ts` reads its variable through its own accessor; a setup retried by a command-line `--retries` leaves the scenarios without failure snapshots (documented). Out of scope, untouched: `healthcheck.ts`'s `{@link SitePreflightResult}` and `apvm.ts`'s `{@link project}` (develop's); `reports/secretprobe/` in the worktree, an empty probe folder from 2026-10-08 | — | — |
+| V330 | Gates on the final code: typecheck, lint, format clean; unit 2024 passed, 8 skipped (develop's macOS ownership skips) | ✅ 2026-10-12 | the four gates |
+| V331 | Live on the final code, `free@nginx` (`bwu2`) and `pro@nginx` (`bwu3`) at once, pinned, `E2E_RETRIES=0`, `cli-running-job` + `plugin-deletion`: both ✔ PASSED, 7/7 each in 11.6 / 11.7 m. The auth setup ended the previous runs' sessions and read every version through the in-page Site Health filter (WordPress 7.1.3, PHP 8.5.11 fpm-fcgi, nginx/1.24.0, MySQL 8.0.46, mysqli). No site password or GitHub token in the reports or `test-results/` (raw, base64, inside zips). Both sites as found: only `backwpup-helper`, no BackWPup option or table, no `e2e_` table, no `.e2e_*` folder, no BackWPup upload folder; disk 27 GB free | ✅ live 2026-10-12 | `live/*.log`; `scan.mts`, `state.mts` |
