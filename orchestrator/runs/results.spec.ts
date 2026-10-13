@@ -11,6 +11,7 @@ import {
   streamOf,
 } from "../__fixtures__/results";
 import {
+  MAX_LINE_LENGTH,
   readRunResults,
   scenarioCounts,
   TEST_STATUSES,
@@ -256,5 +257,37 @@ test.describe("TEST_STATUSES", () => {
     );
     expect(toStream("interrupted")).toBe("interrupted");
     expect(new Set(TEST_STATUSES).size).toBe(TEST_STATUSES.length);
+  });
+});
+
+test.describe("readRunResults — line cap", () => {
+  test("skips a line over the cap unparsed, and reads the rest", () => {
+    const long = line({
+      type: "run.error",
+      message: "x".repeat(MAX_LINE_LENGTH),
+    });
+    const results = readRunResults(
+      streamOf([runBegin(1), scenarioEnd("a", "passed")]) +
+        long +
+        streamOf([runEnd("passed", { total: 1, passed: 1 })]),
+    );
+    expect(results.runErrors).toEqual([]);
+    expect(results.scenarios).toHaveLength(1);
+    expect(results.end?.status).toBe("passed");
+    // Just under the cap, the same line is read.
+    const fits = line({
+      type: "run.error",
+      message: "x".repeat(MAX_LINE_LENGTH - 100),
+    });
+    expect(readRunResults(fits).runErrors).toHaveLength(1);
+  });
+
+  test("parses a deeply nested line at the cap without a crash", () => {
+    const half = MAX_LINE_LENGTH / 2;
+    expect(readRunResults(`${"[".repeat(half)}${"]".repeat(half)}\n`)).toEqual({
+      setups: [],
+      scenarios: [],
+      runErrors: [],
+    });
   });
 });

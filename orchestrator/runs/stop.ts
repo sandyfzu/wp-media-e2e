@@ -1,0 +1,204 @@
+import type { StopTaken } from "./outcome";
+
+/**
+ * Stopping one run: a pure state machine. It is told what the run is doing (which process runs) and
+ * how far the orchestrator wants it stopped; it answers with what to do. Whoever drives it carries
+ * the actions out — `launch.ts` with the real `kill`, the specs with none.
+ *
+ * The escalation is the suite's contract, one step at a time and each at most once:
+ *
+ * 1. **drain** — create the run's stop file: every scenario's first attempt is skipped from then on,
+ *    while the one in flight finishes;
+ * 2. **interrupt** — **one** SIGINT to the runner's PID: it stops its tests at once, still writing its
+ *    reports (once its tests are over it has no handler left, so the launch then sends none);
+ * 3. **kill** — SIGKILL to the runner's whole process group.
+ *
+ * Never SIGTERM, never a second SIGINT. While `bddgen` runs, its group is killed outright: generation
+ * has nothing to drain, and nothing was tested yet — so that stop is taken as `drained`, and the run
+ * reads `stopped`, not `killed`. A stop before or between the two processes is taken the same way,
+ * and the driver then starts nothing more ({@link mayStartPlaywright}).
+ */
+
+/** How far a stop may go. */
+export type StopLevel = Exclude<StopTaken["level"], "none">;
+
+/** What the run is doing. */
+export type RunPhase =
+  | { readonly name: "starting" }
+  | { readonly name: "bddgen"; readonly pgid: number }
+  | { readonly name: "between" }
+  /** The runner: its PID is its group's id, since it is spawned detached. */
+  | { readonly name: "playwright"; readonly pid: number }
+  | { readonly name: "ended" };
+
+/** The machine's state: the run's phase, and how far it has been stopped. */
+export interface RunStopState {
+  readonly phase: RunPhase;
+  readonly taken: StopTaken;
+}
+
+/** What the machine is told. */
+export type RunStopEvent =
+  /** The orchestrator wants the run stopped at least this far. */
+  | { readonly type: "stop"; readonly level: StopLevel; readonly why: string }
+  /** A process started: `bddgen` from `starting`, the runner from `between`. */
+  | {
+      readonly type: "started";
+      readonly process: "bddgen" | "playwright";
+      readonly pid: number;
+    }
+  /** The running process's group is empty. */
+  | { readonly type: "exited" };
+
+/** What the driver must do. */
+export type StopAction =
+  | { readonly type: "createStopFile" }
+  /** One SIGINT to the runner — never to its group. */
+  | { readonly type: "interrupt"; readonly pid: number }
+  /** SIGKILL to the whole group. */
+  | { readonly type: "killGroup"; readonly pgid: number };
+
+/** A transition's result. */
+export interface RunStopStep {
+  readonly state: RunStopState;
+  readonly actions: readonly StopAction[];
+}
+
+/** A run not yet started, not stopped. */
+export const INITIAL_RUN_STOP: RunStopState = {
+  phase: { name: "starting" },
+  taken: { level: "none" },
+};
+
+/** Each level's rank: a stop only ever goes further. */
+const RANK: Readonly<Record<StopTaken["level"], number>> = {
+  none: 0,
+  drained: 1,
+  interrupted: 2,
+  killed: 3,
+};
+
+/**
+ * One transition.
+ *
+ * @param state - the machine's state.
+ * @param event - what happened, or what is asked.
+ * @returns the next state, and the actions to carry out, in order.
+ * @throws {@link Error} for a process starting or exiting out of order — a driver's bug, never a
+ *   run's doing.
+ */
+export function stepRunStop(
+  state: RunStopState,
+  event: RunStopEvent,
+): RunStopStep {
+  switch (event.type) {
+    case "stop":
+      return stop(state, event.level, event.why);
+    case "started":
+      return started(state, event.process, event.pid);
+    case "exited":
+      return exited(state);
+  }
+}
+
+/**
+ * Whether the runner may start once `bddgen` has ended: only while nothing has asked the run to stop.
+ *
+ * @param state - the machine's state.
+ */
+export function mayStartPlaywright(state: RunStopState): boolean {
+  return state.phase.name === "between" && state.taken.level === "none";
+}
+
+/**
+ * A stop: as far as asked, from wherever the run is.
+ *
+ * @param state - the state.
+ * @param level - how far.
+ * @param why - why, for the run's reason.
+ */
+function stop(state: RunStopState, level: StopLevel, why: string): RunStopStep {
+  const { phase, taken } = state;
+  const unchanged = { state, actions: [] };
+  if (phase.name === "ended" || RANK[level] <= RANK[taken.level])
+    return unchanged;
+  if (phase.name !== "playwright") {
+    // Nothing was tested yet: any stop is a drain, and a drain only once.
+    if (taken.level !== "none") return unchanged;
+    return {
+      state: { phase, taken: { level: "drained", why } },
+      actions:
+        phase.name === "bddgen"
+          ? [{ type: "killGroup", pgid: phase.pgid }]
+          : [],
+    };
+  }
+  return {
+    state: { phase, taken: { level, why } },
+    actions: escalation(taken.level, level, phase.pid),
+  };
+}
+
+/**
+ * The runner's steps from one level to a further one. A kill needs nothing before it; an interrupt
+ * drains first when the run was not drained yet, so no new scenario starts as the runner winds down.
+ *
+ * @param from - how far it was stopped.
+ * @param to - how far it must be.
+ * @param pid - the runner's PID, its group's id.
+ */
+function escalation(
+  from: StopTaken["level"],
+  to: StopLevel,
+  pid: number,
+): StopAction[] {
+  if (to === "killed") return [{ type: "killGroup", pgid: pid }];
+  const actions: StopAction[] = [];
+  if (from === "none") actions.push({ type: "createStopFile" });
+  if (to === "interrupted") actions.push({ type: "interrupt", pid });
+  return actions;
+}
+
+/**
+ * A process started. One that starts once a stop was taken is killed at once: the driver should not
+ * have started it, and must not leave it running.
+ *
+ * @param state - the state.
+ * @param process - which.
+ * @param pid - its PID, its group's id.
+ */
+function started(
+  state: RunStopState,
+  process: "bddgen" | "playwright",
+  pid: number,
+): RunStopStep {
+  const expected = process === "bddgen" ? "starting" : "between";
+  if (state.phase.name !== expected)
+    throw new Error(
+      `A run's ${process} cannot start while it is ${state.phase.name}.`,
+    );
+  const phase: RunPhase =
+    process === "bddgen"
+      ? { name: "bddgen", pgid: pid }
+      : { name: "playwright", pid };
+  return {
+    state: { ...state, phase },
+    actions:
+      state.taken.level === "none" ? [] : [{ type: "killGroup", pgid: pid }],
+  };
+}
+
+/**
+ * The running process's group emptied: after `bddgen`, the run is between its two processes; after
+ * the runner, it has ended.
+ *
+ * @param state - the state.
+ */
+function exited(state: RunStopState): RunStopStep {
+  const { phase } = state;
+  if (phase.name === "bddgen")
+    return { state: { ...state, phase: { name: "between" } }, actions: [] };
+  if (phase.name === "playwright")
+    return { state: { ...state, phase: { name: "ended" } }, actions: [] };
+  throw new Error(`A run cannot exit while it is ${phase.name}.`);
+}

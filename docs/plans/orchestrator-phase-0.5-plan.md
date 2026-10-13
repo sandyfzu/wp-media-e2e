@@ -3,8 +3,9 @@
 > **Status:** in implementation, in §7's order. **Done:** step 0, the scaffold (2026-10-12, §7.1; audited 2026-10-13, §7.2); step 0.1,
 > what that audit left open (2026-10-13, §7.3–§7.4; audited the same day, §7.5); step 1, M2 configuration (2026-10-13, §7.6; audited the same day, §7.7);
 > step 2, M4's pure parts and M6's builder and bus (2026-10-13, §7.8; audited the same day, §7.9); step 3, the
-> Slack and Datator formatters and senders (2026-10-13, §7.10; audited the same day, §7.11).
-> **Next:** step 4, M4's launch and end and M5's stop machine. Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> Slack and Datator formatters and senders (2026-10-13, §7.10; audited the same day, §7.11); step 4, M4's
+> launch and end and M5's stop machines (2026-10-13, §7.12; audited the same day, §7.13).
+> **Next:** step 5, M3 and M1 with M9. Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -418,7 +419,7 @@ Each step ships with its unit specs and passes the four gates (CLAUDE.md).
 1. M2 configuration — schema, loader, example. **Done 2026-10-13** (§7.6; audited, §7.7).
 2. M4's pure parts — identity, environment, the outcome table; M6's builder and bus. **Done 2026-10-13** (§7.8).
 3. M7 and M8 formatters (pure), then their senders. **Done 2026-10-13** (§7.10; audited, §7.11).
-4. M4's launch and end, M5's stop state machine (an injected clock and `kill`).
+4. M4's launch and end, M5's stop state machine (an injected clock and `kill`). **Done 2026-10-13** (§7.12; audited, §7.13).
 5. M3 and M1 — the loop and the command; M9 — lock, counter, retention, logs.
 6. Docs: a new `docs/guides/orchestrator.md` (operating it: §6, the config, stopping), `CLAUDE.md`
    (structure, the script, the docs map), `README.md`, `.env.example` untouched (no `E2E_*`).
@@ -959,6 +960,113 @@ and every fix proved by a mutation (V391).
   list cap's room never negative; Datator's trim and lengths (code points) matching Python's; no NUL
   reaches it; the tests 1,000 out of 1,000 at `--repeat-each 20`.
 
+### 7.12 Step 4 — Implemented (2026-10-13, V393–V398)
+
+M4's launch and end and M5 as planned (§4.4, §4.5), in `orchestrator/runs/` and `orchestrator/state/`.
+Nothing is wired to a loop or to signals yet — that is step 5's.
+
+- **`commands.ts`** — `suiteCommands`: Node itself running `bddgen`'s and the runner's own entry
+  scripts (their `bin`), with `--config playwright.<product>.config.ts`; the filter is one argument,
+  `--grep=<value>` (V368).
+- **`process-group.ts`** — `groupAlive` (`kill(-pgid, 0)`: only `ESRCH` is empty, `EPERM` is alive),
+  `signalGroup`, `waitForEmptyGroup` (an injected `kill` and `sleep`); a group id under 2 is refused,
+  since `-0` and `-1` reach the orchestrator's own group or every process.
+- **`stop.ts`** — the run's stop machine, pure: `stepRunStop(state, event)` → state and actions
+  (`createStopFile`, `interrupt` — one SIGINT to the runner's PID —, `killGroup`). A stop only goes
+  further, each step at most once; an interrupt asked for at once drains first; a kill needs nothing
+  before it. While `bddgen` runs, any stop kills its group and is taken as `drained` (§7.8); before or
+  between the processes it is a drain with nothing to do, and `mayStartPlaywright` then refuses the
+  runner. A process starting once a stop was taken is killed at once.
+- **`shutdown.ts`** — the orchestrator's stop, a pure reducer (`stepShutdown`) and a driver over
+  injected timers (`createShutdown`): §4.5's table and budgets, SIGINTs under 1 s after the last one
+  counted are one. Decided here, where §4.5 was silent: **only SIGINT escalates** — SIGTERM and SIGHUP
+  start the drain when nothing is stopping, and otherwise do nothing, so an SSH session closing after a
+  Ctrl-C, or a service manager repeating SIGTERM, cannot cut the drain the operator chose short. The
+  reason names the cause and the escalation (`…(SIGINT); interrupted: the drain took over 15 min`).
+  The process's handlers are step 5's.
+- **`launch.ts`** — `launchRun`: refuses a stop file already there, opens `run.log` (`0600`), spawns
+  each process `detached` with exactly the environment given, its output into the log under our
+  `[orchestrator]` lines (the variables' names, each command, each exit, each stop — never a value),
+  waits for each group to empty, and carries out the stop machine's actions in order; a failed action
+  is a log line, never a throw. Decided here: **a group that outlives its process by 5 min is killed**
+  (`LINGER_MS`, past the interrupt budget, so a worker's teardown is never cut, only a hang) — not a
+  stop, the run's results stand. A command Node refuses or cannot start ends the run with no code and
+  its error's code in the log.
+- **`end.ts`** — `endRun`: reads `results.jsonl` (at most 32 MiB; 8 MiB since §7.13), `run-facts.json` (1 MiB) and the
+  log's last 40 lines (from its last 64 KiB, ours left out), opened non-blocking and only when a
+  regular file (a FIFO there would block an `open`, V367); then `runOutcome` and `buildRunFinished`, both
+  given the secrets. Only the outcome and the event leave it — never the files' raw text. A stream
+  over the cap is reported as such (`resultsUnread`, added to the outcome), not as a run that never
+  finished.
+- **`record.ts`** — `run.json`: `running` (with the process and its group once one runs) and `ended`
+  (the exits, the stop, the event); `readRunningRecord` reads back what step 5's orphan check needs.
+  **`state/atomic.ts`** — `writeJsonAtomic` (a `wx` temporary file beside it, `0600`, then `rename`),
+  for the record and step 5's counter.
+- **A fake suite** (`__fixtures__/fake-suite.ts`): one `node -e` script that traps SIGINT, watches the
+  stop file and can leave a child in its group; the launch specs run against it with real signals.
+- **For step 5:** call `signal` from `process.on` for the three signals and stop every run on
+  `onEscalate`; `dispose` once every run has ended. Write the record on `onProcess` and at the end; the
+  orphan check reads `running` records with a live group (`groupAlive`). `SHUTDOWN_SIGNALS` lists the
+  handlers to install. See also §7.13's notes for step 5.
+
+### 7.13 Audit of step 4 (2026-10-13, V399–V405)
+
+Two reviewers, one on security and one on correctness, each on its own copy; the correctness reviewer
+drove `launchRun` and `endRun` through the real `bddgen` and runner, on a placeholder product of its
+own that touches no site, with a reporter slow on purpose. Every finding was reproduced, then fixed,
+and every fix proved by a mutation (V404).
+
+- **A SIGINT after the tests killed the runner mid-report (medium).** Playwright 1.63 disarms its SIGINT
+  watcher once the tests are over, and with the last handler gone it removes its process `SIGINT`
+  listener (`runner/index.js:6097–6110, 6176`): a SIGINT while the reporters write — HTML, Cucumber,
+  Allure, the summary, the pruning — took the default action, the reports cut, and a run whose stream
+  said `passed` read `stopped` (V399). Phase 0 only ever measured a SIGINT during tests. Now the launch
+  sends no SIGINT once the stream holds `run.end` (`stream-end.ts`: the suite writes it synchronously,
+  before the slow reporters), and logs that it did not; the kill budget still guards a hang. An
+  interrupt that came too late — the runner then ending on its own with a complete run — is judged by
+  its results, like a drain that skipped nothing; one whose runner a signal ended stays `stopped`.
+  Checked against the real runner: an interrupt during `onEnd` or `onExit` now lets both finish, exit 0,
+  `passed`; one during the tests still gives exit 130, `stopped` (V400).
+- **A failing `onProcess` orphaned the run (medium; both reviewers, and our own review).** A throw left
+  `bddgen`'s detached group running unwatched and rejected `launchRun` (or `done`, on the runner); an
+  async callback's rejection ended the orchestrator on an unhandled rejection, the group left behind.
+  Step 5 writes the record there. Now a throw or a rejection is a log line, and the run is watched to
+  its end.
+- **The log was opened through whatever was there (low-medium).** `open(log, "a")` followed a symbolic
+  link, blocked for ever on a FIFO (and kept the process from exiting), and kept a wider mode. Now it is
+  created exclusively (`O_CREAT|O_EXCL|O_NOFOLLOW`, `0600`): a run's log is new, so anything there is
+  refused before anything is spawned. The run folder must be a real folder of this user's, mode `0700`
+  — `mkdir` keeps an existing one as it was.
+- **Signals waited behind log writes (low; our own review).** The stop machine's actions ran in the
+  log's queue: a SIGINT could come after the step that should follow it, and a signal after its group
+  emptied. Now they run at once, synchronously — the stop file with `writeFileSync`.
+- **A stop as the log was flushed changed the run (low).** After a failed `bddgen` the phase stays
+  "between", so a stop arriving while the log closed turned `error` into `stopped`, losing `bddgen`'s
+  error, and wrote to a closed log. Now no stop changes a run once nothing runs any more.
+- **Our lines ran into a process's last output (low; both reviewers).** Output without a newline put our
+  next line on its line, and the reason quoted it. Now our line starts on a line of its own, and the
+  tail strips one of ours from anywhere in a line.
+- **Smaller (low):** the log tail dropped a whole line the window started on (now one byte before the
+  window decides); the shutdown's debounce read the wall clock, so a clock stepped back ignored every
+  Ctrl-C (now `performance.now()`); a group that could not be killed after the linger read as ended
+  while it still held the cell (now the wait goes on, and the log says why); a 32 MiB stream of nested
+  brackets took 2.3 GB to parse (V401) — the cap is now 8 MiB and a line over 256 KiB is skipped
+  unparsed; a spec claiming "ignores a stop once the run has ended" could not fail (it asserted a result
+  taken before the stop).
+- **Kept, on purpose — equivalent mutants (V404):** `O_NOFOLLOW` (`O_CREAT|O_EXCL` already refuses a
+  link); `streamHasEnded`'s regular-file check (a non-blocking read of a FIFO fails anyway, and a
+  failure reads as "not over") — both kept as the stated rule, against a device.
+- **Checked sound:** the child's environment exactly as given (`NODE_OPTIONS` not inherited), no file
+  descriptor of the orchestrator's but `run.log` inherited (`lsof`), groups and sessions their own (`Ss`),
+  only SIGINT to the runner and SIGKILL to `-pgid`; `run.json` and the atomic write never written through
+  a link, `0600` under `umask 0`, 200 concurrent writers with no torn read; the shutdown table, re-entrant
+  `onEscalate`; no flakiness at `--repeat-each 40 --workers 16` with the CPU loaded.
+- **For step 5:** a `running` record names a group by its number only: after a crash, once that group
+  has ended, the number can lead an unrelated one, and the orphan check would refuse the task and name a
+  stranger's group to kill (V402). Record what identifies the leader — its start time, read at spawn —
+  and treat a record whose leader no longer matches as stale. Serialise each run's record writes: a late
+  `running` write must never replace `ended`.
+
 ## 8. What later phases change, and keep
 
 | Here | Later | Kept |
@@ -1080,3 +1188,16 @@ and every fix proved by a mutation (V391).
 | V390 | OpenSSH 10.3's `scp`, through `-S` to a fake `ssh`: the default sends the `sftp` subsystem and the path as given (globbed there); `-O` sends `scp -r -f /srv/my e2e/r` unquoted. Locally, `sh -c` hands a quoted path holding `'`, `$(…)`, a backtick or `;` to `scp` as one argument, nothing run | ✅ 2026-10-13 | Both reviewers |
 | V391 | 25 mutations of the audit's fixes — the cut tail, its length, the cut flag, withholding, the time-limit check, URL and JSON forms (both), the forms used, the webhook's token, `unfurl_*`, both `toWellFormed`, `escapeCut`'s bound, the site cap and its line, `commit`, `(unnamed)`, code spans (both ways), the URL round trip (both) — and step 3's first 20 again: each fails a test but one, a second `toWellFormed` in `escapeCut` that `escapeSlack` made redundant, now removed | ✅ 2026-10-13 | The mutation harness in a copy of the worktree, `--project=orchestrator` |
 | V392 | The four gates pass after the audit; a full unit run: 2340 passed, 8 skipped by their environment guards | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V393 | `orchestrator/runs/` and `state/`: 66 new unit specs (65 in eight new files, one more in `outcome.spec.ts`) — the stop machine's every transition, the shutdown's table, debounce boundary and budgets on a fake clock, the group probes, the launch against a fake suite with real processes and signals (drain, one SIGINT, kill of the whole group, `bddgen` killed, a lingering group waited for and then killed, a command that cannot start or that Node refuses, the environment exactly as given), the end's caps, FIFO and log tail, the record and the atomic write | ✅ 2026-10-13 | `npm run test:unit`; the launch and end specs 20 times over (440 passed) |
+| V394 | macOS adds `__CF_USER_TEXT_ENCODING` to the environment of every process it starts, whatever the parent passes; nothing else was added to a spawned run's environment | ✅ 2026-10-13, macOS | `launch.spec.ts` (the fake writes its variables' names) |
+| V395 | 31 mutations of step 4 — no drain before an interrupt, a `bddgen` stop not taken as a drain, a kill preceded by a SIGINT, a level repeated, a late process left running, the runner started after a stop or after a failed `bddgen`, the debounce boundary, SIGHUP escalating, a budget resetting the debounce, the kill leaving a timer, `dispose` ignored, `EPERM` read as empty, group 1 allowed, the leader alone signalled, the wait's limit off by one, SIGTERM for SIGINT, the environment inherited, not detached, no stop-file check, no linger kill, values logged, our lines in the tail, a cut line kept, a folder read, no cap, the unread reason, a record's group 1, a temporary file kept, a wider mode, `--grep` split — each fails a test (the wait's limit only once its test was tightened) | ✅ 2026-10-13 | A mutation harness in a copy of the worktree |
+| V396 | The real suite, launched by `launchRun` with `suiteCommands` and `runEnvironment` on `backwpup` `pro@nginx` with `--grep=@no-such-tag-e2e`: `bddgen` 0, the runner 1, "No tests found", no setup run, no site touched; `endRun` reads the stream: `error`, "no scenario ran: none matched". The log holds the variables' names only | ✅ 2026-10-13 | A tsx script in the scratchpad; the run's suite pruning removed 9 old local `pro@nginx` reports |
+| V397 | The same, stopped 300 ms in: `bddgen` ended by SIGKILL, the runner never started, the run `stopped` with its reason; no `playwright-bdd` process left | ✅ 2026-10-13 | The same script; `ps -A -o pgid,command` |
+| V398 | The four gates pass; a full unit run: 2406 passed, 8 skipped by their environment guards — the import-boundary spec importing every new module in a child Node | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V399 | Playwright 1.63.0, one SIGINT from `launchRun` while a reporter's `onEnd` (or `onExit`) runs, after `run.end` `passed` is in the stream: the runner is ended by SIGINT, the reporter never finishes, and the run read `stopped`; during the tests the same SIGINT gives exit 130 and `run.end` `interrupted`. Source: the watcher disarmed and the `SIGINT` listener removed once its handlers are gone | ✅ 2026-10-13 | Correctness reviewer's slow-reporter probe; `playwright/lib/runner/index.js:6097–6110, 6176` |
+| V400 | The same probe on the fixed code: an interrupt at 4.5 s (in `onEnd`) and at 9 s (in `onExit`) is skipped, logged, both reporters finish, exit 0, `passed`; at 2.5 s (a test running) exit 130, `stopped` | ✅ 2026-10-13 | The probe in the reviewer's copy with the fixed `runs/` |
+| V401 | `readRunResults` on a line of nested brackets: 4 MiB took 418 MB resident, 32 MiB 2.3 GB; the largest real stream in this checkout is 12 KB (25 streams) | ✅ 2026-10-13 | `/usr/bin/time -l` on a tsx probe; `find … -name results.jsonl` |
+| V402 | `groupAlive` answers `true` for an unrelated live group whose number a stale record names | ✅ 2026-10-13 | Security reviewer's probe |
+| V403 | Before the fixes, each reproduced: a throwing `onProcess` left a live unwatched group and an async one exited the orchestrator 1; a symlinked `run.log` was written through and a FIFO blocked `launchRun` past `process.exit`; a stop during a failed `bddgen`'s flush read `stopped`; output without a newline put our line in the reason; a whole line at the tail's window start was dropped; a wall clock stepped back 1 h ignored every Ctrl-C; a failed SIGKILL after the linger ended the run with its group alive | ✅ 2026-10-13 | Both reviewers' probes; the new specs fail on the old code |
+| V404 | 23 mutations of the audit's fixes — the skipped SIGINT, the stop after the run, the rejection handled, the exclusive log, the folder checks (three), the newline guard, the wait after a failed kill, actions at once, the tail's boundary and shift, ours stripped mid-line, the late interrupt both ways, the line cap both ways, `run.end` by type, the monotonic clock — each fails a test but three equivalent ones (`O_NOFOLLOW`, the stream's file check, a no-op on the throw path); two redundant guards reduced to one; and step 4's first 30 again, all caught | ✅ 2026-10-13 | The mutation harness in a copy of the worktree |
+| V405 | The four gates pass after the audit; a full unit run: 2422 passed, 8 skipped by their environment guards; the real suite again on `pro@nginx` with no matching scenario (`error`, "no scenario ran: none matched") and stopped during `bddgen` (`stopped`), a reused run folder refused (`EEXIST` on `run.log`) | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format`, `test:unit`; the V396 script |

@@ -101,11 +101,30 @@ test.describe("runOutcome — stopped and killed", () => {
     });
   });
 
-  test("stopped when the orchestrator interrupted it, whatever its results say", () => {
+  test("stopped when the orchestrator interrupted it while it tested", () => {
     const why = "the orchestrator was stopped (SIGTERM)";
+    const stop = { level: "interrupted", why } as const;
+    const events = [
+      runBegin(2),
+      scenarioEnd("a", "passed"),
+      runEnd("interrupted", { total: 2, passed: 1, interrupted: 1 }),
+    ];
     expect(
-      runOutcome(input(PASSED, { stop: { level: "interrupted", why } })),
+      runOutcome(
+        input(events, { stop, playwright: { code: 130, signal: null } }),
+      ),
     ).toEqual({ status: "stopped", reason: why });
+    // Its results complete, but the SIGINT ended the runner as it wrote its reports.
+    expect(
+      runOutcome(
+        input(PASSED, { stop, playwright: { code: null, signal: "SIGINT" } }),
+      ),
+    ).toEqual({ status: "stopped", reason: why });
+  });
+
+  test("judged by its results when the interrupt came once its tests were over, and it ended on its own", () => {
+    const stop = { level: "interrupted", why: "too late" } as const;
+    expect(runOutcome(input(PASSED, { stop }))).toEqual({ status: "passed" });
   });
 
   test("stopped when the orchestrator's drain skipped scenarios", () => {
@@ -217,6 +236,23 @@ test.describe("runOutcome — error: the run could not test", () => {
         }),
       ).reason,
     ).toBe("Playwright exited with code 1 without finishing its results");
+  });
+
+  test("error: a stream that is there but was not read says why, not that the run never finished", () => {
+    const unread = input([], {
+      results: undefined,
+      resultsUnread: "it is over the cap",
+    });
+    expect(runOutcome(unread)).toEqual({
+      status: "error",
+      reason:
+        "Playwright exited with code 0, and its results could not be read: it is over the cap",
+    });
+    // A stop still wins: it explains the run before any missing result.
+    expect(
+      runOutcome({ ...unread, stop: { level: "interrupted", why: "Ctrl-C" } })
+        .status,
+    ).toBe("stopped");
   });
 
   test("a setup failed: the facts' line first, else the stream's error, else that one did", () => {

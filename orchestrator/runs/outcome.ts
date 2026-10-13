@@ -12,7 +12,7 @@ import { scenarioCounts, type RunResults } from "./results";
  * | When | Status |
  * | --- | --- |
  * | the orchestrator killed it | `killed` |
- * | it was stopped: interrupted, or drained before it finished — by the orchestrator or not | `stopped` |
+ * | it was stopped: interrupted while it tested, or drained before it finished — by the orchestrator or not | `stopped` |
  * | `bddgen` failed; Playwright ended without `run.end`; a setup failed; the run's time limit; an error outside any test; no scenario ran; Playwright's status or exit code the scenarios do not explain | `error` |
  * | a scenario failed | `failed` |
  * | a scenario was flaky | `flaky` |
@@ -51,6 +51,8 @@ export interface OutcomeInput {
   readonly playwright?: ProcessExit;
   /** The results stream; absent when there is none. */
   readonly results?: RunResults;
+  /** Why the stream was not read though it is there (`it is over 32 MiB`); absent otherwise. */
+  readonly resultsUnread?: string;
   /** The failed setups the run's facts name, in order; their first error's first line each. */
   readonly setupFailures: readonly SetupFailureFact[];
   /** The run log's last lines, for a reason nothing else explains. */
@@ -102,8 +104,10 @@ const EMPTY_RESULTS: RunResults = {
 /**
  * Why the run counts as stopped, if it does: the orchestrator interrupted it, or drained it before it
  * finished every scenario; or it ended interrupted or drained without the orchestrator asking —
- * someone signalled it by hand. A drain asked for as the last scenario ended skipped nothing: that
- * run is judged by its results.
+ * someone signalled it by hand. A stop that came too late to change anything is no stop: a drain
+ * asked for as the last scenario ended, or an interrupt asked for once the tests were over — which
+ * the launch then does not send — while the runner still ended on its own. That run is judged by its
+ * results.
  *
  * @param input - the outcome's input.
  * @returns the reason, or `undefined` when it was not stopped.
@@ -112,9 +116,13 @@ function stopReason(input: OutcomeInput): string | undefined {
   const { stop, results } = input;
   const interrupted = results?.end?.status === "interrupted";
   const drained = results !== undefined && scenarioCounts(results).drained > 0;
-  if (stop.level === "interrupted") return stop.why;
-  // A drain that skipped nothing left a complete run — one whose results still count.
+  // A complete run — every scenario ran, none was cut — whose results still count.
   const finished = results?.end !== undefined && !interrupted && !drained;
+  if (stop.level === "interrupted") {
+    // A runner a signal ended did not finish its reports, whatever its stream says.
+    const endedOnItsOwn = input.playwright?.signal === null;
+    if (!finished || !endedOnItsOwn) return stop.why;
+  }
   if (stop.level === "drained" && !finished) return stop.why;
   if (interrupted) return "interrupted from outside the orchestrator";
   if (drained) return "drained from outside the orchestrator";
@@ -132,6 +140,8 @@ function errorReason(input: OutcomeInput): string | undefined {
   if (!isSuccess(bddgen))
     return `bddgen ${describeExit(bddgen)}${fromLog(input.logTail, input.secrets, true)}`;
   if (playwright === undefined) return "Playwright never started";
+  if (results === undefined && input.resultsUnread !== undefined)
+    return `Playwright ${describeExit(playwright)}, and its results could not be read: ${input.resultsUnread}`;
   if (results?.end === undefined)
     return `Playwright ${describeExit(playwright)} without finishing its results${fromLog(input.logTail, input.secrets)}`;
   const setup = failedSetup(input);

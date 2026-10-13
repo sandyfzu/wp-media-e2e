@@ -133,14 +133,26 @@ export interface RunResults {
 }
 
 /**
+ * The longest line read, in UTF-16 units. The suite caps every error it writes at 2,000 characters, so
+ * a real event is a few KiB; a longer line is skipped unparsed — parsing deeply nested JSON costs about
+ * 100 bytes of memory per byte of text.
+ */
+export const MAX_LINE_LENGTH = 256 * 1024;
+
+/**
  * Reads a finished run's stream. A last line without its newline is read too: the runner may have
- * died writing it, and an unfinished line is skipped like any other that is not an event.
+ * died writing it, and an unfinished line is skipped like any other that is not an event; so is a
+ * line over {@link MAX_LINE_LENGTH}.
  *
  * @param text - the stream's whole text.
  * @returns what it held.
  */
 export function readRunResults(text: string): RunResults {
-  const { events } = parseResults(text.endsWith("\n") ? text : `${text}\n`);
+  const kept = text
+    .split("\n")
+    .filter((line) => line.length <= MAX_LINE_LENGTH)
+    .join("\n");
+  const { events } = parseResults(kept.endsWith("\n") ? kept : `${kept}\n`);
   let begin: RunBegin | undefined;
   let end: RunEnd | undefined;
   const setups = new Map<string, SetupResult>();
