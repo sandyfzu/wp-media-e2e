@@ -5,13 +5,13 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { importable, runInChildNode } from "../common/__fixtures__/child-node";
+import { probeImports, SETTLED } from "../common/__fixtures__/import-probe";
 import {
   PRODUCTS,
   playwrightConfigFor,
@@ -22,8 +22,8 @@ import {
 /**
  * The product list against the repository it describes — so a product folder, entry config or
  * npm script nobody listed fails here, instead of being skipped by the healthcheck and the
- * artifact warm — and the guarantee that importing the list leaves a process's environment alone,
- * which the orchestrator will rely on.
+ * artifact warm — and the guarantee that importing the list leaves the process as it was, which the
+ * orchestrator relies on.
  */
 
 /** The repository root, two levels above this file. */
@@ -32,12 +32,11 @@ const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 /** The unit config, the only root entry config that is not a product's. */
 const UNIT_ENTRY = "unit";
 
-/** A working directory whose `.env` sets a sentinel, so a child that loads `.env` shows it. */
+/** A working directory of its own, so a child never reads the repository's `.env`. */
 let probeDir = "";
 
 test.beforeAll(() => {
   probeDir = mkdtempSync(join(tmpdir(), "e2e-products-"));
-  writeFileSync(join(probeDir, ".env"), "E2E_PROBE_SENTINEL=from-dotenv\n");
 });
 
 test.afterAll(() => {
@@ -47,16 +46,6 @@ test.afterAll(() => {
 /** Runs `body` in a fresh Node from {@link probeDir}: see {@link runInChildNode}. */
 function runInChild(body: string): Promise<unknown> {
   return runInChildNode(body, { cwd: probeDir });
-}
-
-/** The environment variables importing `repoPath` adds, removes or changes, sorted. */
-function envChangedByImport(repoPath: string): Promise<unknown> {
-  return runInChild(`
-    const before = { ...process.env };
-    await import(${importable(join(REPO_ROOT, repoPath))});
-    const keys = new Set([...Object.keys(before), ...Object.keys(process.env)]);
-    console.log(JSON.stringify([...keys].filter((k) => before[k] !== process.env[k]).sort()));
-  `);
 }
 
 /** The product names on the projects that a Playwright entry config builds. */
@@ -203,13 +192,11 @@ test.describe("productFromEnv — the bare config's PRODUCT", () => {
 });
 
 test.describe("Importing the product list", () => {
-  test("leaves the process environment untouched: no .env loaded, no RUN_ID stamped", async () => {
-    expect(await envChangedByImport("src/projects/products.ts")).toEqual([]);
-  });
-
-  test("is measured by a probe that sees run-context load .env and stamp RUN_ID", async () => {
-    expect(
-      await envChangedByImport("src/common/config/run-context.ts"),
-    ).toEqual(expect.arrayContaining(["E2E_PROBE_SENTINEL", "RUN_ID"]));
+  test("leaves the process as it was: no .env loaded, no RUN_ID stamped, no listener added", async () => {
+    const file = join(REPO_ROOT, "src/projects/products.ts");
+    expect(await probeImports([file])).toEqual([
+      { file, effects: [] },
+      { file: SETTLED, effects: [] },
+    ]);
   });
 });

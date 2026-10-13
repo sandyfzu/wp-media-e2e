@@ -17,7 +17,7 @@ const TSX_LOADER = import.meta.resolve("tsx");
 
 /**
  * How long a child may run. One takes under 2 s here; this leaves room for a slow CI runner and
- * stays under the 30 s test timeout, so a hung child fails its test with {@link runInChildNode}'s
+ * stays under the 30 s test timeout, so a hung child fails its test with {@link execInChildNode}'s
  * message rather than the runner's.
  */
 export const CHILD_TIMEOUT_MS = 15_000;
@@ -43,19 +43,25 @@ function describeChildFailure(error: unknown): string {
   return `${how}: ${stderr}`;
 }
 
+/** What a child that exited with status 0 wrote. */
+export interface ChildNodeOutput {
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
 /**
- * Runs `body` — ES module code, top-level `await` allowed — and returns the JSON it printed on
- * its last stdout line. Asynchronous, so the calling test's own timeout can still interrupt it.
+ * Runs `body` — ES module code, top-level `await` allowed — and returns what it wrote, for a caller
+ * that reads its result some other way than stdout. Asynchronous, so the calling test's own timeout
+ * can still interrupt it.
  *
  * @throws {@link Error} naming the exit code, or the time limit, and the child's stderr.
  */
-export async function runInChildNode(
+export async function execInChildNode(
   body: string,
   options: ChildNodeOptions,
-): Promise<unknown> {
-  let stdout: string;
+): Promise<ChildNodeOutput> {
   try {
-    ({ stdout } = await execFileAsync(
+    return await execFileAsync(
       process.execPath,
       ["--import", TSX_LOADER, "--input-type=module", "--eval", body],
       {
@@ -68,13 +74,26 @@ export async function runInChildNode(
           ...options.env,
         },
       },
-    ));
+    );
   } catch (error) {
     // The argv is the caller's own probe code, and the env holds nothing secret.
     throw new Error(`child Node failed (${describeChildFailure(error)})`, {
       cause: error,
     });
   }
+}
+
+/**
+ * Runs `body` like {@link execInChildNode} and returns the JSON it printed on its last stdout line.
+ *
+ * @throws {@link Error} naming the exit code, or the time limit, and the child's stderr; a
+ * `SyntaxError` when that line is not JSON.
+ */
+export async function runInChildNode(
+  body: string,
+  options: ChildNodeOptions,
+): Promise<unknown> {
+  const { stdout } = await execInChildNode(body, options);
   return JSON.parse(stdout.trim().split("\n").at(-1) ?? "");
 }
 
