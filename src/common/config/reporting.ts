@@ -40,6 +40,8 @@ function ownReporter(file: string): string {
  *                        report:allure`); report config lives in `allurerc.mjs`.
  *  - run summary         — the verdict, what was tested and where the reports are; last, and
  *                          printed in `onExit`, so it is the run's final block (`reporting/run-summary.ts`).
+ *                          First it prunes the run's report group, once every report is written
+ *                          (`reporting/run-pruning.ts`, `run.reportsKeep`).
  *
  * The suite's own reporters each receive `run` as their options.
  *

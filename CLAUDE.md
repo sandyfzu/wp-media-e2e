@@ -34,8 +34,8 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 ```text
 src/
 ├── common/                 # product-agnostic, shared by every product
-│   ├── config/             # env, sites loading, run-context, the cell pin, the drain, metadata, devices, file-owner rule, the config factory
-│   ├── reporting/          # the suite's own reporters: cell-notice.ts, results-stream.ts (results.jsonl), run-summary.ts; their pure parts (results.ts, setup-facts.ts) and the stream's schema + reader
+│   ├── config/             # env, sites loading, run-context (+ run-id.ts: RUN_ID's formatter/parser), the cell pin, the drain, metadata, devices, file-owner rule, the config factory
+│   ├── reporting/          # the suite's own reporters: cell-notice.ts, results-stream.ts (results.jsonl), run-summary.ts; their pure parts (results.ts, setup-facts.ts) and the stream's schema + reader; report retention (retention.ts, report-tree.ts, run-pruning.ts, prune-command.ts)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ending a saved login's session)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── text.ts             # small shared string helpers (escapeRegExp)
@@ -45,7 +45,7 @@ src/
 │   ├── pages/              # cross-product Page Object Model (plugins.page.ts, site-health.page.ts) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
-│   ├── __fixtures__/       # spec helpers (child-node.ts: run code in a fresh Node; drain/: the drain spec's scenarios; secret-scan.ts + secrets/: the no-credential canary; mock-wordpress.ts: wp-login and Site Health served locally)
+│   ├── __fixtures__/       # spec helpers (child-node.ts: run code in a fresh Node; report-tree.ts: fake report trees; drain/: the drain spec's scenarios; secret-scan.ts + secrets/: the no-credential canary; mock-wordpress.ts: wp-login and Site Health served locally)
 │   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -98,6 +98,13 @@ playwright*.config.ts       # entry configs (default, per-product, unit)
   dispatcher's rule and settle, as the run ends, one that never ran (`retryNotRun`); and never write a
   step's parameters, a Playwright API step's title or a call log — the stream is still as sensitive as
   the reports.
+- **Report retention** — each run prunes **its own cell's** report folder as it ends (the summary's
+  `onExit`, `reporting/run-pruning.ts`; a `Pruned` line says what went): at most `E2E_REPORTS_KEEP`
+  (20; `0` lifts the cap, not the age rules), none older than 30 days except the newest complete
+  report (up to 182 days); an empty run (`--list`, no tests) never counts; the run in progress is never
+  removed. A run is a folder named by a RUN_ID or holding a `run.begin` stream — never dated by mtime.
+  `npm run report:prune` does every cell. Removal renames to a hidden `.pruning-…` folder first, never
+  follows a link, and never fails a run (`reporting/retention.ts`).
 
 Full detail — the `parallelIndex` invariant, the config factory, the credential
 registry, and artifact lifecycle — is in
@@ -138,6 +145,8 @@ npm run report                     # open the newest Playwright HTML report
 npm run report -- wp-rocket apache # open a specific product/cell's newest report
 npm run report:allure              # generate Allure report for the newest run
 npm run report:allure -- wp-rocket apache --open
+npm run report:prune               # dry run of the retention policy over every cell's reports
+npm run report:prune -- --apply    # remove (--keep, --older-than, --keep-newest-for, --product, --cell)
 
 # Local WordPress (Docker transport)
 npm run env:up                     # start + install Apache(:8100) & Nginx(:8101) sites
@@ -775,6 +784,9 @@ Update it when you change anything about:
 - The run's own reporters: the `[cell]` notice, the results stream (`results.jsonl`, its schema and
   reader, `reporting/results.ts`) and the end-of-run summary; the project names that tell a setup from
   a scenario (`config/project-names.ts`).
+- Report retention: the policy and its removal (`reporting/retention.ts`, `report-tree.ts`), a run's
+  own pruning (`run-pruning.ts`, `E2E_REPORTS_KEEP`), `npm run report:prune` (`prune-command.ts`), and
+  the RUN_ID format (`config/run-id.ts`).
 
 ### docs/architecture/wordpress-automation.md
 

@@ -27,6 +27,7 @@
     "fixtures:capture": "tsx capture-backwpup-fixtures.ts",
     "report": "tsx scripts/report.mjs",
     "report:allure": "tsx scripts/allure.mjs",
+    "report:prune": "tsx prune-reports.ts",
     "env:up": "bash docker/setup.sh",
     "env:down": "docker compose -f docker/docker-compose.yml down -v",
     "env:logs": "docker compose -f docker/docker-compose.yml logs -f",

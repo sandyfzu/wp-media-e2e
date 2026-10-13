@@ -152,7 +152,18 @@ Every run writes a layered set of reports into `reports/<product>/<cell>/<RUN_ID
   [`results-schema.ts`](src/common/reporting/results-schema.ts).
 
 A run ends with a summary below everything else: the verdict (`✘ COULD NOT TEST` when a setup
-failed), the counts, the plugin and sites it tested, and how to open each report.
+failed), the counts, the plugin and sites it tested, how to open each report, and which old reports
+it pruned.
+
+**Old reports are pruned as each run ends**, for that run's cell only: at most `E2E_REPORTS_KEEP`
+(20; `0` lifts the cap, not the age rules), none older than 30 days except the cell's newest
+complete report, kept up to 182 days. A cell that no longer runs is pruned by hand:
+
+```bash
+npm run report:prune                                   # dry run: every report, its decision and why
+npm run report:prune -- --apply                        # remove what the policy says goes
+npm run report:prune -- --product backwpup --cell pro@nginx --keep 5 --older-than 2w --apply
+```
 
 Generate the Allure report from the most recent run:
 

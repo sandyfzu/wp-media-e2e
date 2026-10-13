@@ -266,7 +266,9 @@ commander 15, croner 10, pino 10, react 19.3, vite 8.3, tailwindcss 4.3).
   default **30 days** — with their logs and any zip only they referred to. Each task's newest report
   outlives *X*, but only up to *Y* — configurable, default **6 months** — and any report can be removed
   by hand (command, dashboard). A run's summary record stays (it is small), so history and trends
-  survive. The same pruning runs by hand on a dev machine, per cell (Phase 0F).
+  survive. Until then the suite prunes each cell as a run ends, and by hand on a dev machine (Phase
+  0F); before the orchestrator takes over, the suite needs a switch turning its own pruning off
+  (`E2E_REPORTS_KEEP=0` lifts only the cap — Phase 0 plan §8.3).
 - **Updating the suite** — decided 2026-10-05: **stop, update, resume**. One checkout serves every
   cell, and a run reads its files while it runs (`bddgen`, step files, `node_modules`), so nothing is
   updated under a running cell. Until this exists, the suite is updated by hand while the orchestrator
@@ -406,8 +408,9 @@ retries, duration, first failing step's message — and the final totals, for li
 the Phase 0 plan's P4), writing JSON lines — `<report dir>/results.jsonl`, schema v1 — plus an
 end-of-run summary on the terminal. **Done 2026-10-12** — Phase 0 plan §7.1.
 
-**0F — Report pruning.** The pruning module the orchestrator's retention uses (§3), plus
-`npm run report:prune` for dev machines: age-based, each cell's newest report kept up to the cap.
+**0F — Report pruning.** The pruning module the orchestrator's retention uses (§3): each run prunes
+its cell as it ends — at most `E2E_REPORTS_KEEP` (20), 30 days, the newest complete report up to 182
+days — and `npm run report:prune` does every cell. **Done 2026-10-12** — Phase 0 plan §8.1–§8.3.
 
 ## 7. Phase 0.5 — The minimal orchestrator (planned)
 

@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 
@@ -11,6 +12,7 @@ import {
   fakeTest,
   jsonAttachment,
 } from "../__fixtures__/reporter-fakes";
+import { makeRun, removeTempRoot, tempRoot } from "../__fixtures__/report-tree";
 import {
   ARTIFACTS_ATTACHMENT,
   SITE_INFO_ATTACHMENT,
@@ -616,5 +618,67 @@ test.describe("RunSummaryReporter", () => {
       }),
     ).toBe("");
     expect(reporter.printsToStdio()).toBe(false);
+  });
+});
+
+test.describe("the run's pruning, in the summary", () => {
+  test("renderSummary: a Pruned line last, a failure styled as a warning, none when nothing went", () => {
+    const style = (format: unknown, text: string): string =>
+      format === "yellow" ? `<y>${text}</y>` : text;
+    const lines = renderSummary(
+      input({
+        pruned: [
+          { text: "1 old report, 4.3 MB — beyond the newest 20", warn: false },
+          { text: "could not remove x — EACCES\nsecond line", warn: true },
+        ],
+      }),
+      style,
+    );
+    expect(lines.slice(-2)).toEqual([
+      "  Pruned      1 old report, 4.3 MB — beyond the newest 20",
+      "              <y>could not remove x — EACCES second line</y>",
+    ]);
+    expect(renderSummary(input({ pruned: [] })).join("\n")).not.toContain(
+      "Pruned",
+    );
+  });
+
+  test("the reporter prunes its own cell's folder as the run ends, and says so; never for --list", () => {
+    const root = tempRoot("e2e-summary-prune-");
+    try {
+      const cell = join(root, "backwpup", "pro@nginx");
+      const old = [
+        "2026-10-01T00-00-00-000Z-1",
+        "2026-10-02T00-00-00-000Z-1",
+        "2026-10-03T00-00-00-000Z-1",
+      ].map((name) => makeRun(cell, name));
+      const current = makeRun(
+        cell,
+        new Date().toISOString().replace(/[:.]/g, "-") + "-2",
+      );
+      const run = { ...RUN, reportPath: current, reportsKeep: 2 };
+
+      const listing = new RunSummaryReporter({ ...run, _mode: "list" });
+      listing.onEnd({ status: "passed", startTime: new Date(), duration: 1 });
+      void listing.onExit();
+      expect(old.every((path) => existsSync(path))).toBe(true);
+
+      const reporter = new RunSummaryReporter(run);
+      const out = captureStdout(() => {
+        reporter.onEnd({
+          status: "passed",
+          startTime: new Date(),
+          duration: 1,
+        });
+        void reporter.onExit();
+      });
+      expect(out).toMatch(
+        /\n {2}Pruned {6}2 old reports, \d+ B — beyond the newest 2 \(E2E_REPORTS_KEEP\)\n$/,
+      );
+      expect(old.map((path) => existsSync(path))).toEqual([false, false, true]);
+      expect(existsSync(current)).toBe(true);
+    } finally {
+      removeTempRoot(root);
+    }
   });
 });

@@ -6,8 +6,9 @@ import { After, Given, Then, When } from "../../fixtures";
 import { STOP_FILE_ENV } from "../../config/drain";
 
 /**
- * Steps for the results stream's end-to-end spec (`reporting/results-stream.run.spec.ts`). They touch
- * nothing but the run's own stop file, so the scenarios need no real site.
+ * Steps for the results stream's end-to-end spec (`reporting/results-stream.run.spec.ts`), which the
+ * report pruning's (`reporting/run-pruning.run.spec.ts`) reuses. They touch nothing but the run's own
+ * stop file, so the scenarios need no real site.
  */
 
 Given("a background step", () => {

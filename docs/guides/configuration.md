@@ -161,7 +161,7 @@ maps each edition to the single variant it builds (`pro` → `pro-en`) — see
 Copied to `.env` and loaded once by
 [`load-env.ts`](../../src/common/config/load-env.ts), imported first by every product
 Playwright config and script (healthcheck, artifact warm, fixture capture, `report`,
-`report:allure`) — never by the unit config — from the **working directory**. **Real
+`report:allure`, `report:prune`) — never by the unit config — from the **working directory**. **Real
 environment variables always win** over `.env`, even blank ones (CI secrets are never
 overwritten). Every key is loaded, unknown ones included; a malformed line is skipped. A
 `.env` that exists but cannot be read (a directory, no permission, a link to a missing
@@ -175,11 +175,12 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 | ------------- | ---------------------- | ----------------------------------------------------------------------- |
 | `E2E_LOAD_DOTENV` | `true`              | `false`/`0` **in the environment** skips `.env` entirely, in every process of the run — for a caller that hands the run its whole environment (the orchestrator). Any other value but `true`/`1`/blank fails the run naming it. Set inside `.env` it has no effect (the file is already being read) and a warning says so — once per process that reads the file, so `npm run test:*` (`bddgen`, then the runner) prints it twice. |
 | `REPORT_MODE` | _(unset)_ → self-contained | `rich` → external attachments + embedded trace viewer (serve over http). |
-| `RUN_ID`      | auto-stamped           | Per-run report token; pin to share one token across a batch.            |
+| `RUN_ID`      | auto-stamped           | Per-run report token; pin to share one token across a batch. One folder name: no `/` or `\`, not hidden, no control character, ≤ 255 bytes — else the run fails naming it. |
 | `CI`          | _(unset)_              | Non-empty enables CI config (retries, `forbidOnly`).                    |
 | `E2E_CELL`    | _(unset)_ → no pin     | Pins the run — `bddgen`, the runner, its workers — to one cell of the product: the config holds that cell alone, so `bddgen` regenerates only its specs and cells can run side by side. Exact name; blank means unset. A name the product lacks, or a `--project` selecting none of the cell's projects, fails naming the variable. **Pass it per command, never in `.env`**, which would pin every run started from that folder. Ignored by the healthcheck and the artifact warm, which span cells by design. |
 | `PRODUCT`     | `wp-rocket`            | Product for the bare `playwright.config.ts`: a name listed in [`products.ts`](../../src/projects/products.ts) (whitespace ignored). Any other name fails the run. |
-| `REPORT_ROOT` | `reports`              | Report artifact root (accumulates).                                     |
+| `REPORT_ROOT` | `reports`              | Report artifact root (accumulates; pruned as each run ends).            |
+| `E2E_REPORTS_KEEP` | `20`              | How many reports a cell keeps: each run prunes its own cell's folder as it ends, beyond the newest this many, and anything older than 30 days but the newest complete report (kept up to 182 days). `0` = no cap (the age rules still apply; nothing turns the pruning off). An integer 0–10000, else the run fails at its start naming it. Also `npm run report:prune`'s default `--keep`. See [execution-model.md](../architecture/execution-model.md#report-retention). |
 | `OUTPUT_ROOT` | `test-results`         | Ephemeral Playwright artifact root: `<product>/<cell>` for a run targeting that cell, `<product>/_all/<cell>` for any other run, `_unit` for unit tests. |
 | `AUTH_ROOT`   | `.auth`                | Ephemeral `storageState` root.                                          |
 | `ARTIFACTS_ROOT` | `.artifacts`        | Resolved plugin-zip root (**wiped & rebuilt each run**; see Plugin artifacts). |

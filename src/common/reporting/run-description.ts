@@ -15,6 +15,11 @@ export interface RunDescription extends CellNoticeOptions {
   readonly reportCell: string;
   /** The run's report folder, absolute: where the reporters write. */
   readonly reportPath: string;
+  /**
+   * `E2E_REPORTS_KEEP`: how many reports the run's own report folder keeps as the run ends, `0` for
+   * no cap (`run-pruning.ts`). Absent, the run prunes nothing.
+   */
+  readonly reportsKeep?: number;
 }
 
 /**
@@ -47,6 +52,12 @@ export function readRunDescription(
     }
   }
   if (typeof value.pinned !== "boolean") return { missing: "pinned" };
+  if (
+    value.reportsKeep !== undefined &&
+    !(Number.isInteger(value.reportsKeep) && (value.reportsKeep as number) >= 0)
+  ) {
+    return { missing: "reportsKeep" };
+  }
   return value as RunDescription;
 }
 

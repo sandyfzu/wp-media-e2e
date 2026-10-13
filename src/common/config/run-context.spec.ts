@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 import { isAbsolute } from "node:path";
 
 import unitConfig from "../../../playwright.unit.config";
+import { runInChildNode } from "../__fixtures__/child-node";
 import { CELL_PIN_ENV } from "./cell-pin";
 import {
   cellOwningOutput,
@@ -378,5 +379,51 @@ test.describe("cellOwningOutput — the cell a run targets as a whole", () => {
   test("none when no cell is selected", () => {
     expect(cellOwningOutput(undefined, [])).toBeUndefined();
     expect(cellOwningOutput(undefined, ["setup:a"])).toBeUndefined();
+  });
+});
+
+test.describe("RUN_ID — the run's token", () => {
+  /** What importing run-context does with `RUN_ID` set (or not), in a fresh process. */
+  async function importWith(
+    runId: string | undefined,
+  ): Promise<{ runId?: string; error?: string }> {
+    const result = await runInChildNode(
+      `try {
+         const { RUN_ID } = await import(${JSON.stringify(`${REPO_ROOT}src/common/config/run-context.ts`)});
+         console.log(JSON.stringify({ runId: RUN_ID }));
+       } catch (error) {
+         console.log(JSON.stringify({ error: error.message }));
+       }`,
+      {
+        cwd: REPO_ROOT,
+        env: {
+          E2E_LOAD_DOTENV: "false",
+          ...(runId === undefined ? {} : { RUN_ID: runId }),
+        },
+      },
+    );
+    return result as { runId?: string; error?: string };
+  }
+
+  test("a fresh one is a stamp the report pruning can date", async () => {
+    const { runId } = await importWith(undefined);
+    expect(runId).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-\d+$/);
+  });
+
+  test("a pinned one is kept as given, even one no parser reads", async () => {
+    expect(await importWith("nightly-42")).toEqual({ runId: "nightly-42" });
+  });
+
+  test("a pinned one that cannot name a report folder fails at once, naming RUN_ID", async () => {
+    for (const bad of ["../escape", "a/b", ".hidden"]) {
+      const { error } = await importWith(bad);
+      expect(error, bad).toContain(`RUN_ID=${JSON.stringify(bad)}`);
+    }
+  });
+
+  test("the message escapes every control character: a C1 escape never reaches the terminal raw", async () => {
+    const { error } = await importWith("run\u009b31m\u007f\u2028x");
+    expect(error).toContain(String.raw`RUN_ID="run\u009b31m\u007f\u2028x"`);
+    expect(error).not.toMatch(/[\u007f-\u009f\u2028\u2029]/);
   });
 });

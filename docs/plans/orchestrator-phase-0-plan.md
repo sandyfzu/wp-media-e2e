@@ -4,7 +4,9 @@
 > (2026-10-06, §3.2), 0A.1 (2026-10-06, §3.1), 0B.1 (2026-10-08, §4.1), 0D.2 with 0B.2 (2026-10-08,
 > §6.2, §4.2; audited the same day), 0C's suite parts (2026-10-08, §5;
 > audited the same day), 0D.3 and 0D.4 (2026-10-09, §6.3, §6.4; audited the same day, §6.5), 0E
-> (2026-10-12, §7.1; audited the same day, §7.2). The rest is
+> (2026-10-12, §7.1; audited the same day, §7.2), 0F (2026-10-12, §8.1; audited the same day, §8.2,
+> §8.3).
+> The rest is
 > investigated: every item has a verified finding and a recommended solution, with the
 > alternatives it beat.
 > **Date:** 2026-09-25.
@@ -38,7 +40,7 @@ The recommended solution per item. "—" means no suite change: the orchestrator
 | 0D.3 the site's versions — **done** | Read Site Health's "Copy site info" in the auth setup; keep only whitelisted keys | new page object + parser; `auth.setup.ts` |
 | 0D.4 no credential in a report — **done** | Type a secret with `evaluate`, never `fill()`, and check it in the page; the auth setup traces without DOM snapshots and without the failure snapshot; each run's setup ends the session the previous run saved | new `secret-field.ts`, `session.ts`, `authenticate.ts`; `login.ts`, `auth.setup.ts`, `storage.sidebar.ts`, `project.ts` |
 | 0E results stream — **done** | A JSON-lines reporter (schema v1), always on, writing `<report dir>/results.jsonl` — nothing on the terminal; plus an end-of-run summary for people | new `src/common/reporting/results-stream.ts`, `run-summary.ts` and their pure parts; `reporting.ts`, `project.ts` |
-| 0F pruning | At most 20 reports per cell (FIFO, at each run's end), none older than 30 days, the newest complete one kept up to 6 months; `npm run report:prune` for every cell | new `run-id.ts`, `retention.ts`, `prune-reports.ts` |
+| 0F pruning — **done** | At most 20 reports per cell (FIFO, at each run's end), none older than 30 days, the newest complete one kept up to 6 months; `npm run report:prune` for every cell | new `run-id.ts`, `retention.ts`, `report-tree.ts`, `run-pruning.ts`, `prune-command.ts`, `prune-reports.ts`; `run-context.ts`, `project.ts`, `run-summary.ts`, `run-description.ts` |
 
 ## 1. Method
 
@@ -98,7 +100,9 @@ recommendations below fit together as one contract.
   - from the orchestrator's own secrets: `GITHUB_TOKEN` (a private product's run asks for one even on a
     cache hit, V83) and, for BackWPup, **every `BWP_*` it holds, forwarded by prefix** — never a
     hand-kept list, which would silently blank a credential added later (V87);
-  - `E2E_REPORTS_KEEP=0`, because the orchestrator prunes per task itself (0F);
+  - `E2E_REPORTS_KEEP`, the cell's cap (Phase 0.5: `runs.reportsKeep`). `0` lifts only the cap — the
+    30- and 182-day rules still run at each run's end (0F, §8.3). Once the orchestrator prunes per task
+    itself, it needs a separate switch that turns the suite's end-of-run pruning off — not built yet;
   - `E2E_SITE_STAGING_DIR` only if the task sets it — a site's own `transport.stagingDir` wins anyway
     (V92);
   - never `CI`, `PRODUCT`, `E2E_INTERNAL_SELECTED_CELLS`, `HEALTHCHECK_*`, `CAPTURE_*`, or anything else.
@@ -1450,7 +1454,7 @@ each fix proven by a test that fails with it undone (V236), then live again on b
 - Policy — **decided with the user (P6)**: at most **N = 20** reports per group (FIFO), no older than
   **X = 30 days**, but each group's newest complete report kept up to **Y = 182 days**. Per group
   (`product/cell` on a dev machine, the task in the orchestrator), newest first by RUN_ID time (else
-  the newest mtime inside):
+  ~~the newest mtime inside~~ its stream's `run.begin`, §8.3):
   1. an **empty** run — `--list` or "No tests found", recognised by its `results.jsonl` — never counts
      and is removed unless protected (without this, each such invocation evicted a real report, V104);
   2. a protected run (the run in progress, the orchestrator's active runs) is kept; so is a future-dated
@@ -1467,9 +1471,10 @@ each fix proven by a test that fails with it undone (V236), then live again on b
   killed right after had already cost a complete report (V106). The summary prints what it removed.
   A cell that no longer runs is pruned only by `npm run report:prune` (all cells, a dry run unless
   `--apply`).
-- **Orchestrator**: sets `E2E_REPORTS_KEEP=0` in its runs and prunes per **task** itself, at each run's
-  end and on its schedule — several tasks can share a cell, and it also drops each report's logs and
-  zips while keeping a summary record (parent §3).
+- **Orchestrator**: prunes per **task** itself, at each run's end and on its schedule — several tasks can
+  share a cell, and it also drops each report's logs and zips while keeping a summary record (parent §3).
+  `E2E_REPORTS_KEEP=0` does not hand it the job: it lifts the cap, the age rules still run. A switch
+  turning the suite's own pruning off is deferred to then (§8.3).
 - **Configurable**: `E2E_REPORTS_KEEP` (`intEnv`, 0–10000; a bad value fails at start, naming it —
   V107); `report:prune --keep <n> --older-than <n>m|h|d|w --keep-newest-for … --product --cell
   --apply` (a strict parser, exit 2 on a bad value); the orchestrator's own config.
@@ -1502,6 +1507,108 @@ boundaries at exactly X and Y, protected paths, grouping by task); `listReportRu
 `applyRetention` on a temporary tree (a symlinked run skipped, a symlink inside a run unlinked with its
 target intact, cell-level files kept, each removal verified).
 
+### 8.1 Implemented (2026-10-12, V270–V280)
+
+As recommended above, with these specifics:
+
+- **Modules.** `config/run-id.ts` — `formatRunId`, a strict `parseRunId` (each part compared, never
+  rolled over) and `isUsableRunId`; `stamp()` uses the formatter. `reporting/retention.ts` — the
+  policy (`DEFAULT_RETENTION`, `MIN_MAX_AGE_MS`), `listReportRuns`/`listGroupRuns`, the pure
+  `planRetention`, `applyRetention`, `removeLeftovers`; `report-tree.ts` — the walk and reads that never
+  follow a link; `run-pruning.ts` — a run's own pruning and its `Pruned` lines; `prune-command.ts` — the
+  CLI's parser and command, `prune-reports.ts` only wires it. All side-effect free on import (no
+  `.env`, no `RUN_ID`), so the orchestrator can import `run-id.ts` and `retention.ts`.
+- **Where it runs.** In the run summary's `onExit`, before it prints: every reporter's `onEnd` is
+  awaited before the first `onExit`, and `onExit`s run in order (V271), so the summary — listed last —
+  prunes after every report is written and prints `Pruned` in its block. Not a separate reporter: its
+  line would trail the block, and `--list` and a run description that lacks the cap would need the
+  same checks twice. `--list` prunes nothing (it ran nothing; its own empty folder goes with the next
+  run). A failing or interrupted run prunes.
+- **The cap** reaches the reporter as `RunDescription.reportsKeep`, read with
+  `intEnv("E2E_REPORTS_KEEP", 20, 0, 10000)` as the config is built — so `bddgen` already fails on a bad
+  value, naming it. Absent, a run prunes nothing.
+- **Recognising runs.** A run is a folder holding a report part — `playwright`, `cucumber`,
+  `allure-results`, `allure`, `results.jsonl` or 0D.1's `run-facts.json` — that is not itself a link,
+  and (since §8.3) named by a RUN_ID or opening its stream with `run.begin`.
+  **Empty**: `results.jsonl`'s first line is `run.begin` with `mode: "list"`, or 0 scenarios and 0 setups
+  (a `--grep` matching nothing gives exactly that, V272). **Complete**: `playwright/index.html` is a
+  non-empty regular file (the HTML reporter writes it in `onEnd`). The stream is opened with
+  `O_NOFOLLOW | O_NONBLOCK` and checked to be a regular file, so a link or a FIFO is never read.
+- **Beyond the plan.** A pinned `RUN_ID` must be one folder name — no `/` or `\`, not hidden, no control
+  character, ≤ 255 bytes — or the run fails naming it (a `../` RUN_ID wrote its report outside the
+  cell). A planner entry with no finite time is kept outside the cap (`undated`; listed runs always have
+  one). A removal is renamed to `.pruning-<ms>-<pid>-<8 hex>`; what an interrupted removal leaves is
+  removed by a later prune after an hour (a younger one may still be another prune's). `npm run report`
+  and `report:allure` skip hidden folders.
+- **The CLI.** `--product`/`--cell` are checked as single folder names and matched against what is on
+  disk, not `products.ts`: a retired product or cell stays prunable, a name matching nothing exits 2.
+  `--older-than` under `1d` exits 2 (the planner floors it anyway); `--keep` defaults to
+  `E2E_REPORTS_KEEP`, else 20. Sizes are decimal (`MB` = 10⁶ bytes). Hidden entries are counted, not
+  listed (`.DS_Store`).
+- **Limits, kept.** Two runs of one cell ending together are safe — a rename that finds nothing reads
+  as "gone", an in-flight `.pruning-…` folder is left alone — but one cell takes one run at a time:
+  with `E2E_REPORTS_KEEP=1`, a second run of the cell still in progress could be ranked beyond the cap.
+  ~~A run with an unparsable pinned `RUN_ID` is dated by its newest file~~ — by its stream's
+  `run.begin` since §8.3 (V288).
+
+### 8.2 Audit (2026-10-12, V281–V287)
+
+The diff re-read against this section, the installed Playwright and Node sources and measurement; each
+fix proven by a test that fails with it undone (V285).
+
+- **`parseRunId` threw** (V281): `9999-13-01T00-00-00-000Z-1` rolls into the year 10000, which the
+  formatter refuses — a folder so named would have failed every listing. **Fixed:** the parts are
+  compared to the date's, nothing is formatted.
+- **The end-of-run pruning followed a linked cell or product folder** (V282), where the CLI's listing
+  skips one. **Fixed:** both refuse it, reported as a failure line.
+- **One unreadable folder ended the CLI's whole listing** (exit 1, nothing pruned) (V283). **Fixed:** a
+  product or cell folder that cannot be read is skipped as `unreadable (EACCES)` and the listing goes on;
+  an unreadable run says `unreadable`, not "holds no report part".
+- **A `.pruning-…` link or file** would have been offered as a leftover (never removed — the removal
+  checks for a real folder — but printed so) (V284). **Fixed:** only a real folder is a leftover.
+- **Confirmed, no change** (V287): a run renamed away mid-listing is skipped, never thrown; a link
+  swapped in between check and rename is put back; names come from `readdir` and the CLI's names are
+  filters, never joined into a path; a protected path is compared resolved.
+
+### 8.3 Adversarial audit (2026-10-12, V288–V299)
+
+Every path the pruning can reach treated as a safety question, re-derived from §8 and P6, and measured
+on temporary trees, the real runner and a read-only dry run of the main checkout; each fix proven by a
+test that fails with it undone (V299).
+
+- **High — a folder of someone else's could be removed** (V288). Any folder holding an entry named like a
+  report part (`cucumber`, `allure`, …) was a run, and one not named by a RUN_ID was dated by its newest
+  file. With `REPORT_ROOT` set to a checkout, `report:prune --apply` removed
+  `node_modules/playwright-bdd/{dist,src}` — npm dates them 1985 — as "older than 30 days"; the dry run
+  over this worktree listed both as runs. **Fixed:** a run is named by a RUN_ID, or its
+  `results.jsonl`'s first line is `run.begin`, which dates it; never a file's time. Anything else is
+  skipped as "not a run". The §8.1 limit (an Allure generation making such a run look new) goes with it.
+  A pinned-name run killed before its stream began is now listed, never removed.
+- **A report path too short was pruned as a group** (V289): handed `/x`, `pruneRunGroup` listed `/` —
+  seen in this audit's lab; nothing qualified as a run there. The config always builds
+  `<root>/<product>/<cell>/<RUN_ID>` (cell names start with `[a-z0-9]`, RUN_IDs are one segment), so
+  **fixed** as defence in depth: refused, as a failure line.
+- **`formatRunId` made tokens `parseRunId` refuses** (V290): years 0000–0099 (`Date.UTC` reads 50 as
+  1950). **Fixed:** the formatter reads its token back and refuses one that would not date its run.
+  `isUsableRunId` let C1 controls through though documented "no control character" (V291). **Fixed.**
+- **"An interrupted run still prunes" was never measured** (V292). Now through the real runner: one
+  SIGINT mid-scenario exits 130, the HTML report is written (so the run is complete), and it prunes. A
+  command-line `--reporter` replaces the summary and its pruning — nothing goes even at a cap of 1;
+  now documented (`execution-model.md`).
+- **`E2E_REPORTS_KEEP=0`** (V293) — the plan said both "no cap" (P5) and "the orchestrator prunes per
+  task itself" (§2, §8). **Decided with the user:** as built — `0` lifts the cap, the 30- and 182-day
+  rules still run at each run's end; no switch now. **Deferred obligation:** before the orchestrator
+  prunes per task, the suite needs a separate switch turning its end-of-run pruning off, so no report goes
+  before the orchestrator saves its summary. §2, §8, the Phase 0.5 and parent plans, the guides,
+  `.env.example`, `CLAUDE.md` and the README now say so.
+- **Confirmed, no change** (V294–V297): links at every level, odd names, `..`, three prunes of one group at
+  once, a prune killed mid-removal, timing, the CLI's parser, a dry run writing nothing. Playwright 1.63.0's
+  HTML reporter writes in `onEnd` (`runner/index.js:3471`) and `finishTaskRun` awaits every `onEnd`
+  before the first `onExit` (`:6310–6318`).
+- **Kept, low:** `--keep -1` says "needs a value" rather than naming the range (exit 2 either way; its
+  test pins it). The pruning has no time limit of its own: a hung filesystem would hold the run's exit
+  until the orchestrator's SIGKILL (a removal then left is finished by a later prune).
+
 ## 9. Implementation order
 
 Each step ships with its unit tests, passes the four gates, and gets the live check its section names,
@@ -1519,7 +1626,7 @@ on `bwu2`/`bwu3`, one cell at a time.
    login. **Done 2026-10-09.**
 8. 0D.1 and 0E, run facts and the results stream (the reporting code). **0E done 2026-10-12**; 0D.1
    reuses its attachment parsers (`setup-facts.ts`) and run description.
-9. 0F, pruning.
+9. 0F, pruning. **Done 2026-10-12.**
 
 0A.3, 0A.4 and 0A.5 belong to the orchestrator: no suite change but the optional loader check.
 
@@ -1534,7 +1641,7 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | P2 | ~~V5: which sites does AutoE2E run, on which hosts?~~ **Answered 2026-09-28**: two WordPress servers — AutoE2E's two nginx cells on the nginx one, its two apache cells on the apache one (§3.3); site details later, if needed. |
 | P3 | ~~V6: may runs overlap on one server to measure it?~~ **Answered 2026-09-28**: yes — about four parallel suites per server are fine; name the sites before a run (§3.3). |
 | P4 | ~~The results stream: always on, or orchestrator-only?~~ **Decided 2026-09-28**: always on — it writes nothing to the terminal (V100); manual runs get an end-of-run summary instead (§7). |
-| P5 | ~~Variable names?~~ **Decided 2026-09-30** (the user left the choice to me): `E2E_CELL` (the pin), `E2E_LOAD_DOTENV` (`false` skips `.env`; a switch's name, so nobody passes it a file path), `E2E_INTERNAL_STOP_FILE` (internal), `E2E_REPORTS_KEEP` (default 20, `0` = no cap), and the display-only `E2E_RUN_NAME` and `E2E_REQUESTED_REF`. |
+| P5 | ~~Variable names?~~ **Decided 2026-09-30** (the user left the choice to me): `E2E_CELL` (the pin), `E2E_LOAD_DOTENV` (`false` skips `.env`; a switch's name, so nobody passes it a file path), `E2E_INTERNAL_STOP_FILE` (internal), `E2E_REPORTS_KEEP` (default 20, `0` = no cap, the age rules still run), and the display-only `E2E_RUN_NAME` and `E2E_REQUESTED_REF`. |
 | P6 | ~~Retention defaults?~~ **Decided 2026-09-28**: at most 20 per cell (FIFO, configurable), 30 days, the newest complete kept up to 6 months (§8). |
 | P7 | ~~File with APVM: the token left in a killed clone's `.git/config` (V78), and a `gc` in the Node library (V76)?~~ **Set aside 2026-09-28**: not a priority. The orchestrator's private build folders (§3.5) still keep the token out of shared temp space. |
 
@@ -1734,3 +1841,33 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V236 | Each fix undone fails a test: the imposed-skip retry, the retries bound, settling (stream and summary), the call-log strip, the line resync, `plain()` (twice), the interrupted setup, the regular-file check (hung 10 min), the surrogate cut, the `..` folder, the `pinned` check, the quoted path (15 mutations) | ✅ mutation | Fifteen mutations, each restored |
 | V237 | Through the real runner, offline, 6 cases: each run's stream ends every test once, before `run.end`, whose counts are the ends written; the no-baseline scenario ends `failed`, 1 attempt, `retryNotRun`, its error on the last step begun; nothing written into the repository | ✅ run spec | `results-stream.run.spec.ts`, ~19 s |
 | V238 | Live after the fixes, both cells at once: `free@nginx` — 3 attempts, 2 `scenario.retry`, one `scenario.end failed` (BackWPup Free's leftover options, V230); `pro@nginx` — passed; both streams consistent, no call log, no ANSI; the summaries as before. Gates: typecheck, lint, format clean; unit 1827 passed, 8 skipped | ✅ live 2026-10-12 | `audit-0e-*` reports; the four gates |
+| V270 | `parseRunId` reads today's stamps and the orchestrator's `-<run id>` suffixes, round-trips `formatRunId`, and rejects impossible dates (Feb 30, Feb 29 of 2025, hour 24, a year below 100) and near misses; `isUsableRunId` refuses `../x`, `a/b`, a hidden name, a control character, 256 bytes | ✅ unit | `run-id.spec.ts`; `run-context.spec.ts` (a fresh Node per case) |
+| V271 | Every reporter's `onEnd` is awaited, in order, before the first `onExit`; `onExit`s run in order; a throw in either sets `hasReporterErrors`, which turns a passing run `failed` | ✅ source | `runner/index.js:1642–1653`, `:6310–6320` (Playwright 1.63.0); playwright-bdd's Cucumber reporter writes in `onEnd` (`reporter/cucumber/index.js:46–58`, 9.2.1) |
+| V272 | `--grep` matching nothing: "No tests found", exit 1, `run.begin` with 0 scenarios and 0 setups; the folder holds `playwright/`, `cucumber/`, `results.jsonl` | ✅ measured | Placeholder `wp-rocket/apache` runs |
+| V273 | `rmSync(…, { recursive: true })` unlinks a link inside a folder, and a link to a folder itself, leaving the target intact; `renameSync` of a missing path throws `ENOENT` | ✅ measured | Node 24.21.0 lab |
+| V274 | The planner decides 20 table cases with a fixed `now` — V105's rules, both boundaries at exactly X and Y, the 1-day floor, protected (past the cap, past X, empty), future-dated, empty, undated, `keep = 0`, groups apart, ties, purity | ✅ unit | `retention.spec.ts` |
+| V275 | Through the real runner, offline (synthetic product, keep 2): two passes keep both; a failing third removes the oldest and prints `Pruned 1 old report … beyond the newest 2 (E2E_REPORTS_KEEP)`; `--list` prunes nothing; a SIGKILLed run prunes nothing; the next run removes the `--list` folder and two beyond the cap, keeping the killed one; another cell and `_all` untouched; `E2E_REPORTS_KEEP=lots` fails at start naming it | ✅ run spec | `run-pruning.run.spec.ts`, ~30 s |
+| V276 | `wp-rocket/nginx` placeholder, default cap: runs 1–20 remove nothing; run 21 prints `Pruned 1 old report, 1.6 MB — beyond the newest 20 (E2E_REPORTS_KEEP)` and holds 20 (the oldest gone, itself kept); a failing run (exit 1) still removes one; a SIGKILLed run (137, no `playwright/index.html`, no `run.end`) removes nothing — 21 folders; the next removes 2 and keeps the killed one; `apache` and `_all` keep their 3 each | ✅ measured | `e2e21.sh` |
+| V277 | A run's own pruning of a 20-run group with one removal (1.56 MB): 12.2 ms | ✅ measured | `pruneRunGroup` timed on a copy |
+| V278 | Dry run over the main checkout's `reports/` (2026-10-12): 198 runs, 920.2 MB; the default policy would remove 146 (673.1 MB) — 106 older than 30 days, 40 beyond the newest 20 — keeping 52, each cell's newest complete report included; age alone (`--keep 0`) 106 (537.9 MB). Skipped: `pro@nginx/allure-history.jsonl` and 6 `.DS_Store`. Nothing modified | ✅ dry run | `npm run report:prune` with `REPORT_ROOT` on the main checkout |
+| V279 | Each rule undone fails a test (22 mutations): the round trip, protection, empty taking a place, the newest-complete exception, the 1-day floor, both boundaries, `keep = 0`, links followed, no rename, the stream read through a link, the leftover grace, a folder with no part, leftovers as runs, pruning removed from the summary, the `RUN_ID` check, the CLI's duplicate, floor and exit 1, `reportsKeep` checked, the `Pruned` label, the config not passing the cap (run spec) | ✅ mutation | Mutation script, each restored |
+| V280 | Gates: typecheck, lint, format clean; unit 1895 passed, 8 skipped | ✅ 2026-10-12 | The four gates |
+| V281 | `parseRunId("9999-13-01T00-00-00-000Z-1")` and `("9999-12-31T24-00-00-000Z-1")` threw `A RUN_ID needs a four-digit year` before the fix; now `undefined` | ✅ measured + unit | `run-id.spec.ts` |
+| V282 | A linked product or cell folder is never pruned through: the run reports `a link, never followed`, the target keeps its 3 runs | ✅ unit | `run-pruning.spec.ts` |
+| V283 | An unreadable cell (mode 000) is skipped as `unreadable (EACCES)` and the other cells listed; an unreadable run as `unreadable` | ✅ unit | `retention.spec.ts` |
+| V284 | Only a real folder named `.pruning-…` is a leftover; the CLI counts hidden entries (`and 1 hidden entry`) instead of listing them | ✅ unit | `retention.spec.ts`, `prune-command.spec.ts` |
+| V285 | Each audit fix undone fails a test (5 mutations): the parts compared, the product link, the cell link, the unreadable skip, the hidden count | ✅ mutation | Mutation script |
+| V286 | After the audit: V276 re-run unchanged; gates clean, unit 1897 passed, 8 skipped | ✅ 2026-10-12 | `e2e21.sh`; the four gates |
+| V287 | Reviewed, no change: a run renamed away during a listing is skipped (no part found), never thrown; a link swapped in for a run before its rename is refused, after it put back; two prunes of one group — the second's rename gets `ENOENT` and reports the run gone, an in-flight `.pruning-…` folder younger than an hour is left alone | ✅ review + unit | `retention.ts`; `retention.spec.ts` |
+| V288 | `REPORT_ROOT` = a temporary checkout-shaped tree dated 1985: `report:prune --apply` removed `node_modules/playwright-bdd/dist` and `src` ("older than 30 days (dated by its files)"); the dry run over this worktree listed both as runs. After the fix: listed as "not a run", nothing removed; a pinned-name run is dated by `run.begin.at` (`(dated by its stream)`) | ✅ lab + unit | `lab1`; `retention.spec.ts`, `prune-command.spec.ts` |
+| V289 | `pruneRunGroup("/warm-artifacts.ts", …)` listed `/` as the group (nothing removed); now `/run`, `/c/run`, `/` are refused before any listing, `/p/c/run` is not | ✅ lab + unit | `run-pruning.spec.ts` |
+| V290 | `formatRunId` of year 0050 gave `0050-01-01T00-00-00-000Z-1`, which `parseRunId` refuses; now a `RangeError`; year 0100 round-trips | ✅ measured + unit | `run-id.spec.ts` |
+| V291 | `isUsableRunId("a\u0085b")` was true; now false, and `bddgen` fails naming `RUN_ID` (as for `../escape`) | ✅ measured + unit | `run-id.spec.ts`; `bddgen` |
+| V292 | One SIGINT to the runner mid-scenario (keep 2): exit 130, `playwright/index.html` written, `Pruned 1 old report … beyond the newest 2`; `--reporter=line` at keep 1 prunes nothing | ✅ run spec | `run-pruning.run.spec.ts`, ~16 s |
+| V293 | `E2E_REPORTS_KEEP=0`: no cap, age rules still run (user decision 2026-10-12); a switch turning the suite's pruning off is deferred to the orchestrator's per-task pruning | ✅ decided | §2, §8, §8.3; Phase 0.5 §7–§8; parent §3, 0F |
+| V294 | Links: inside a doomed run (target intact), a run name that is a link (skipped), a linked root (followed, by design); names with spaces, `'`, leading `-`, C1, a newline, unicode; `..` in the report path (protected run kept) — only real runs of the group went | ✅ lab | `lab-safety.ts` |
+| V295 | A 300-run group pruned by three processes at once (CLI `--apply --keep 5` and two run ends protecting different runs), 3 trials: 5 left, no failure, no leftover, the second renames reported "already gone". A prune SIGKILLed mid-removal (100 000 files): its `.pruning-…` folder (99 513 files) kept by the next prune, removed by one an hour on | ✅ lab | `lab-conc-*.ts`, `lab-crash-*.ts` |
+| V296 | First prune of a copy of the main checkout's `pro@nginx` (102 runs, 529 MB on disk): 82 removed (50 too old, 32 beyond the cap), 369.9 MB, 380 ms; the next 2 ms | ✅ measured | `lab-time.ts` |
+| V297 | The CLI parser on 27 inputs: duplicates, `--keep=`, `-1`, `10001`, `1e3`, `1.5d`, `0m`, `1439m`, unknown options, `--`, `--apply=yes`, positional junk all exit 2 naming the problem; `007` reads 7. Two dry runs over the main checkout left its 6 025 entries' mtime, ctime, inode and size unchanged | ✅ measured | `lab-args.ts`; `stat` snapshots |
+| V298 | Dry run over the main checkout after the fixes, unchanged from V278: 198 runs, 920.2 MB; 146 to remove (673.1 MB: 106 older than 30 days, 40 beyond the cap), 9 newest-complete kept; `--keep 0` 106 (537.9 MB). Every name there is a RUN_ID | ✅ dry run | `npm run report:prune`, `REPORT_ROOT` on the main checkout |
+| V299 | Each fix undone fails a test (16 mutations, all killed): dating by file age, a later line's `run.begin`, the short-path guard, the formatter's read-back, C1 allowed, both age boundaries, the cap's, keep = 0 capping, the future rule, no rename, the leftover grace, links followed, protection after the empty rule, an interrupted run not pruning (run spec). V276 re-run unchanged (run 21 removes 1, 1.6 MB; a failing run removes 1; SIGKILL 137 removes none, 21 folders; the next removes 2, keeps the killed one; `apache`/`_all` 3 each). Gates: typecheck, lint, format clean; unit 1901 passed, 8 skipped | ✅ 2026-10-12 | `mutate.py`; `e2e21.sh`; the four gates |
