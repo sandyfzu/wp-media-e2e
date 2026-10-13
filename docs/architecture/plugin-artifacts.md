@@ -34,7 +34,7 @@ WP Rocket has `previous` from day one; BackWPup deliberately does not yet (see
 | `types.ts`           | The whole domain's types (roles, manifest, requests, resolution). Types only.      |
 | `manifest.ts`        | Pure accessors over a product's manifest (roles, default ref, edition → variant).  |
 | `request.ts`         | Reads the six `E2E_*` vars; **pure** `buildArtifactPlan` → one request per role.   |
-| `apvm.ts`            | Lazy `Apvm` singleton, token diagnostics, progress → console, secret redaction.    |
+| `apvm.ts`            | Lazy `Apvm` singleton, token diagnostics, progress → console, masked (`redactSecrets`, `text.ts`). |
 | `resolve.ts`         | Wipe → build/copy per role → hash → `resolution.json`.                             |
 | `digest.ts`          | A zip's SHA-256 (`sha256File`, streamed) and its format check (`isSha256`).        |
 | `pin.ts`             | **Pure**: the full commit (`fullCommit`) and the pin that rebuilds a build (`pinOf`, `requirePin`). |

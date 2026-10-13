@@ -4,7 +4,8 @@
 > (2026-10-06, §3.2), 0A.1 (2026-10-06, §3.1), 0B.1 (2026-10-08, §4.1), 0D.2 with 0B.2 (2026-10-08,
 > §6.2, §4.2; audited the same day), 0C's suite parts (2026-10-08, §5;
 > audited the same day), 0D.3 and 0D.4 (2026-10-09, §6.3, §6.4; audited the same day, §6.5), 0E
-> (2026-10-12, §7.1; audited the same day, §7.2). The rest is
+> (2026-10-12, §7.1; audited the same day, §7.2), 0D.1 (2026-10-12, §6.1.1; audited the same day,
+> §6.1.2). The rest is
 > investigated: every item has a verified finding and a recommended solution, with the
 > alternatives it beat.
 > **Date:** 2026-09-25.
@@ -33,7 +34,7 @@ The recommended solution per item. "—" means no suite change: the orchestrator
 | 0B.2 the built commit — **done** | The warm returns what it built — full commit, version, the pin; the run gets `commit:<sha>` with the built version — a cache hit with no network — or `release:<tag>` (still asks GitHub's API) | new `pin.ts`; `warm.ts`, `apvm.ts`, `warm-artifacts.ts` |
 | 0B.3 one product list — **done** | `src/projects/products.ts`, with a drift-guard spec, replaces the three hard-coded lists; a misspelt `PRODUCT` fails instead of running WP Rocket | new `products.ts`; `healthcheck.ts`, `warm-artifacts.ts`, `playwright.config.ts`, `eslint.config.js` |
 | 0C stopping a run | Spawn the Playwright CLI directly, in its own process group. Stop = **drain** (a stop file skips each scenario's first attempt), then **one** SIGINT, then SIGKILL of the group; never SIGTERM. The `@plugin` Before path stops running work first | `fixtures.ts`, `plugin-lifecycle.ts`, `plugin.hooks.ts` |
-| 0D.1 reports say it up front | A *run facts* reporter, listed first: the HTML report's title, Allure's `environment.properties`, a banner on the Cucumber report, `run-facts.json` | new `src/common/reporting/`; `reporting.ts`, `scripts/allure.mjs` |
+| 0D.1 reports say it up front — **done** | A *run facts* reporter, before the reports: the HTML report's title, Allure's `environment.properties` and name, a banner on the Cucumber report, `run-facts.json` | new `run-facts.ts`, `run-facts.reporter.ts`, `report-files.ts`; `reporting.ts`, `project.ts`, `run-description.ts`, `setup-facts.ts`, `scripts/allure.mjs` |
 | 0D.2 commit and digest — **done** | Record the full commit, and a SHA-256 of **every** resolved zip | new `digest.ts`; `resolve.ts`, `types.ts`, `consume.ts`, `verify.ts` |
 | 0D.3 the site's versions — **done** | Read Site Health's "Copy site info" in the auth setup; keep only whitelisted keys | new page object + parser; `auth.setup.ts` |
 | 0D.4 no credential in a report — **done** | Type a secret with `evaluate`, never `fill()`, and check it in the page; the auth setup traces without DOM snapshots and without the failure snapshot; each run's setup ends the session the previous run saved | new `secret-field.ts`, `session.ts`, `authenticate.ts`; `login.ts`, `auth.setup.ts`, `storage.sidebar.ts`, `project.ts` |
@@ -1025,6 +1026,102 @@ three reports for a normal run, a failed setup and a SIGINT, and assert their te
 `bwu2`/`bwu3`: a normal run, a SIGINT and a SIGKILL — each report's SHA-256 equal to `shasum` of the zip
 in `.artifacts/`.
 
+### 6.1.1 Implemented (2026-10-12, V239–V249)
+
+As recommended, with these specifics:
+
+- **Modules.** `reporting/run-facts.ts` (pure): the facts (`beginFacts`, `withSetupAttachment`,
+  `withSetupEnded`, `endFacts`), the title line, the entries (labels most important first), the
+  properties escaping, the banner and where it goes (`bannerSplice`), `run-facts.json`'s text.
+  `reporting/run-facts.reporter.ts` is the thin reporter; `reporting/report-files.ts` writes a file
+  whole (temporary file + rename) and splices a file's end in place (its last 64 KB read). Reused:
+  `setup-facts.ts` (the attachments, now with each zip's `sha256`, believed only as 64 lowercase hex),
+  `RunTally`/`firstError` (`results.ts`), `verdictOf`, `describePlugin`, `describeSite`, `plain` and
+  `cut` (`run-summary.ts`, `cut` now exported); `escapeHtml` is new in `text.ts`.
+- **Placement — after `list`, before the reports, not first.** What needs the order is the HTML
+  report reading the title and metadata in its own `onEnd`; the `[cell]` notice must stay first (it
+  prints before "Running …") and the stream before `list` (its `run.end` before every report).
+- **Lifecycle — the final files in `onEnd`, not `onExit`.** `onEnd` writes `run-facts.json` and
+  `environment.properties` with the verdict, the metadata and `PLAYWRIGHT_HTML_TITLE`; `onExit` only
+  splices the Cucumber banner, which needs every `onEnd` done. Earlier is safer: a kill between the two
+  keeps the final facts. allure-playwright never writes that file (no `environmentInfo`) nor cleans the
+  folder (V246). Nothing is written for `--list`.
+- **The display-only variables**: `E2E_RUN_NAME` and `E2E_REQUESTED_REF` reach the reporters through the
+  run description (`project.ts`, `run-description.ts`); the requested ref replaces, in the title, the
+  pin the run was built from (`develop @ 1dceea8966`, not `commit:<40 hex> @ …`). Documented in
+  `.env.example` and `configuration.md`.
+- **What the title says**: `backwpup · pro@nginx (pro) · BackWPup Pro 9.99.99 · develop @ 1dceea8966 ·
+  WordPress 7.1.3 · PHP 8.5.11 64bit · <run name or RUN_ID>`, plus `RUNNING`, `INTERRUPTED`,
+  `COULD NOT TEST` or `NO TESTS` — the states the reports cannot say themselves. A missing fact:
+  `plugin unknown: artifacts setup failed` / `skipped` / `interrupted` / `did not run` / `not in this
+  run` / `left no record`, `pending: … not finished` while it runs. The status entry of a killed run:
+  `running — no end recorded yet; a run that is over and still says so was killed`.
+- **Entries** (Allure's Metadata, the HTML metadata, the banner's disclosure): Status, Plugin, Plugin
+  SHA-256, Site, Server, Cell, Run, Requested ref — Allure's eight — then the plugin's commit, ref, pin,
+  zip and source, the RUN_ID, start and end. A second role, a pool's later sites and a run of every cell
+  keep labels unique.
+- **Kept out**: of the sites file only `baseURL`; every stored value is one plain line, credentials
+  masked (`redactSecrets`, §6.1.3), at most 300 characters.
+  `captureGitInfo` is guarded off by `project.spec.ts`. An operator's own `PLAYWRIGHT_HTML_TITLE` wins.
+- **`scripts/allure.mjs`**: `--name` from `run-facts.json`'s `title` (else `product · cell`), and a run
+  counts only when its `allure-results/` holds a `-result.json` — the facts' properties file alone made a
+  `--list` run "the newest" (V254).
+
+### 6.1.2 Audit (2026-10-12, V250–V256)
+
+Every claim re-read against the diff and the installed sources; each fix proven by a test that fails
+with it undone (V248), then live again on both cells.
+
+- **A site's versions reached the title raw** (V250): `describeSite` made the entries plain, but the
+  title read `versions.wordpress`/`php` directly, so an escape sequence or newline in Site Health's text
+  would reach the HTML title, the banner and Allure's name. **Fixed:** every string a setup attaches is
+  made a fact's text as it is folded in (`cleanStrings`), plugin facts included.
+- **"pending: … running"** said a queued setup was running (V251): now `pending: … not finished`.
+- **The banner's dark colours** did not follow the Cucumber report's own dark theme (V252): it now uses
+  the report's panel colours (`#282a36`/`#f8f8f2`).
+- **An untestable guard** (V253): `spliceIntoTail`'s regular-file check survived its mutation — a FIFO
+  or device reports size 0, so nothing is read and nothing blocks. Removed; the FIFO spec stays.
+- **`allure.mjs` and runs that ran nothing** (V254), found while building: fixed as above, measured on a
+  synthetic report root.
+- **Placement and timing** re-checked (V255, V256): after `list` and before `html` is enough, and the
+  final files in `onEnd` survive a kill before `onExit`.
+- **Confirmed, no change** (V242, V246): the HTML report's metadata panel lists all 15 facts with
+  `#?show-metadata-other`, `actualWorkers` stays hidden; a killed run leaves no HTML report and a 0-byte
+  Cucumber file (V68), so only `run-facts.json` and Allure's properties carry its facts — and Allure,
+  generated from it, names it `RUNNING`.
+
+### 6.1.3 Adversarial audit (2026-10-12, V257–V269)
+
+Every claim re-measured; each fix proven by a test that fails with it undone (V263), then live on both
+cells at once (V265).
+
+- **The masking was aimed at the wrong source** (V257). APVM never quotes its token — nine failure modes,
+  fake and real tokens, online and offline — and git hides a URL's user and password itself. What does
+  quote a credential: Playwright's navigation errors, a basic-auth `baseURL` whole; and git, a URL
+  parameter (`?access_token=`).
+- **The summary and the stream masked nothing** (V258): a setup's error, a failed resolution's error, a
+  site's URL went out as written — to the terminal, the orchestrator's log and `results.jsonl`; so did
+  the site-info attachment and its `[site]` line. **Fixed** (approved): one `redactSecrets` in `text.ts`
+  (moved from `apvm.ts`) — a GitHub token, a URL's user and password, a credential URL parameter —
+  applied before any cut by `cleanMessage` (every stream error, hence the summary's and the facts'),
+  `displayText` (the summary's and the facts' values), `readSiteInfo` and APVM's output. The facts'
+  own copy is gone.
+- **The facts' copy leaked** (V259): it stopped at the first `@`, leaving `ss@host` of a password
+  `p@ss`, and had no token rule. Now to the authority's last `@`.
+- **Quadratic matching** (V260): the URL pattern, APVM's copy included, tried a scheme from every `\b`
+  — 0.4 s for 40,000 characters of `a.`, minutes for a megabyte; now on every stream message, so it
+  starts only where a run of scheme characters does: 0.2 ms.
+- **Every sink checked** (V261): the `[cell]` notice carries no error text; the stream's every error
+  goes through `cleanMessage`; the facts, properties, banner, HTML title and metadata and Allure's name
+  through `factText`. Playwright's own reports, traces and Allure's results keep its error as written —
+  outside the suite's reach.
+- **Test gaps** (V262, V263): label escaping, the requested ref on another role, a banner for a run
+  that never ended, the cut after the mask — each survived its mutation; tests added. A reporter that
+  throws now proven not to turn a green run red through the real runner (V264).
+- **Docs**: §6.1.1 said a clone error could quote a token (V257: it cannot), now corrected; `--reporter`
+  (no facts) said in `execution-model.md`; the masking said where the stream, the summary and APVM are
+  documented.
+
 ### 6.2 0D.2 — The full commit, and a zip's SHA-256
 
 **Finding.**
@@ -1517,8 +1614,8 @@ on `bwu2`/`bwu3`, one cell at a time.
    **Done 2026-10-08.**
 7. 0D.3 and 0D.4 — the site's versions, and no credential in a report: both change the auth setup's
    login. **Done 2026-10-09.**
-8. 0D.1 and 0E, run facts and the results stream (the reporting code). **0E done 2026-10-12**; 0D.1
-   reuses its attachment parsers (`setup-facts.ts`) and run description.
+8. 0D.1 and 0E, run facts and the results stream (the reporting code). **0E done 2026-10-12**; **0D.1
+   done 2026-10-12** — it reuses 0E's attachment parsers (`setup-facts.ts`), tally and run description.
 9. 0F, pruning.
 
 0A.3, 0A.4 and 0A.5 belong to the orchestrator: no suite change but the optional loader check.
@@ -1734,3 +1831,34 @@ The [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — the minimal orchestrato
 | V236 | Each fix undone fails a test: the imposed-skip retry, the retries bound, settling (stream and summary), the call-log strip, the line resync, `plain()` (twice), the interrupted setup, the regular-file check (hung 10 min), the surrogate cut, the `..` folder, the `pinned` check, the quoted path (15 mutations) | ✅ mutation | Fifteen mutations, each restored |
 | V237 | Through the real runner, offline, 6 cases: each run's stream ends every test once, before `run.end`, whose counts are the ends written; the no-baseline scenario ends `failed`, 1 attempt, `retryNotRun`, its error on the last step begun; nothing written into the repository | ✅ run spec | `results-stream.run.spec.ts`, ~19 s |
 | V238 | Live after the fixes, both cells at once: `free@nginx` — 3 attempts, 2 `scenario.retry`, one `scenario.end failed` (BackWPup Free's leftover options, V230); `pro@nginx` — passed; both streams consistent, no call log, no ANSI; the summaries as before. Gates: typecheck, lint, format clean; unit 1827 passed, 8 skipped | ✅ live 2026-10-12 | `audit-0e-*` reports; the four gates |
+| V239 | Live, both cells at once (`--grep "The version command names\|@smoke"`, `E2E_RUN_NAME`, `E2E_REQUESTED_REF=develop`): ✔ PASSED; every report leads with `backwpup · pro@nginx (pro) · BackWPup Pro 9.99.99 · develop @ 1dceea8966 · WordPress 7.1.3 · PHP 8.5.11 64bit · <run name>` (Free: `BackWPup 9.99.99`) — the HTML document title, the Cucumber banner (the body's first element, above `#content`), Allure's name; Allure shows 8 of 15 Metadata | ✅ live 2026-10-12 | `live-0d1-normal-*`, `live-0d1-final-*` reports, rendered in Chromium |
+| V240 | Each report's SHA-256 equals `shasum -a 256` of the zip in `.artifacts/` (Free `3f6fd5dd…6259`, Pro `bb348eaa…cb97`): in the HTML report's embedded data, the Cucumber banner, `environment.properties`, `run-facts.json` and the generated Allure report — 8 places per run; no site password anywhere in any report folder (scanner of `__fixtures__/secret-scan.ts`, zips and base64 included), no username in the three new outputs | ✅ live 2026-10-12 | Scans of the normal, SIGINT, SIGKILL and final runs |
+| V241 | Live, ONE SIGINT to the runner 3 s into the scenario's Before hook, both cells: exit 130, group empty; `status: interrupted`, the title, banner and Allure name end `· INTERRUPTED`, the status entry `interrupted — stopped before it finished`; the teardown ran, the sites as found | ✅ live 2026-10-12 | `live-0d1-sigint-*` |
+| V242 | Live, SIGKILL to the runner's group, both cells: `run-facts.json` and `environment.properties` stand, `status: running`, no `endedAt`, both setups `passed`, the plugin with its SHA-256; no HTML report, a 0-byte Cucumber file (V68); Allure generated from it is named `… · RUNNING` with the killed-run status; the next run ended the session it left | ✅ live 2026-10-12 | `live-0d1-sigkill-*`, then `live-0d1-final-*` |
+| V243 | The sites as found after all eight runs: the same plugin list as the baseline (no `backwpup`/`backwpup-pro`), no BackWPup option, 19 tables (none `e2e_`/`bwpup`), no `.e2e_temp`, no `.e2e_content_copy`, no restore folder; disk 73 % before and after | ✅ live 2026-10-12 | WP-CLI and `ls` over SSH, before and after |
+| V244 | Allure 3.18's own `parseProperties` (`@allurereport/reader`) reads back exactly what `toProperties` wrote, for keys and values with `=`, `:`, `\`, `#`, `!`, leading spaces, LF, CRLF, tab, U+00B7, an emoji, ESC, NUL and DEL | ✅ unit | `run-facts.spec.ts` |
+| V245 | The Cucumber report (html-formatter 23.1) ends `</script>\n</body>\n</html>`; its messages escape `<` as `\x3C` and its bundle holds no `</body>`, so the file's last `</body>` is the document's; playwright-bdd puts its own assets before it | ✅ source | `CucumberHtmlStream.js`, `index.mustache`; playwright-bdd `reporter/cucumber/html/index.js` |
+| V246 | allure-playwright 3.12.2 never empties its results folder and writes `environment.properties` only with `environmentInfo`; its writer replaces files by temporary file + rename. The HTML report reads `PLAYWRIGHT_HTML_TITLE` and `config.metadata` in its `onEnd`; its metadata panel lists other keys only with `#?show-metadata-other` — rendered, all 15 facts, `actualWorkers` hidden | ✅ source + rendered | allure-js-commons `ReporterRuntime.js:409–413`, `FileSystemWriter.js`; `runner/index.js:3479–3484`; `htmlReport/report.js` |
+| V247 | Through the real runner, offline, 6 cases rendered in Chromium: a normal run (title, banner on top, Allure name and Metadata via `scripts/allure.mjs`), the rich mode's banner, failed setups (`COULD NOT TEST`, `resolution failed — …`, `site unknown: auth setup failed`, a banner with no scenario), one SIGINT (`INTERRUPTED`), a SIGKILL (`running`), `--list` (nothing written) | ✅ run spec | `run-facts.run.spec.ts`, ~26 s |
+| V248 | Each rule undone fails a test (27 mutations): key escaping, non-ASCII escaping, the last `</body>`, the banner's escaping, the credential mask, an empty attachment erasing a record, pending → did not run, `INTERRUPTED`, the requested ref, the HTML title, an operator's title kept, publishing per setup, `--list`, the catch-all, stale metadata keys, settling, the banner splice, the 64 KB tail, the temporary file's removal, the grow-only splice, the placement before `html`, the digest parse and its check, the display-only variables, plain site and plugin facts, `escapeHtml`'s `&` | ✅ mutation | Each restored |
+| V249 | Gates: typecheck, lint, format clean; unit 1895 passed, 8 skipped | ✅ 2026-10-12 | The four gates |
+| V250 | A site's versions reached the title raw (only the entries were made plain); now every attached string is a fact's text as it is folded in — an OSC 8 link and a newline in a version are gone from the facts | ✅ unit | `run-facts.spec.ts` |
+| V251 | "pending: … running" said a queued setup was running; now "pending: … not finished" | ✅ unit | `run-facts.spec.ts` |
+| V252 | The Cucumber report has a dark theme of its own (`prefers-color-scheme: dark`, panel `#282a36`/`#f8f8f2`); the banner now uses those colours | ✅ source | html-formatter `main.css` |
+| V253 | `spliceIntoTail`'s regular-file check survived its mutation: a FIFO reports size 0, so nothing is read and nothing blocks; removed, the FIFO spec kept | ✅ mutation | `report-files.spec.ts` |
+| V254 | `scripts/allure.mjs` counted a run whose `allure-results/` held only the facts' properties (a `--list` run) as the newest; it now needs a `-result.json` — measured on a synthetic report root: the `--list`-like folder skipped, a later real one chosen | ✅ measured | Scratch report roots |
+| V255 | Reporter placement: after `list`, before `html` — the HTML title and metadata set in this `onEnd` reach the report (rendered); the `[cell]` notice still prints first | ✅ rendered | V239, V247 |
+| V256 | The final facts are written in `onEnd` (not `onExit`, as first planned): a kill between the two keeps them; `onExit` only splices the banner, after every report's `onEnd` | ✅ source + run spec | `run-facts.reporter.ts`; V247 |
+| V257 | APVM 3.0.0's errors and events carry no token: 9 failure modes — fake `ghp_`/`github_pat_`/bare tokens online (missing branch, commit), offline under `sandbox-exec` (branch, commit, `release:`, `tag:`), the real token (missing branch, commit, release, PR); its clone URL has no user. git 2.43 (`ubuntu:24.04`) and 2.56 drop a URL's user and password from their own errors but print `?access_token=…` verbatim. Playwright 1.63's `page.goto` error quotes `http://u:<pw>@host/…` whole in its first line | ✅ measured | Scratch probe of `apvm-napi` with a throwaway cache; `git ls-remote`/`clone`; a `goto` probe |
+| V258 | The summary printed a setup's error, a failed resolution's error and a site's `baseURL` unmasked; `results.jsonl`'s errors and the site-info attachment and `[site]` line likewise. Now masked by one `redactSecrets` (`text.ts`), before any cut | ✅ unit | `run-summary.spec.ts`, `results.spec.ts`, `site-info.spec.ts` (a real `goto` to a basic-auth URL), `text.spec.ts` |
+| V259 | The facts' own pattern stopped at the first `@` (`https://u:p@ss@h` left `ss@h`) and had no token rule; the shared one masks to the authority's last `@`, a GitHub token and a credential URL parameter, idempotent, stateless across calls | ✅ unit | `text.spec.ts` |
+| V260 | The URL pattern was quadratic (scheme tried from every `\b`): 40,000 characters of `a.` took 392 ms, 20,000 106 ms; with a lookbehind, 0.2 ms, 1 MB of base64 3.4 ms | ✅ measured + unit | Scratch timing; the linear-time spec takes 36 s with `\b`. Made after V265's runs; every masking case's output unchanged |
+| V261 | Sinks: the `[cell]` notice holds product, cell, workers and report folder only; every stream error (`setup.end`, `scenario.retry`/`end`, `run.error`) passes `cleanMessage`; every fact `factText`; Allure's `--name` is the facts' title | ✅ source | `cell-notice.ts`, `results-stream.ts`, `results.ts`, `run-facts.ts`, `scripts/allure.mjs` |
+| V262 | Surviving mutations before the audit: label escaping, the requested ref given to a `previous` role, a banner when `onEnd` never ran, factText's cut before the mask (its test's password lay past the cut) | ✅ mutation | Each with a test now |
+| V263 | Each rule undone fails a test: 14 masking mutations (no-op, the stream, `displayText`, both cut orders, site-info's URL and error, first `@`, no parameter, no token, parameter word bound, `/` and space bounds, quadratic scheme) and 27 others (banner, escaping, settling, properties, labels, the reporter, `report-files.ts`); a retry's status given to a setup is equivalent — a due retry carries none | ✅ mutation | Each restored |
+| V264 | Through the real runner, facts files that cannot be written (folders in their place) leave a passing run at exit 0 with its HTML title; with the catch rethrowing, the run fails | ✅ run spec + mutation | `run-facts.run.spec.ts` |
+| V265 | Live, `free@nginx` and `pro@nginx` at once: normal runs (`audit0d1-*-normal`) passed, title, banner, properties and rendered HTML title right, `Plugin SHA-256` equal to `shasum` of `.artifacts/` (`3f6fd5dd…`, `bb348eaa…`); one SIGINT (`audit0d1-free-sigint`, exit 130) `INTERRUPTED` everywhere; SIGKILL (`audit0d1-pro-sigkill`) left `running` facts, a 0-byte Cucumber file, no HTML report; cleanup runs (`audit0d1-*-after`) passed; both sites as found (only `backwpup-helper`, no option, table, `.e2e_*`, restore folder or `debug.log`); disk 27 GB free | ✅ live | Run logs; `wp` over SSH before and after |
+| V266 | Secrets in all six live runs' report folders and `test-results/` (zips, embedded data, traces, `error-context.md`, Allure results, Cucumber, `results.jsonl`, `run-facts.json`): 0 hits for both sites' passwords and the GitHub token, raw and base64. The site username (a common 4-letter word) appears as the auth setup's `Fill "<user>"` step in the HTML report's data and Allure's results — the login's deliberate `fill()`, at 5973f05 already — never in `run-facts.json`, the properties or the banner | ✅ live | `secret-scan.ts`'s `findSecret`; a whole-word scan for the username |
+| V267 | The HTML report's metadata panel shows the facts only with `#?show-metadata-other`; `actualWorkers` stays hidden | ✅ rendered | Live `audit0d1-pro-normal` |
+| V268 | Gates: typecheck, lint, format clean; unit 1908 passed, 8 skipped (1895 before the audit) | ✅ 2026-10-12 | The four gates |
+| V269 | Outside 0D.1, noticed: `free@nginx`'s first attempt of "The version command…" failed on a PHP fatal — "Restore working directory …/uploads/backwpup-restore-<hex> is not writable" — and passed on retry; unchanged here | ℹ️ live | `audit0d1-free-normal` |

@@ -5,6 +5,7 @@ import type { TestCase, TestResult } from "@playwright/test/reporter";
 
 import { STOPPED_ANNOTATION } from "../config/drain";
 import { setupKindOf, type SetupKind } from "../config/project-names";
+import { redactSecrets } from "../text";
 
 /**
  * What a run's results are, decided from Playwright's reporter API: each test's final status, the
@@ -171,7 +172,8 @@ function cutAt(text: string, limit: number): string {
 
 /**
  * A message as a stream line carries it: no ANSI codes, no call log (see {@link CALL_LOG} — the
- * reports keep it whole), no trailing whitespace, at most `limit` characters — a cut one ending with a
+ * reports keep it whole), credentials masked ({@link redactSecrets} — a navigation error quotes a
+ * basic-auth URL whole), no trailing whitespace, at most `limit` characters — a cut one ending with a
  * marker that says so.
  *
  * @param message - the raw message.
@@ -183,8 +185,9 @@ export function cleanMessage(
 ): string {
   const plain = stripVTControlCharacters(message);
   const callLog = CALL_LOG.exec(plain);
-  const head = (
-    callLog === null ? plain : plain.slice(0, callLog.index)
+  // Masked before the cut, which could otherwise leave a credential without what marks it.
+  const head = redactSecrets(
+    callLog === null ? plain : plain.slice(0, callLog.index),
   ).trimEnd();
   if (head.length <= limit) return head;
   // Never longer than `limit`, even when the marker itself does not fit.

@@ -26,10 +26,10 @@ import {
   assertToken,
   createBuildReporter,
   getApvm,
-  redactSecrets,
   toArtifactOrigin,
 } from "./apvm";
 import { errorMessage } from "../guards";
+import { redactSecrets } from "../text";
 import { fullCommit, requirePin } from "./pin";
 import type { Pin } from "./pin";
 import { buildArtifactPlan } from "./request";

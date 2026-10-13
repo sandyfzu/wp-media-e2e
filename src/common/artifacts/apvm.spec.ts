@@ -1,58 +1,8 @@
 import { test, expect } from "@playwright/test";
 
-import { createBuildReporter, redactSecrets, requiresToken } from "./apvm";
+import { createBuildReporter, requiresToken } from "./apvm";
 
-/**
- * The APVM boundary's pure parts. `redactSecrets` is the security-relevant one: everything we
- * keep from a builder's output — progress lines, the buffered failure tail, the rejection
- * message — is printed to the console and embedded in the error a Playwright HTML/Allure report
- * stores, and CI publishes those. A private-repo build authenticates with a GitHub token, and
- * git echoes the authenticated remote URL in several of its failure messages, so the scrub is
- * what keeps a token out of a published report.
- */
-
-test.describe("redactSecrets", () => {
-  test("removes GitHub tokens in every issued prefix", () => {
-    for (const token of [
-      "ghp_16CharsOrMoreAAAA",
-      "gho_16CharsOrMoreAAAA",
-      "ghu_16CharsOrMoreAAAA",
-      "ghs_16CharsOrMoreAAAA",
-      "ghr_16CharsOrMoreAAAA",
-      "github_pat_11ABCDEFG0aBcDeFgHiJkL",
-    ]) {
-      const redacted = redactSecrets(
-        `fatal: bad credentials for ${token} here`,
-      );
-      expect(redacted).not.toContain(token);
-      expect(redacted).toContain("***");
-    }
-  });
-
-  test("strips URL credentials while keeping the scheme and host readable", () => {
-    const line =
-      "fatal: unable to access 'https://x-access-token:ghp_16CharsOrMoreAAAA@github.com/wp-media/backwpup-pro.git/'";
-    const redacted = redactSecrets(line);
-    expect(redacted).not.toContain("ghp_16CharsOrMoreAAAA");
-    expect(redacted).not.toContain("x-access-token");
-    expect(redacted).toContain(
-      "https://***@github.com/wp-media/backwpup-pro.git",
-    );
-  });
-
-  test("leaves ordinary build output untouched", () => {
-    const line =
-      "Cloning into 'backwpup-pro' from https://github.com/wp-media/backwpup-pro.git";
-    expect(redactSecrets(line)).toBe(line);
-  });
-
-  test("is idempotent — the warm path scrubs at the call site and again at the funnel", () => {
-    const once = redactSecrets(
-      "fatal: unable to access 'https://x-access-token:ghp_16CharsOrMoreAAAA@github.com/o/r.git'",
-    );
-    expect(redactSecrets(once)).toBe(once);
-  });
-});
+/** The APVM boundary's pure parts (masking its output is `text.ts`'s `redactSecrets`). */
 
 test("requiresToken flags only the private-source projects", () => {
   expect(requiresToken("backwpup")).toBe(true);

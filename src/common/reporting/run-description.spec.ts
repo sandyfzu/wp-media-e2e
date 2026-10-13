@@ -28,6 +28,8 @@ test.describe("readRunDescription", () => {
     expect(readRunDescription(options)).toBe(options);
     const { cell: _cell, edition: _edition, ...everyCell } = RUN;
     expect(readRunDescription(everyCell)).toEqual(everyCell);
+    const named = { ...RUN, runName: "nightly", requestedRef: "develop" };
+    expect(readRunDescription(named)).toEqual(named);
   });
 
   test("names the first field missing or of the wrong type", () => {
@@ -38,6 +40,8 @@ test.describe("readRunDescription", () => {
       [{ ...RUN, runId: 42 }, "runId"],
       [{ ...RUN, cell: 1 }, "cell"],
       [{ ...RUN, edition: null }, "edition"],
+      [{ ...RUN, runName: 7 }, "runName"],
+      [{ ...RUN, requestedRef: ["develop"] }, "requestedRef"],
       [{ ...RUN, pinned: "yes" }, "pinned"],
     ];
     for (const [options, field] of cases) {

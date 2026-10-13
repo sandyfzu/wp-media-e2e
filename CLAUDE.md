@@ -35,10 +35,10 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 src/
 ├── common/                 # product-agnostic, shared by every product
 │   ├── config/             # env, sites loading, run-context, the cell pin, the drain, metadata, devices, file-owner rule, the config factory
-│   ├── reporting/          # the suite's own reporters: cell-notice.ts, results-stream.ts (results.jsonl), run-summary.ts; their pure parts (results.ts, setup-facts.ts) and the stream's schema + reader
+│   ├── reporting/          # the suite's own reporters: cell-notice.ts, results-stream.ts (results.jsonl), run-facts.reporter.ts (run-facts.json, report titles), run-summary.ts; their pure parts (results.ts, setup-facts.ts, run-facts.ts, report-files.ts) and the stream's schema + reader
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ending a saved login's session)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
-│   ├── text.ts             # small shared string helpers (escapeRegExp)
+│   ├── text.ts             # small shared string helpers (escapeRegExp, escapeHtml, redactSecrets — masking credentials)
 │   ├── deadline.ts         # withinBudget: a time limit for a best-effort step
 │   ├── steps/              # generic step definitions
 │   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
@@ -97,7 +97,15 @@ playwright*.config.ts       # entry configs (default, per-product, unit)
   scenario by its result, never by a step's error (a skip carries one); predict a retry by the
   dispatcher's rule and settle, as the run ends, one that never ran (`retryNotRun`); and never write a
   step's parameters, a Playwright API step's title or a call log — the stream is still as sensitive as
-  the reports.
+  the reports. Every credential a message quotes is masked (`redactSecrets`, `text.ts`), in the stream,
+  the summary and the run facts alike.
+- **What a run tested, up front** — the run-facts reporter (`reporting/run-facts.reporter.ts`, before
+  the reports) says it in one line — product, cell, plugin version, ref and commit, WordPress and PHP,
+  the run's name (`E2E_RUN_NAME`, display only; `E2E_REQUESTED_REF` shows the ref asked for) — as the
+  HTML report's title, a banner on the Cucumber report and the Allure report's name; every fact (the
+  zip's SHA-256 included) in their metadata and in `<report dir>/run-facts.json`, rewritten as each setup
+  ends. A missing fact says why, never blank; only whitelisted values (of the sites file, `baseURL`);
+  everything caught, so it can never fail a run. Keep `captureGitInfo` off (it records emails, a diff).
 
 Full detail — the `parallelIndex` invariant, the config factory, the credential
 registry, and artifact lifecycle — is in
@@ -773,8 +781,9 @@ Update it when you change anything about:
 - Stopping a run: the drain (`config/drain.ts`, `E2E_INTERNAL_STOP_FILE`, the `drainGate` fixture)
   and the signals that escalate it.
 - The run's own reporters: the `[cell]` notice, the results stream (`results.jsonl`, its schema and
-  reader, `reporting/results.ts`) and the end-of-run summary; the project names that tell a setup from
-  a scenario (`config/project-names.ts`).
+  reader, `reporting/results.ts`), the run facts (`run-facts.json`, the reports' titles, banner and
+  metadata) and the end-of-run summary; the project names that tell a setup from a scenario
+  (`config/project-names.ts`).
 
 ### docs/architecture/wordpress-automation.md
 

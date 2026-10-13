@@ -13,6 +13,7 @@ import { styleText } from "node:util";
 import { Apvm } from "apvm-napi";
 import type { JsBuildEvent } from "apvm-napi";
 
+import { redactSecrets } from "../text";
 import type { ArtifactOrigin } from "./types";
 
 /**
@@ -81,39 +82,9 @@ export function assertToken(
   }
 }
 
-// ── Secret redaction ───────────────────────────────────────────────────────────────
-//
-// A private-repo build authenticates with a GitHub token, and git echoes the remote URL
-// verbatim in several of its failure messages (`fatal: unable to access
-// 'https://user:token@github.com/…'`) — so raw builder output can carry the token. Everything
-// we retain from APVM reaches a console log and the error a Playwright HTML/Allure report
-// keeps, which CI routinely publishes as an artifact; scrubbing here is what keeps a token
-// out of them.
-
-/** GitHub tokens in every issued form: `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` and `github_pat_`. */
-const GITHUB_TOKEN_RE = /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{10,}/g;
-
-/** `scheme://userinfo@host` — credentials embedded in a URL; the scheme and host are kept. */
-const URL_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi;
-
-/** The placeholder a redacted secret is replaced with. */
-const REDACTED = "***";
-
-/**
- * Replaces anything that looks like a credential in `text`. Applied to every APVM-sourced
- * string we log or attach to an error — never a substitute for not passing secrets around,
- * but the last line of defence before third-party output reaches a report. Idempotent, so
- * scrubbing twice on the way through nested handlers is harmless.
- *
- * Uses only `replace`, which resets a global regex's `lastIndex` on every call. Do **not**
- * switch these module-level `/g/` patterns to `test`/`exec`: those advance `lastIndex` and
- * would make every other call silently skip the start of the string.
- */
-export function redactSecrets(text: string): string {
-  return text
-    .replace(GITHUB_TOKEN_RE, REDACTED)
-    .replace(URL_USERINFO_RE, `$1${REDACTED}@`);
-}
+// A private-repo build authenticates with a GitHub token, and raw builder output is third-party
+// text: everything kept from it reaches a console log and the error a Playwright HTML/Allure report
+// keeps, which CI publishes — so it is masked (`redactSecrets`) on its way out.
 
 /** How many trailing command-output lines to retain for a failed build's error context. */
 const OUTPUT_TAIL = 40;

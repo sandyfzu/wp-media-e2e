@@ -15,12 +15,12 @@ import { existsSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { errorMessage } from "../guards";
+import { redactSecrets } from "../text";
 import { REPO_ROOT, RUN_ID } from "../config/run-context";
 import {
   assertToken,
   createBuildReporter,
   getApvm,
-  redactSecrets,
   toArtifactOrigin,
 } from "./apvm";
 import { sha256File } from "./digest";

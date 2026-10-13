@@ -439,6 +439,59 @@ test.describe("renderSummary", () => {
     expect(lines.filter((line) => line.startsWith("  Plugin"))).toEqual([]);
   });
 
+  test("every credential a setup, a build or a site's URL carried is masked, before any cut", () => {
+    const lines = renderSummary(
+      input({
+        status: "failed",
+        setupFailures: [
+          {
+            project: "artifacts:pro@nginx",
+            setup: "artifacts",
+            // Long enough to be cut inside the password, were the cut first.
+            message: `Error: ${"x".repeat(150)} clone of https://x-access-token:SECRET1PASSWORD@github.com/o/r failed`,
+          },
+          {
+            project: "setup:pro@nginx",
+            setup: "auth",
+            message:
+              "page.goto: net::ERR_FAILED at http://admin:SECRET2@bwu3.example/wp-login.php",
+          },
+        ],
+        cells: new Map<string, CellFacts>([
+          [
+            "pro@nginx",
+            {
+              failed: ["artifacts", "auth"],
+              plugins: [
+                {
+                  role: "plugin",
+                  ok: false,
+                  error: "build: token ghp_SECRET3SECRET3SECRET3 refused",
+                },
+              ],
+              sites: [
+                {
+                  baseURL: "http://admin:SECRET4@bwu3.example",
+                  error: "fetch of https://h/x?access_token=SECRET5 failed",
+                },
+              ],
+            },
+          ],
+        ]),
+      }),
+    );
+    expect(lines.join("\n")).not.toMatch(/SECRET/);
+    expect(lines).toContain(
+      "              setup:pro@nginx failed — page.goto: net::ERR_FAILED at http://***@bwu3.example/wp-login.php",
+    );
+    expect(lines).toContain(
+      "  Plugin      resolution failed — build: token *** refused",
+    );
+    expect(lines).toContain(
+      "  Site        http://***@bwu3.example · versions unknown — fetch of https://h/x?access_token=*** failed",
+    );
+  });
+
   test("a report folder a shell would split is quoted", () => {
     const lines = renderSummary(input({ reportDir: "/my reports/run-1" }));
     expect(lines).toContain(
