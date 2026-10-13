@@ -1,7 +1,7 @@
 # Orchestrator Phase 0.5 — The minimal orchestrator
 
-> **Status:** in implementation, in §7's order. **Done:** step 0, the scaffold (2026-10-12, §7.1; audited 2026-10-13, §7.2). **Next:** step 0.1,
-> what that audit left open (§7.3). Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> **Status:** in implementation, in §7's order. **Done:** step 0, the scaffold (2026-10-12, §7.1; audited 2026-10-13, §7.2); step 0.1,
+> what that audit left open (2026-10-13, §7.3–§7.4; audited the same day, §7.5). **Next:** step 1, M2 configuration. Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -362,8 +362,9 @@ orchestrator/
 - It imports from the suite only modules that leave the process as it was: the product list (0B.3),
   the sites loader, 0F's `run-id.ts` and `retention.ts` (V340). The product list is not free of
   effects: importing it reads every product's sites files once, prints a `[sites]` warning for a
-  product with none, and **throws** on one that is not valid JSON (V342) — so M1 imports it inside
-  its error handling, and a broken sites file is a config error, not a crash. Never `run-context.ts`, nor `resolve.ts`,
+  product with none, and **throws** on one that is not valid JSON (V342) — so M1 loads it through
+  `loadProductList` (step 0.1a) inside its error handling, and a broken sites file is a config error,
+  not a crash. Never `run-context.ts`, nor `resolve.ts`,
   `consume.ts` or `project.ts`, which import it (V84, V130). Importing any of those would load
   `.env` into the orchestrator's own process and stamp its `RUN_ID`. The child environment's
   allowlist (Phase 0 §2) keeps that state out of runs, but it should not exist at all.
@@ -409,7 +410,7 @@ Each step ships with its unit specs and passes the four gates (CLAUDE.md).
    **Done 2026-10-12** (§7.1).
 0.1. What the step-0 audit left open (§7.3): 0.1a the product list loaded where a broken sites file is
    a config error; 0.1b an absolute `ARTIFACTS_ROOT` kept where it points; 0.1c the boundary's cheap
-   remaining routes closed, the rest stated.
+   remaining routes closed, the rest stated. **Done 2026-10-13** (§7.4).
 1. M2 configuration — schema, loader, example.
 2. M4's pure parts — identity, environment, the outcome table; M6's builder and bus.
 3. M7 and M8 formatters (pure), then their senders.
@@ -593,6 +594,74 @@ way around the boundary for a few lines.
 **Done when** the new refusals are in both readers and the spec's table, each mutation-proved; the
 spec's stated limits list only what stays open; the four gates pass.
 
+### 7.4 Step 0.1 — Implemented (2026-10-13, V347–V351)
+
+As planned, plus:
+
+- **0.1a.** `loadProductList` returns the list's three members, frozen — never `productFromEnv`, which
+  reads the environment. The `ConfigError` keeps the failure's own message and **no cause**:
+  `JSON.parse`'s message quotes the text around the error, credentials included, and a logged error
+  prints its causes (V347). Its spec drives the real sites loader on a broken file holding a fake
+  password.
+- **0.1b.** One helper, `cellArtifactsDir` (`consume.ts`), resolves the folder for the setup and the
+  readers alike, so the two cannot drift. `dirs()`'s TSDoc says its paths are relative or absolute and
+  are resolved, never joined; `.env.example`, `execution-model.md` and `plugin-artifacts.md` say it
+  too. A full unit run left no `private/` folder; the 176 empty leftover folders (0 files) are gone
+  (V348).
+- **0.1c.** Two more builtins refused, measured as routes around the boundary: `inspector`
+  (`Runtime.evaluate` runs code in the process) and `repl` (fed a stream, it does too) — V349.
+  `eval` is refused by the scan as well as by `no-eval`, so the authority refuses it; the scan reads
+  both names from the syntax tree by spelling — an identifier, a property after a dot, a string key
+  in brackets or destructuring — never from a comment or an ordinary string (`forbiddenNames`;
+  `boundaryViolations` = imports + names). ESLint's `no-restricted-properties` names the property on
+  any object, so `globalThis.process.getBuiltinModule` is caught too. Where the readers differ, the
+  table says so: ESLint's boundary block misses `import("node:module")` and `require("node:vm")`;
+  the full config refuses the `require` (`@typescript-eslint/no-require-imports`), and only the scan
+  sees the `import()` (V350). The builtin list is written out in the spec, so dropping a name from
+  both readers still fails.
+- **Stated limits** now: a module's output and globals; what an unref'd timer or a function does
+  after the import; what a package does; a name built at run time
+  (`process["get" + "BuiltinModule"]`).
+- **Proved** by 20 mutations, each failing the test meant to catch it (V348, V351).
+
+### 7.5 Audit of step 0.1 (2026-10-13, V352–V358)
+
+Every claim re-measured, every fix proved by a mutation that fails the test meant to catch it (V357).
+
+- **`new Function` was open (medium).** §7.3 took it as refused by `@typescript-eslint/no-implied-eval`,
+  which lints `.ts` only: in an orchestrator `.js` or `.mjs`, `new Function("…")` passed both readers,
+  and `Reflect.construct(Function, …)` passed them in every dialect (V353). Now the scan refuses the
+  name `Function` and ESLint runs `no-new-func`; the dialect test checks `eval` and `new Function` in
+  each.
+- **CommonJS was open (medium).** A `.cts` or `.cjs` file, or a `.js` under a nested `package.json`
+  saying `"commonjs"`, gets `require` and `module.require`, which load a computed name, and neither
+  guard follows a `require` once renamed (V352). An ES-module `.ts` under tsx has neither. The spec
+  now refuses such files in `orchestrator/` (`commonJsFiles`; test code and declaration files exempt).
+- **0.1a's point had no test (medium).** Nothing proved that importing `product-list.ts` loads nothing
+  of the suite: a static import of the list passed every test. A child Node with an invalid
+  `BWP_FTP_PORT` — which makes the list throw as it loads — now imports the module, then gets the
+  `ConfigError` from the call alone.
+- **Weaker than claimed (low).** The "never quotes it" test read `String(error)`, which never held a
+  cause; it now reads `util.inspect`, after proving the loader's own error does quote the file. The
+  scan missed a string key in a computed destructuring (`{ ["getBuiltinModule"]: g } = process`),
+  which ESLint caught; it reads it now. The fixture's builtin list was not pinned — an added name went
+  untested; the spec now pins it.
+- **0.1b through the real setup (low).** Only the pure helper was tested. The run spec whose cell `y`
+  fails its artifacts setup offline now asserts the cell's folder at the absolute root and nothing
+  under the checkout — with `join` it fails, and leaves exactly the old `private/…` folders (V358).
+- **Undocumented (low).** Node keeps a module as its first import left it: the sites files are read
+  once per process, and a failed load is final — a second call fails even once the file is fixed
+  (V355). The TSDoc says so; it fits "once, at start".
+- **Inexact doc (low).** "Every caller resolves a root against `REPO_ROOT`": Playwright and
+  playwright-bdd resolve `outputDir` against the config's folder, which is the repository (V356);
+  `execution-model.md` now says who resolves.
+- **Stated limits, completed:** a refused name reached through a string (`Reflect.get(process,
+  "getBuiltinModule")`) or built at run time; a constructor reached at run time
+  (`(async () => {}).constructor` runs code, V354); Node's internals (`process.binding("contextify")`
+  hands out the VM's own classes, deprecated) and native addons (`process.dlopen`); a module's output
+  and globals; timers and functions after the import; packages. Not a route: a string timer — Node
+  refuses one (V354).
+
 ## 8. What later phases change, and keep
 
 | Here | Later | Kept |
@@ -668,3 +737,15 @@ spec's stated limits list only what stays open; the four gates pass.
 | V344 | 25 mutations of the fixes — scanner back to `preProcessFile`, `require`/`typeof import()`/parentheses/computed/`file:` unread, `__fixtures__` not test code, builtins unresolved, closure silent, probe blind to listeners/cwd, no turn, baseline after its own listener, allowlist checks dropped, own test code importable, lexical judging, `.ts`-only lister, declaration files probed, five ESLint rule changes — each fails at least one test | ✅ 2026-10-13 | A mutation harness in a copy of the worktree; the baseline mutation was rewritten once, having changed nothing |
 | V345 | ESLint 10.11.0's core `no-restricted-imports` does not check an `import()` expression: a literal `import("../../src/common/config/run-context")` gets no error | ✅ 2026-10-13 | The `Linter` table in `orchestrator/import-boundary.spec.ts` |
 | V346 | `artifacts.setup.ts:73` and `consume.ts:148` build the artifacts folder as `join(REPO_ROOT, dirs().artifacts)`, so an absolute `ARTIFACTS_ROOT` lands under the checkout; `results-stream.run.spec.ts` passes one, and the worktree holds only empty `private/var/folders/…/artifacts/resultsprobe` folders (0 files) | ✅ 2026-10-13 | `find private -type f` (0); source; not fixed (out of scope) |
+| V347 | Node 24.21.0's `JSON.parse` quotes the text around the error (`Unexpected token 's', ..."assword": s3cret }" is not valid JSON`); the sites loader's own message names only the file. `loadProductList` on a broken WP Rocket `sites.json` holding a fake password: one `ConfigError` line naming the file, no cause, and `util.inspect` of the error holds no credential | ✅ 2026-10-13 | `node -e` probe; a copy of the worktree under `node --import tsx`; `product-list.spec.ts` |
+| V348 | With `join`, the two new absolute-`ARTIFACTS_ROOT` tests fail; with `resolve`, they pass. A full unit run (2070 passed, 8 skipped by their environment guards) adds no folder under `private/`; its 176 empty folders (0 files, no links) were then removed | ✅ 2026-10-13 | `consume.spec.ts` against a mutated `consume.ts`; `find private` before and after `npm run test:unit`; `find private -depth -type d -empty -delete` |
+| V349 | `node:inspector` (`Session.post("Runtime.evaluate")`) and `node:repl` (`repl.start` fed a stream) each run code in the importing process — both set a variable; `process.getBuiltinModule` is a function on Node 24.21.0 and returns `node:vm` | ✅ 2026-10-13 | `node --input-type=module -e` probes |
+| V350 | ESLint 10.11.0: `no-restricted-properties` with `property` alone catches `process.getBuiltinModule(…)`, `globalThis.process["getBuiltinModule"]` and destructuring by name or string key; `no-eval` catches `eval()` and `globalThis.eval`; the `paths` of `no-restricted-imports` miss `import("node:module")` and `require("node:vm")` — the full config refuses the `require` (`@typescript-eslint/no-require-imports`), not the `import()` | ✅ 2026-10-13 | The `Linter` table in `orchestrator/import-boundary.spec.ts`; `npx eslint` on a throwaway `orchestrator/zzprobe/probe.ts`, removed after |
+| V351 | 18 mutations of 0.1a and 0.1c — a raw rethrow, `String(error)`, the whole module or an unfrozen list returned, a cause kept, no `name`; the scan blind to builtins, to `repl`, to `node:`, to bracket access, to destructured string keys, to `eval`, names left out of `boundaryViolations`, any string read as a name; ESLint without `repl`, without `node:` forms, without `no-eval`, `getBuiltinModule` only on `process` — each fails the test meant to catch it | ✅ 2026-10-13 | A mutation harness in a copy of the worktree, `--project=orchestrator`, baseline green before and after |
+| V352 | tsx 4.23.15, file entry: an ES-module `.ts` sees no `require` and no `module`; a `.cts` sees `require` and `module.require` as functions, and a `.js` under a nested `package.json` of `{"type":"commonjs"}` sees `require`. (Node's `-e` mode puts builtins such as `module` on `globalThis`, so an `-e` probe misleads.) | ✅ 2026-10-13 | Probe files under `orchestrator/zz/` in a copy of the worktree, removed after |
+| V353 | ESLint 10.11.0, the full config: in an orchestrator `.js`, `new Function("…")` and `Function("…")` get no error (`@typescript-eslint/no-implied-eval` lints `.ts` only); `Reflect.construct(Function, …)` gets none in `.ts` either. With `no-new-func`, both direct forms are refused in every dialect | ✅ 2026-10-13 | `npx eslint` on probe files in a copy; the spec's dialect test and table |
+| V354 | Node 24.21.0: `setTimeout("…")` throws `ERR_INVALID_ARG_TYPE`; `(async () => {}).constructor("…")` runs code in the process; `process.binding("contextify")` returns `compileFunction` and `ContextifyScript` (DEP0111); `process.dlopen` is a function | ✅ 2026-10-13 | `node --input-type=module -e` probes |
+| V355 | A second `loadProductList()` in one process, after the broken sites file is removed, fails with the first error: Node keeps a module whose evaluation threw | ✅ 2026-10-13 | A tsx entry in a copy of the worktree |
+| V356 | Playwright 1.63.0 resolves a project's `outputDir` with `path.resolve(configDir, …)`; playwright-bdd 9.2.1 resolves its `outputDir` the same way | ✅ 2026-10-13 | `playwright/lib/common/index.js:587` (`pathResolve`, `:616`); `playwright-bdd/dist/config/index.js:81` (`resolveOutputDir`) |
+| V357 | 29 mutations of step 0.1 and its audit fixes — V351's 18, plus: a static import of the list, a cause's message kept, `join` back in `cellArtifactsDir`, a builtin added to the fixture only, `Function` not refused, no `no-new-func`, computed keys unread, `package.json` or `.cjs` not counted as CommonJS, declaration files counted — each fails the test meant to catch it; the static import fails only the new laziness test | ✅ 2026-10-13 | The mutation harness in a copy of the worktree, `--project=orchestrator` (and the two `src` specs for `join`), baseline green before and after |
+| V358 | With `join`, the real artifacts setup of the run spec's cell `y` creates `private/…/artifacts/resultsprobe/y` under the checkout, and the new assertions fail; with `resolve`, nothing is created there | ✅ 2026-10-13 | The `join` mutation in a copy of the worktree, which then held `private/var` |

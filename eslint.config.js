@@ -12,6 +12,21 @@ import suiteImports from "./orchestrator/suite-imports.json" with { type: "json"
  * The `src/` modules the orchestrator may import, as the alternatives of a regular expression:
  * relative to `src/`, without `.ts`, regex characters escaped.
  */
+/**
+ * The builtins orchestrator code may not load, each a way to load or run code no import guard sees:
+ * `require` (`module`), a thread sharing the process (`worker_threads`), a context (`vm`), and code
+ * evaluated in the process itself (`inspector`, `repl`). The orchestrator spawns processes and needs
+ * none of them. `orchestrator/__fixtures__/import-boundary.ts` refuses the same list.
+ */
+const refusedBuiltins = [
+  "module",
+  "worker_threads",
+  "vm",
+  "inspector",
+  "inspector/promises",
+  "repl",
+].flatMap((name) => [name, `node:${name}`]);
+
 const admittedSuiteModules = suiteImports
   .map((path) =>
     path
@@ -99,11 +114,12 @@ export default defineConfig([
   // and `run-context.ts` — with every module importing it — loads `.env` and stamps `RUN_ID` into the
   // importing process. So its code imports from `src/` only the modules
   // `orchestrator/suite-imports.json` lists (an allowlist: each new one is a decision), never test
-  // code, and never a module whose path it computes. Test code never runs in that process and is
-  // exempt. This rule reads only a static import's spelling, and is stricter than the spec where
-  // spelling misleads it (a `../` detour back into an admitted module); it misses `typeof import()`,
-  // a literal `import()` and anything outside `src/`. `orchestrator/import-boundary.spec.ts` resolves
-  // every form and imports the code itself.
+  // code, never a module whose path it computes, nor the builtins and calls that load or run code
+  // unchecked. Test code never runs in that process and is exempt. These rules read only a static
+  // import's spelling, and are stricter than the spec where spelling misleads them (a `../` detour
+  // back into an admitted module); they miss `typeof import()`, a literal `import()` and anything
+  // outside `src/`. `orchestrator/import-boundary.spec.ts` resolves every form and imports the code
+  // itself.
   {
     files: ["orchestrator/**/*.{ts,mts,cts,js,mjs,cjs}"],
     ignores: ["orchestrator/**/*.spec.*", "orchestrator/**/__fixtures__/**"],
@@ -111,11 +127,10 @@ export default defineConfig([
       "no-restricted-imports": [
         "error",
         {
-          paths: ["node:module", "module"].map((name) => ({
+          paths: refusedBuiltins.map((name) => ({
             name,
-            importNames: ["createRequire"],
             message:
-              "A require() made by createRequire loads whatever its argument names, unchecked: import the module instead.",
+              "This builtin loads or runs code no import guard sees (require, a thread, a VM context, the inspector, a REPL), and the orchestrator needs none: import the module itself, or spawn a process.",
           })),
           patterns: [
             {
@@ -141,6 +156,19 @@ export default defineConfig([
             "Write the path as a plain string: a computed import() path cannot be checked against orchestrator/suite-imports.json.",
         },
       ],
+      // On any object, so `globalThis.process.getBuiltinModule` is caught too.
+      "no-restricted-properties": [
+        "error",
+        {
+          property: "getBuiltinModule",
+          message:
+            "process.getBuiltinModule loads any builtin by a name no import guard reads: import the module itself.",
+        },
+      ],
+      // Code evaluated from a string is code no guard reads. `no-new-func` covers `.js` too, which
+      // `@typescript-eslint/no-implied-eval` does not lint.
+      "no-eval": "error",
+      "no-new-func": "error",
     },
   },
 

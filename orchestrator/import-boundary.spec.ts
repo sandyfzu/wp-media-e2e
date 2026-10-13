@@ -23,10 +23,12 @@ import {
 } from "../src/common/__fixtures__/import-scan";
 import {
   allowlistProblems,
-  forbiddenImports,
+  boundaryViolations,
+  commonJsFiles,
   isProbed,
   orchestratorCode,
   ORCHESTRATOR_DIR,
+  REFUSED_BUILTINS,
   REPO_ROOT,
   SIDE_EFFECT_ROOTS,
 } from "./__fixtures__/import-boundary";
@@ -39,9 +41,16 @@ import suiteImports from "./suite-imports.json" with { type: "json" };
  * code reaches outside `orchestrator/` only for the modules `suite-imports.json` admits. ESLint
  * refuses the rest as it is typed, by spelling alone. This spec judges every import where it really
  * leads, walks everything an admitted module can load, and imports the code to see what it does.
+ * Both also refuse the builtins and names that load or run code no guard reads: `module`,
+ * `worker_threads`, `vm`, `inspector`, `repl`, `process.getBuiltinModule`, `eval` and `Function`;
+ * and the code must be ES modules — CommonJS hands every module a `require`.
  *
- * Stated limits — the boundary catches mistakes, not evasion: a `require` made by `createRequire`
- * under another name, a `Worker`, a file read and evaluated, and what a package does are not seen.
+ * Stated limits — the boundary catches mistakes, not evasion. Not seen: a module's output and the
+ * globals it sets (the product list prints `[sites]` warnings by design); what an unref'd timer or a
+ * function does after the import; what a package does; a refused name reached through a string
+ * (`Reflect.get(process, "getBuiltinModule")`) or built at run time; a constructor reached at run
+ * time (`(async () => {}).constructor`); Node's internals (`process.binding`) and native addons
+ * (`process.dlopen`).
  */
 
 /** The admitted modules, as absolute paths. */
@@ -186,9 +195,76 @@ const CASES: readonly ImportCase[] = [
     lint: true,
     scan: "./setup.spec — test code",
   },
+  // The builtins and names that load or run code no guard reads.
   {
     code: 'import { createRequire } from "node:module";',
     lint: true,
+    scan: "node:module — loads or runs code unchecked",
+  },
+  {
+    code: 'export { Worker } from "worker_threads";',
+    lint: true,
+    scan: "worker_threads — loads or runs code unchecked",
+  },
+  {
+    code: 'const m = await import("node:module");',
+    lint: false,
+    scan: "node:module — loads or runs code unchecked",
+  },
+  {
+    code: 'const vm = process.getBuiltinModule("vm");',
+    lint: true,
+    scan: "getBuiltinModule — loads a builtin by a string",
+  },
+  {
+    code: 'const load = globalThis.process["getBuiltinModule"];',
+    lint: true,
+    scan: "getBuiltinModule — loads a builtin by a string",
+  },
+  {
+    code: "const { getBuiltinModule } = process;",
+    lint: true,
+    scan: "getBuiltinModule — loads a builtin by a string",
+  },
+  {
+    code: 'const { "getBuiltinModule": load } = process;',
+    lint: true,
+    scan: "getBuiltinModule — loads a builtin by a string",
+  },
+  {
+    code: 'const vm = require("node:vm");',
+    lint: false,
+    scan: "node:vm — loads or runs code unchecked",
+  },
+  {
+    code: 'const { ["getBuiltinModule"]: load } = process;',
+    lint: true,
+    scan: "getBuiltinModule — loads a builtin by a string",
+  },
+  {
+    code: 'const vm = process?.getBuiltinModule("vm");',
+    lint: true,
+    scan: "getBuiltinModule — loads a builtin by a string",
+  },
+  { code: 'eval("1");', lint: true, scan: "eval — runs code from a string" },
+  {
+    code: 'const run = new Function("return 1");',
+    lint: true,
+    scan: "Function — builds code from a string",
+  },
+  {
+    code: 'const run = Reflect.construct(Function, ["return 1"]);',
+    lint: false,
+    scan: "Function — builds code from a string",
+  },
+  {
+    code: "const run = globalThis.eval;",
+    lint: true,
+    scan: "eval — runs code from a string",
+  },
+  {
+    code: '// Never eval() a string, nor call getBuiltinModule.\nconst text = "eval";',
+    lint: false,
     scan: null,
   },
   // Admitted: as written, by its .js spelling, or by a detour ESLint cannot see through.
@@ -255,9 +331,32 @@ test.describe("orchestrator/ code imports only itself and the admitted modules",
   test("the scan refuses what leaves orchestrator/ for anything but an admitted module, judged where it leads", () => {
     for (const { code, scan } of CASES) {
       expect(
-        forbiddenImports(EXAMPLE, code, ADMITTED, resolveImport),
+        boundaryViolations(EXAMPLE, code, ADMITTED, resolveImport),
         code,
       ).toEqual(scan === null ? [] : [scan]);
+    }
+  });
+
+  test("both readers refuse every builtin that loads or runs code, with or without node:", async () => {
+    // Written out, not read from either reader: dropping a name from both must still fail here.
+    const builtins = [
+      "module",
+      "worker_threads",
+      "vm",
+      "inspector",
+      "inspector/promises",
+      "repl",
+    ];
+    expect(REFUSED_BUILTINS).toEqual(builtins);
+    for (const name of builtins.flatMap((n) => [n, `node:${n}`])) {
+      const code = `import * as m from "${name}";`;
+      expect(
+        boundaryViolations(EXAMPLE, code, ADMITTED, resolveImport),
+        code,
+      ).toEqual([`${name} — loads or runs code unchecked`]);
+      expect(await lintRules(code, EXAMPLE), code).toEqual([
+        "no-restricted-imports",
+      ]);
     }
   });
 
@@ -279,6 +378,14 @@ test.describe("orchestrator/ code imports only itself and the admitted modules",
         await lintRules(code, join(ORCHESTRATOR_DIR, "runs", name)),
         name,
       ).toEqual(["no-restricted-imports"]);
+      // `.js` too, which `@typescript-eslint/no-implied-eval` does not lint.
+      expect(
+        await lintRules(
+          'eval("1");\nnew Function("return 1");',
+          join(ORCHESTRATOR_DIR, "runs", name),
+        ),
+        name,
+      ).toEqual(["no-eval", "no-new-func"]);
     }
     for (const path of ["runs/example.spec.ts", "__fixtures__/helper.ts"]) {
       expect(await lintRules(code, join(ORCHESTRATOR_DIR, path)), path).toEqual(
@@ -287,7 +394,11 @@ test.describe("orchestrator/ code imports only itself and the admitted modules",
     }
   });
 
-  test.describe("orchestratorCode and isProbed", () => {
+  test("the orchestrator's code is ES modules only: no .cts, .cjs or package.json", () => {
+    expect(commonJsFiles()).toEqual([]);
+  });
+
+  test.describe("orchestratorCode, isProbed and commonJsFiles", () => {
     /** A folder shaped like `orchestrator/`, every kind of file in it. */
     let dir = "";
 
@@ -306,7 +417,11 @@ test.describe("orchestrator/ code imports only itself and the admitted modules",
         "sub/cli.ts",
         "a.spec.ts",
         "x.run.spec.mts",
+        "y.spec.cts",
+        "types.d.cts",
+        "sub/package.json",
         "__fixtures__/h.ts",
+        "__fixtures__/package.json",
         "sub/__fixtures__/i.js",
         "config.example.json",
         "README.md",
@@ -331,6 +446,7 @@ test.describe("orchestrator/ code imports only itself and the admitted modules",
         "f.mjs",
         "g.cjs",
         "sub/cli.ts",
+        "types.d.cts",
         "types.d.ts",
       ]);
     });
@@ -347,12 +463,20 @@ test.describe("orchestrator/ code imports only itself and the admitted modules",
         "sub/cli.ts",
       ]);
     });
+
+    test("finds every file that would make the code CommonJS, but test code and declaration files", () => {
+      expect(commonJsFiles(dir)).toEqual([
+        "c.cts",
+        "g.cjs",
+        "sub/package.json",
+      ]);
+    });
   });
 
   test("no orchestrator code imports anything the boundary refuses, in any form", () => {
     const offenders = orchestratorCode().flatMap((path) => {
       const file = join(ORCHESTRATOR_DIR, path);
-      return forbiddenImports(
+      return boundaryViolations(
         file,
         readFileSync(file, "utf8"),
         ADMITTED,

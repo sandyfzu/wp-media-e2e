@@ -146,10 +146,11 @@ adds, so it is always targeted.
   (APVM reports `release-<tag>` in that field); its `pinRef` (`release:5.7.7`) is the only record
   of the tag a `release:latest-stable` chose. The summary line shows `pin=` only for a release — a
   commit pin repeats the commit.
-- The root is overridable with `ARTIFACTS_ROOT`; `<product>/<cell>` is always
-  appended, so two cells never share a directory. Two runs resolving one cell's zips do
-  (a run of the cell, or `--project=artifacts:<cell>` alone): the second wipes the first's
-  zips, so a cell takes one such run at a time.
+- The root is overridable with `ARTIFACTS_ROOT` — relative to the repository or absolute,
+  resolved by `cellArtifactsDir` (`consume.ts`) for the setup and the readers alike;
+  `<product>/<cell>` is always appended, so two cells never share a directory. Two runs
+  resolving one cell's zips do (a run of the cell, or `--project=artifacts:<cell>` alone): the
+  second wipes the first's zips, so a cell takes one such run at a time.
 - **Every resolved zip is normalised to mode `0644`.** A build lands `0600`, and getting it
   onto a site copies it verbatim: `docker cp` preserves the host mode _and_ numeric owner
   (meaningless inside a container), so WP-CLI there cannot open the archive and

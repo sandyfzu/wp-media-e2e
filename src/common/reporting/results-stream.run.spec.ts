@@ -538,6 +538,10 @@ test.describe("the results stream and the summary, through the real runner", () 
       scenarios: { total: 6, didNotRun: 6 },
       setups: { total: 2, failed: 2 },
     });
+    // The artifacts setup made the cell's folder at the absolute ARTIFACTS_ROOT before failing,
+    // and nothing under the checkout, where joining the root onto it would have put it.
+    expect(existsSync(join(work, "artifacts", PRODUCT, "y"))).toBe(true);
+    expect(existsSync(join(REPO_ROOT, work))).toBe(false);
 
     const summary = summaryOf(outcome.stdout);
     expect(summary[0]).toMatch(/✘ COULD NOT TEST/);

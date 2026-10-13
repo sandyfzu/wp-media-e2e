@@ -17,7 +17,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { errorMessage, isNonEmptyString, isObject } from "../guards";
 import { REPO_ROOT, RUN_ID, dirs } from "../config/run-context";
@@ -143,9 +143,18 @@ function warnIfStale(raw: unknown, product: string, cell: string): void {
   );
 }
 
+/**
+ * Absolute path to a cell's ephemeral artifacts dir: `ARTIFACTS_ROOT` (default `.artifacts`)
+ * resolved against {@link REPO_ROOT} — a relative root lands in the checkout, an absolute one stays
+ * where it points, as the report and login roots do — then `<product>/<cell>`.
+ */
+export function cellArtifactsDir(product: string, cell: string): string {
+  return resolve(REPO_ROOT, dirs(product, cell).artifacts);
+}
+
 /** Absolute path to a cell's `resolution.json` (inside its ephemeral artifacts dir). */
 export function resolutionFilePath(product: string, cell: string): string {
-  return join(REPO_ROOT, dirs(product, cell).artifacts, "resolution.json");
+  return join(cellArtifactsDir(product, cell), "resolution.json");
 }
 
 /** Reads and JSON-parses `resolution.json`, wrapping a parse failure with the path. */

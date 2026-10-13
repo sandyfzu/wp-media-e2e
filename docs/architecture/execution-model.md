@@ -252,7 +252,9 @@ imports only that product, so its runs never load another product's sites files.
   warning for a product that has none, and **throwing** on one that is not valid JSON — and reads
   `BWP_*`, all once. It never loads `.env`, stamps `RUN_ID`, adds a process listener or changes the
   working directory, so a long-lived process can import it and keep its own state — inside its error
-  handling, so a broken sites file is reported rather than fatal. Importing `run-context.ts`, and so
+  handling, so a broken sites file is reported rather than fatal: the orchestrator does it through
+  `loadProductList` (`orchestrator/config/product-list.ts`), which turns the failure into one line
+  naming the file. Importing `run-context.ts`, and so
   `project.ts`, `resolve.ts` or `consume.ts`, loads `.env` and stamps `RUN_ID`.
 - **Drift guard.** `products.spec.ts` fails when the list disagrees with `src/projects/`'s
   folders, or a product's features or own steps lie outside its folder. It also fails when a
@@ -268,7 +270,10 @@ imports only that product, so its runs never load another product's sites files.
   spelling; `orchestrator/import-boundary.spec.ts` judges each import where it really leads,
   walks everything an admitted module can load (none may reach `load-env.ts` or `run-context.ts`,
   even lazily), and imports the code in a fresh Node to prove the process left as it was
-  (`probeImports`: environment, process listeners, working directory, exit code).
+  (`probeImports`: environment, process listeners, working directory, exit code). Both refuse the
+  builtins and names that load or run code no guard reads — `module`, `worker_threads`, `vm`,
+  `inspector`, `repl`, `process.getBuiltinModule`, `eval`, `Function` — and the spec keeps the code
+  ES modules only (no `.cts`, `.cjs` or `package.json`): CommonJS hands every module a `require`.
 
 ## The config factory
 
@@ -359,7 +364,10 @@ resolves all paths via `dirs(product, cell)`. Two lifecycles:
   the parser cannot read is dated by its stream's `run.begin`.
 - The `<product>/<cell>` namespace is **always** appended, so two cells never share a
   directory, whatever the `*_ROOT` overrides (`REPORT_ROOT`, `OUTPUT_ROOT`, `AUTH_ROOT`,
-  `ARTIFACTS_ROOT`). Two runs of one cell share every folder of it but the report, so a
+  `ARTIFACTS_ROOT`). Each root is relative to the repository or absolute: `dirs()` keeps it as
+  given, and it is resolved, never joined (`join` would nest an absolute root under the checkout) —
+  against `REPO_ROOT` by the suite's own code, against the config's folder, the repository, by
+  Playwright and playwright-bdd. Two runs of one cell share every folder of it but the report, so a
   cell takes one run at a time.
 - **Output folders follow the selection** (`outputDirFor`). Playwright empties the output
   folder of every project a run selects before it starts. So a cell's three projects

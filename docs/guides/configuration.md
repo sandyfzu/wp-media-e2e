@@ -189,6 +189,9 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 | `E2E_INTERNAL_STOP_FILE` | _(unset)_ → no drain | **Internal**, set by the orchestrator. An absolute path, no surrounding whitespace, in a folder that exists for the run's lifetime, the file itself not there yet as the run starts; once that file exists, every scenario's first attempt is skipped as `stopped` while the one in flight finishes (the drain — see [execution-model.md](../architecture/execution-model.md#stopping-a-run-the-drain)). Any other value fails the run as it starts. |
 | `E2E_SITE_STAGING_DIR` | `.e2e_temp`   | Where artifacts are staged **on each site** (absolute, or relative to its WordPress root). A site's own `transport.stagingDir` wins over this. |
 
+Each `*_ROOT` is relative to the repository root or absolute — a root on another disk stays where it
+points — and `<product>/<cell>` is always appended to it.
+
 ### Plugin artifacts (build & verify)
 
 Which plugin zips a run resolves, builds (via [APVM](https://github.com/wp-media/automation-plugin-version-manager)),

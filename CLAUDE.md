@@ -57,7 +57,7 @@ src/
         ├── steps/          # product-specific steps
         └── support/        # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
 
-orchestrator/               # the orchestrator (being built): suite-imports.json, the suite modules it may import, + its import-boundary spec
+orchestrator/               # the orchestrator (being built): suite-imports.json, the suite modules it may import, + its import-boundary spec; config/ (product-list.ts: the product list loaded as a config error, errors.ts: ConfigError)
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)
 playwright*.config.ts       # entry configs (default, per-product, unit)
@@ -357,8 +357,12 @@ The orchestrator is a long-lived process and must keep the process-wide state it
 `run-context.ts`, and every module importing it, loads `.env` and stamps `RUN_ID` as it is imported.
 So the orchestrator's code imports from the suite only the modules
 [`orchestrator/suite-imports.json`](orchestrator/suite-imports.json) lists — never test code, never a
-computed `import()` path. ESLint reads the list (`no-restricted-imports`, by spelling; test code
-exempt); [`orchestrator/import-boundary.spec.ts`](orchestrator/import-boundary.spec.ts) judges every
+computed `import()` path, nor a builtin or name that loads or runs code no guard reads (`module`,
+`worker_threads`, `vm`, `inspector`, `repl`, `process.getBuiltinModule`, `eval`, `Function`), and
+it is ES modules only — no `.cts`, `.cjs` or `package.json` (CommonJS hands every module a `require`). It loads the
+product list only through `loadProductList` (`orchestrator/config/product-list.ts`): importing it reads
+every product's sites file, so a broken one must be a config error, not a crash. ESLint reads the
+list (`no-restricted-imports`, by spelling; test code exempt); [`orchestrator/import-boundary.spec.ts`](orchestrator/import-boundary.spec.ts) judges every
 import form where it really leads, walks all an admitted module can load (never `load-env.ts` or
 `run-context.ts`, even lazily), and imports the admitted modules and the orchestrator's code but the
 root `cli.ts` in a fresh Node to prove environment, process listeners, working directory and exit

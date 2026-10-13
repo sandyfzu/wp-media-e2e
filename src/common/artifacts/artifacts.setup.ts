@@ -1,12 +1,11 @@
-import { join } from "node:path";
-
 import { test as setup } from "@playwright/test";
 import type { TestInfo } from "@playwright/test";
 
 import { getPool, readRouting } from "../config/metadata";
 import { ARTIFACTS_ATTACHMENT } from "../setup/attachments";
 import { isPlaceholderSite } from "../config/sites";
-import { REPO_ROOT, dirs, isCellTargeted } from "../config/run-context";
+import { isCellTargeted } from "../config/run-context";
+import { cellArtifactsDir } from "./consume";
 import { resolveIdentity } from "./manifest";
 import { getManifest, registerArtifacts } from "./registry";
 import { buildArtifactPlan, readArtifactEnv } from "./request";
@@ -70,7 +69,7 @@ setup(
     });
     for (const warning of plan.warnings) console.warn(warning);
 
-    const artifactsDir = join(REPO_ROOT, dirs(product, cell).artifacts);
+    const artifactsDir = cellArtifactsDir(product, cell);
     const outcomes = await resolveArtifacts({
       requests: plan.requests,
       artifactsDir,

@@ -252,18 +252,19 @@ export interface RunDirs {
   /** Ephemeral generated BDD specs directory. */
   readonly bdd: string;
   /**
-   * Ephemeral resolved-plugin-artifacts directory (the zips under test). Repo-root-relative
-   * like the rest; the artifacts resolver joins it onto {@link REPO_ROOT} for the absolute
-   * path APVM needs, and wipes it whole on every resolution.
+   * Ephemeral resolved-plugin-artifacts directory (the zips under test). Relative or absolute
+   * like the rest; `cellArtifactsDir` resolves it against {@link REPO_ROOT} for the absolute
+   * path APVM needs, and the resolver wipes it whole on every resolution.
    */
   readonly artifacts: string;
 }
 
 /**
- * Resolve the artifact directories for a (product, cell). All paths are repo-root-relative.
- * A `*_ROOT` override replaces only the root prefix; the `<product>/<cell>` namespace is
- * always appended, so two cells never share a directory. Two runs of one cell do, but for a
- * report, which `RUN_ID` keeps apart.
+ * Resolve the artifact directories for a (product, cell): relative to the repository root, or
+ * absolute when their `*_ROOT` is — so a caller resolves them against {@link REPO_ROOT}, never
+ * joins them onto it. A `*_ROOT` override replaces only the root prefix; the `<product>/<cell>`
+ * namespace is always appended, so two cells never share a directory. Two runs of one cell do,
+ * but for a report, which `RUN_ID` keeps apart.
  */
 export function dirs(product: string, cell: string): RunDirs {
   const cellNs = `${product}/${cell}`;

@@ -44,7 +44,7 @@ import type {
 export interface ResolveParams {
   /** The per-role requests from the pure planner (`buildArtifactPlan`). */
   readonly requests: readonly ArtifactRequest[];
-  /** Absolute path to the cell's artifacts dir (`REPO_ROOT` + `dirs().artifacts`); wiped here. */
+  /** Absolute path to the cell's artifacts dir (`cellArtifactsDir`); wiped here. */
   readonly artifactsDir: string;
   /**
    * The WordPress plugin slug every role of this cell must carry — the expected identity's slug
