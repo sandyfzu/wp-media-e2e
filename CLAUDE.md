@@ -35,7 +35,7 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 ```text
 src/
 ├── common/                 # product-agnostic, shared by every product
-│   ├── config/             # env, sites loading, run-context (+ run-id.ts: RUN_ID's formatter/parser), the cell pin, the drain, metadata, devices, file-owner rule, the config factory
+│   ├── config/             # env, sites loading, run-context (+ run-id.ts: RUN_ID's formatter/parser, a run's report folder; run-env.ts: the run-setting variables' names), the cell pin, the drain, metadata, devices, file-owner rule, the config factory
 │   ├── reporting/          # the suite's own reporters: cell-notice.ts, results-stream.ts (results.jsonl), run-facts.reporter.ts (run-facts.json, report titles), run-summary.ts; their pure parts (results.ts, setup-facts.ts, run-facts.ts, report-files.ts) and the stream's schema + reader; report retention (retention.ts, report-tree.ts, run-pruning.ts, prune-command.ts)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ending a saved login's session)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
@@ -58,7 +58,7 @@ src/
         ├── steps/          # product-specific steps
         └── support/        # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
 
-orchestrator/               # the orchestrator (being built): suite-imports.json, the suite modules it may import, + its import-boundary spec; config.example.json; config/ (product-list.ts: the product list loaded as a config error, errors.ts: ConfigError; its config file: schema.ts (zod), parse.ts (messages; keys shown only as names), json-keys.ts (keys JSON would lose), check.ts (against the suite's products and cells), load.ts)
+orchestrator/               # the orchestrator (being built): suite-imports.json, the suite modules it may import, + its import-boundary spec; config.example.json; config/ (product-list.ts: the product list loaded as a config error, errors.ts: ConfigError; its config file: schema.ts (zod), parse.ts (messages; keys shown only as names), json-keys.ts (keys JSON would lose), check.ts (against the suite's products and cells), load.ts, secrets.ts (every secret value, for masking)); runs/ (identity.ts: a run's id, RUN_ID and paths; environment.ts: its allowlisted environment; results.ts, facts.ts: what it left, read back and checked field by field; outcome.ts: its status and reason); events/ (bus.ts: the event bus; run-finished.ts: `run.finished` v1 and its builder); text.ts (cut; safe line and block: masked by shape and value, cleaned)
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)
 playwright*.config.ts       # entry configs (default, per-product, unit)

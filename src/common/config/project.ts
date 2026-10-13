@@ -25,6 +25,12 @@ import {
   routingMetadata,
 } from "./metadata";
 import { cellProjectNames } from "./project-names";
+import {
+  REPORTS_KEEP_ENV,
+  REQUESTED_REF_ENV,
+  RETRIES_ENV,
+  RUN_NAME_ENV,
+} from "./run-env";
 import type { RunDescription } from "../reporting/run-description";
 import { reporters } from "./reporting";
 import { DEFAULT_RETENTION, MAX_REPORTS_KEEP } from "../reporting/retention";
@@ -70,7 +76,7 @@ const isCI = process.env.CI !== undefined && process.env.CI !== "";
  * Deliberately applied to the scenario projects only: the auth and artifact setups are not tests,
  * and a setup that cannot succeed should say so at once rather than three times.
  */
-const RETRIES = intEnv("E2E_RETRIES", 2, 0, 10);
+const RETRIES = intEnv(RETRIES_ENV, 2, 0, 10);
 
 /**
  * How many reports the run's report folder keeps as the run ends (`reporting/run-pruning.ts`):
@@ -78,7 +84,7 @@ const RETRIES = intEnv("E2E_RETRIES", 2, 0, 10);
  * config is built, so a bad value fails the run at its start, naming the variable.
  */
 const REPORTS_KEEP = intEnv(
-  "E2E_REPORTS_KEEP",
+  REPORTS_KEEP_ENV,
   DEFAULT_RETENTION.keep,
   0,
   MAX_REPORTS_KEEP,
@@ -104,8 +110,8 @@ const SETUP_TRACE = {
  * on them. A blank one is absent.
  */
 function displayOnlyFacts(): Pick<RunDescription, "runName" | "requestedRef"> {
-  const runName = env("E2E_RUN_NAME");
-  const requestedRef = env("E2E_REQUESTED_REF");
+  const runName = env(RUN_NAME_ENV);
+  const requestedRef = env(REQUESTED_REF_ENV);
   return {
     ...(runName !== "" ? { runName } : {}),
     ...(requestedRef !== "" ? { requestedRef } : {}),

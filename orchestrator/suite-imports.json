@@ -1,6 +1,10 @@
 [
+  "src/common/config/run-env.ts",
   "src/common/config/run-id.ts",
   "src/common/config/sites.ts",
+  "src/common/reporting/results-reader.ts",
+  "src/common/reporting/results-schema.ts",
   "src/common/reporting/retention.ts",
+  "src/common/text.ts",
   "src/projects/products.ts"
 ]

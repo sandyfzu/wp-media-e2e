@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-import { formatRunId, isUsableRunId, parseRunId } from "./run-id";
+import { formatRunId, isUsableRunId, parseRunId, runReportDir } from "./run-id";
 
 /**
  * The RUN_ID's one formatter and its strict parser: the report pruning dates a run by its folder's
@@ -144,5 +144,16 @@ test.describe("isUsableRunId", () => {
       expect(isUsableRunId(id), JSON.stringify(id)).toBe(false);
     }
     expect(isUsableRunId("x".repeat(255))).toBe(true);
+  });
+});
+
+test.describe("runReportDir", () => {
+  test("names the run's folder under its product and cell, relative or absolute as the root is", () => {
+    expect(runReportDir("reports", "backwpup", "pro@nginx", "r1")).toBe(
+      "reports/backwpup/pro@nginx/r1",
+    );
+    expect(runReportDir("/srv/reports", "wp-rocket", "apache", "r2")).toBe(
+      "/srv/reports/wp-rocket/apache/r2",
+    );
   });
 });

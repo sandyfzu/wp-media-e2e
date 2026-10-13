@@ -6,7 +6,7 @@ import { isNonEmptyString, isObject } from "../guards";
 import { DEFAULT_REPORT_ROOT } from "../reporting/retention";
 import { pinnedCell } from "./cell-pin";
 import { env } from "./env";
-import { formatRunId, isUsableRunId } from "./run-id";
+import { formatRunId, isUsableRunId, runReportDir } from "./run-id";
 
 /**
  * Absolute repo root, derived from this module's own location
@@ -269,7 +269,12 @@ export interface RunDirs {
 export function dirs(product: string, cell: string): RunDirs {
   const cellNs = `${product}/${cell}`;
   return {
-    report: `${env("REPORT_ROOT", DEFAULT_REPORT_ROOT)}/${cellNs}/${RUN_ID}`,
+    report: runReportDir(
+      env("REPORT_ROOT", DEFAULT_REPORT_ROOT),
+      product,
+      cell,
+      RUN_ID,
+    ),
     output: `${env("OUTPUT_ROOT", "test-results")}/${cellNs}`,
     auth: `${env("AUTH_ROOT", ".auth")}/${cellNs}`,
     bdd: `.features-gen/${cellNs}`,

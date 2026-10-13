@@ -123,3 +123,23 @@ export function isUsableRunId(value: string): boolean {
     Buffer.byteLength(value, "utf8") <= MAX_NAME_BYTES
   );
 }
+
+/**
+ * A run's report folder: `<root>/<product>/<cell>/<RUN_ID>`. The suite writes there, and the
+ * orchestrator reads a run's results back from there, so both build it here — the orchestrator
+ * cannot import `run-context.ts`, which loads `.env` and stamps a `RUN_ID` as it is imported.
+ *
+ * @param root - the reports' root, relative to the checkout or absolute (`reports` by default).
+ * @param product - the product's name.
+ * @param cell - the cell.
+ * @param runId - the run's RUN_ID.
+ * @returns the folder, relative or absolute as `root` is.
+ */
+export function runReportDir(
+  root: string,
+  product: string,
+  cell: string,
+  runId: string,
+): string {
+  return `${root}/${product}/${cell}/${runId}`;
+}

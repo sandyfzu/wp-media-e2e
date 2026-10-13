@@ -1,8 +1,9 @@
 # Orchestrator Phase 0.5 — The minimal orchestrator
 
 > **Status:** in implementation, in §7's order. **Done:** step 0, the scaffold (2026-10-12, §7.1; audited 2026-10-13, §7.2); step 0.1,
-> what that audit left open (2026-10-13, §7.3–§7.4; audited the same day, §7.5); step 1, M2 configuration (2026-10-13, §7.6; audited the same day, §7.7).
-> **Next:** step 2, M4's pure parts and M6's builder and bus. Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> what that audit left open (2026-10-13, §7.3–§7.4; audited the same day, §7.5); step 1, M2 configuration (2026-10-13, §7.6; audited the same day, §7.7);
+> step 2, M4's pure parts and M6's builder and bus (2026-10-13, §7.8; audited the same day, §7.9).
+> **Next:** step 3, the Slack and Datator formatters and senders. Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -255,7 +256,7 @@ SIGINT. While `bddgen` runs, its group is killed outright: generation has nothin
   | Field | Content |
   | --- | --- |
   | `v`, `type`, `at` | `1`, `"run.finished"`, ISO time |
-  | `run` | `id`, `runId` (`RUN_ID`), `name`, `trigger` (`"loop"`), `task` (`id`, `name`) |
+  | `run` | `id`, `runId` (`RUN_ID`), `name`, `trigger` (`"loop"`), `task` (`id`, `name`, `grep` — Datator's `test_suite` needs it) |
   | `unit` | `product`, `cell`, `edition` |
   | `plugin` | `requestedRef`, `ref`, `commit` (full), `version` |
   | `sites` | per site of the pool, in pool order: `baseURL`, `wordpress`, `php` |
@@ -414,7 +415,7 @@ Each step ships with its unit specs and passes the four gates (CLAUDE.md).
    a config error; 0.1b an absolute `ARTIFACTS_ROOT` kept where it points; 0.1c the boundary's cheap
    remaining routes closed, the rest stated. **Done 2026-10-13** (§7.4).
 1. M2 configuration — schema, loader, example. **Done 2026-10-13** (§7.6; audited, §7.7).
-2. M4's pure parts — identity, environment, the outcome table; M6's builder and bus.
+2. M4's pure parts — identity, environment, the outcome table; M6's builder and bus. **Done 2026-10-13** (§7.8).
 3. M7 and M8 formatters (pure), then their senders.
 4. M4's launch and end, M5's stop state machine (an injected clock and `kill`).
 5. M3 and M1 — the loop and the command; M9 — lock, counter, retention, logs.
@@ -760,6 +761,126 @@ message.
   text must equal the parsed URL); keys up to 40 name characters are shown, so a short random key
   pasted as a key would be. Linux's limit is from its source, not measured here (no Linux host).
 
+### 7.8 Step 2 — Implemented (2026-10-13, V372–V376)
+
+M4's pure parts and M6 as planned (§4.4, §4.6): nothing here starts a process or touches a site.
+
+- **`runs/identity.ts`** — `runIdOf` (`bpng-12`; a task's id and a number from 1) and `runIdentity`:
+  the `RUN_ID` (`formatRunId(start, id)`, which the pruning dates back to the start, V372), the run's
+  folder `runs/<id>/` with `run.log`, `run.json` and `stop`, and its report folder — all absolute. The
+  counter that hands out the number is step 5's.
+- **`runReportDir`**, added to the suite's `run-id.ts` and now used by `run-context.ts`'s `dirs`: the
+  one place `<root>/<product>/<cell>/<RUN_ID>` is spelled, so the suite and the orchestrator cannot
+  drift. The orchestrator joins it to `reports` (retention's `DEFAULT_REPORT_ROOT`): runs never get
+  `REPORT_ROOT`.
+- **`runs/environment.ts`** — §4.4's allowlist exactly: `PATH`, `HOME`, `LANG`, `TMPDIR` when set and
+  not empty; `E2E_LOAD_DOTENV=false`, `RUN_ID`, `E2E_CELL`, `E2E_INTERNAL_STOP_FILE`; the task's ref,
+  version, requested ref and name, `E2E_RETRIES`, `E2E_REPORTS_KEEP` when configured; the secrets.
+  `variableNames` gives the log header names, never values. A spec checks every name against the
+  suite's own constants.
+- **`runs/results.ts`** reads `results.jsonl` through the suite's `parseResults` (the last
+  `scenario.end`/`setup.end` per id, in first-ended place; a last line without its newline read too);
+  `scenarioCounts` takes `run.end`'s counts, else counts the ended scenarios, the rest as not run.
+  **`runs/facts.ts`** reads only what is reported from `run-facts.json` — edition, requested ref, the
+  `plugin` role's name, version, ref and commit, each site's WordPress and PHP, the failed setups — each
+  field checked with zod, a malformed one read as unknown and never an error.
+- **`runs/outcome.ts`** — §4.4's table, first match wins. Decided here, where the table was silent:
+  - **A drain that skipped nothing** (asked for as the last scenario ended: `run.end` present, not
+    interrupted, `drained` 0) is judged by its results, not `stopped` — it tested everything, and its
+    results reach Datator. An interrupt is always `stopped`.
+  - **Stopped from outside** — `run.end` `interrupted`, or a drained scenario, with no stop from the
+    orchestrator — is `stopped` too: someone signalled the run by hand.
+  - **`error`** also covers: an error outside any test (`run.error`), even beside scenarios that ran —
+    the suite calls that run failed, but its results cannot be trusted as a regression; the run's time
+    limit (`timedout`); a run whose every scenario was skipped (nothing tested); and a Playwright exit
+    its results do not explain (code 0 for a failed run, 1 for a passed one, a signal).
+  - The reason is one line: the failed setup's line from the facts, else the stream's; for `bddgen`,
+    the log's first line naming an error, else its exit; otherwise the exit and the log's last three
+    lines. Credentials masked by shape (the suite's `redactSecrets`) before it is cut to 500 code points.
+- **`events/run-finished.ts`** — `run.finished` v1 and `buildRunFinished`, from the run, its outcome,
+  results and facts. Unknown facts are `null`, never absent, so a subscriber reads every field. Beyond
+  §4.6: **`plugin.name`** (the `Plugin Name:` header — Slack's "BackWPup Pro 9.99.99"); an interrupted
+  scenario counts as **`didNotRun`** (the six counts stay §4.6's); a scenario's error keeps its lines,
+  ANSI stripped, capped at 2,000 code points (the stream's own cap).
+- **`events/bus.ts`** — `createEventBus({ timeoutMs, log })`: `on`, `publish` (returns at once),
+  `settle` (until nothing is in flight, an event published meanwhile included). Each handler gets an
+  `AbortSignal` that aborts at its time limit — for `fetch` — and a throw, a rejection or a timeout is
+  one masked log line under the subscriber's name. Default 30 s.
+- **`text.ts`** — `cut` (by code point), `oneLine` (the suite's `plain`, whitespace collapsed),
+  `safeLine` (masked, then one line, then cut).
+- **Admitted** to `suite-imports.json`: `results-reader.ts` and `results-schema.ts` (the stream's
+  reader and types) and `text.ts` (`plain`, `redactSecrets`) — each pure, the boundary spec passing
+  with them (V375). `run-facts.ts` is not: it imports the reporter's whole summary; `facts.ts` reads
+  the file itself, and a spec checks the file name against the suite's.
+- **For step 3:** a Slack webhook URL is a credential with no shape `redactSecrets` knows. A sender
+  must never put its URL or key in an error; the bus masks them by value when given `secretValues`
+  (§7.9).
+- **For step 4:** the stop machine reports how far it went (`StopTaken`). A stop while `bddgen` runs
+  kills its group, but nothing was tested yet: report it as `drained`, so the run reads `stopped`, not
+  `killed`.
+
+### 7.9 Audit of step 2 (2026-10-13, V377–V382)
+
+Two reviewers, one on security and one on correctness, each on its own copy; the correctness reviewer
+drove the suite's real reporters through 13 run shapes (pass, fail, flaky, failed setup, all skipped,
+drained, `afterAll` failure, a real SIGINT, `--max-failures`, a filter matching nothing,
+`globalTimeout`) and checked the code against all 24 real streams in `reports/` (V377). Every finding
+was reproduced, then fixed, and every fix proved by a mutation (V381).
+
+- **The bus could crash the orchestrator (medium; both reviewers, and our own review).** A `log` that
+  throws (a full disk), or a handler throwing something `String()` cannot print (`Object.create(null)`,
+  a `message` getter that throws, a `message` that is not text), made the delivery reject: `settle`
+  rejected and the voided `finally` became an unhandled rejection — exit 1 (V378). Now a failing log
+  drops its line, `describeFailure` is total, and nothing in the bus can reject.
+- **Masking before cleaning let a credential through (medium).** `safeLine` masked, then cleaned: a
+  token split by a terminal code, a zero-width space, a bidi override or a soft hyphen was missed, then
+  joined whole by the cleaning (`ghp_\u200b…` → `ghp_…`). Masking only after cleaning fails the other
+  way: a URL password holding a control character becomes two words. Now masked on both sides; the log
+  tail's lines too, which were cleaned before any masking.
+- **Untrusted fields reached the outcome and the event (medium).** The suite's reader trusts a known
+  line's fields: `run.end` with `scenarios: null` crashed `runOutcome`; an `error.message` that is not
+  text crashed `buildRunFinished`; a 200,000-deep `path` built an event `JSON.stringify` cannot write; an
+  unknown status corrupted the counts (`constructor: "function Object() …1"`). Now `results.ts` checks
+  every field it uses with zod: a line of the wrong shape is dropped, a count of the wrong type reads as
+  0, a `path` is text and at most 8 deep.
+- **Secrets the orchestrator holds were masked only by shape (low).** A storage password, a legacy
+  40-hex token, the webhook's path have no shape. `secretValues(config)` (`config/secrets.ts`) lists
+  them — the runs' secrets, the webhook whole and its path, Datator's key — and the reason, the event's
+  text and the bus's lines mask them by value, the longest first: a value inside a longer one, masked
+  first, left the longer one's rest in clear — found by the audit's own test.
+- **The event carried raw text (low).** Names, versions, URLs and errors are now made safe: masked,
+  terminal codes removed, control and invisible characters dropped; a name or fact one line, an error a
+  block whose line feeds are kept (CR, U+0085, U+2028 become line feeds). Slack must still escape `&`,
+  `<`, `>` (step 3).
+- **`publish` ran handlers inside itself (low).** An async wrapper runs up to its first `await`, so a
+  handler's synchronous part ran in `publish`, and a handler publishing again re-entered it (1,235 deep,
+  then a stack overflow). A handler now starts a turn later: 2,000 synchronous re-publishes run at depth
+  1. The spec claiming "returns before any handler has run" passed only because its flag was set after
+  an `await` (fixed). Synchronous work still cannot be interrupted by the time limit; the doc says so.
+- **Two reasons could never appear (low).** The stream writes every `onError`: a filter matching nothing
+  writes "No tests found" (and Playwright then drops the setups too), and `globalTimeout` writes "Timed
+  out waiting …" before `run.end` `timedout` (Playwright 1.63 `runner/index.js:6182–6186`). Both read
+  as "an error outside any test". "No tests found" is now skipped by the suite's own rule (a spec checks
+  the copy against `isNoTestsFound`), and the time limit is checked first.
+- **Smaller (low):** `cut` returned more than `max` for `max < 1` — now a `RangeError`; four variable
+  names were literals in `project.ts` the orchestrator copied — now `run-env.ts`, used by both, admitted
+  (V380); a `run.end` `failed` with no failed scenario and no error read `passed` — now `error` (not seen
+  in practice: Playwright fails a run only for a failed test or an `onError`, V377); `facts.ts` read a
+  `requestedRef` nothing used — removed.
+- **Added to `run.finished` v1 before anything consumes it:** `run.task.grep`, which Datator's
+  `test_suite` needs (D1).
+- **Wrong in this plan:** §7.8 said `publish` "returns at once" (its handlers ran inside it) and
+  that reasons are masked by shape only (now by value too); V373 said every name is checked against the
+  suite's constants (four were not, until `run-env.ts`).
+- **Checked sound:** the allowlist (an inherited `NODE_OPTIONS`, `GITHUB_TOKEN`, `RUN_ID`,
+  `E2E_LOAD_DOTENV=true` dropped); paths (cell names cannot hold `..` or `/`); `facts.ts` on 200,000-deep
+  nesting and wrong types; the bus's timers; the admitted modules; the report folder equal to
+  `run-context.ts`'s in a child process; every outcome row against real runs. `__proto__` in `secrets`
+  is refused by step 1's `lostKeys` before the schema runs (a reviewer tested the schema alone).
+- **For step 4:** read `results.jsonl` with a size cap — `readRunResults` takes the whole text (a 50 MB
+  stream: 169 ms, 423 MB resident). Pass `secretValues(config)` to `runOutcome`, `buildRunFinished` and
+  the bus.
+
 ## 8. What later phases change, and keep
 
 | Here | Later | Kept |
@@ -860,3 +981,14 @@ message.
 | V369 | `new Headers({ "X-API-Key": "keyĀ" })` throws "Cannot convert argument to a ByteString", without the value; `TextDecoder("utf-8", { fatal: true })` refuses a stray `0xE9`, a truncated sequence and an encoded surrogate, and drops a leading BOM; `/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u` matches a lone surrogate, U+0085, U+009B, U+2028, U+202E and U+200B but not an emoji pair | ✅ 2026-10-13 | Reviewer A; `node -e` probes; `load.spec.ts`, `schema.spec.ts` |
 | V370 | 48 mutations of the audit's fixes — the key scanner (index, repeats, `__proto__`, commas, escapes, paths), `describeKey` (token prefixes, length), the rebuilt message, path masking, each Unicode class in text and secrets, the secret cap, `-`, every URL condition (exact form, user, password, port, query, fragment, Slack's hook path), Datator's key, token strictness, whole numbers, `sshHost`'s user part, the threshold cap, the non-blocking open, the read limit, the size test, fatal decoding, lost keys, shell quoting, the mode mask, the pool messages — and reviewer B's 7 survivors of the first specs: all fail a test but one equivalent (Datator's `/` from the path or the text). Four survived first; three tests were added for them, and the fourth turned out to be a malformed mutant (perl expanded `@-`) that still showed a missing case | ✅ 2026-10-13 | The mutation harness in a reviewer's copy, `orchestrator/config`, baseline green before and after |
 | V371 | The four gates pass after the audit; a full unit run: 2167 passed, 8 skipped by their environment guards — the orchestrator's 116 among them, the import-boundary spec importing `json-keys.ts` in a child Node | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V372 | A run's `RUN_ID` (`2026-10-13T10-15-31-042Z-bpng-12`) parses back to its start and its id; a report folder from `runReportDir` matches `run-context.ts`'s, which now calls it | ✅ 2026-10-13 | `identity.spec.ts`, `run-id.spec.ts`; the suite's specs unchanged and passing |
+| V373 | The run environment holds exactly §4.4's names, nothing else the orchestrator holds (`RUN_ID`, `CI`, an inherited `GITHUB_TOKEN` or `BWP_*`, `PLAYWRIGHT_BDD_CONFIGS` tried); the suite's spellings match its own constants | ✅ 2026-10-13 | `environment.spec.ts` |
+| V374 | 52 mutations of step 2 — every outcome row, the drain-without-effect rule, the setup, error-line and log-tail reasons, the stream's last-wins and last-line rules, the counts' fallbacks, the facts' role, cell, version and leniency, the event's fallbacks and caps, the bus's abort, timer, settle, await and bounds, the cut and the report path, the masking (dropped, applied after the cut, left out of a reason or of the bus) — each fails a test. Three survived first (a second `run.begin`; masking after the cut, whose test checked only the password's whole word; a mutation prettier had reflowed): tests now kill the first two, the third was re-run. Equivalent, kept: `bddgen`'s `signal === null` (Node never gives a code with a signal) | ✅ 2026-10-13 | A mutation harness in a copy of the worktree, the step's specs, baseline green before and after |
+| V375 | `results-reader.ts`, `results-schema.ts` and `text.ts` admitted: imported in a child Node they change nothing in the process, and nothing they can load reaches `load-env.ts` or `run-context.ts` | ✅ 2026-10-13 | `import-boundary.spec.ts` |
+| V376 | The four gates pass; a full unit run: 2245 passed, 8 skipped by their environment guards — the orchestrator's 193 among them | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format:check`, `test:unit` |
+| V377 | The suite's real reporters, driven through 13 run shapes, and all 24 real streams in `reports/`: the outcome matches the suite's own verdict where they share a meaning (flaky → `flaky`, a SIGKILL without `run.end` → `error`, by design); Playwright 1.63 exits 130 interrupted, 0 passed, 1 otherwise; a `failed` run.end without a failed test always came with a `run.error` | ✅ 2026-10-13 | The correctness reviewer's harness in its copy, `judge.ts` over the real streams |
+| V378 | Before the fix: a `log` that throws, `throw Object.create(null)`, or a `message` that is not text made `settle` reject and Node exit 1 on the unhandled rejection; after it, `settle` resolves and no rejection is unhandled | ✅ 2026-10-13 | Both reviewers' scripts; `bus.spec.ts` |
+| V379 | Before the fix: `safeLine` returned `ghp_…` whole for a token split by `\u200b`, `\u202e`, `\u00ad` or a terminal code, and `run.end` `scenarios: null` threw in `runOutcome`; after it, each is masked or read as 0 | ✅ 2026-10-13 | `text.spec.ts`, `results.spec.ts`, `outcome.spec.ts` |
+| V380 | `run-env.ts` admitted: imported in a child Node it changes nothing; `project.ts` reads the four names through it | ✅ 2026-10-13 | `import-boundary.spec.ts` |
+| V381 | 37 mutations of the audit's fixes — masking before and after cleaning, by value and in order, `cut`'s bound, `safeBlock`'s breaks, controls and format characters, `secretValues`' webhook path, key and duplicates, every zod rule `results.ts` adds, "No tests found", the failed-status rule, the reason's and log lines' masking, the bus's log, turn, totality, secrets and names, the event's grep, error, names, facts and URL, a misspelt variable — each fails a test. Two survived first (`safeBlock` without its first mask; an unknown status, whose test line lacked a feature anyway): tests now kill both; one prettier had reflowed was re-run | ✅ 2026-10-13 | The mutation harness in a copy of the worktree, `--project=orchestrator`, baseline green before and after |
+| V382 | The four gates pass after the audit; a full unit run: 2275 passed, 8 skipped by their environment guards | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format:check`, `test:unit` |
