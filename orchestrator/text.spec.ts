@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 
-import { cut, oneLine, safeBlock, safeLine } from "./text";
+import { cut, oneLine, safeBlock, safeLine, secretForms } from "./text";
 
 /** A GitHub token by its shape, and its 36 characters after the prefix. */
 const BODY = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
@@ -131,5 +131,35 @@ test.describe("safeBlock", () => {
       ]),
     ).toBe("Expected ***\nGot ***");
     expect(Array.from(safeBlock("y".repeat(3000), 2000))).toHaveLength(2000);
+  });
+});
+
+test.describe("secretForms", () => {
+  test("gives a secret as written, URL-encoded, and JSON-escaped as JavaScript and PHP write it", () => {
+    expect(secretForms('a"b\\c/d+e')).toEqual([
+      'a"b\\c/d+e',
+      "a%22b%5Cc%2Fd%2Be",
+      'a\\"b\\\\c/d+e',
+      'a\\"b\\\\c\\/d+e',
+    ]);
+    expect(secretForms("plainvalue")).toEqual(["plainvalue"]);
+  });
+
+  test("survives a lone surrogate, which has no URL form", () => {
+    expect(secretForms("ab\ud800cdefgh")).toEqual([
+      "ab\ud800cdefgh",
+      "ab\\ud800cdefgh",
+    ]);
+  });
+
+  test("lets safeLine mask each form", () => {
+    const key = "key/with+plus";
+    expect(
+      safeLine(
+        `${encodeURIComponent(key)} ${JSON.stringify(key).replaceAll("/", "\\/")}`,
+        100,
+        [key],
+      ),
+    ).toBe('*** "***"');
   });
 });

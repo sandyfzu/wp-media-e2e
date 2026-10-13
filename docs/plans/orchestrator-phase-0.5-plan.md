@@ -2,8 +2,9 @@
 
 > **Status:** in implementation, in §7's order. **Done:** step 0, the scaffold (2026-10-12, §7.1; audited 2026-10-13, §7.2); step 0.1,
 > what that audit left open (2026-10-13, §7.3–§7.4; audited the same day, §7.5); step 1, M2 configuration (2026-10-13, §7.6; audited the same day, §7.7);
-> step 2, M4's pure parts and M6's builder and bus (2026-10-13, §7.8; audited the same day, §7.9).
-> **Next:** step 3, the Slack and Datator formatters and senders. Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> step 2, M4's pure parts and M6's builder and bus (2026-10-13, §7.8; audited the same day, §7.9); step 3, the
+> Slack and Datator formatters and senders (2026-10-13, §7.10; audited the same day, §7.11).
+> **Next:** step 4, M4's launch and end and M5's stop machine. Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -416,7 +417,7 @@ Each step ships with its unit specs and passes the four gates (CLAUDE.md).
    remaining routes closed, the rest stated. **Done 2026-10-13** (§7.4).
 1. M2 configuration — schema, loader, example. **Done 2026-10-13** (§7.6; audited, §7.7).
 2. M4's pure parts — identity, environment, the outcome table; M6's builder and bus. **Done 2026-10-13** (§7.8).
-3. M7 and M8 formatters (pure), then their senders.
+3. M7 and M8 formatters (pure), then their senders. **Done 2026-10-13** (§7.10; audited, §7.11).
 4. M4's launch and end, M5's stop state machine (an injected clock and `kill`).
 5. M3 and M1 — the loop and the command; M9 — lock, counter, retention, logs.
 6. Docs: a new `docs/guides/orchestrator.md` (operating it: §6, the config, stopping), `CLAUDE.md`
@@ -881,6 +882,83 @@ was reproduced, then fixed, and every fix proved by a mutation (V381).
   stream: 169 ms, 423 MB resident). Pass `secretValues(config)` to `runOutcome`, `buildRunFinished` and
   the bus.
 
+### 7.10 Step 3 — Implemented (2026-10-13, V383–V386)
+
+M7 and M8 as planned (§4.7, §4.8), in `orchestrator/notify/`: pure formatters, thin senders. Nothing is
+subscribed to the bus yet — that is step 5's wiring.
+
+- **`post.ts`** — `postJson`, the one HTTP call: a JSON `POST` with `fetch`, 15 s by default and the
+  bus's signal too (`AbortSignal.any`), answering a `Delivery` (`ok` and the status, or the status and
+  a `detail`) and **never rejecting**. A **redirect is not followed** (`redirect: "manual"`): `fetch`
+  would follow Datator's `301` with a `GET` and report the page it landed on (V384). At most 8 KiB of
+  an answer is read, the rest cancelled; `detail` is its first 500 characters, one masked line. With
+  no answer, `detail` is in our own words — the time limit, `cancelled`, or the network error's code
+  (`ECONNREFUSED`) — never `fetch`'s message, so the URL cannot reach a log.
+- **`slack.ts`** — `slackMessage(event, { instance, sshHost })`, §4.7's text. Decided here, where §4.7
+  was silent: the headline names `plugin.name`, else the product; a count shows only when not 0
+  (`skipped`, `did not run` too); `Reason:` for every status that has one, so a stopped run's message
+  says why beside what it tested; `COULD NOT TEST` drops the counts and lists and adds `Took:` and
+  `Log:`; the 20 listed scenarios are failed first, then flaky, each list ending "…and N more" when
+  cut; a scenario's error is its first non-blank line. Every piece is escaped and bounded **after**
+  escaping (`escapeCut`, never inside `&amp;`), so the worst event is under 20,000 characters (§7.11). A path
+  becomes `scp [-r] <host>:<path> .`, single-quoted when a shell would split it. `sendSlack` succeeds
+  only on `200` with body `ok`, and masks the webhook — whole and its path — in Slack's answer.
+- **`datator.ts`** — `datatorPayload(event)`, §4.8's mapping, `undefined` for `error`, `stopped`,
+  `killed`. Guards for what Datator's serializer refuses — each refusal measured against its own code
+  (V385), and each one loses the whole run: a name blank after trimming is `(unnamed)`; a lone
+  surrogate becomes U+FFFD (`toWellFormed`); a commit that is not 40 or 64 hex digits is `null`;
+  `website_url` is `null` unless Django's `URLValidator` surely accepts it — `http://wp-apache`, a
+  Docker cell's host, is refused. An interrupted scenario is `skipped`; `test_suite` cut to 255.
+  `sendDatator` succeeds only on `201`, and masks the key in the answer.
+- **For step 5:** subscribe both with `secretValues(config)`, hand each the bus's signal, and turn a
+  failed `Delivery` into the terminal's `slack ✗ …` line; keep the Datator payload in `run.json`.
+
+### 7.11 Audit of step 3 (2026-10-13, V387–V392)
+
+Two reviewers, one on security and one on correctness, each on its own copy, over real local servers,
+Datator's own app and OpenSSH's `scp` against a fake `ssh`. Every finding was reproduced, then fixed,
+and every fix proved by a mutation (V391).
+
+- **A secret the read cap cut through showed its start (medium).** The 8 KiB cap came before masking:
+  a key straddling it was neither whole (value) nor recognisable (shape), and padding the cleaning
+  collapses (spaces, zero-width characters) put its first 20 characters at the head of `detail`
+  (V387). Now a cut answer loses its last 256 code points — or the longest secret's length — after
+  cleaning and masking, before the 500-character cut.
+- **Datator's URL check was weaker than §7.10 said (medium-low).** `acceptedUrl` judged the host
+  `new URL` had rewritten but returned the text as written: `http://010.1.1.1/`, `http://127.1/`,
+  `ex%61mple.com`, a space or tab in the path, `http:/a.com` passed it, and Datator refused the whole
+  record (V388). Now a URL is kept only when the parser writes it back unchanged (a trailing `/`
+  aside): of 2,790 URLs, none it keeps is refused by Django (V389).
+- **Secrets echoed in another form were not masked (low).** A service may quote a value URL-encoded
+  or inside a JSON string (`\"`, and PHP's `\/`). `secretForms` (`text.ts`) gives each form, and every
+  mask — the event's, the bus's, the senders' — masks them all.
+- **What masking cannot cover is withheld (low).** A value under 8 characters is never masked by value
+  (it would mask words), and the config does not bound Datator's key, whose length Datator's docs do
+  not state. An answer still quoting any secret, in any form, is now withheld: `HTTP 403 (its answer is
+  withheld: it quotes a secret)`.
+- **The webhook's token alone was not masked (low).** Only the whole URL and its path were; the last
+  segment is the token. `webhookSecrets` (`config/secrets.ts`) gives all three to `secretValues` and
+  `sendSlack`.
+- **`postJson` could reject (low).** `AbortSignal.timeout` refused a time limit out of range and
+  `AbortSignal.any` a non-signal, both outside its `try`. Now an invalid time limit is a failed
+  delivery, and the signals are built inside the `try`.
+- **Slack (low).** The site lines were not bounded (100 sites: 60,723 characters): at most 10 now,
+  then "…and N more sites", the worst message under 20,000. A lone surrogate reached Slack's JSON:
+  `escapeSlack` makes it U+FFFD. Links are not previewed (`unfurl_links`, `unfurl_media` false — the
+  fields Slack's own webhook client sends). `Report:` and `Log:` are code, so an `_` in a path is not
+  italics, unless the path holds a backtick. A commit with no ref read `· @ abc`: now `commit abc1234`;
+  a scenario with no name at all is `(unnamed)`. `escapeCut` refuses a bound under 1, as `cut` does.
+- **Stated, not changed:** the `scp` quoting serves the local shell; the far end still reads the path
+  — a `*`, `?` or `[` is a pattern in scp's SFTP mode, and legacy `-O` hands it to a remote shell
+  unquoted (V390). The paths are the checkout's and the state directory's. Slack's formatting (`*`,
+  `_`, a bare link, `:emoji:`) is left to it: a run can style its text, not ping or hide a link.
+  Node's fetch honours proxy variables only with `NODE_USE_ENV_PROXY`, the operator's choice.
+- **Checked sound:** redirects not followed; errors carry only a code; a 500 MB gzip answer (509 KB on
+  the wire) read in 6 ms, 13 MB resident; endless and trickled bodies bounded; escaping never split;
+  run text masked before escaping, so `&amp;` cannot hide a secret; `formatDuration`'s rounding; the
+  list cap's room never negative; Datator's trim and lengths (code points) matching Python's; no NUL
+  reaches it; the tests 1,000 out of 1,000 at `--repeat-each 20`.
+
 ## 8. What later phases change, and keep
 
 | Here | Later | Kept |
@@ -992,3 +1070,13 @@ was reproduced, then fixed, and every fix proved by a mutation (V381).
 | V380 | `run-env.ts` admitted: imported in a child Node it changes nothing; `project.ts` reads the four names through it | ✅ 2026-10-13 | `import-boundary.spec.ts` |
 | V381 | 37 mutations of the audit's fixes — masking before and after cleaning, by value and in order, `cut`'s bound, `safeBlock`'s breaks, controls and format characters, `secretValues`' webhook path, key and duplicates, every zod rule `results.ts` adds, "No tests found", the failed-status rule, the reason's and log lines' masking, the bus's log, turn, totality, secrets and names, the event's grep, error, names, facts and URL, a misspelt variable — each fails a test. Two survived first (`safeBlock` without its first mask; an unknown status, whose test line lacked a feature anyway): tests now kill both; one prettier had reflowed was re-run | ✅ 2026-10-13 | The mutation harness in a copy of the worktree, `--project=orchestrator`, baseline green before and after |
 | V382 | The four gates pass after the audit; a full unit run: 2275 passed, 8 skipped by their environment guards | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format:check`, `test:unit` |
+| V383 | `orchestrator/notify/`: 50 unit specs, over a real local HTTP server and the real `fetch` — success and refusal, masking, the 500-character cut, an endless body read only to its cap, a time limit with no answer and with a stalled body, the caller's abort, a refused connection named by its code, a hostile thrown value, an unserialisable body; every headline, escaping, caps, the worst-case size; every Datator field | ✅ 2026-10-13 | `post.spec.ts`, `slack.spec.ts`, `datator.spec.ts` |
+| V384 | Node 24.21.0's `fetch` with `redirect: "manual"` returns the `301` itself, one request made; Django's `CommonMiddleware` answers `301` to Datator's URL without its `/` | ✅ 2026-10-13 | `post.spec.ts` (a sink), and the V385 harness: `sendDatator` to `/e2e_tests/results` → `{ ok: false, status: 301 }` |
+| V385 | Datator's own app (`0cff7bc`, unmodified; Django 4.2.1, DRF 3.14.0, Python 3.14.8, served over HTTP) answers `201` to 12 `datatorPayload` payloads — typical, passed, flaky with `grep`, release (`null` commit, no site), SHA-256 commit, a Docker host (dropped), `localhost`, 500-code-point emoji names with a 4,000-character error, blank names and a lone surrogate, a 500-character `grep`, 500 failed scenarios (2 MB), none — and `403` to a wrong key. Without the guards it answers `400`: `http://wp-apache` ("Enter a valid URL"), a lone surrogate ("Surrogate characters are not allowed"), a blank `feature_name`, 501 characters, `845.7`; 500 emoji pass (it counts code points), and a blank `error_message` passes | ✅ 2026-10-13 | Datator's `e2e_tests` app behind `CommonMiddleware`, SQLite in memory, `wsgiref`; posted by `sendDatator` |
+| V386 | 20 mutations of `notify/` — redirect followed, the read cap, the cancellation, the masked detail, `&` escaping, the escaped bound, the webhook masked whole and by path, the shared list cap, Slack's `ok`, shell quoting, posted statuses, flaky as successful, whole seconds, `toWellFormed`, `(unnamed)`, the URL check, `201` only, the key masked, the error cap — each fails a test; one (the webhook masked whole) survived first, a test now kills it | ✅ 2026-10-13 | The mutation harness in a copy of the worktree |
+| V387 | A 40-character key after 8,172 spaces (or 2,724 zero-width spaces) of a refused answer: `detail` was the key's first 20 characters; now no 4 of its characters in a row, nor a `ghp_` token's prefix | ✅ 2026-10-13 | Security reviewer's probe; `post.spec.ts` |
+| V388 | Datator's app answers `400` "Enter a valid URL" to `http://010.1.1.1/`, `https://a.com/my site`, `http:/a.com`, `http://127.1/`, all of which the first `acceptedUrl` kept | ✅ 2026-10-13 | Correctness reviewer, Datator's app over HTTP |
+| V389 | 2,790 URLs (6 schemes × 31 hosts × 15 endings): the fixed `acceptedUrl` keeps 240, and DRF 3.14.0's `URLField(max_length=255)` on Django 4.2.1 accepts every one; the 12 payloads of V385 still get `201` | ✅ 2026-10-13 | `acceptedUrl` in tsx, then DRF's field in the V385 venv |
+| V390 | OpenSSH 10.3's `scp`, through `-S` to a fake `ssh`: the default sends the `sftp` subsystem and the path as given (globbed there); `-O` sends `scp -r -f /srv/my e2e/r` unquoted. Locally, `sh -c` hands a quoted path holding `'`, `$(…)`, a backtick or `;` to `scp` as one argument, nothing run | ✅ 2026-10-13 | Both reviewers |
+| V391 | 25 mutations of the audit's fixes — the cut tail, its length, the cut flag, withholding, the time-limit check, URL and JSON forms (both), the forms used, the webhook's token, `unfurl_*`, both `toWellFormed`, `escapeCut`'s bound, the site cap and its line, `commit`, `(unnamed)`, code spans (both ways), the URL round trip (both) — and step 3's first 20 again: each fails a test but one, a second `toWellFormed` in `escapeCut` that `escapeSlack` made redundant, now removed | ✅ 2026-10-13 | The mutation harness in a copy of the worktree, `--project=orchestrator` |
+| V392 | The four gates pass after the audit; a full unit run: 2340 passed, 8 skipped by their environment guards | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format`, `test:unit` |

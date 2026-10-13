@@ -6,7 +6,7 @@ import { secretValues } from "./secrets";
 const WEBHOOK = "https://hooks.slack.com/services/T000/B000/XXXXXXXXXXXXXXXX";
 
 test.describe("secretValues", () => {
-  test("lists the runs' secrets, the webhook whole and its path alone, and Datator's key", () => {
+  test("lists the runs' secrets, the webhook whole, its path and its token alone, and Datator's key", () => {
     expect(
       secretValues({
         secrets: { GITHUB_TOKEN: "ghp_x", BWP_FTP_PASSWORD: " pass word " },
@@ -20,6 +20,7 @@ test.describe("secretValues", () => {
       " pass word ",
       WEBHOOK,
       "/services/T000/B000/XXXXXXXXXXXXXXXX",
+      "XXXXXXXXXXXXXXXX",
       "k3y-value",
     ]);
   });

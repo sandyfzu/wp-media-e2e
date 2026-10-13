@@ -47,16 +47,37 @@ const FORMAT = /\p{Cf}/gu;
 /**
  * `text` with every credential masked: by its shape ({@link redactSecrets}), and by the value of every
  * secret the orchestrator holds ({@link maskValues}; values under 8 characters are not masked, as
- * they would mask ordinary words). The longest value first: a value inside a longer one, masked
- * first, would leave the longer one's rest in clear.
+ * they would mask ordinary words) — each also as a URL or a JSON string writes it ({@link secretForms}),
+ * since a service's answer may echo it so. The longest value first: a value inside a longer one,
+ * masked first, would leave the longer one's rest in clear.
  *
  * @param text - the text.
  * @param secrets - the secret values to mask wherever they appear, in any order.
  * @returns the masked text.
  */
 function mask(text: string, secrets: readonly string[]): string {
-  const longestFirst = [...secrets].sort((a, b) => b.length - a.length);
+  const longestFirst = [...new Set(secrets.flatMap(secretForms))].sort(
+    (a, b) => b.length - a.length,
+  );
   return maskValues(redactSecrets(text), longestFirst);
+}
+
+/**
+ * A secret as it may be written back: as it is, URL-encoded (`%2F`), and inside a JSON string —
+ * escaped as JavaScript does, and with `\/` as PHP does.
+ *
+ * @param secret - the secret.
+ * @returns its forms, each once.
+ */
+export function secretForms(secret: string): string[] {
+  const json = JSON.stringify(secret).slice(1, -1);
+  let url = secret;
+  try {
+    url = encodeURIComponent(secret);
+  } catch {
+    // A lone surrogate cannot be URL-encoded; it has no such form.
+  }
+  return [...new Set([secret, url, json, json.replaceAll("/", "\\/")])];
 }
 
 /**
