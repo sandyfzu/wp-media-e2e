@@ -27,14 +27,32 @@ export const GROUP_POLL_MS = 250;
  * @throws what `kill` throws besides `ESRCH` and `EPERM`.
  */
 export function groupAlive(pgid: number, kill: KillFn): boolean {
+  return probeGroup(pgid, kill) !== "empty";
+}
+
+/**
+ * What `kill(-pgid, 0)` says of a group: `members` when it succeeds — a member at least is this
+ * user's to signal —, `unsignallable` on `EPERM` — members, none of them this user's to signal —,
+ * `empty` on `ESRCH`.
+ *
+ * @param pgid - the group's id: a whole number above 1.
+ * @param kill - `process.kill`, or a stand-in.
+ * @returns what it says.
+ * @throws {@link RangeError} for an id that is not a whole number above 1.
+ * @throws what `kill` throws besides `ESRCH` and `EPERM`.
+ */
+export function probeGroup(
+  pgid: number,
+  kill: KillFn,
+): "members" | "unsignallable" | "empty" {
   assertGroupId(pgid);
   try {
     kill(-pgid, 0);
-    return true;
+    return "members";
   } catch (error) {
     const code = errorCode(error);
-    if (code === "ESRCH") return false;
-    if (code === "EPERM") return true;
+    if (code === "ESRCH") return "empty";
+    if (code === "EPERM") return "unsignallable";
     throw error;
   }
 }

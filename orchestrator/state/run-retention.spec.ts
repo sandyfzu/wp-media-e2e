@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -19,9 +20,18 @@ import {
   LEFTOVER_GRACE_MS,
 } from "../../src/common/reporting/retention";
 import { formatRunId } from "../../src/common/config/run-id";
-import { endedRecord, runningRecord, type RunRecord } from "../runs/record";
+import { escapeRegExp } from "../../src/common/text";
 import {
   MAX_RECORD_BYTES,
+  endedRecord,
+  lostRecord,
+  parseRunRecord,
+  runningRecord,
+  type RecordFileRead,
+  type RunRecord,
+} from "../runs/record";
+import { checkOrphans } from "./orphans";
+import {
   describeRunRetention,
   pruneTaskRuns,
   recordDating,
@@ -65,14 +75,22 @@ function record(
 ): RunRecord {
   const startedAt = new Date(NOW - ageMs);
   const identity = { id, runId: formatRunId(startedAt, id), startedAt };
-  return state === "running"
-    ? runningRecord(identity, taskId, { name: "playwright", pgid: 4242 })
-    : endedRecord(
-        identity,
-        taskId,
-        { bddgen: { code: 0, signal: null }, stop: { level: "none" } },
-        finishedEvent(),
-      );
+  const running = runningRecord(identity, taskId, {
+    name: "playwright",
+    pgid: 4242,
+  });
+  if (state === "running") return running;
+  if (state === "lost") {
+    const read = parseRunRecord(JSON.stringify(running), id);
+    if (read.kind !== "running") throw new Error("unreadable running record");
+    return lostRecord(read.record, "process group ended", new Date(NOW));
+  }
+  return endedRecord(
+    identity,
+    taskId,
+    { bddgen: { code: 0, signal: null }, stop: { level: "none" } },
+    finishedEvent(),
+  );
 }
 
 /**
@@ -164,52 +182,64 @@ test.describe("runNumberOf", () => {
 
 test.describe("recordDating", () => {
   const name = `${TASK}-3`;
-  test("dates a folder by its own record, complete once it ended", () => {
+  /** A record's text, sorted as the folder `name`'s. */
+  const sorted = (text: string): RecordFileRead => parseRunRecord(text, name);
+
+  test("dates a folder by its own record, complete once it ended, never once lost", () => {
     const at = NOW - HOUR_MS;
     expect(
-      recordDating(
-        { kind: "text", text: JSON.stringify(record(name, HOUR_MS, "ended")) },
-        name,
-        TASK,
-      ),
+      recordDating(sorted(JSON.stringify(record(name, HOUR_MS, "ended")))),
     ).toEqual({ time: at, complete: true, record: "ended" });
     expect(
-      recordDating(
-        {
-          kind: "text",
-          text: JSON.stringify(record(name, HOUR_MS, "running")),
-        },
-        name,
-        TASK,
-      ),
+      recordDating(sorted(JSON.stringify(record(name, HOUR_MS, "running")))),
     ).toEqual({ time: at, complete: false, record: "running" });
+    expect(
+      recordDating(sorted(JSON.stringify(record(name, HOUR_MS, "lost")))),
+    ).toEqual({ time: at, complete: false, record: "lost" });
   });
 
-  test("leaves undated what no record of this folder and task dates", () => {
+  test("leaves undated what no record of this folder and task dates, and says why", () => {
     const ended = record(name, HOUR_MS, "ended");
-    const cases = [
-      { kind: "missing" },
-      { kind: "tooLarge", bytes: MAX_RECORD_BYTES + 1 },
-      { kind: "unreadable", code: "ELOOP" },
-      { kind: "text", text: "{not json" },
-      { kind: "text", text: JSON.stringify(record(`${TASK}-4`, 0, "ended")) },
-      {
-        kind: "text",
-        text: JSON.stringify(record(name, 0, "ended", OTHER)),
-      },
+    const running = record(name, HOUR_MS, "running");
+    const cases: [RecordFileRead, string][] = [
+      [{ kind: "missing" }, "no run.json"],
+      [
+        { kind: "tooLarge", bytes: MAX_RECORD_BYTES + 1 },
+        "run.json is 1048577 bytes, over the cap",
+      ],
+      [{ kind: "unreadable", code: "ELOOP" }, "run.json is unreadable (ELOOP)"],
+      [sorted("{not json"), "run.json is not JSON"],
+      [
+        sorted(JSON.stringify(record(`${TASK}-4`, 0, "ended"))),
+        "run.json is another run's record",
+      ],
+      [
+        sorted(JSON.stringify(record(name, 0, "ended", OTHER))),
+        "run.json is not a run record this orchestrator reads",
+      ],
       // Not as the orchestrator writes it: no zone, so `Date.parse` would read it as local time.
-      {
-        kind: "text",
-        text: JSON.stringify({ ...ended, startedAt: "2026-10-13T11:00:00" }),
-      },
-    ] as const;
-    for (const read of cases) {
-      const dating = recordDating(read, name, TASK);
-      expect(dating.time, JSON.stringify(read)).toBeNaN();
-      expect(dating.complete).toBe(false);
-      expect(dating.record).toBe("unread");
-      expect(dating.undated).toEqual(expect.any(String));
-    }
+      [
+        sorted(JSON.stringify({ ...ended, startedAt: "2026-10-13T11:00:00" })),
+        "run.json is not a run record this orchestrator reads",
+      ],
+      // A running record no orphan check reads (a group id of 1) is never protected as running.
+      [
+        sorted(
+          JSON.stringify({
+            ...running,
+            process: { name: "playwright", pgid: 1 },
+          }),
+        ),
+        "run.json is not a run record this orchestrator reads",
+      ],
+    ];
+    for (const [read, why] of cases)
+      expect(recordDating(read), JSON.stringify(read)).toEqual({
+        time: Number.NaN,
+        complete: false,
+        record: "unread",
+        undated: why,
+      });
   });
 });
 
@@ -443,6 +473,218 @@ test.describe("pruneTaskRuns", () => {
       expect(report.removed).toEqual([]);
     }
     expect(left()).toEqual([`${TASK}-1`]);
+  });
+
+  test("prunes lost runs by age and cap, dated by their start, never kept as complete", async () => {
+    for (let n = 1; n <= 30; n++) dated(n, (31 - n) * HOUR_MS, "lost");
+    const report = await prune({ keep: 5 });
+    expect(report.failed).toEqual([]);
+    expect(report.removed).toHaveLength(25);
+    expect(
+      report.removed.every((r) => r.decision.reason === "beyond-cap"),
+    ).toBe(true);
+    expect(left()).toEqual(
+      [26, 27, 28, 29, 30].map((n) => `${TASK}-${String(n)}`),
+    );
+    // An old lost run goes for its age, even as the task's only run: it is no complete report.
+    rmSync(runsDir, { recursive: true });
+    mkdirSync(runsDir);
+    dated(1, 31 * DAY_MS, "lost");
+    expect(reasons(await prune())).toEqual({ [`${TASK}-1`]: "delete:too-old" });
+  });
+
+  test("a run the orphan check finds over is pruned like any other once marked lost", async () => {
+    for (let n = 1; n <= 6; n++) dated(n, (7 - n) * HOUR_MS, "running");
+    // Still `running`: protected, however many.
+    expect((await prune({ keep: 2 })).removed).toEqual([]);
+    const check = await checkOrphans(stateDir, {
+      // Every group ended.
+      kill: () => {
+        throw Object.assign(new Error(), { code: "ESRCH" });
+      },
+      readLeaderStart: () => Promise.resolve({ kind: "gone" }),
+      now: () => new Date(NOW),
+    });
+    expect(check.stale).toHaveLength(6);
+    expect(check.warnings).toEqual([]);
+    const report = await prune({ keep: 2 });
+    expect(report.removed.map((r) => r.decision.entry.name).sort()).toEqual(
+      [1, 2, 3, 4].map((n) => `${TASK}-${String(n)}`),
+    );
+    expect(left()).toEqual([`${TASK}-5`, `${TASK}-6`]);
+  });
+
+  test("refuses a time that is not a finite number, removing nothing — not even a leftover", async () => {
+    dated(2, HOUR_MS);
+    dated(1, 400 * DAY_MS);
+    const fresh = join(runsDir, `.pruning-${String(NOW - 1000)}-1-abcdef02`);
+    mkdirSync(fresh);
+    for (const now of [
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      Number.NaN,
+    ]) {
+      const report = await prune({ now });
+      expect(report.failed, String(now)).toEqual([
+        {
+          path: runsDir,
+          error: "The time to prune at must be a finite number.",
+        },
+      ]);
+      expect(report.removed).toEqual([]);
+      expect(report.leftovers).toEqual([]);
+    }
+    expect(left()).toEqual([
+      `.pruning-${String(NOW - 1000)}-1-abcdef02`,
+      `${TASK}-1`,
+      `${TASK}-2`,
+    ]);
+  });
+
+  test("keeps what it removed in its report when listing the leftovers then fails", async () => {
+    dated(2, HOUR_MS);
+    dated(1, 400 * DAY_MS);
+    const report = await pruneTaskRuns(
+      { stateDir, taskId: TASK, now: NOW },
+      {
+        listLeftovers: () => {
+          throw Object.assign(new Error("no"), { code: "EMFILE" });
+        },
+      },
+    );
+    expect(report.removed.map((r) => r.decision.entry.name)).toEqual([
+      `${TASK}-1`,
+    ]);
+    expect(report.plan).toHaveLength(2);
+    expect(report.failed).toEqual([{ path: runsDir, error: "EMFILE" }]);
+    expect(left()).toEqual([`${TASK}-2`]);
+  });
+
+  test("lists skipped entries by name", async () => {
+    symlinkSync(stateDir, join(runsDir, `${TASK}-10`));
+    writeFileSync(join(runsDir, `${TASK}-9`), "a file");
+    symlinkSync(stateDir, join(runsDir, `${TASK}-1`));
+    expect((await prune()).skipped.map((entry) => entry.path)).toEqual(
+      [`${TASK}-1`, `${TASK}-10`, `${TASK}-9`].map((name) =>
+        join(runsDir, name),
+      ),
+    );
+  });
+
+  test("says how many folders nothing dates, with the first one's reason", async () => {
+    test.skip(process.getuid?.() === 0, "root reads a folder of mode 000");
+    dated(1, HOUR_MS);
+    // A folder its owner cannot read, and one with no record: both kept, for ever, unless said.
+    const locked = makeRun(
+      `${TASK}-2`,
+      record(`${TASK}-2`, 40 * DAY_MS, "ended"),
+    );
+    makeRun(`${TASK}-3`);
+    chmodSync(locked, 0o000);
+    try {
+      const report = await prune({ keep: 1 });
+      expect(report.failed).toEqual([]);
+      const show = (path: string): string => relative(stateDir, path);
+      expect(describeRunRetention(report, show)).toEqual([
+        {
+          text: `kept 2 run folders that nothing dates, never pruned — runs/${TASK}-3: no run.json`,
+          warn: true,
+        },
+      ]);
+      expect(left()).toHaveLength(3);
+    } finally {
+      chmodSync(locked, 0o700);
+    }
+    rmSync(join(runsDir, `${TASK}-3`), { recursive: true });
+    // Readable again, the folder is dated (and old): nothing is left undated.
+    expect(
+      describeRunRetention(await prune({ keep: 1 }), String).filter((line) =>
+        line.text.startsWith("kept"),
+      ),
+    ).toEqual([]);
+  });
+
+  test("a failure's line shows its paths as the line does, and promises no later removal", async () => {
+    test.skip(process.getuid?.() === 0, "root removes from a read-only folder");
+    dated(2, HOUR_MS);
+    const old = dated(1, 400 * DAY_MS);
+    // A folder in the run that its owner may not empty: the removal stops part-way.
+    const stuck = join(old, "stuck");
+    mkdirSync(stuck);
+    writeFileSync(join(stuck, "file"), "x");
+    chmodSync(stuck, 0o500);
+    try {
+      const report = await prune();
+      expect(report.removed).toEqual([]);
+      const hidden = String.raw`\.pruning-\d+-\d+-[0-9a-f]{8}`;
+      // The suite's words, its system error quoting the absolute path (once or twice, by system).
+      expect(report.failed).toEqual([
+        {
+          path: old,
+          error: expect.stringMatching(
+            new RegExp(
+              `^removed in part; the rest is in ${hidden}, which a later prune removes: .*${escapeRegExp(runsDir)}/${hidden}`,
+            ),
+          ),
+        },
+      ]);
+      const [line, ...more] = describeRunRetention(report, (path) =>
+        relative(stateDir, path),
+      );
+      expect(more).toEqual([]);
+      expect(line?.warn).toBe(true);
+      expect(line?.text).toMatch(
+        new RegExp(
+          `^could not prune runs/${TASK}-1 — removed in part; the rest is in ${hidden}, which a later ` +
+            `prune tries again: .*runs/${hidden}`,
+        ),
+      );
+      // No absolute path, and no path said twice.
+      expect(line?.text).not.toContain(stateDir);
+      expect(line?.text).not.toMatch(/(\S+) '\1'/);
+    } finally {
+      for (const name of readdirSync(runsDir))
+        if (name.startsWith(".pruning-"))
+          chmodSync(join(runsDir, name, "stuck"), 0o700);
+      if (existsSync(stuck)) chmodSync(stuck, 0o700);
+    }
+  });
+
+  test("a failure's line names a path Node repeats once, and leaves other words as they are", () => {
+    const failed = {
+      path: "/s/runs/kxqm-1",
+      error:
+        "removed in part; the rest is in .pruning-1-2-abcdef01, which a later prune removes: " +
+        "ENOTEMPTY, Directory not empty: /s/runs/.pruning-1-2-abcdef01 '/s/runs/.pruning-1-2-abcdef01'",
+    };
+    const show = (path: string): string => relative("/s", path);
+    expect(
+      describeRunRetention(
+        {
+          policy: DEFAULT_RETENTION,
+          plan: [],
+          removed: [],
+          gone: [],
+          leftovers: [],
+          skipped: [],
+          failed: [
+            failed,
+            { path: "/s/runs", error: "EACCES" },
+            {
+              path: "/s/runs/kxqm-2",
+              error:
+                "EACCES: permission denied, rename '/s/runs/kxqm-2' -> '/s/runs/.pruning-1-2-abcdef02'",
+            },
+          ],
+        },
+        show,
+      ).map((line) => line.text),
+    ).toEqual([
+      "could not prune runs/kxqm-1 — removed in part; the rest is in .pruning-1-2-abcdef01, which a " +
+        "later prune tries again: ENOTEMPTY, Directory not empty: runs/.pruning-1-2-abcdef01",
+      "could not prune runs — EACCES",
+      "could not prune runs/kxqm-2 — EACCES: permission denied, rename 'runs/kxqm-2' -> 'runs/.pruning-1-2-abcdef02'",
+    ]);
   });
 
   test("says what went in one line, and each failure and skipped entry in its own", async () => {

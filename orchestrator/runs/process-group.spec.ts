@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 
 import {
   groupAlive,
+  probeGroup,
   signalGroup,
   waitForEmptyGroup,
   type KillFn,
@@ -55,6 +56,22 @@ test.describe("groupAlive", () => {
     for (const pgid of [0, 1, -5, 2.5, Number.NaN])
       expect(() => groupAlive(pgid, kill)).toThrow(RangeError);
     expect(calls).toEqual([]);
+  });
+});
+
+test.describe("probeGroup", () => {
+  test("tells members we may signal from members we may not, and an empty group", () => {
+    const alive = scriptedKill([undefined]);
+    expect(probeGroup(4242, alive.kill)).toBe("members");
+    expect(alive.calls).toEqual([[-4242, 0]]);
+    expect(probeGroup(4242, scriptedKill(["EPERM"]).kill)).toBe(
+      "unsignallable",
+    );
+    expect(probeGroup(4242, scriptedKill(["ESRCH"]).kill)).toBe("empty");
+    expect(() => probeGroup(4242, scriptedKill(["EINVAL"]).kill)).toThrow(
+      "kill EINVAL",
+    );
+    expect(() => probeGroup(1, alive.kill)).toThrow(RangeError);
   });
 });
 

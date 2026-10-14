@@ -1,58 +1,67 @@
 import type { Dirent } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 import { errorCode } from "../error-code";
-import { readCapped, type CappedRead } from "../files";
+import type { CappedMiss } from "../files";
 import { RUN_FILES, RUNS_DIR } from "../runs/identity";
 import type { LeaderStartReader } from "../runs/leader";
-import { groupAlive, type KillFn } from "../runs/process-group";
+import { probeGroup, type KillFn } from "../runs/process-group";
 import {
+  MAX_RECORD_BYTES,
   lostRecord,
-  matchLeader,
-  readRecord,
+  readRunRecordFile,
   writeRunRecord,
   type RunningRecordRead,
   type RunRecord,
 } from "../runs/record";
-import { safeLine } from "../text";
+import { safeLine, shellWord } from "../text";
 
 /**
  * The orphan check, as the orchestrator starts: every run whose record still says `running` is either
- * an **orphan** — its group alive and still led by the process the record names: a run an
- * orchestrator killed or crashed under left holding its cell's sites — or **stale**, and rewritten
- * `lost` so it is not read again. An orphan refuses the start ({@link orphanRefusal}): a second run on
- * its cell would share its sites.
+ * an **orphan** — its process group still the run's, holding its cell's sites: an orchestrator was
+ * killed or crashed under it — or **stale**, and rewritten `lost` so it is not read again. An orphan
+ * refuses the start ({@link orphanRefusal}): a second run on its cell would share its sites.
  *
- * Stale is anything else: no process recorded, its group gone, its leader's start not recorded, or a
- * leader that differs — the group's number handed to another process, or its leader gone while
- * members live on. That last is the run's own workers only in the moments after its runner exited;
- * any longer it is a stranger's group, and refusing on it would refuse for as long as it lives.
- * What cannot be checked now — the leader's start unreadable, the group not askable — is an orphan,
- * unconfirmed: a refusal can be retried, a record rewritten cannot.
+ * What makes the group's number the run's: a PID is never handed out while a live process group has
+ * that id (POSIX, XBD "Process ID Reuse"; measured on Linux 7.0 by steering `ns_last_pid` onto a live
+ * group's id: the next fork skipped it, and took it once the group had ended). So, while group `N`
+ * lives:
+ * - a live process at PID `N` started when the record says is the run's leader: **confirmed**;
+ * - one that started at another time made group `N` itself, after the run's had ended: **stale**;
+ * - no process at PID `N` — its leader exited while members live on — is the run's own group with
+ *   its runner gone (Playwright's workers outlive a killed runner by ~30 s), or a later process's
+ *   group whose leader exited in turn: the two cannot be told apart, so it is an orphan,
+ *   **unconfirmed**, and the refusal says how to check;
+ * - members none of them ours to signal (`EPERM`) are a stranger's: the orchestrator spawns every
+ *   run as itself. **Stale**.
+ *
+ * Anything else that cannot be checked now — the leader's start unreadable now or at spawn, the group
+ * not askable — is an unconfirmed orphan too: a refusal can be retried, a record rewritten cannot.
  *
  * Run it under the orchestrator's lock, before any run starts: a run of this orchestrator still
  * starting, with no process recorded yet, would read as stale.
  */
 
-/** The largest record read, in bytes: a running one is under 1 KiB, an ended one a few. */
-export const MAX_RECORD_BYTES = 1024 * 1024;
-
-/** A run left running: its group alive, led by the process its record names. */
+/** A run left running: its group alive, and the run's or possibly the run's. */
 export interface Orphan {
   readonly taskId: string;
   /** The run's id, `bpng-12`. */
   readonly id: string;
   readonly pgid: number;
-  /** `false` when that could not be checked now, and is assumed. */
+  /** Its `run.json`, absolute. */
+  readonly record: string;
+  /** `false` when the group could not be shown to be the run's, and is assumed to be. */
   readonly confirmed: boolean;
+  /** Why it could not be confirmed, in words; absent when confirmed. */
+  readonly why?: string;
 }
 
 /** Why a running record is taken to be over. */
 export type StaleReason =
   | "no process recorded"
   | "process group ended"
-  | "leader's start not recorded"
+  | "process group not ours"
   | "leader differs";
 
 /** A running record found over. */
@@ -85,19 +94,21 @@ export interface OrphanCheckDeps {
 
 /** How one running record is classified. */
 export type Classification =
+  | { readonly kind: "orphan"; readonly pgid: number; readonly confirmed: true }
   | {
       readonly kind: "orphan";
       readonly pgid: number;
-      readonly confirmed: boolean;
+      readonly confirmed: false;
+      readonly why: string;
     }
   | { readonly kind: "stale"; readonly reason: StaleReason };
 
 /**
- * Classifies one running record.
+ * Classifies one running record; see this module's description for each case.
  *
  * @param record - the record, as read back.
  * @param deps - `kill` and the start reader.
- * @returns orphan (confirmed or not) or stale, and why.
+ * @returns orphan (confirmed, or not and why) or stale, and why.
  */
 export async function classifyRunning(
   record: Pick<RunningRecordRead, "process">,
@@ -106,28 +117,43 @@ export async function classifyRunning(
   const { process } = record;
   if (process === undefined)
     return { kind: "stale", reason: "no process recorded" };
-  const unconfirmed = {
+  const { pgid } = process;
+  const unconfirmed = (why: string): Classification => ({
     kind: "orphan",
-    pgid: process.pgid,
+    pgid,
     confirmed: false,
-  } as const;
+    why,
+  });
+  let group: ReturnType<typeof probeGroup>;
   try {
-    if (!groupAlive(process.pgid, deps.kill))
-      return { kind: "stale", reason: "process group ended" };
-  } catch {
+    group = probeGroup(pgid, deps.kill);
+  } catch (error) {
     // `kill` answered what it never should: the group cannot be shown gone.
-    return unconfirmed;
+    return unconfirmed(
+      `its group could not be asked (${errorCode(error) ?? "unknown error"})`,
+    );
   }
-  switch (await matchLeader(record, deps.readLeaderStart)) {
-    case "matches":
-      return { ...unconfirmed, confirmed: true };
-    case "unreadable":
-      return unconfirmed;
-    case "unrecorded":
-      return { kind: "stale", reason: "leader's start not recorded" };
-    case "differs":
-      return { kind: "stale", reason: "leader differs" };
-  }
+  if (group === "empty")
+    return { kind: "stale", reason: "process group ended" };
+  if (group === "unsignallable")
+    return { kind: "stale", reason: "process group not ours" };
+  const recorded = process.leaderStart;
+  if (recorded === undefined)
+    return unconfirmed(
+      process.leaderStartUnread === undefined
+        ? "its leader's start was not recorded"
+        : `its leader's start could not be read at spawn (${process.leaderStartUnread})`,
+    );
+  const now = await deps.readLeaderStart(pgid);
+  if (now.kind === "start")
+    return now.value === recorded
+      ? { kind: "orphan", pgid, confirmed: true }
+      : { kind: "stale", reason: "leader differs" };
+  return unconfirmed(
+    now.kind === "gone"
+      ? `its ${process.name} process has exited, and the rest of its group still runs`
+      : `its leader's start cannot be read now (${now.why})`,
+  );
 }
 
 /**
@@ -137,8 +163,8 @@ export async function classifyRunning(
  * @param stateDir - the state directory.
  * @param deps - the system.
  * @returns the orphans, the stale runs, and the warnings.
- * @throws what listing the runs' folder throws besides `ENOENT` — with the folder unreadable, no run
- *   can be shown not to be an orphan.
+ * @throws when the runs' folder is a link (never followed) or no folder, or cannot be listed — with
+ *   it unreadable, no run can be shown not to be an orphan. A missing one holds no run.
  */
 export async function checkOrphans(
   stateDir: string,
@@ -162,7 +188,9 @@ export async function checkOrphans(
         taskId: record.taskId,
         id: record.id,
         pgid: verdict.pgid,
+        record: path,
         confirmed: verdict.confirmed,
+        ...(verdict.confirmed ? {} : { why: verdict.why }),
       });
       continue;
     }
@@ -181,20 +209,28 @@ export async function checkOrphans(
 }
 
 /**
- * The refusal an orphan makes: the task, the run, its group, and the command that ends it.
+ * The refusal an orphan makes: the task, the run, its group, and the way out. A confirmed one names
+ * the command that ends it; an unconfirmed one first says how to look at the group — `ps -g` selects
+ * a process group on macOS and a session on Linux, the same thing for a run, which is spawned in a
+ * session of its own — and how to mark the run over when the group is not its.
  *
  * @param orphan - the orphan.
  * @returns one line for the terminal and the log.
  */
 export function orphanRefusal(orphan: Orphan): string {
   const pgid = String(orphan.pgid);
-  const unconfirmed = orphan.confirmed
-    ? ""
-    : " (it could not be confirmed that the group is still the run's)";
+  const end = `kill -KILL -${pgid}`;
+  if (orphan.confirmed)
+    return (
+      `Task ${orphan.taskId} still has run ${orphan.id} running, in process group ${pgid}: an ` +
+      `orchestrator stopped without ending it, and a second run would share its sites. End it with: ${end}`
+    );
   return (
-    `Task ${orphan.taskId} still has run ${orphan.id} running, in process group ${pgid}` +
-    `${unconfirmed}: an orchestrator stopped without ending it, and a second run would share its ` +
-    `sites. End it with: kill -KILL -${pgid}`
+    `Task ${orphan.taskId} may still have run ${orphan.id} running, in process group ${pgid} — ` +
+    `unconfirmed: ${orphan.why ?? "it could not be checked"}. A second run would share its sites. ` +
+    `Check the group first: ps -o pid,user,lstart,command -g ${pgid}. If those are the run's ` +
+    `processes, end them with: ${end}. If not, mark the run over: in ` +
+    `${safeLine(shellWord(orphan.record), 1000)}, set "state" to "lost".`
   );
 }
 
@@ -209,8 +245,8 @@ type RunningRead =
   | { readonly kind: "warning"; readonly text: string };
 
 /**
- * Reads one run folder's record, when it still says `running`: never through a link, never a FIFO,
- * within {@link MAX_RECORD_BYTES}, and only when it names the folder it is in.
+ * Reads one run folder's record, when it still says `running` (`readRunRecordFile`: never through a
+ * link, never a FIFO, within its cap, and only when it names the folder it is in).
  *
  * @param runsDir - `<state>/runs`.
  * @param entry - the folder's entry.
@@ -229,30 +265,46 @@ async function readRunning(
       text: `${name} in the runs' folder is not a folder: passed over`,
     };
   const path = join(runsDir, entry.name, RUN_FILES.record);
-  const read = await readCapped(path, MAX_RECORD_BYTES, { followLink: false });
-  if (read.kind === "missing") return { kind: "skip" };
-  if (read.kind !== "text")
-    return {
-      kind: "warning",
-      text: `run ${name}'s record ${describeUnread(read)}: passed over`,
-    };
-  const record = readRecord(read.text);
-  if (record.kind === "over") return { kind: "skip" };
-  if (record.kind === "malformed" || record.record.id !== entry.name)
-    return {
-      kind: "warning",
-      text: `run ${name}'s record is not one this orchestrator reads: passed over`,
-    };
-  return { kind: "running", record: record.record, path };
+  const read = await readRunRecordFile(path, entry.name);
+  switch (read.kind) {
+    case "missing":
+    case "over":
+      return { kind: "skip" };
+    case "running":
+      return { kind: "running", record: read.record, path };
+    case "malformed":
+      return {
+        kind: "warning",
+        text: `run ${name}'s record is not one this orchestrator reads (${read.why}): passed over`,
+      };
+    default:
+      return {
+        kind: "warning",
+        text: `run ${name}'s record ${describeUnread(read)}: passed over`,
+      };
+  }
 }
 
 /**
- * The runs' folder's entries, sorted by name; none when it does not exist yet.
+ * The runs' folder's entries, sorted by name; none when it does not exist yet. The folder itself is
+ * never followed: through a link, the check would rewrite records outside the state directory.
  *
  * @param runsDir - `<state>/runs`.
+ * @throws an error coded `ELOOP` for a link, `ENOTDIR` for anything else but a folder, or what
+ *   `lstat` and `readdir` throw besides `ENOENT`.
  */
 async function listRuns(runsDir: string): Promise<Dirent[]> {
   try {
+    const stats = await lstat(runsDir);
+    if (stats.isSymbolicLink())
+      throw Object.assign(
+        new Error("the runs' folder is a symbolic link, never followed"),
+        { code: "ELOOP" },
+      );
+    if (!stats.isDirectory())
+      throw Object.assign(new Error("the runs' folder is not a folder"), {
+        code: "ENOTDIR",
+      });
     const entries = await readdir(runsDir, { withFileTypes: true });
     return entries.sort((a, b) =>
       a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
@@ -295,7 +347,7 @@ async function markLost(
  * @param read - the failed read.
  */
 function describeUnread(
-  read: Exclude<CappedRead, { kind: "text" } | { kind: "missing" }>,
+  read: Exclude<CappedMiss, { kind: "missing" }>,
 ): string {
   if (read.kind === "tooLarge")
     return `is over ${String(MAX_RECORD_BYTES)} bytes`;

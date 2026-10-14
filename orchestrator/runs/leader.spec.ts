@@ -143,6 +143,13 @@ test.describe("readLeaderStart, Linux", () => {
     expect(
       await readLeaderStart(21, linux({ [BOOT_ID_PATH]: BOOT_ID })),
     ).toEqual({ kind: "gone" });
+    // The process exiting while its stat is read.
+    expect(
+      await readLeaderStart(
+        21,
+        linux({ "/proc/21/stat": { code: "ESRCH" }, [BOOT_ID_PATH]: BOOT_ID }),
+      ),
+    ).toEqual({ kind: "gone" });
     expect(
       await readLeaderStart(
         21,
@@ -196,7 +203,25 @@ test.describe("readLeaderStart, macOS", () => {
         21,
         darwin({ kind: "exited", code: 2, stdout: "" }),
       ),
-    ).toMatchObject({ kind: "unknown" });
+    ).toEqual({ kind: "unknown", why: "ps exited 2" });
+    // Exit 1 that printed something is no "no such process".
+    expect(
+      await readLeaderStart(
+        21,
+        darwin({ kind: "exited", code: 1, stdout: "ps: something odd\n" }),
+      ),
+    ).toEqual({ kind: "unknown", why: "ps exited 1" });
+    // Nor is a start printed with a failing exit.
+    expect(
+      await readLeaderStart(
+        21,
+        darwin({
+          kind: "exited",
+          code: 1,
+          stdout: "Tue Oct 13 23:57:39 2026\n",
+        }),
+      ),
+    ).toEqual({ kind: "unknown", why: "ps exited 1" });
     expect(
       await readLeaderStart(
         21,

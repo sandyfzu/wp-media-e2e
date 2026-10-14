@@ -11,12 +11,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { formatRunId } from "../../src/common/config/run-id";
 import { finishedEvent } from "../__fixtures__/run-finished";
 import type { LeaderStart, LeaderStartReader } from "../runs/leader";
 import { readLeaderStart } from "../runs/leader";
-import type { KillFn } from "../runs/process-group";
+import { waitForEmptyGroup, type KillFn } from "../runs/process-group";
 import {
   endedRecord,
   leaderProcess,
@@ -45,12 +46,19 @@ function identity(id: string) {
 }
 
 /**
- * A `kill` stand-in: groups in `alive` have members, any other is empty.
+ * A `kill` stand-in: groups in `alive` have members we may signal, groups in `foreign` members we
+ * may not; any other is empty.
  *
  * @param alive - the live groups.
+ * @param foreign - the live groups of another user.
  */
-function killWith(alive: readonly number[]): KillFn {
+function killWith(
+  alive: readonly number[],
+  foreign: readonly number[] = [],
+): KillFn {
   return (pid) => {
+    if (foreign.includes(-pid))
+      throw Object.assign(new Error("not permitted"), { code: "EPERM" });
     if (!alive.includes(-pid))
       throw Object.assign(new Error("no such process"), { code: "ESRCH" });
   };
@@ -79,6 +87,69 @@ function deps(overrides: Partial<OrphanCheckDeps> = {}): OrphanCheckDeps {
     now: () => FOUND,
     ...overrides,
   };
+}
+
+/** A real process group whose leader has exited while a member lives on. */
+interface LeaderlessGroup {
+  /** The group's id: its exited leader's PID. */
+  readonly pgid: number;
+  /** The member's PID. */
+  readonly member: number;
+}
+
+/**
+ * Starts a detached group (as a run is) whose leader starts a member in its own group, says its PID,
+ * and exits — as Playwright's runner, killed, leaves its workers running for a while.
+ *
+ * @param beforeExit - called with the group's id while its leader still lives.
+ * @returns the group, once its leader has exited and been reaped. Kill it with `-pgid`.
+ */
+async function leaderlessGroup(
+  beforeExit: (pgid: number) => Promise<void> = () => Promise.resolve(),
+): Promise<LeaderlessGroup> {
+  const leader = spawn(
+    process.execPath,
+    [
+      "-e",
+      `process.stdin.once("data", () => {
+         const member = require("node:child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+         member.unref();
+         process.stdout.write(String(member.pid), () => process.exit(0));
+       });`,
+    ],
+    { detached: true, stdio: ["pipe", "pipe", "ignore"] },
+  );
+  await once(leader, "spawn");
+  const pgid = leader.pid ?? 0;
+  let said = "";
+  leader.stdout.on("data", (chunk: Buffer) => (said += chunk.toString()));
+  const closed = once(leader, "close");
+  try {
+    await beforeExit(pgid);
+  } finally {
+    leader.stdin.end("go");
+  }
+  await closed;
+  return { pgid, member: Number(said) };
+}
+
+/**
+ * Kills a group, if anything is left in it, and waits until it is empty.
+ *
+ * @param pgid - the group.
+ */
+async function killGroup(pgid: number): Promise<void> {
+  try {
+    process.kill(-pgid, "SIGKILL");
+  } catch {
+    return;
+  }
+  await waitForEmptyGroup(pgid, {
+    kill: process.kill.bind(process),
+    sleep: delay,
+    pollMs: 20,
+    timeoutMs: 10_000,
+  });
 }
 
 /** A state directory of its own, removed after the test. */
@@ -151,13 +222,18 @@ test.describe("classifyRunning", () => {
     ).toEqual({ kind: "stale", reason: "leader differs" });
   });
 
-  test("a group alive with its leader gone is stale", async () => {
+  test("a group alive with its leader gone is an unconfirmed orphan: the runner died, its workers live on", async () => {
     expect(
       await classifyRunning(recorded, {
         kill: killWith([4242]),
         readLeaderStart: startsOf({}),
       }),
-    ).toEqual({ kind: "stale", reason: "leader differs" });
+    ).toEqual({
+      kind: "orphan",
+      pgid: 4242,
+      confirmed: false,
+      why: "its playwright process has exited, and the rest of its group still runs",
+    });
   });
 
   test("a group ended is stale, whoever has the PID now", async () => {
@@ -169,18 +245,74 @@ test.describe("classifyRunning", () => {
     ).toEqual({ kind: "stale", reason: "process group ended" });
   });
 
-  test("no process, or no start recorded, is stale", async () => {
+  test("a group with no member ours to signal is a stranger's: stale", async () => {
+    expect(
+      await classifyRunning(recorded, {
+        kill: () => {
+          throw Object.assign(new Error(), { code: "EPERM" });
+        },
+        readLeaderStart: startsOf({ 4242: { kind: "start", value: START } }),
+      }),
+    ).toEqual({ kind: "stale", reason: "process group not ours" });
+  });
+
+  test("no process recorded is stale, without asking anything", async () => {
+    const asked: number[] = [];
+    expect(
+      await classifyRunning(
+        {},
+        {
+          kill: (pid) => {
+            asked.push(pid);
+          },
+          readLeaderStart: (pid) => {
+            asked.push(pid);
+            return Promise.resolve({ kind: "start", value: START });
+          },
+        },
+      ),
+    ).toEqual({ kind: "stale", reason: "no process recorded" });
+    expect(asked).toEqual([]);
+  });
+
+  test("a live group whose leader's start was never read is an unconfirmed orphan, and says why", async () => {
     const alive = {
       kill: killWith([4242]),
       readLeaderStart: startsOf({ 4242: { kind: "start", value: START } }),
     };
-    expect(await classifyRunning({}, alive)).toEqual({
-      kind: "stale",
-      reason: "no process recorded",
+    expect(
+      await classifyRunning(
+        {
+          process: {
+            name: "bddgen",
+            pgid: 4242,
+            leaderStartUnread: "EACCES",
+          },
+        },
+        alive,
+      ),
+    ).toEqual({
+      kind: "orphan",
+      pgid: 4242,
+      confirmed: false,
+      why: "its leader's start could not be read at spawn (EACCES)",
     });
+    // A record written before the start was recorded at all.
     expect(
       await classifyRunning({ process: { name: "bddgen", pgid: 4242 } }, alive),
-    ).toEqual({ kind: "stale", reason: "leader's start not recorded" });
+    ).toEqual({
+      kind: "orphan",
+      pgid: 4242,
+      confirmed: false,
+      why: "its leader's start was not recorded",
+    });
+    // Its group gone, it is stale all the same.
+    expect(
+      await classifyRunning(
+        { process: { name: "bddgen", pgid: 4242, leaderStartUnread: "gone" } },
+        { ...alive, kill: killWith([]) },
+      ),
+    ).toEqual({ kind: "stale", reason: "process group ended" });
   });
 
   test("what cannot be checked now is an unconfirmed orphan, never stale", async () => {
@@ -191,7 +323,12 @@ test.describe("classifyRunning", () => {
           4242: { kind: "unknown", why: "timed out" },
         }),
       }),
-    ).toEqual({ kind: "orphan", pgid: 4242, confirmed: false });
+    ).toEqual({
+      kind: "orphan",
+      pgid: 4242,
+      confirmed: false,
+      why: "its leader's start cannot be read now (timed out)",
+    });
     expect(
       await classifyRunning(recorded, {
         kill: () => {
@@ -199,16 +336,12 @@ test.describe("classifyRunning", () => {
         },
         readLeaderStart: startsOf({ 4242: { kind: "start", value: START } }),
       }),
-    ).toEqual({ kind: "orphan", pgid: 4242, confirmed: false });
-    // A member we may not signal is still a member.
-    expect(
-      await classifyRunning(recorded, {
-        kill: () => {
-          throw Object.assign(new Error(), { code: "EPERM" });
-        },
-        readLeaderStart: startsOf({ 4242: { kind: "start", value: START } }),
-      }),
-    ).toEqual({ kind: "orphan", pgid: 4242, confirmed: true });
+    ).toEqual({
+      kind: "orphan",
+      pgid: 4242,
+      confirmed: false,
+      why: "its group could not be asked (EINVAL)",
+    });
   });
 });
 
@@ -236,10 +369,43 @@ test.describe("checkOrphans", () => {
       }),
     );
     expect(check).toEqual({
-      orphans: [{ taskId: "bpng", id: "bpng-12", pgid: 4242, confirmed: true }],
+      orphans: [
+        {
+          taskId: "bpng",
+          id: "bpng-12",
+          pgid: 4242,
+          record: path,
+          confirmed: true,
+        },
+      ],
       stale: [],
       warnings: [],
     });
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  test("reports an unconfirmed orphan with why, and leaves its record as it is", async () => {
+    const path = await running("bpng-12", {
+      name: "playwright",
+      pgid: 4242,
+      leaderStart: START,
+    });
+    const before = await readFile(path, "utf8");
+    const check = await checkOrphans(
+      stateDir,
+      deps({ kill: killWith([4242]), readLeaderStart: startsOf({}) }),
+    );
+    expect(check.orphans).toEqual([
+      {
+        taskId: "bpng",
+        id: "bpng-12",
+        pgid: 4242,
+        record: path,
+        confirmed: false,
+        why: "its playwright process has exited, and the rest of its group still runs",
+      },
+    ]);
+    expect(check.stale).toEqual([]);
     expect(await readFile(path, "utf8")).toBe(before);
   });
 
@@ -255,9 +421,13 @@ test.describe("checkOrphans", () => {
       pgid: 502,
       leaderStart: START,
     });
-    const unrecorded = await running("bpng-4", { name: "bddgen", pgid: 503 });
+    const foreign = await running("bpng-4", {
+      name: "bddgen",
+      pgid: 503,
+      leaderStart: START,
+    });
     const system = deps({
-      kill: killWith([502, 503]),
+      kill: killWith([502], [503]),
       readLeaderStart: startsOf({
         502: { kind: "start", value: "ps:Wed Oct 14 01:00:00 2026" },
         503: { kind: "start", value: START },
@@ -270,11 +440,7 @@ test.describe("checkOrphans", () => {
         { id: "bpng-1", reason: "no process recorded", rewritten: true },
         { id: "bpng-2", reason: "process group ended", rewritten: true },
         { id: "bpng-3", reason: "leader differs", rewritten: true },
-        {
-          id: "bpng-4",
-          reason: "leader's start not recorded",
-          rewritten: true,
-        },
+        { id: "bpng-4", reason: "process group not ours", rewritten: true },
       ],
       warnings: [],
     });
@@ -285,10 +451,11 @@ test.describe("checkOrphans", () => {
       runId: formatRunId(STARTED, "bpng-2"),
       taskId: "bpng",
       startedAt: STARTED.toISOString(),
+      process: { name: "bddgen", pgid: 501, leaderStart: START },
       foundAt: FOUND.toISOString(),
       reason: "process group ended",
     });
-    for (const path of [noProcess, reused, unrecorded])
+    for (const path of [noProcess, reused, foreign])
       expect(await recordAt(path)).toMatchObject({ state: "lost" });
     expect(await checkOrphans(stateDir, system)).toEqual({
       orphans: [],
@@ -332,9 +499,14 @@ test.describe("checkOrphans", () => {
     expect(check.orphans).toEqual([]);
     expect(check.stale).toEqual([]);
     expect(check.warnings).toEqual(
-      ["bpng-10", "bpng-7", "bpng-8", "bpng-9"].map(
-        (id) =>
-          `run ${id}'s record is not one this orchestrator reads: passed over`,
+      [
+        ["bpng-10", "another run's record"],
+        ["bpng-7", "not JSON"],
+        ["bpng-8", "not a run record this orchestrator reads"],
+        ["bpng-9", "not JSON"],
+      ].map(
+        ([id, why]) =>
+          `run ${id ?? ""}'s record is not one this orchestrator reads (${why ?? ""}): passed over`,
       ),
     );
     expect(await recordAt(elsewhere)).toMatchObject({ state: "running" });
@@ -405,6 +577,37 @@ test.describe("checkOrphans", () => {
       code: "ENOTDIR",
     });
   });
+
+  test("never follows a runs' folder that is a link, nor rewrites a record through it", async () => {
+    const elsewhere = join(stateDir, "elsewhere");
+    await mkdir(join(elsewhere, "bpng-1"), { recursive: true });
+    const path = join(elsewhere, "bpng-1", "run.json");
+    await writeRunRecord(path, runningRecord(identity("bpng-1"), "bpng"));
+    await symlink(elsewhere, join(stateDir, "runs"));
+    await expect(checkOrphans(stateDir, deps())).rejects.toMatchObject({
+      code: "ELOOP",
+    });
+    expect(await recordAt(path)).toMatchObject({ state: "running" });
+  });
+
+  test("passes over a running record a person marked lost, as the refusal says to", async () => {
+    const path = await running("bpng-17", {
+      name: "playwright",
+      pgid: 4242,
+      leaderStart: START,
+    });
+    const marked = (await readFile(path, "utf8")).replace(
+      '"state": "running"',
+      '"state": "lost"',
+    );
+    await writeFile(path, marked);
+    expect(
+      await checkOrphans(
+        stateDir,
+        deps({ kill: killWith([4242]), readLeaderStart: startsOf({}) }),
+      ),
+    ).toEqual({ orphans: [], stale: [], warnings: [] });
+  });
 });
 
 test.describe("against real processes", () => {
@@ -426,7 +629,7 @@ test.describe("against real processes", () => {
         readLeaderStart,
       });
       expect((await checkOrphans(stateDir, real)).orphans).toEqual([
-        { taskId: "bpng", id: "bpng-20", pgid, confirmed: true },
+        { taskId: "bpng", id: "bpng-20", pgid, record: path, confirmed: true },
       ]);
       // The same group, as a record written for another process that had its number.
       const reused = await running("bpng-21", {
@@ -456,6 +659,47 @@ test.describe("against real processes", () => {
         process.kill(-pgid, "SIGKILL");
     }
   });
+
+  test("a group whose leader exited while a member lives on is an unconfirmed orphan, never stale", async () => {
+    const real = deps({ kill: process.kill.bind(process), readLeaderStart });
+    let path = "";
+    const { pgid, member } = await leaderlessGroup(async (id) => {
+      path = await running(
+        "bpng-22",
+        await leaderProcess("playwright", id, readLeaderStart),
+      );
+    });
+    try {
+      expect(member).toBeGreaterThan(1);
+      expect(await recordAt(path)).toMatchObject({
+        process: { leaderStart: expect.any(String) },
+      });
+      expect(await readLeaderStart(pgid)).toEqual({ kind: "gone" });
+      const before = await readFile(path, "utf8");
+      expect(await checkOrphans(stateDir, real)).toEqual({
+        orphans: [
+          {
+            taskId: "bpng",
+            id: "bpng-22",
+            pgid,
+            record: path,
+            confirmed: false,
+            why: "its playwright process has exited, and the rest of its group still runs",
+          },
+        ],
+        stale: [],
+        warnings: [],
+      });
+      expect(await readFile(path, "utf8")).toBe(before);
+      // Once the member is gone too, the run is over.
+      await killGroup(pgid);
+      expect((await checkOrphans(stateDir, real)).stale).toEqual([
+        { id: "bpng-22", reason: "process group ended", rewritten: true },
+      ]);
+    } finally {
+      await killGroup(pgid);
+    }
+  });
 });
 
 test.describe("orphanRefusal", () => {
@@ -465,6 +709,7 @@ test.describe("orphanRefusal", () => {
         taskId: "bpng",
         id: "bpng-12",
         pgid: 4242,
+        record: "/srv/state/runs/bpng-12/run.json",
         confirmed: true,
       }),
     ).toBe(
@@ -473,16 +718,47 @@ test.describe("orphanRefusal", () => {
     );
   });
 
-  test("says when it could not be confirmed", () => {
+  test("an unconfirmed one says why, how to check first, and how to mark the run over", () => {
     expect(
       orphanRefusal({
         taskId: "bpng",
         id: "bpng-12",
         pgid: 4242,
+        record: "/srv/my state/runs/bpng-12/run.json",
         confirmed: false,
+        why: "its playwright process has exited, and the rest of its group still runs",
       }),
-    ).toContain(
-      "in process group 4242 (it could not be confirmed that the group is still the run's): ",
+    ).toBe(
+      "Task bpng may still have run bpng-12 running, in process group 4242 — unconfirmed: its " +
+        "playwright process has exited, and the rest of its group still runs. A second run would " +
+        "share its sites. Check the group first: ps -o pid,user,lstart,command -g 4242. If those " +
+        "are the run's processes, end them with: kill -KILL -4242. If not, mark the run over: in " +
+        `'/srv/my state/runs/bpng-12/run.json', set "state" to "lost".`,
     );
+  });
+
+  test("the command it gives lists exactly the group's processes, its leader gone", async () => {
+    const { pgid, member } = await leaderlessGroup();
+    try {
+      const command = /Check the group first: (ps [^.]+)\./.exec(
+        orphanRefusal({
+          taskId: "bpng",
+          id: "bpng-12",
+          pgid,
+          record: "/r",
+          confirmed: false,
+          why: "x",
+        }),
+      )?.[1];
+      const [file, ...args] = (command ?? "").split(" ");
+      const out = execFileSync(file ?? "", args, { encoding: "utf8" });
+      const lines = out.trim().split("\n");
+      expect(lines[0]).toMatch(/^\s*PID\s+USER\s+STARTED\s+COMMAND$/);
+      expect(
+        lines.slice(1).map((line) => Number(line.trim().split(/\s+/)[0])),
+      ).toEqual([member]);
+    } finally {
+      await killGroup(pgid);
+    }
   });
 });
