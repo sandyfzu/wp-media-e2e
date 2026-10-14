@@ -14,6 +14,8 @@ import {
   endedRecord,
   leaderProcess,
   lostRecord,
+  MAX_RECORD_WORDS,
+  recordWords,
   parseRunRecord,
   readRunRecordFile,
   runningRecord,
@@ -385,6 +387,55 @@ test.describe("leaderProcess", () => {
       leaderStartUnread: "gone",
     });
     expect(gone.asked).toEqual([77]);
+  });
+
+  test("records only what the record's reader reads back, so a live run is never passed over as malformed", async () => {
+    expect(MAX_RECORD_WORDS).toBe(200);
+    const whys = [
+      "x".repeat(201),
+      "ERR_ü",
+      "line\nbreak\u0007",
+      "   ",
+      "\u202e",
+    ];
+    for (const why of whys) {
+      const process = await leaderProcess(
+        "bddgen",
+        77,
+        reader({ kind: "unknown", why }, { kind: "unknown", why }),
+      );
+      const read = readBack(runningRecord(IDENTITY, "bpng", process));
+      expect(read.process?.leaderStartUnread, why).toBe(recordWords(why));
+    }
+    // A start the reader would refuse is recorded as unread, never as a start no record reads back.
+    for (const value of ["s".repeat(201), "ps:dé"]) {
+      const process = await leaderProcess(
+        "bddgen",
+        77,
+        reader({ kind: "start", value }),
+      );
+      expect(
+        readBack(runningRecord(IDENTITY, "bpng", process)).process,
+      ).toEqual({
+        name: "bddgen",
+        pgid: 77,
+        leaderStartUnread: "start not recordable",
+      });
+    }
+  });
+});
+
+test.describe("recordWords", () => {
+  test("keeps printable ASCII as it is", () => {
+    expect(recordWords("EACCES")).toBe("EACCES");
+    expect(recordWords("y".repeat(200))).toBe("y".repeat(200));
+  });
+
+  test("makes each run of other characters one ?, a blank text unknown, and cuts past 200 characters", () => {
+    expect(recordWords("ERR_üü\n\tx")).toBe("ERR_?x");
+    expect(recordWords(" \n ")).toBe("unknown");
+    expect(recordWords("")).toBe("unknown");
+    expect(recordWords("z".repeat(201))).toBe(`${"z".repeat(197)}...`);
   });
 });
 

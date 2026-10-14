@@ -174,8 +174,37 @@ export function writeRunRecord(path: string, record: RunRecord): Promise<void> {
 /** A run's id as `runIdOf` makes it: a task's id, then a number from 1. */
 const RUN_ID_PATTERN = /^[a-z0-9]+-[1-9][0-9]{0,15}$/;
 
-/** A reason the orchestrator wrote: printable ASCII, so a message may quote it. */
-const WORDS = z.string().regex(/^[\x20-\x7e]{1,200}$/);
+/** The longest {@link recordWords} text, in characters. */
+export const MAX_RECORD_WORDS = 200;
+
+/** What a record's words are: printable ASCII, so a message may quote it, 1 to 200 characters. */
+const WORDS_PATTERN = new RegExp(
+  `^[\\x20-\\x7e]{1,${String(MAX_RECORD_WORDS)}}$`,
+);
+
+/** A reason the orchestrator wrote, as read back ({@link WORDS_PATTERN}). */
+const WORDS = z.string().regex(WORDS_PATTERN);
+
+/**
+ * Text as a record's words: what the reader accepts ({@link WORDS_PATTERN}), so a record written can
+ * always be read back — a word the reader refused would make the whole record malformed, and a live
+ * run passed over. Each run of characters outside printable ASCII becomes `?`, once the text is trimmed; blank text is
+ * `unknown`; a text past {@link MAX_RECORD_WORDS} is cut, `...` closing it.
+ *
+ * @param text - what to record, from anywhere (a system's error code, a reader's why).
+ * @returns the words.
+ * @example
+ * ```ts
+ * recordWords("ERR_ü\n"); // "ERR_?"
+ * ```
+ */
+export function recordWords(text: string): string {
+  const words = text.trim().replace(/[^\x20-\x7e]+/g, "?");
+  if (words === "") return "unknown";
+  return words.length > MAX_RECORD_WORDS
+    ? `${words.slice(0, MAX_RECORD_WORDS - 3)}...`
+    : words;
+}
 
 /**
  * What every record is read back for: who the run is — each field a message may quote checked to be
@@ -327,8 +356,8 @@ export function lostRecord(
 /**
  * A running record's process with its leader's start, read now: call it as the process is spawned,
  * before it can have ended and its PID gone to another. A read that cannot tell is tried once more;
- * a start still unread is recorded as such, with why — never left out silently, since the orphan
- * check must then assume the run may be live.
+ * a start still unread is recorded as such, with why ({@link recordWords}, so the record reads back) —
+ * never left out silently, since the orphan check must then assume the run may be live.
  *
  * @param name - the process.
  * @param pgid - its group: its PID.
@@ -341,11 +370,15 @@ export async function leaderProcess(
 ): Promise<RunningProcess> {
   let start: LeaderStart = await read(pgid);
   if (start.kind === "unknown") start = await read(pgid);
-  if (start.kind === "start") return { name, pgid, leaderStart: start.value };
+  // A start the reader would refuse is no start to match against: recorded as unread instead.
+  if (start.kind === "start" && WORDS_PATTERN.test(start.value))
+    return { name, pgid, leaderStart: start.value };
+  if (start.kind === "start")
+    return { name, pgid, leaderStartUnread: "start not recordable" };
   return {
     name,
     pgid,
-    leaderStartUnread: start.kind === "gone" ? "gone" : start.why,
+    leaderStartUnread: start.kind === "gone" ? "gone" : recordWords(start.why),
   };
 }
 
