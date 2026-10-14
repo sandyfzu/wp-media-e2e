@@ -6,8 +6,9 @@
 > Slack and Datator formatters and senders (2026-10-13, §7.10; audited the same day, §7.11); step 4, M4's
 > launch and end and M5's stop machines (2026-10-13, §7.12; audited the same day, §7.13); step 5's
 > 5A–5D, the logger, lock, counter, leader identity, orphan check and run-folder retention (2026-10-13,
-> §7.15; audited and re-audited the same day, §7.16); 5E, the notification subscribers (2026-10-13, §7.17).
-> **Next:** step 5's 5F–5K (§7.14), with §7.16's notes for 5F and 5H and §7.17's for 5F. Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> §7.15; audited and re-audited the same day, §7.16); 5E, the notification subscribers (2026-10-13, §7.17); 5F, one
+> run (2026-10-13, §7.18; audited 2026-10-14, the same section).
+> **Next:** step 5's 5G–5K (§7.14), with §7.16's notes for 5H and §7.18's for 5G and 5H. Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -190,7 +191,8 @@ committed `orchestrator/config.example.json` documents it.
 
 - **Identity.** `<task>-<n>` (`bpng-12`), `n` from a counter in `tasks/<task>.json`, written atomically
   (temporary file, then rename). `RUN_ID` is `<formatRunId(start)>-<run id>`, with 0F's formatter. Its
-  folder `runs/<run id>/` holds `run.log`, `run.json` and the stop file.
+  folder `runs/<run id>/` holds `run.log`, `run.json`, the stop file and, once the run has ended,
+  `run-finished.json` and `datator.json` (§4.9).
 - **Launch** — Phase 0's run contract (its §2), unchanged: `node node_modules/playwright-bdd/dist/cli/index.js
   --config playwright.<product>.config.ts`, then, if it exited `0`, `node node_modules/@playwright/test/cli.js
   test --config playwright.<product>.config.ts` (plus `--grep=<grep>` when the task has one — one argument, so a value starting with `-` cannot read as an option, V368). Each `detached`
@@ -218,7 +220,8 @@ committed `orchestrator/config.example.json` documents it.
   | any `flaky` | `flaky` |
   | otherwise | `passed` |
 
-- **Run record.** `run.json`: the `run.finished` payload, the process group, the exit codes. Written at
+- **Run record.** `run.json`: the process group, the exit codes, the status, reason and counts — the
+  `run.finished` payload and the Datator record beside it, in files never read back (§4.9). Written at
   start (`running`, with the group) and at the end.
 - **Orphans.** A detached run outlives an orchestrator killed by SIGKILL or a crash, and nothing
   reports it. At start, a task whose last record still says `running` with a live group is **not
@@ -301,7 +304,7 @@ SIGINT. While `bddgen` runs, its group is killed outright: generation has nothin
 ### 4.8 M8 — Datator
 
 - `POST` the configured URL, `X-API-Key`, JSON; success is `201`, anything else is logged with its
-  status and the body's first 500 characters. 15 s timeout, no retry; `run.json` keeps the payload.
+  status and the body's first 500 characters. 15 s timeout, no retry; the run folder keeps the payload (`datator.json`, §4.9).
 - **Only runs that tested** — `passed`, `flaky`, `failed`. Not `error`, `stopped` or `killed`: a broken
   branch or site is not a regression (parent §2), and AutoE2E posted nothing when a cycle crashed.
 - **Mapping**, against Datator's own serializer (V117, V118):
@@ -329,8 +332,17 @@ SIGINT. While `bddgen` runs, its group is killed outright: generation has nothin
   orchestrator.lock  pid; a second start on this directory refuses, a dead pid's lock is taken over
   orchestrator.log   the terminal's lines
   tasks/<id>.json    the run counter
-  runs/<run id>/     run.log, run.json, stop
+  runs/<run id>/     run.log, run.json, stop; run-finished.json, datator.json (0600) once it ended
 ```
+
+- **What a run keeps.** `run.json` is the one file the orchestrator reads back (orphan check,
+  run-folder retention), so it stays small whatever the run did: identity, state, how its processes
+  ended, and the outcome — status, reason (cut to 500 code points), counts; under 1 KiB, its cap
+  1 MiB. The whole `run.finished` (`run-finished.json`) and the Datator record posted (`datator.json`,
+  only for a run that tested and with Datator configured) sit beside it for whoever looks into the
+  run, written atomically before the `ended` record and never parsed back — they grow with the
+  scenarios (2.1 MB each for 1,000 failed at the error cap, V425), and a file no reader parses can
+  never make a run folder undated, so kept for ever.
 
 - **Reports** are pruned by the suite at each run's end (0F), per cell — one task per cell here, so
   per task too. `runs.reportsKeep` sets `E2E_REPORTS_KEEP` (default 20, the suite's; `0` lifts only the
@@ -918,7 +930,8 @@ subscribed to the bus yet — that is step 5's wiring.
   Docker cell's host, is refused. An interrupted scenario is `skipped`; `test_suite` cut to 255.
   `sendDatator` succeeds only on `201`, and masks the key in the answer.
 - **For step 5:** subscribe both with `secretValues(config)`, hand each the bus's signal, and turn a
-  failed `Delivery` into the terminal's `slack ✗ …` line; keep the Datator payload in `run.json`.
+  failed `Delivery` into the terminal's `slack ✗ …` line; keep the Datator payload in the run's folder
+  (`datator.json` — superseded: first planned in `run.json`, moved out by §7.18's audit).
 
 ### 7.11 Audit of step 3 (2026-10-13, V387–V392)
 
@@ -1302,6 +1315,88 @@ finding reproduced, fixed, and proved by a test that fails without it.
   `@returns` and member docs; untested `failed` fallback, raw `notPosted`, subscriber name and `fetch`
   seam.
 
+### 7.18 5F — Implemented (2026-10-13, V421–V424; audited 2026-10-14, V425–V429)
+
+`orchestrator/tasks/cycle.ts`, as §7.14 asks, following §7.16's and §7.17's notes; its pure parts (the
+lines, the task as the event names it, the furthest stop, two fallback outcomes) in `tasks/run-lines.ts`.
+Decided here, where §7.14 was silent:
+
+- **The handle: `runOnce(task, deps)` → `{ stop(level, why), done }`, at once.** The work begins on a
+  later turn, so a stop asked right away takes no number. A stop is remembered (the furthest wins, its
+  reason kept on a tie) and handed to `launchRun`'s run as soon as it exists; asked while the number is
+  taken, the number is spent and nothing starts (`bpng-12 not started: …`); asked during the launch, up
+  to `bddgen`'s starting record, nothing is spawned and the run is recorded and published `stopped`
+  (the audit's fix, below); once the run has ended, it does nothing. `done` never rejects: `ended` (the id, the status, `endedAt` — when the processes had
+  ended —, the event), or `notStarted` `stopped`/`failed` (no number or identity could be had).
+- **Order:** number → identity → one `createRecordWriter` → `launchRun` (`onSpawning` writes
+  `startingRecord`; its failure is a line, then rethrown, so nothing is spawned unrecorded; `onProcess`
+  writes `runningRecord(…, leaderProcess(…))`, a reader that throws recorded as `leaderStartUnread`, and
+  never rejects) → the started line → `done` → `endRun` → `run-finished.json` → `datatorPayload(event)` →
+  `datator.json` → `ended` record → the outcome line → `publish` → `pruneTaskRuns` (`current` the run's folder, `keep` from `runs.reportsKeep`)
+  and `describeRunRetention`'s lines. Every step on its own: one failing never skips the next.
+- **Lines**, under the task's id, paths from the checkout: `bpng-12 started · backwpup pro@nginx · develop
+  [· @smoke] · .orchestrator/runs/bpng-12/run.log` (`default ref` when the task names none), logged once
+  `launchRun` has spawned `bddgen`; `bpng-12 ✔ passed · 52 scenarios: 51 passed, 1 flaky · 54m 10s ·
+  reports/…` — `⚠` flaky, `✘` failed and error, `■` stopped and killed; a run that did not test gives its
+  reason and points at its log. Every failure a dependency throws is `failureLine` with the secrets.
+- **A launch that fails** (its folder refused, its first record unwritten, its commands unbuildable) is
+  an `error` run, `the run could not start: …`, logged and published; its `ended` record is written
+  only once `onSpawning` was called — the launch made the folder — never into a folder it refused.
+  **A `done` that rejects** (its contract says never) leaves the `running` record for the next start's
+  orphan check, its processes possibly alive, and publishes an `error`. **An end that cannot be read**:
+  `killed` or `stopped` from the stop taken, else `error`, `its end could not be read: …`.
+- **What the run keeps** (as the audit left it, §4.9): a lean `ended` `run.json` — `status`, `reason`,
+  `counts` in place of the whole event —, and beside it `run-finished.json` and `datator.json` (the very
+  object posted), each written by `writeJsonAtomic` (`0600`), a failure a line that never keeps the
+  `ended` record from being written. Nothing reads them back.
+- **The fake suite** writes files as it starts (`writes`), so a fake runner leaves a real results stream.
+- **For 5G:** count the cooldown from the loop's own clock once `done` settles (or `endedAt`); a
+  `notStarted` `stopped` ends the loop — and a stop asked during the launch gives an `ended` `stopped` run,
+  so end the loop on the stop asked, not on the result's kind; `--once` takes `ended`'s status, and `notStarted` `failed` is `1`.
+  Hold the current handle where a stop can reach it, and stop a cooldown yourself — `runOnce` knows none.
+- **For 5H:** `deps` are `secrets: secretValues(config)`, `datatorPayload: notifications.datatorPayload`,
+  `commandsFor: (task) => suiteCommands({ node: process.execPath, checkout, playwrightConfig:
+  playwrightConfigFor(productByName(task.product)), grep: task.grep })`, `inherited: process.env`, the
+  logger and the bus; on `onEscalate` call every live handle's `stop(level, reason)`.
+
+**Audit (2026-10-14, V425–V429).** Two reviewers (security, correctness), each on its own copy; every
+finding reproduced, fixed, and proved by a test that fails without it.
+
+- **An ended record could outgrow its reader (low-medium; both).** `run.json` held the event and the
+  Datator record, each a copy of every scenario, the writer with no size check: 1,000 scenarios failed
+  at the error cap made 4.3–4.6 MB, over the 4 MiB cap — read as too large, so undated, kept for ever,
+  and warned about at every start; and the Datator record was read back through a strict schema though
+  nothing used it, so one value out of bounds made the whole record malformed, the same way. Now
+  `run.json` is lean (§4.9: 514 bytes for that run), the event and the Datator record are files beside
+  it that nothing parses, the cap is back to 1 MiB and the reader to what it was before 5F (identity,
+  start, state); `datatorPayloadSchema`, used by nothing else, is gone. The three cap literals 5F had
+  changed (`record`, `orphans`, `run-retention` specs) are back to their originals.
+- **A stop during the launch spawned `bddgen`, then killed it (low; both).** It was only checked before
+  the launch, so one asked while the run's folder was made or its first record written reached the run
+  once `bddgen` ran, and the handle's doc promised more. Now `onSpawning("bddgen")`, once the starting
+  record is written, throws when a stop was asked; the launch spawns nothing (its contract, unchanged)
+  and the run is recorded and published `stopped`, the stop taken as the machine takes any stop before a
+  process — a drain, with the furthest stop's reason. Two `cycle.spec.ts` tests expected the old
+  behaviour (a SIGKILLed `bddgen`; a stop forwarded once the launch returned) and now assert the new one.
+- **A launch that failed after making its folder left it without a `run.json`** (reproduced: a log that
+  cannot be made) — undated, kept for ever. `launchRun` now removes the folder it made (`rmdir`: only
+  empty, never through a link) when it fails before `onSpawning`; its existing specs pass unmodified.
+- **Smaller (low):** untested: a long, non-ASCII leader-read failure (it must go through `recordWords`,
+  or the running record is malformed and a live run passed over), the unwatched run's `endedAt`, the
+  prune when not even an event can be built (`buildRunFinished` now a seam), a lone surrogate in a
+  Datator error; the stop ranks copied in `run-lines.ts` (now `STOP_RANK` from `stop.ts`); a redundant
+  `writer && launch` (one optional `{ writer, launch }`); `stop(level)` in CLAUDE.md; missing `@returns`.
+- **Re-audit of the fixes (2026-10-14, V429).** A stop's `why` reached the event, both kept files, the
+  record's `reason` and `stop.why`, and the run log raw — unmasked, uncut, multi-line (before 5F too,
+  through `unreadOutcome` and every `stop.why`). Now `Cycle.stop`, the one entry of a `why`, makes it
+  `safeLine` within 500 code points, masked by the secrets. Also: an untested `folder.stopped` (a stop
+  asked while a first record that then fails is written must read `error`, not `stopped`); stale
+  §4.4/§4.8/§7.10 text keeping the payload in `run.json`; "under 2 KiB" for an ended record (fuzzed:
+  2,313 B; now "a few KiB").
+- **Kept, on purpose:** a run whose first record and then its `ended` record both fail to be written
+  (a full disk) keeps its folder without `run.json`, said twice in the log; and a `run.finished` that
+  cannot be built leaves the `running` record for the next start's orphan check, as before.
+
 ## 8. What later phases change, and keep
 
 | Here | Later | Kept |
@@ -1451,3 +1546,12 @@ finding reproduced, fixed, and proved by a test that fails without it.
 | V418 | The audit's cases, over real sockets: a thrown message that is a number, an object, empty or blank, and a status that is not text, each still making the line; a 7-character secret echoed by each sender's answer withheld whole; a shapeless secret echoed plain, URL-encoded and JSON-escaped masked in both; an answer cut 690 characters into a 700-character secret showing none of it; both senders hanging end at 100 ms each under a 180 ms bus limit; a write to the record handed out, its `test_cases` or a case throws `TypeError` and the body posted is unchanged; a `fetch` given reaches both senders; `HTTP method not allowed` keeps its `405`; `textOf`/`failureLine` total on a revoked proxy, a throwing getter or `toString`, `Object.create(null)` | ✅ 2026-10-13 | `subscribe.spec.ts` (30 tests), `text.spec.ts` (+5) |
 | V419 | Mutations, each in a copy of the worktree, each failing the test meant for it — 19/19: the 8 earlier survivors (no secrets to Slack, to Datator; one after the other; no `failed`; raw `notPosted`; the subscriber's name; no `fetch` to Slack, to Datator), the old behaviour of each fix (the old `errorText`, `notPosted`, detail and `HTTP ` rule; no freeze, of the cases, of the array) and of the helper (`textOf` without `String`, without its `catch`; the `HTTP ` rule exact only, or without its space) | ✅ 2026-10-13 | A mutation harness in a copy |
 | V420 | The gates pass; a full unit run: 2849 passed, 8 skipped by their environment guards; the specs of `bus.ts`, `product-list.ts` and `run-retention.ts` pass unmodified on the shared helper | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V421 | `orchestrator/tasks/`: 46 new specs (32 in `cycle.spec.ts` against the fake suite — real processes, signals and files —, 14 in `run-lines.spec.ts`), and 5 more for the Datator record kept (`datator.spec.ts` 2, `record.spec.ts` 3): passed, failed (its error masked everywhere, by value), `bddgen` failing; a stop as the handle is given, while the number is taken, while the first record is written, during `bddgen`, during the runner (drained, interrupted, killed), a lesser stop after, a stop after the end; a throw from the counter, each record write, the leader's reader, the payload, `publish`, the prune (thrown and rejected), the logger, `endRun` (and of a killed run), the launch, the commands, a rejected `done` — each logged masked, the run recorded where its folder is its own, no unhandled rejection (a listener per test). `--repeat-each 8 --workers 6`: 368 passed | ✅ 2026-10-13 | `npx playwright test -c playwright.unit.config.ts orchestrator/tasks` |
+| V422 | An ended record's size, event and Datator record together: 52 failed scenarios with 300-character errors 28 KB → 54 KB; 100 at the 2,000-character error cap 223 KB → 443 KB; 300 668 KB → 1.33 MB, over the old 1 MiB cap | ✅ 2026-10-13 | A tsx probe over `finishedEvent` and `datatorPayload` |
+| V423 | Mutations, each in a copy of the worktree, each failing a test: `cycle.ts` 24/24 — the deferred start, the stop after the number, the forward after the launch, the record only in a folder of its own (both ways), the rethrow of a failed first record, the unread leader, the Datator record kept, the catches (payload, publish, logger), the prune's run and cap, no prune, no publish, the record before the publish, the end's secrets, masking by value, the unwatched run's record, the unread end's status, the furthest stop, both lines, a counter failure read as stopped; the record and schema 8/8 — Datator on a lost record, of another start, not kept, a loose object, untrimmed text, any URL, a blank error, the cap back to 1 MiB. Found by the first round, then fixed: the furthest-stop rule untested, and a test expecting exit 130 where the fake may drain first (0) | ✅ 2026-10-13 | A mutation script in the scratchpad |
+| V424 | The gates pass; a full unit run: 2900 passed, 8 skipped by their environment guards; `import-boundary.spec.ts` passes with `suite-imports.json` unchanged | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V425 | Reproduced before the fixes: 1,000 scenarios failed at the 2,000-character error cap made a 4.3–4.6 MB `run.json`, over the 4 MiB cap (`tooLarge`, undated); one out-of-bound Datator value made a record malformed; a stop while the first record was written let `bddgen` spawn, then SIGKILLed it; a `launchRun` whose log cannot be made left an empty run folder. After: that run's `run.json` is 514 bytes, `run-finished.json` 2.18 MB and `datator.json` 2.13 MB, neither read back; the same stop spawns nothing and the run reads `stopped`; the folder is removed | ✅ 2026-10-14 | The reviewers' probes; a tsx probe; `record.spec.ts`, `cycle.spec.ts`, `launch.spec.ts` |
+| V426 | Mutations, each in a copy of the worktree, each failing a test — 23/23: the reviewers' survivors (a leader's failure not through `recordWords`, no prune when the event cannot be built, the unwatched run's `endedAt`, a Datator error not made well-formed — the schema mutants went with the schema), and each fix undone: the 4 MiB cap, the event back in `run.json`, the reason uncut, a reader parsing more, the stop before `bddgen` unchecked, read as could-not-start, taken as asked, unrecorded, the `ended` record before the files, a failed file blocking it, either file unwritten or wrong, not `0600`, unmasked, the `buildEvent` seam, the folder kept, the tie rule on `STOP_RANK`, an unwatched run recording its end, a record without one to write | ✅ 2026-10-14 | A mutation script in the scratchpad |
+| V427 | `cycle.spec.ts` under `--repeat-each 20 --workers 6`: 720 passed; `launch.spec.ts` passes with its 29 tests unmodified (one added) | ✅ 2026-10-14 | `npx playwright test -c playwright.unit.config.ts orchestrator/tasks/cycle.spec.ts --repeat-each 20 --workers 6` |
+| V428 | The gates pass; a full unit run: 2901 passed, 8 skipped by their environment guards | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V429 | Re-audit fixes, each undone in a copy and failing a test: a stop's `why` kept raw (a secret, a line feed, an ESC code, 600+ characters — masked, one line, 500 code points in the event, `run.json`'s `reason` and `stop.why`, `run-finished.json`, the lines and the run log, before the spawn and during `bddgen`); `folder.stopped` dropped (a stop asked while a failing first record is written read `stopped`, now `error`). The gates then pass: a full unit run, 2904 passed, 8 skipped | ✅ 2026-10-14 | A mutation script in the scratchpad; `npm run typecheck`, `lint`, `format`, `test:unit` |
