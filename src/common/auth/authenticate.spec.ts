@@ -25,6 +25,7 @@ import {
   hideFailureSnapshot,
 } from "./authenticate";
 import { sessionsInState } from "./session";
+import { removeTempDir } from "../__fixtures__/temp-dir";
 
 /**
  * The auth setup's pool authentication against a mock WordPress (`__fixtures__/mock-wordpress.ts`),
@@ -75,7 +76,7 @@ test.afterAll(async () => {
 
 test.beforeEach(() => {
   rmSync(stubLog, { force: true });
-  rmSync(join(work, "auth"), { recursive: true, force: true });
+  removeTempDir(join(work, "auth"));
   delete process.env.WP_STUB_MODE;
 });
 

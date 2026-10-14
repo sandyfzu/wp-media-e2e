@@ -23,6 +23,7 @@ import {
   stagingPath,
 } from "./staging";
 import type { LocalTransport, SshTransport } from "../config/types";
+import { removeTempDir } from "../__fixtures__/temp-dir";
 
 // The pure path/category logic needs no transport at all; the transfer + lifecycle behaviour is
 // exercised end to end on the `local` transport (a real WP-root-like directory, real
@@ -77,7 +78,7 @@ test.beforeEach(() => {
   // single source for the name everywhere it is *set*.
   delete process.env.E2E_SITE_STAGING_DIR;
   delete process.env.WP_STUB_ARGV_FILE;
-  rmSync(join(wpRoot, DEFAULT_STAGING_DIR), { recursive: true, force: true });
+  removeTempDir(join(wpRoot, DEFAULT_STAGING_DIR));
 });
 
 /**
