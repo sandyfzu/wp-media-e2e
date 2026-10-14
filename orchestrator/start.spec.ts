@@ -644,6 +644,97 @@ test.describe("start — stopping", () => {
     await expectCleanEnd(r.proc);
   });
 
+  test("a parent that ends drains as a SIGHUP: said, every run stopped, 130; the watch is gone", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    let parent = 100;
+    const reads: number[] = [];
+    const r = rig(undefined, {
+      parentWatch: {
+        parentPid: () => {
+          reads.push(parent);
+          return parent;
+        },
+        intervalMs: 20,
+      },
+    });
+    const timeoutsBefore = activeTimeouts();
+    const started = start({ config }, r.deps);
+    await waitForText(runLog("bpng-1"), FAKE_LINES.ready);
+    // An unchanged parent changes nothing.
+    await delay(100);
+    expect(await logText()).not.toContain("stopping");
+    parent = 1;
+    expect(await started).toBe(130);
+    expect(await record("bpng-1")).toMatchObject({ status: "stopped" });
+    const log = await logText();
+    expect(log).toContain(
+      "the parent process 100 ended (now 1): stopping as on a hangup",
+    );
+    expect(log).toContain("stopping: the orchestrator was stopped (SIGHUP)");
+    expect(log.match(/ stopping: /g)).toHaveLength(1);
+    // Read until it changed, then no more: the watch stopped itself, and start left no timer.
+    const count = reads.length;
+    await delay(100);
+    expect(reads.length).toBe(count);
+    expect(activeTimeouts()).toBeLessThanOrEqual(timeoutsBefore);
+    await expectCleanEnd(r.proc);
+  });
+
+  test("a parent that ends while a run drains slowly is said once: the watch stops as it fires", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    let parent = 100;
+    // The run ignores the drain and ends on its own 600 ms in: the watch would fire ~30 times more.
+    const r = rig(() => ({ runMs: 600, ignoreDrain: true }), {
+      parentWatch: { parentPid: () => parent, intervalMs: 20 },
+    });
+    const started = start({ config }, r.deps);
+    await waitForText(runLog("bpng-1"), FAKE_LINES.ready);
+    parent = 1;
+    expect(await started).toBe(130);
+    const log = await logText();
+    expect(log.match(/the parent process 100 ended/g)).toHaveLength(1);
+    expect(log.match(/ stopping: /g)).toHaveLength(1);
+    await expectCleanEnd(r.proc);
+  });
+
+  test("a reparent to a subreaper, not PID 1, is the parent ending too", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    let parent = 100;
+    const r = rig(undefined, {
+      parentWatch: { parentPid: () => parent, intervalMs: 20 },
+    });
+    const started = start({ config }, r.deps);
+    await waitForText(runLog("bpng-1"), FAKE_LINES.ready);
+    parent = 4321;
+    expect(await started).toBe(130);
+    expect(await logText()).toContain(
+      "the parent process 100 ended (now 4321): stopping as on a hangup",
+    );
+    await expectCleanEnd(r.proc);
+  });
+
+  test("the parent watch is gone once start returns, its parent unchanged", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    let reads = 0;
+    const r = rig(
+      (id) => runner(id, 1, "passed", { exitCode: undefined, runMs: 200 }),
+      {
+        parentWatch: {
+          parentPid: () => {
+            reads += 1;
+            return 7;
+          },
+          intervalMs: 20,
+        },
+      },
+    );
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    const count = reads;
+    expect(count).toBeGreaterThan(1);
+    await delay(100);
+    expect(reads).toBe(count);
+  });
+
   test("two SIGINTs within a second count as one: the run is drained, not interrupted", async () => {
     const config = await writeConfig();
     const r = rig();

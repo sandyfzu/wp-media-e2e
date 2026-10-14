@@ -70,7 +70,8 @@ import { failureLine, safeBlock, textOf } from "./text";
  * directory's lock, refuses on a run an earlier orchestrator left running, subscribes Slack and
  * Datator, and starts every selected task's loop at once. SIGINT, SIGTERM and SIGHUP drive the
  * shutdown machine (`runs/shutdown.ts`), and each escalation stops every loop — a stop ends a
- * cooldown and starts nothing, so loops, not only runs, are stopped. It waits for every loop; once
+ * cooldown and starts nothing, so loops, not only runs, are stopped. A parent that ends — npm killed
+ * by a SIGHUP it does not relay — counts as SIGHUP ({@link ParentWatch}). It waits for every loop; once
  * the runs were killed, only for {@link KILL_SETTLE_MS} more, then names what it leaves behind. Then
  * it settles the bus, releases the lock, closes the log and waits for the terminal.
  *
@@ -93,6 +94,9 @@ export const KILL_SETTLE_MS = 60_000;
 
 /** How long closing the log, then emptying the terminal's queue, may each take at the exit. */
 export const EXIT_WAIT_MS = 5_000;
+
+/** How often the parent's PID is read, to notice the parent is gone (see {@link ParentWatch}). */
+export const PARENT_WATCH_MS = 1_000;
 
 /** The scope of the orchestrator's own lines. */
 const SCOPE = "orchestrator";
@@ -154,6 +158,18 @@ export type LoopSeams = Partial<
   >
 >;
 
+/**
+ * How `start` notices its parent is gone: npm, or the shell, ended without passing a signal on — npm
+ * relays only SIGINT and SIGTERM, so a SIGHUP to npm's PID alone ends npm and leaves the orchestrator
+ * running, reparented, holding the lock. A changed parent PID is then a hangup: the drain, as SIGHUP.
+ */
+export interface ParentWatch {
+  /** The parent's PID now; `process.ppid` by default, which Node reads afresh each time. */
+  readonly parentPid: () => number;
+  /** How often it is read; {@link PARENT_WATCH_MS} by default. */
+  readonly intervalMs?: number;
+}
+
 /** Every seam of `start`; production uses none. */
 export interface StartDeps {
   /** `process` by default. */
@@ -184,6 +200,8 @@ export interface StartDeps {
   readonly notifications?: NotificationOptions;
   /** The loops' seams. */
   readonly loop?: LoopSeams;
+  /** How the parent's end is noticed; `process.ppid` every {@link PARENT_WATCH_MS} by default. */
+  readonly parentWatch?: ParentWatch;
 }
 
 /** What `start` begins with: the product list, the config, and the tasks selected. */
@@ -283,6 +301,8 @@ class Orchestrator {
   private readonly giveUp = deferred();
   /** The timer that resolves {@link giveUp}, once armed. */
   private giveUpTimer: unknown;
+  /** The parent watch's interval, while it runs. */
+  private parentTimer: NodeJS.Timeout | undefined;
   /** The log, once open: until then, lines go to standard error. */
   private logger: Logger | undefined;
   /** Every secret of the config and of its tasks' sites, once loaded: masked wherever a line goes. */
@@ -322,10 +342,37 @@ class Orchestrator {
       this.handlers.set(signal, handler);
       this.process.on(signal, handler);
     }
+    this.watchParent();
   }
 
-  /** Removes the handlers, disarms the shutdown's budget and the wait after a kill. */
+  /**
+   * Reads the parent's PID now and, every interval, again: once it changed — the parent ended and the
+   * process was reparented — says so and stops as on SIGHUP, then stops watching. Unreferenced: it
+   * never keeps the process alive by itself.
+   */
+  private watchParent(): void {
+    const watch = this.deps.parentWatch ?? { parentPid: () => process.ppid };
+    const first = watch.parentPid();
+    this.parentTimer = setInterval(() => {
+      const now = watch.parentPid();
+      if (now === first) return;
+      this.stopWatchingParent();
+      this.say(
+        `the parent process ${String(first)} ended (now ${String(now)}): stopping as on a hangup`,
+      );
+      this.shutdown.signal("SIGHUP");
+    }, watch.intervalMs ?? PARENT_WATCH_MS).unref();
+  }
+
+  /** Stops the parent watch, if it runs. */
+  private stopWatchingParent(): void {
+    if (this.parentTimer !== undefined) clearInterval(this.parentTimer);
+    this.parentTimer = undefined;
+  }
+
+  /** Removes the handlers and the parent watch, disarms the shutdown's budget and the wait after a kill. */
   unlisten(): void {
+    this.stopWatchingParent();
     for (const [signal, handler] of this.handlers)
       this.process.off(signal, handler);
     this.handlers.clear();
