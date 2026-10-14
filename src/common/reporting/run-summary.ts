@@ -13,7 +13,7 @@ import type {
 
 import { cellOfProject, type SetupKind } from "../config/project-names";
 import { errorMessage } from "../guards";
-import { plain, redactSecrets } from "../text";
+import { maskSiteUrl, plain, redactSecrets } from "../text";
 
 // Shared with the facts, the prune command and the Site Health reader; re-exported for its importers.
 export { plain };
@@ -262,12 +262,14 @@ function pluginPhrase(fact: PluginFact): string {
  */
 export function describeSite(fact: SiteFact): string {
   if ("error" in fact) {
-    return displayText(`${fact.baseURL} · versions unknown — ${fact.error}`);
+    return displayText(
+      `${maskSiteUrl(fact.baseURL)} · versions unknown — ${fact.error}`,
+    );
   }
   const { wordpress, php } = fact.versions;
   return displayText(
     [
-      fact.baseURL,
+      maskSiteUrl(fact.baseURL),
       `WordPress ${wordpress ?? "unknown"}`,
       `PHP ${php ?? "unknown"}`,
     ].join(" · "),

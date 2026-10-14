@@ -3,7 +3,9 @@ import { test, expect } from "@playwright/test";
 import {
   escapeHtml,
   escapeRegExp,
+  maskSiteUrl,
   maskValues,
+  NOT_A_SITE_URL,
   plain,
   redactSecrets,
 } from "./text";
@@ -99,6 +101,52 @@ test.describe("redactSecrets", () => {
     }
   });
 
+  test("masks a password a URL parser would refuse — with / ? # or @ — to its last @", () => {
+    for (const [text, masked] of [
+      ["https://admin:pa/ss-word9@host.test/", "https://***@host.test/"],
+      ["https://admin:pa?ss-word9@host.test/x", "https://***@host.test/x"],
+      ["https://admin:pa#ss-word9@host.test", "https://***@host.test"],
+      ["https://admin:p@ss/word@host", "https://***@host"],
+      [
+        "at https://admin:a-long/loose?password#over16@host.test/ then",
+        "at https://***@host.test/ then",
+      ],
+      ["https://admin:p/w@x@host.test/ then", "https://***@host.test/ then"],
+      ["https://:pa/ss@host.test", "https://***@host.test"],
+    ] as const)
+      expect(redactSecrets(text)).toBe(masked);
+  });
+
+  test("never reaches a later @ through a port, a bare colon or a path: emails and paths stay", () => {
+    for (const text of [
+      "https://site.example:8080/x then mail admin@site.example",
+      "https://site.example:8080 admin@site.example",
+      "https://site.example:443: user admin@site.example not found",
+      "https://site.example: user admin@site.example not found",
+      "https://site.example/wp: user admin@site.example",
+      "user admin@site.example could not log in to https://site.example",
+      "https://a.test:wrong/ logged in as admin@a.test",
+      "http://[2001:db8::1]/ user@host",
+      "s3://bucket:key/path owner@x",
+      "https://github.com:wp-media/x.git by dev@wp-media.me",
+      "https://a.test/2024:report written by admin@a.test",
+      "https://a.test/files/2024:report@archive.zip",
+    ])
+      expect(redactSecrets(text)).toBe(text);
+  });
+
+  test("a loose password ends at its own last @, never at a later word's", () => {
+    expect(
+      redactSecrets(
+        "https://admin:pa/ss@host.test then mail admin@site.example",
+      ),
+    ).toBe("https://***@host.test then mail admin@site.example");
+    // A space ends a password: one holding a space has no shape (see maskSiteUrl).
+    expect(redactSecrets("https://admin:p w@host.test")).toBe(
+      "https://admin:p w@host.test",
+    );
+  });
+
   test("masks a credential URL parameter to its end, whatever its case or place", () => {
     expect(
       redactSecrets(
@@ -142,6 +190,9 @@ test.describe("redactSecrets", () => {
     const started = performance.now();
     redactSecrets("a.".repeat(200_000));
     redactSecrets(`https://${"a".repeat(400_000)}`);
+    redactSecrets("https://a:b ".repeat(40_000));
+    redactSecrets(`https://a:${"b".repeat(400_000)}`);
+    redactSecrets(`https://a:b${"@".repeat(400_000)}`);
     expect(performance.now() - started).toBeLessThan(2_000);
   });
 
@@ -149,6 +200,54 @@ test.describe("redactSecrets", () => {
     const text = "http://a:b@h1 http://c:d@h2";
     expect(redactSecrets(text)).toBe("http://***@h1 http://***@h2");
     expect(redactSecrets(text)).toBe("http://***@h1 http://***@h2");
+  });
+});
+
+test.describe("maskSiteUrl", () => {
+  test("keeps an http(s) URL as written, a path only when it has one", () => {
+    for (const url of [
+      "https://bwu2.qa.test",
+      "https://bwu2.qa.test/",
+      "http://localhost:8100/wp",
+      "https://a.qa.test:8443/wp/",
+    ])
+      expect(maskSiteUrl(url)).toBe(url);
+  });
+
+  test("shows a user and password as ***@ and drops a query and a fragment", () => {
+    expect(maskSiteUrl("http://admin:SECRETPW@wp.test")).toBe(
+      "http://***@wp.test",
+    );
+    expect(maskSiteUrl("https://token@a.test/wp/?pwd=x#y")).toBe(
+      "https://***@a.test/wp/",
+    );
+    expect(maskSiteUrl("https://a.test?k=v")).toBe("https://a.test");
+    // A quote stops every shape; the parser still finds the password.
+    expect(maskSiteUrl('https://u:pa"ss-word@a.test/')).toBe(
+      "https://***@a.test/",
+    );
+  });
+
+  test("is the stand-in for anything but an http(s) URL — a password with a space included", () => {
+    for (const url of [
+      "not a url",
+      "https://admin:hunter 22x@bad host/",
+      "https://admin:s3cr3tpw@host.test:99999/",
+      "foo:admin:s3cr3tpw@host",
+      "file:///etc/passwd",
+      "ftp://u:p@files.test/",
+      "",
+    ])
+      expect(maskSiteUrl(url), url).toBe(NOT_A_SITE_URL);
+  });
+
+  test("is the same when applied again", () => {
+    for (const url of [
+      "http://admin:pw@wp.test",
+      "https://a.test/wp?x=1",
+      "bad url",
+    ])
+      expect(maskSiteUrl(maskSiteUrl(url))).toBe(maskSiteUrl(url));
   });
 });
 

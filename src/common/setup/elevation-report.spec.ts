@@ -13,12 +13,12 @@ import type { SiteElevation } from "./elevation-report";
 
 /** One site's elevation state. Ownership is pending unless a case says otherwise. */
 const site = (
-  baseURL: string,
+  host: string,
   support: SiteElevation["support"],
   ownershipPending = true,
 ): SiteElevation => ({
-  baseURL,
-  transport: `ssh: ubuntu@${baseURL}`,
+  baseURL: `https://${host}`,
+  transport: `ssh: ubuntu@${host}`,
   support,
   ownershipPending,
 });
@@ -147,4 +147,27 @@ test("claims the ownership cost only for sites that actually needed a handover",
       .filter((line) => line.includes("ownership handover pending")),
   ).toHaveLength(1);
   expect(mixed).toContain("needs-it.test  [ssh: ubuntu@needs-it.test]  ←");
+});
+
+test("names each site by maskSiteUrl: credentials ***@, a baseURL that is no URL never printed", () => {
+  const banner = plain([
+    {
+      baseURL: "https://admin:pw-0001@creds.test/wp?k=v",
+      transport: "ssh: ubuntu@creds.test",
+      support: "unavailable",
+      ownershipPending: true,
+    },
+    {
+      baseURL: "https://admin:pa ss-word9@bad host/",
+      transport: "ssh: ubuntu@bad",
+      support: "unavailable",
+      ownershipPending: true,
+    },
+  ]);
+  expect(banner).toContain(
+    "https://***@creds.test/wp  [ssh: ubuntu@creds.test]",
+  );
+  expect(banner).toContain("(not a valid http(s) URL)  [ssh: ubuntu@bad]");
+  for (const secret of ["pw-0001", "ss-word9", "k=v"])
+    expect(banner).not.toContain(secret);
 });

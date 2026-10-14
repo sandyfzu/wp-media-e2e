@@ -261,6 +261,15 @@ test.describe("the phrases", () => {
       "https://x · versions unknown — timeout",
     );
   });
+
+  test("describeSite: the URL by maskSiteUrl — credentials ***@, a baseURL that is no URL never shown", () => {
+    expect(
+      describeSite({ baseURL: "https://u:pw-0001@x.test/?k=v", versions: {} }),
+    ).toBe("https://***@x.test/ · WordPress unknown · PHP unknown");
+    expect(
+      describeSite({ baseURL: "https://u:pa ss-word9@bad host/", error: "t" }),
+    ).toBe("(not a valid http(s) URL) · versions unknown — t");
+  });
 });
 
 test.describe("plain text, paths and shell words", () => {

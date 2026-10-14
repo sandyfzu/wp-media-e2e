@@ -227,3 +227,16 @@ test.describe("readSiteInfo — a site whose URL carries basic-auth credentials"
     expect(JSON.stringify(entry)).not.toContain("SECRETPW");
   });
 });
+
+test.describe("readSiteInfo — a site whose baseURL is no URL", () => {
+  test("records the stand-in, never the text", async ({ page }) => {
+    await page.route(/./, (route) => route.abort());
+    const entry = await readSiteInfo(
+      page,
+      "https://admin:pa ss-word9@bad host/",
+      500,
+    );
+    expect(entry.baseURL).toBe("(not a valid http(s) URL)");
+    expect(JSON.stringify(entry.baseURL)).not.toContain("ss-word9");
+  });
+});

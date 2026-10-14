@@ -5,7 +5,7 @@ import {
   setupKindOf,
   type SetupKind,
 } from "../config/project-names";
-import { escapeHtml } from "../text";
+import { escapeHtml, maskSiteUrl } from "../text";
 import type { Counts, TestStatus } from "./results";
 import type { RunDescription } from "./run-description";
 import {
@@ -247,9 +247,9 @@ function cleanStrings<T extends object>(value: T): T {
  */
 function cleanSite(fact: SiteFact): SiteFact {
   return "error" in fact
-    ? cleanStrings(fact)
+    ? cleanStrings({ ...fact, baseURL: maskSiteUrl(fact.baseURL) })
     : {
-        baseURL: factText(fact.baseURL),
+        baseURL: factText(maskSiteUrl(fact.baseURL)),
         versions: cleanStrings(fact.versions),
       };
 }

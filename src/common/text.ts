@@ -52,6 +52,19 @@ const GITHUB_TOKEN = /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{10,}/g;
  */
 const URL_USERINFO = /(?<![a-z\d+.-])([a-z][a-z\d+.-]*:\/\/)[^\s/?#"'<>`]+@/gi;
 
+/**
+ * A URL's password that {@link URL_USERINFO} would cut short: one holding `/`, `?`, `#` or `@`
+ * (`https://admin:p@ss/word@host`), which a URL parser refuses or splits. It takes a user (no
+ * `/ ? # : @` nor space), a `:`, then a password with **no whitespace** that does not read as a port
+ * (digits, then the authority's end), up to the **last** `@` before the next space, within 256
+ * characters — so it never runs past a word, and each scheme costs a bounded scan. Applied before
+ * {@link URL_USERINFO}, which would otherwise mask only up to the password's first `@`. A password
+ * holding a space has no shape to tell it from text: a site's `baseURL` is shown through
+ * {@link maskSiteUrl} instead, which never prints one.
+ */
+const URL_LOOSE_PASSWORD =
+  /(?<![a-z\d+.-])([a-z][a-z\d+.-]*:\/\/)[^\s/?#:@"'<>`]*:(?!\d*(?:[\s/?#:]|$))[^\s"'<>`]{0,256}?@(?=[^\s@]*(?:[\s"'<>`]|$))/gi;
+
 /** A credential passed as a URL parameter (`?access_token=…`), which git quotes verbatim. */
 const URL_CREDENTIAL_PARAM =
   /([?&#;](?:access_token|token|password|passwd|pwd|secret|client_secret|api_?key)=)[^\s&#;"'<>`]+/gi;
@@ -66,7 +79,7 @@ const WORDPRESS_AUTH_COOKIE =
 
 /**
  * `text` with every credential it may quote masked, by its shape: a GitHub token, a URL's user and
- * password, a credential URL parameter (`pwd` — WordPress's login form — included), an HTTP
+ * password (one a parser would refuse too), a credential URL parameter (`pwd` — WordPress's login form — included), an HTTP
  * `Authorization` header, a WordPress login cookie. A credential with no recognisable shape — a
  * legacy 40-hex token, a password quoted bare — is masked only by its value ({@link maskValues}). The
  * last line of defence before an error reaches a log or a report — a
@@ -90,8 +103,50 @@ export function redactSecrets(text: string): string {
     .replace(GITHUB_TOKEN, MASK)
     .replace(AUTHORIZATION, `$1${MASK}`)
     .replace(WORDPRESS_AUTH_COOKIE, `$1${MASK}`)
+    .replace(URL_LOOSE_PASSWORD, `$1${MASK}@`)
     .replace(URL_USERINFO, `$1${MASK}@`)
     .replace(URL_CREDENTIAL_PARAM, `$1${MASK}`);
+}
+
+/** What {@link maskSiteUrl} shows for an address that is not an `http(s)` URL: never its text. */
+export const NOT_A_SITE_URL = "(not a valid http(s) URL)";
+
+/**
+ * A URL's scheme, its authority (to the first `/` or `\\`, as a parser ends it) and the rest, as
+ * written: what {@link maskSiteUrl} shows of an address the parser accepted.
+ */
+const URL_PARTS = /^([a-z][a-z\d+.-]*:)[\\/]{2}([^\\/]*)(.*)$/is;
+
+/**
+ * A site's `baseURL` as safe to show, judged by a URL parser rather than by a shape: an `http(s)` URL
+ * keeps its host, port and path **as written** (nothing re-encoded or case-folded, so a secret in them
+ * is still masked by its value later), its user and password shown as `***@`, its query and fragment
+ * dropped (either may carry a token); anything else — text that does not parse, another scheme — is
+ * {@link NOT_A_SITE_URL}, since a sites file may hold anything pasted there (a password with a space
+ * included). The same when applied again.
+ *
+ * @param baseURL - the site's address, as its sites file writes it.
+ * @returns the address to show.
+ * @example
+ * ```ts
+ * maskSiteUrl("http://admin:pw@wp.test"); // "http://***@wp.test"
+ * maskSiteUrl("https://admin:hunter 2@bad host/"); // "(not a valid http(s) URL)"
+ * ```
+ */
+export function maskSiteUrl(baseURL: string): string {
+  if (!URL.canParse(baseURL)) return NOT_A_SITE_URL;
+  const url = new URL(baseURL);
+  if (url.protocol !== "http:" && url.protocol !== "https:")
+    return NOT_A_SITE_URL;
+  const credentials =
+    url.username !== "" || url.password !== "" ? `${MASK}@` : "";
+  const parts = URL_PARTS.exec(baseURL.split(/[?#]/, 1)[0] ?? "");
+  // The authority's host is after its last `@`, as the parser reads it.
+  const written = parts?.[2]?.split("@").at(-1);
+  if (parts === null || written === undefined)
+    // Written some other way the parser still takes (`https:host`): shown as it reads it.
+    return `${url.protocol}//${credentials}${url.host}${url.pathname}`;
+  return `${url.protocol}//${credentials}${written}${parts[3] ?? ""}`;
 }
 
 /** The shortest value {@link maskValues} masks: a shorter one would mask ordinary words. */

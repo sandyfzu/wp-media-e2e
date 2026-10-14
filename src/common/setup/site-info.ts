@@ -2,7 +2,7 @@ import type { Page } from "@playwright/test";
 
 import { errorMessage } from "../guards";
 import { SiteHealthPage } from "../pages/site-health.page";
-import { plain, redactSecrets } from "../text";
+import { maskSiteUrl, plain, redactSecrets } from "../text";
 
 /**
  * The versions a site actually runs, as its reports record them: WordPress, PHP **as the web server
@@ -134,7 +134,7 @@ export async function readSiteInfo(
   budgetMs: number,
 ): Promise<SiteInfoEntry> {
   const deadline = Date.now() + budgetMs;
-  const site = redactSecrets(baseURL);
+  const site = maskSiteUrl(baseURL);
   try {
     const siteHealth = new SiteHealthPage(page);
     await siteHealth.goto({ timeout: budgetMs });

@@ -859,3 +859,21 @@ test.describe("metadataOf and runFactsJson", () => {
     expect(runFactsJson(facts).endsWith("}\n")).toBe(true);
   });
 });
+
+test.describe("withSetupAttachment — a site's URL", () => {
+  test("is kept by maskSiteUrl: credentials ***@, no query, a baseURL that is no URL never kept", () => {
+    const facts = withSetupAttachment(
+      beginFacts(RUN, PLAN, STARTED),
+      "setup:pro@nginx",
+      [
+        { baseURL: "https://u:pw-0001@a.test/wp?k=v", versions: {} },
+        { baseURL: "https://u:pa ss-word9@bad host/", error: "timeout" },
+      ],
+    );
+    const json = JSON.stringify(facts);
+    for (const secret of ["pw-0001", "ss-word9", "k=v"])
+      expect(json).not.toContain(secret);
+    expect(json).toContain('"baseURL":"https://***@a.test/wp"');
+    expect(json).toContain('"baseURL":"(not a valid http(s) URL)"');
+  });
+});

@@ -130,6 +130,18 @@ test.describe("verifyPool — admin locale gate", () => {
     expect(message).toContain("Site Language");
   });
 
+  test("names a site in its report by maskSiteUrl: a baseURL that is no URL is never printed", async () => {
+    process.env.WP_STUB_LOCALE = "fr_FR";
+    const error = await verifyPool(
+      [localSite("https://admin:pa ss-word9@bad host/")],
+      "backwpup",
+      "local",
+    ).catch((e: unknown) => e);
+    const message = (error as Error).message;
+    expect(message).toContain("Site 0 — (not a valid http(s) URL)");
+    expect(message).not.toContain("ss-word9");
+  });
+
   test("reports a locale it cannot read, rather than assuming English", async () => {
     process.env.WP_STUB_LOCALE = "fail";
     const error = await verifyPool([localSite()], "backwpup", "local").catch(

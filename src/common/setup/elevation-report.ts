@@ -1,6 +1,6 @@
 import { styleText } from "node:util";
 
-import { redactSecrets } from "../text";
+import { maskSiteUrl } from "../text";
 import type { ElevationSupport } from "../wp/exec";
 
 /**
@@ -100,9 +100,7 @@ export function renderElevationWarning(
     // marker is what ties the extra cost below to the sites it is true for.
     const mark = site.ownershipPending ? "  ←  ownership handover pending" : "";
     // The report becomes a setup's output, which the reports keep: a basic-auth `baseURL` is masked.
-    lines.push(
-      `     ${redactSecrets(site.baseURL)}  [${site.transport}]${mark}`,
-    );
+    lines.push(`     ${maskSiteUrl(site.baseURL)}  [${site.transport}]${mark}`);
   }
   lines.push("");
   // Both causes are named because `sudo` reports them identically — it will not say whether a user
