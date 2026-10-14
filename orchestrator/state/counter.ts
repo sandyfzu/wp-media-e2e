@@ -1,5 +1,5 @@
 import { lstat, mkdir, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 
 import { TASK_ID_PATTERN } from "../config/schema";
@@ -7,9 +7,11 @@ import { errorCode } from "../error-code";
 import {
   checkOwnFolder,
   describeFolderProblem,
+  ownFolderRemedy,
   PRIVATE_FOLDER,
+  type OwnFolderCheck,
 } from "../folders";
-import { RUNS_DIR } from "../runs/identity";
+import { runIdOf, RUNS_DIR } from "../runs/identity";
 import { shellWord } from "../text";
 import { writeJsonAtomic } from "./atomic";
 import { StateError } from "./errors";
@@ -86,21 +88,20 @@ export function counterPath(stateDir: string, taskId: string): string {
  * @param place - the counter, for the messages.
  * @returns the next run number, from 1: past both the counter and the folders.
  * @throws {@link StateError} naming the file when the text is not JSON, not a counter, or there is no
- *   safe number after it.
+ *   safe number after it — naming the run folder instead when its number is the one with none after
+ *   it, since only moving that folder helps then.
  */
 export function nextAfter(
   text: string | undefined,
   highestFolder: number,
   place: CounterPlace,
 ): number {
-  const last = Math.max(
-    text === undefined ? 0 : lastRunOf(text, place),
-    highestFolder,
-  );
-  const next = last + 1;
-  if (!Number.isSafeInteger(next))
+  const counted = text === undefined ? 0 : lastRunOf(text, place);
+  const next = Math.max(counted, highestFolder) + 1;
+  if (Number.isSafeInteger(next)) return next;
+  if (highestFolder < counted)
     throw counterRefused(place, "has no run number left");
-  return next;
+  throw folderExhausted(place, highestFolder, counted === highestFolder);
 }
 
 /**
@@ -222,14 +223,52 @@ async function ensureTasksDir(dir: string): Promise<void> {
       if (errorCode(error) !== "EEXIST") throw error;
     });
   const check = await checkOwnFolder(dir, PRIVATE_FOLDER);
+  if (check.kind !== "ok") throw tasksFolderRefusal(dir, check);
+}
+
+/**
+ * The refusal of a counters' folder {@link checkOwnFolder} did not pass, with what to do about it.
+ *
+ * @param dir - `<stateDir>/tasks`.
+ * @param check - what was wrong with it.
+ * @param user - who must own it: this process's user by default.
+ */
+export function tasksFolderRefusal(
+  dir: string,
+  check: Exclude<OwnFolderCheck, { kind: "ok" }>,
+  user?: string,
+): StateError {
   if (check.kind === "notFolder")
-    throw new StateError(
+    return new StateError(
       `The run counters' folder ${dir} is not a folder (a symbolic link is refused). Remove it: rm ${shellWord(dir)}`,
     );
-  if (check.kind !== "ok")
-    throw new StateError(
-      `The run counters' folder ${dir} ${describeFolderProblem(check)}: it must be this user's alone (chmod 700 ${shellWord(dir)}).`,
-    );
+  return new StateError(
+    `The run counters' folder ${dir} ${describeFolderProblem(check)}: it must be this user's alone (${ownFolderRemedy(dir, check, PRIVATE_FOLDER, user)}).`,
+  );
+}
+
+/**
+ * The refusal of a task whose highest run folder holds the largest safe number, leaving none past it.
+ * Only moving that folder out of `runs/` helps: the counter never hands out a number below a folder's.
+ *
+ * @param place - the counter.
+ * @param number - the folder's number.
+ * @param counterToo - whether the counter holds that number as well, so it must be set lower too.
+ */
+function folderExhausted(
+  place: CounterPlace,
+  number: number,
+  counterToo: boolean,
+): StateError {
+  const name = runIdOf(place.taskId, number);
+  const folder = join(place.runsDir, name);
+  const moved = join(dirname(place.runsDir), `${name}.moved`);
+  const counter = counterToo
+    ? ` The run counter ${place.path} holds that number too: ${repair(place)}`
+    : "";
+  return new StateError(
+    `Task ${place.taskId} has no run number left: its run folder ${folder} holds the largest safe number, and no run number is handed out below a run folder's. Move the folder out of ${place.runsDir}: mv ${shellWord(folder)} ${shellWord(moved)}${counter}`,
+  );
 }
 
 /**

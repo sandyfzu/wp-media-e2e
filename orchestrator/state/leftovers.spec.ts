@@ -1,6 +1,9 @@
 import { test, expect } from "@playwright/test";
+import { execFileSync } from "node:child_process";
 import {
   chmod,
+  lstat,
+  lutimes,
   mkdir,
   mkdtemp,
   readdir,
@@ -124,6 +127,29 @@ test.describe("sweepLeftovers", () => {
       ].sort(),
     );
     expect(await readdir(tasks)).toEqual(["bpng.json"]);
+  });
+
+  test("keeps an old FIFO, folder or link named as a leftover: only a regular file is one", async () => {
+    const tasks = join(dir, TASKS_DIR);
+    await mkdir(tasks);
+    const when = new Date(NOW - LEFTOVER_AGE_MS - 1);
+    const fifo = join(dir, `.orchestrator.lock.${HEX12}.tmp`);
+    // Node makes no FIFO: `mkfifo` does, on every system this runs on.
+    execFileSync("mkfifo", [fifo]);
+    const folder = join(dir, `.orchestrator.lock.${HEX32}.claim`);
+    await mkdir(folder);
+    const target = join(dir, "target");
+    await writeFile(target, "x");
+    const link = join(tasks, `.bpng.json.${HEX12}.tmp`);
+    await symlink(target, link);
+    // Each old by its own time, a link's included, so only its type keeps it.
+    for (const path of [fifo, folder]) await utimes(path, when, when);
+    await lutimes(link, when, when);
+
+    expect(await sweepLeftovers(dir, NOW)).toEqual({ removed: [], failed: [] });
+    expect((await lstat(fifo)).isFIFO()).toBe(true);
+    expect((await lstat(folder)).isDirectory()).toBe(true);
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
   });
 
   test("lists nothing through a link at tasks/", async () => {

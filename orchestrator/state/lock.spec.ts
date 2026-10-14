@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { unlinkSync } from "node:fs";
 import {
   chmod,
+  link,
   mkdir,
   mkdtemp,
   readdir,
@@ -21,6 +22,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { execInChildNode } from "../../src/common/__fixtures__/child-node";
 import { withHandleMethod } from "../__fixtures__/file-handle";
+import { currentUser } from "../folders";
 import type { LeaderStartReader } from "../runs/leader";
 import type { KillFn } from "../runs/process-group";
 import { StateError } from "./errors";
@@ -298,6 +300,25 @@ test.describe("judgeOwner", () => {
     ).toEqual({ kind: "dead" });
   });
 
+  test("never reads a lock from a machine cloned from this one's image as an earlier boot: one machine id, another host", async () => {
+    const host: PidSpace = {
+      ...SPACE,
+      pidns: INIT_PID_NAMESPACE,
+      machine: "0123456789abcdef0123456789abcdef",
+    };
+    // Its boot differs and its machine id does not: only the host name tells it is another, live, machine.
+    const clone: PidSpace = {
+      ...host,
+      host: "runner-a",
+      boot: "0e1d2c3b-4a59-6877-8695-a4b3c2d1e0f9",
+    };
+    expect(
+      await judge(owner(5, 2, { space: clone }), { ...me, space: host }, () => {
+        throw new Error("never asked");
+      }),
+    ).toEqual({ kind: "foreign" });
+  });
+
   test("passes on any other error", async () => {
     await expect(
       judge(owner(5, 2), me, () => {
@@ -386,9 +407,21 @@ test.describe("acquireLock", () => {
     );
     expect(error).toBeInstanceOf(StateError);
     expect(error.message).toBe(
-      `${lockPath} was written by pid 1 in another PID space (linux boot ${SPACE.boot ?? ""}, pid:[4026532965]; this process: linux boot ${SPACE.boot ?? ""}, pid:[4026532829]) — another container, host or boot, where this process cannot tell whether it still runs. If no orchestrator runs on this state directory there, remove the lock: rm ${lockPath}`,
+      `${lockPath} was written by pid 1 in another PID space (linux boot ${SPACE.boot ?? ""}, pid:[4026532965]; this process: linux boot ${SPACE.boot ?? ""}, pid:[4026532829]) — another container, host or boot, where this process cannot tell whether it still runs. A container restarts into a new PID namespace, so its own lock reads as another's: running the orchestrator on the host, or its container with --pid=host, keeps one namespace across restarts. If no orchestrator runs on this state directory there, remove the lock: rm ${lockPath}`,
     );
     expect(await lockOnDisk()).toEqual(theirs);
+  });
+
+  test("says nothing of containers when the lock is from another boot or platform", async () => {
+    for (const space of [
+      { ...SPACE, boot: "0e1d2c3b-4a59-6877-8695-a4b3c2d1e0f9" },
+      { ...SPACE, platform: "darwin" },
+    ]) {
+      await plantLock(owner(5, 9, { space }));
+      const error = await rejectionOf(acquireLock(dir, deps(77, 1)));
+      expect(error.message).toMatch(/another PID space/);
+      expect(error.message).not.toContain("--pid=host");
+    }
   });
 
   test("refuses every lock when this process's own PID space cannot be read", async () => {
@@ -698,17 +731,160 @@ test.describe("acquireLock", () => {
     });
     await atRecheck;
     // B: judges the same stale lock dead meanwhile. Without A's claim it would take it over, then A
-    // would remove B's lock and create its own: two holders.
+    // would remove B's lock and create its own: two holders. Both starts are this one process, so
+    // A's claim is known by its token as this process's own.
     const b = await rejectionOf(acquireLock(dir, deps(101, 2)));
     expect(b).toBeInstanceOf(StateError);
-    expect(b.message).toMatch(
-      /^Another start \(pid 100 on box\) is taking over /,
+    expect(b.message).toBe(
+      `This process is already taking over ${lockPath} (its claim ${claimPath(lockPath, owner(DEAD_PID, 9))}): a second start in one process is refused.`,
     );
     resume();
     const lock = await a;
     taken.push(lock);
     expect(await lockOnDisk()).toEqual(owner(100, 1));
     expect(await readdir(dir)).toEqual([LOCK_FILE]);
+  });
+
+  test("never removes a new holder's lock when it claims a stale one only after another start took the lock over", async () => {
+    await plantLock(owner(DEAD_PID, 9));
+    let resume = (): void => undefined;
+    const parked = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let reached = (): void => undefined;
+    const atClaim = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    // Y: judges the stale lock dead, then waits just before linking its claim on it.
+    const y = acquireLock(dir, {
+      ...deps(101, 2),
+      link: async (existing, path) => {
+        if (path.endsWith(".claim")) {
+          reached();
+          await parked;
+        }
+        await link(existing, path);
+      },
+    });
+    await atClaim;
+    // X: removes the stale lock and takes its own meanwhile — the claim Y then gets is on a file gone.
+    const x = await take(deps(100, 1));
+    resume();
+    // Y finds X's token where the dead one's was: it removes nothing, and X is a live holder.
+    const refused = await rejectionOf(y);
+    expect(refused).toBeInstanceOf(StateError);
+    expect(await lockOnDisk()).toEqual(x.owner);
+    expect(await readdir(dir)).toEqual([LOCK_FILE]);
+  });
+
+  test("refuses a second start in this process while the first is still taking the lock, with this process's start unknown", async () => {
+    let first = true;
+    const unknownStart: LockDeps = {
+      ...deps(77, 1),
+      readStart: () => Promise.resolve({ kind: "unknown", why: "EACCES" }),
+      // The first link waits once it is made: the lock is on disk, the start still taking it.
+      link: async (existing, path) => {
+        await link(existing, path);
+        if (first) {
+          first = false;
+          await sleep(50);
+        }
+      },
+    };
+    const results = await Promise.allSettled([
+      acquireLock(dir, unknownStart),
+      acquireLock(dir, { ...unknownStart, token: () => token(2) }),
+    ]);
+    const won = results.flatMap((r) =>
+      r.status === "fulfilled" ? [r.value] : [],
+    );
+    taken.push(...won);
+    expect(won).toHaveLength(1);
+    const refused = results.find((r) => r.status === "rejected");
+    expect(refused?.status === "rejected" && refused.reason).toEqual(
+      new StateError(
+        `This process already holds ${lockPath}: a second start in one process is refused. Release the lock it holds first.`,
+      ),
+    );
+    expect(await lockOnDisk()).toEqual(won[0]?.owner);
+  });
+
+  test("refuses a second start in this process while the first holds a claim, with this process's start unknown — never naming its own PID as another start's", async () => {
+    const stale = owner(DEAD_PID, 9);
+    await plantLock(stale);
+    let resume = (): void => undefined;
+    const parked = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let reached = (): void => undefined;
+    const atRecheck = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const unknownStart: LockDeps = {
+      ...deps(77, 1),
+      readStart: () => Promise.resolve({ kind: "unknown", why: "EACCES" }),
+    };
+    const a = acquireLock(dir, {
+      ...unknownStart,
+      afterRecheck: async () => {
+        reached();
+        await parked;
+      },
+    });
+    await atRecheck;
+    // Judged by PID and start alone, A's claim would read as an earlier process's of this PID: dead.
+    const b = await rejectionOf(
+      acquireLock(dir, { ...unknownStart, token: () => token(2) }),
+    );
+    expect(b.message).toBe(
+      `This process is already taking over ${lockPath} (its claim ${claimPath(lockPath, stale)}): a second start in one process is refused.`,
+    );
+    resume();
+    taken.push(await a);
+    expect((await lockOnDisk())?.token).toBe(token(1));
+  });
+
+  test("takes the lock under a token again once a start under it failed", async () => {
+    await plantLock(owner(5, 9));
+    await expect(acquireLock(dir, deps(77, 1))).rejects.toThrow(
+      /Another orchestrator/,
+    );
+    await rm(lockPath);
+    expect((await take(deps(77, 1))).owner.token).toBe(token(1));
+  });
+
+  test("refuses a token this process already holds or is taking the lock with, removing nothing", async () => {
+    const first = await take(deps(77, 1));
+    await expect(acquireLock(dir, deps(78, 1))).rejects.toThrow(
+      /This process already holds/,
+    );
+    expect(await lockOnDisk()).toEqual(first.owner);
+    // The refused start left the first's token registered: with this process's start unknown, only
+    // the token still tells its lock from an earlier process's of this PID.
+    await expect(
+      acquireLock(dir, {
+        ...deps(77, 2),
+        readStart: () => Promise.resolve({ kind: "unknown", why: "EACCES" }),
+      }),
+    ).rejects.toThrow(/This process already holds/);
+    expect(await lockOnDisk()).toEqual(first.owner);
+    expect(await first.release()).toBe(true);
+  });
+
+  test.describe("for another user's state directory", () => {
+    test.skip(
+      process.getuid?.() === 0 || process.getuid === undefined,
+      "root owns / and may take any folder; Windows has no owners",
+    );
+
+    test("says to hand it to this user with sudo chown, creating nothing", async () => {
+      // `/` is root's on every system this runs on: a folder of another user's, without root.
+      await expect(acquireLock("/", deps(77, 1))).rejects.toThrow(
+        new StateError(
+          `The state directory / is owned by uid 0, not this user: it must be this user's, and no one else may write in it (sudo chown ${currentUser()} /).`,
+        ),
+      );
+    });
   });
 });
 

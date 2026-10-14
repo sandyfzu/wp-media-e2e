@@ -14,8 +14,8 @@ import { BOOT_ID_PATH } from "../runs/leader";
  *   container of that boot) and the PID namespace (`/proc/self/ns/pid`, `pid:[<inode>]`: two live
  *   namespaces never share one; a dead one's may be handed to a new one, which is harmless — every
  *   process of the dead one is gone). The machine's id (`/etc/machine-id`, kept across boots; absent
- *   in most containers) adds one more answer: a lock from an **earlier boot** of the same machine's
- *   initial namespace names only dead processes.
+ *   in most containers) and its host name add one more answer: a lock from an **earlier boot** of the
+ *   same machine's initial namespace names only dead processes.
  * - **Elsewhere (macOS)** — one PID namespace per machine, named by its host name. A changed host
  *   name reads as another machine: refused, never misjudged.
  *
@@ -113,8 +113,9 @@ export function sameSpace(a: PidSpace, b: PidSpace): boolean {
 
 /**
  * Whether `earlier` is an earlier boot of `now`'s machine, both in its initial PID namespace: then
- * every process `earlier` names has ended with that boot. Needs the machine's id on both sides — a
- * container without one is never so judged.
+ * every process `earlier` names has ended with that boot. Needs the machine's id and the host name on
+ * both sides, each the same — a container without a machine id is never so judged, nor are two
+ * machines cloned from one image (which share `/etc/machine-id`) unless they share a host name too.
  *
  * @param earlier - the space a lock was written in.
  * @param now - this process's.
@@ -125,6 +126,8 @@ export function earlierBoot(earlier: PidSpace, now: PidSpace): boolean {
     now.platform === "linux" &&
     earlier.machine !== null &&
     earlier.machine === now.machine &&
+    earlier.host !== null &&
+    earlier.host === now.host &&
     earlier.pidns === INIT_PID_NAMESPACE &&
     now.pidns === INIT_PID_NAMESPACE &&
     earlier.boot !== null &&

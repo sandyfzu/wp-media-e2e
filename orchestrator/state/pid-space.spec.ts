@@ -162,6 +162,13 @@ test.describe("earlierBoot", () => {
 
   for (const [why, earlier, now] of [
     ["another machine", { machine: "f".repeat(32) }, {}],
+    // Cloned from one image, so one machine id: each would take the other's live lock over NFS.
+    [
+      "a clone of this machine under another host name",
+      { host: "runner-a" },
+      {},
+    ],
+    ["a machine whose host name is unknown", { host: null }, { host: null }],
     ["no machine id", { machine: null }, { machine: null }],
     ["a container's namespace", { pidns: "pid:[4026532829]" }, {}],
     ["this process in a container", {}, { pidns: "pid:[4026532829]" }],

@@ -7,12 +7,14 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
   checkOwnFolder,
+  currentUser,
   describeFolderProblem,
+  ownFolderRemedy,
   PRIVATE_FOLDER,
   STATE_FOLDER,
 } from "./folders";
@@ -100,5 +102,78 @@ test.describe("describeFolderProblem", () => {
     expect(describeFolderProblem({ kind: "open", mode: 0o777 })).toBe(
       "is mode 777",
     );
+  });
+});
+
+test.describe("ownFolderRemedy", () => {
+  test("closes an open folder as its rule asks", () => {
+    expect(
+      ownFolderRemedy(
+        "/srv/state",
+        { kind: "open", mode: 0o777 },
+        STATE_FOLDER,
+      ),
+    ).toBe("chmod go-w /srv/state");
+    expect(
+      ownFolderRemedy("/srv/t", { kind: "open", mode: 0o755 }, PRIVATE_FOLDER),
+    ).toBe("chmod 700 /srv/t");
+  });
+
+  test("hands another user's folder to this one with sudo — its owner's chmod is not this user's to run — closing it too only when it is open", () => {
+    expect(
+      ownFolderRemedy(
+        "/srv/state",
+        { kind: "notOwn", uid: 0, mode: 0o755 },
+        STATE_FOLDER,
+        "ci",
+      ),
+    ).toBe("sudo chown ci /srv/state");
+    expect(
+      ownFolderRemedy(
+        "/srv/t",
+        { kind: "notOwn", uid: 0, mode: 0o755 },
+        PRIVATE_FOLDER,
+        "ci",
+      ),
+    ).toBe("sudo chown ci /srv/t && chmod 700 /srv/t");
+  });
+
+  test("quotes a path or user name the shell would split", () => {
+    expect(
+      ownFolderRemedy(
+        "/srv/my state",
+        { kind: "notOwn", uid: 0, mode: 0o700 },
+        STATE_FOLDER,
+        "o'neil",
+      ),
+    ).toBe(`sudo chown 'o'\\''neil' '/srv/my state'`);
+  });
+
+  test("names this process's user by default", () => {
+    expect(
+      ownFolderRemedy(
+        "/x",
+        { kind: "notOwn", uid: 0, mode: 0o700 },
+        STATE_FOLDER,
+      ),
+    ).toBe(`sudo chown ${currentUser()} /x`);
+  });
+});
+
+test.describe("currentUser", () => {
+  test("is the user's name", () => {
+    expect(currentUser(() => ({ username: "ci" }), 1001)).toBe("ci");
+  });
+
+  test("is the numeric id, which chown takes too, for a user with no name — a container's arbitrary --user", () => {
+    const noPasswdEntry = (): never => {
+      throw new Error("uv_os_get_passwd returned ENOENT");
+    };
+    expect(currentUser(noPasswdEntry, 12345)).toBe("12345");
+    expect(currentUser(() => ({ username: "" }), 12345)).toBe("12345");
+  });
+
+  test("is this system's user by default", () => {
+    expect(currentUser()).toBe(userInfo().username);
   });
 });

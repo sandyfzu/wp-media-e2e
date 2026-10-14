@@ -6,6 +6,7 @@ import {
   readdir,
   readFile,
   readlink,
+  rename,
   rm,
   stat,
   symlink,
@@ -22,6 +23,7 @@ import {
   nextAfter,
   nextRunNumber,
   TASKS_DIR,
+  tasksFolderRefusal,
   type CounterPlace,
 } from "./counter";
 import { StateError } from "./errors";
@@ -125,6 +127,34 @@ test.describe("nextAfter", () => {
     expect(() => nextAfter(undefined, Number.MAX_SAFE_INTEGER, place)).toThrow(
       /has no run number left/,
     );
+  });
+
+  test("names the run folder, and says to move it, when that folder's number leaves none after it", () => {
+    const folder = join(runs, `bpng-${String(Number.MAX_SAFE_INTEGER)}`);
+    const move = `Move the folder out of ${runs}: mv ${folder} ${join(dir, `bpng-${String(Number.MAX_SAFE_INTEGER)}.moved`)}`;
+    const said = `Task bpng has no run number left: its run folder ${folder} holds the largest safe number, and no run number is handed out below a run folder's. ${move}`;
+    // No counter, or one behind the folder: the counter is no part of it.
+    expect(() => nextAfter(undefined, Number.MAX_SAFE_INTEGER, place)).toThrow(
+      new StateError(said),
+    );
+    expect(() =>
+      nextAfter(counterText(12), Number.MAX_SAFE_INTEGER, place),
+    ).toThrow(new StateError(said));
+    // Both at the last number: both need the operator.
+    expect(() =>
+      nextAfter(
+        counterText(Number.MAX_SAFE_INTEGER),
+        Number.MAX_SAFE_INTEGER,
+        place,
+      ),
+    ).toThrow(`${said} The run counter ${file} holds that number too: `);
+    // The counter alone at the last number: the counter's own repair, no folder named.
+    const counterOnly = (): number =>
+      nextAfter(counterText(Number.MAX_SAFE_INTEGER), 3, place);
+    expect(counterOnly).toThrow(
+      `The run counter ${file} has no run number left. It is never reset`,
+    );
+    expect(counterOnly).not.toThrow(/run folder/);
   });
 
   test("words the repair with the task's own id and run folders, never a placeholder for them", () => {
@@ -233,6 +263,24 @@ test.describe("nextRunNumber", () => {
     expect(await nextRunNumber(dir, "bpng")).toBe(6);
   });
 
+  test("names the run folder that leaves no number, never the counter it has not got, and counts on once it is moved", async () => {
+    const name = `bpng-${String(Number.MAX_SAFE_INTEGER)}`;
+    await mkdir(join(runs, name), { recursive: true });
+    const error = await nextRunNumber(dir, "bpng").then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    );
+    expect(error).toBeInstanceOf(StateError);
+    const message = (error as StateError).message;
+    expect(message).toContain(
+      `mv ${join(runs, name)} ${join(dir, `${name}.moved`)}`,
+    );
+    expect(message).not.toContain(file);
+    expect(await readdir(tasks)).toEqual([]);
+    await rename(join(runs, name), join(dir, `${name}.moved`));
+    expect(await nextRunNumber(dir, "bpng")).toBe(1);
+  });
+
   test("refuses a dangling symbolic link at tasks/, naming it", async () => {
     await symlink(join(dir, "nowhere"), tasks);
     await expect(nextRunNumber(dir, "bpng")).rejects.toThrow(
@@ -250,6 +298,22 @@ test.describe("nextRunNumber", () => {
       );
       expect(await readdir(tasks)).toEqual([]);
     });
+
+  test("says to hand another user's tasks/ folder back with sudo chown, closing it too when it is open", () => {
+    // Only root can give a folder away: its owner's chmod is no remedy for this user.
+    expect(
+      tasksFolderRefusal(tasks, { kind: "notOwn", uid: 0, mode: 0o700 }, "ci")
+        .message,
+    ).toBe(
+      `The run counters' folder ${tasks} is owned by uid 0, not this user: it must be this user's alone (sudo chown ci ${tasks}).`,
+    );
+    expect(
+      tasksFolderRefusal(tasks, { kind: "notOwn", uid: 0, mode: 0o755 }, "ci")
+        .message,
+    ).toBe(
+      `The run counters' folder ${tasks} is owned by uid 0, not this user: it must be this user's alone (sudo chown ci ${tasks} && chmod 700 ${tasks}).`,
+    );
+  });
 
   test("refuses a corrupt counter, leaving it as it was", async () => {
     await mkdir(tasks, { mode: 0o700 });

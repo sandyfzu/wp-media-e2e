@@ -1,4 +1,7 @@
 import { lstat, stat } from "node:fs/promises";
+import { userInfo } from "node:os";
+
+import { shellWord } from "./text";
 
 /**
  * Whether a folder the orchestrator keeps its state in is safe to use: a real folder, this user's,
@@ -15,12 +18,15 @@ export interface OwnFolderRule {
   readonly followLink: boolean;
   /** The permission bits no one but the owner may have: `0o077` for "0700 only", `0o022` for "no one else writes". */
   readonly closedTo: number;
+  /** The `chmod` mode that closes a folder as the rule asks: `700`, `go-w`. */
+  readonly chmod: string;
 }
 
 /** A folder the orchestrator made, for its own files alone: a real folder, mode 0700. */
 export const PRIVATE_FOLDER: OwnFolderRule = {
   followLink: false,
   closedTo: 0o077,
+  chmod: "700",
 };
 
 /**
@@ -31,6 +37,7 @@ export const PRIVATE_FOLDER: OwnFolderRule = {
 export const STATE_FOLDER: OwnFolderRule = {
   followLink: true,
   closedTo: 0o022,
+  chmod: "go-w",
 };
 
 /** A folder as judged: fine, or what is wrong with it. */
@@ -55,7 +62,7 @@ export type OwnFolderCheck =
  *
  * @example
  * ```ts
- * const check = await checkOwnFolder(dir, { followLink: false, closedTo: 0o077 });
+ * const check = await checkOwnFolder(dir, PRIVATE_FOLDER);
  * if (check.kind !== "ok") throw new Error(`${dir} is not private`);
  * ```
  */
@@ -90,4 +97,58 @@ export function describeFolderProblem(
     case "open":
       return `is mode ${check.mode.toString(8)}`;
   }
+}
+
+/**
+ * The command that makes a folder {@link checkOwnFolder} refused for its owner or its mode pass.
+ * Another user's folder is handed to this one with `sudo` — only root may give a file away, so its
+ * owner's `chmod` is no remedy here — then closed as the rule asks when it is open too.
+ *
+ * @param path - the folder.
+ * @param check - what was wrong: another user's, or open to others.
+ * @param rule - the rule it was judged by, for the mode it needs.
+ * @param user - who must own it: this process's user ({@link currentUser}) by default.
+ * @returns `sudo chown alice /srv/state`, `sudo chown alice /srv/state && chmod go-w /srv/state`,
+ *   or `chmod 700 /srv/state/tasks`.
+ *
+ * @example
+ * ```ts
+ * if (check.kind === "notOwn" || check.kind === "open")
+ *   throw new Error(`${dir} ${describeFolderProblem(check)}: ${ownFolderRemedy(dir, check, PRIVATE_FOLDER)}`);
+ * ```
+ */
+export function ownFolderRemedy(
+  path: string,
+  check: Extract<OwnFolderCheck, { kind: "notOwn" | "open" }>,
+  rule: OwnFolderRule,
+  user: string = currentUser(),
+): string {
+  const folder = shellWord(path);
+  const chmod = `chmod ${rule.chmod} ${folder}`;
+  if (check.kind === "open") return chmod;
+  const chown = `sudo chown ${shellWord(user)} ${folder}`;
+  return (check.mode & rule.closedTo) === 0 ? chown : `${chown} && ${chmod}`;
+}
+
+/**
+ * This process's user, as `chown` takes it: its name, or its numeric id when the system has no name
+ * for it — `userInfo` throws for a user with no passwd entry, as a container run with an arbitrary
+ * `--user` is (measured on `node:24`).
+ *
+ * @param info - `os.userInfo`.
+ * @param uid - this process's user id: `process.getuid()` by default.
+ * @returns the name, else the id — empty only with neither, on a system without user ids (Windows),
+ *   where {@link checkOwnFolder} checks no owner, so nothing asks.
+ */
+export function currentUser(
+  info: () => { readonly username: string } = userInfo,
+  uid: number | undefined = process.getuid?.(),
+): string {
+  try {
+    const { username } = info();
+    if (username !== "") return username;
+  } catch {
+    // No passwd entry: the id serves `chown` as well.
+  }
+  return String(uid ?? "");
 }

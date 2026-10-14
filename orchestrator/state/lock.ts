@@ -7,6 +7,7 @@ import { errorCode } from "../error-code";
 import {
   checkOwnFolder,
   describeFolderProblem,
+  ownFolderRemedy,
   STATE_FOLDER,
 } from "../folders";
 import { readLeaderStart, type LeaderStartReader } from "../runs/leader";
@@ -46,8 +47,8 @@ export { LOCK_FILE, type LockOwner } from "./lock-owner";
  * earlier boot of this very machine, whose processes all ended with it. In its space, an owner is
  * dead when `kill(pid, 0)` says no such process, or that PID's process started at another time than
  * the lock says (a reused PID); `EPERM` is a live process. A lock naming this process's own PID was
- * left by an earlier process of that PID — unless this process holds it, which a second start in one
- * process is refused for.
+ * left by an earlier process of that PID — unless this process holds it or is taking it, which its
+ * token tells whatever this process's start, and a second start in one process is refused for.
  *
  * A dead owner's file is removed, race-free, under a **claim** named after its token: created
  * exclusively, so of every start racing over that one file only one gets it, which then checks the
@@ -73,8 +74,14 @@ const MAX_CLAIM_DEPTH = 3;
 /** `link`'s codes for a file system that makes no hard links: macOS's FAT (`ENOTSUP`), Linux's vfat (`EPERM`) — both measured — and a FUSE file system without the call (`ENOSYS`). */
 const NO_HARD_LINKS = new Set(["ENOTSUP", "EOPNOTSUPP", "EPERM", "ENOSYS"]);
 
-/** The locks this process holds, by real lock path and token: a second start in it is refused. */
-const HELD = new Set<string>();
+/**
+ * The locks this process holds or is taking, by real lock path and token — a lock or claim holding
+ * one is this process's own, judged `self` whatever its start, so a second start in it is refused. An
+ * acquisition's token is entered before anything is written under it: between linking the lock and
+ * returning there are awaits in which another start in this process may read that lock, and judging
+ * it by PID and start would read it as an earlier process's when this one's start is unknown.
+ */
+const OURS = new Set<string>();
 
 /** How an owner is judged. */
 export type OwnerVerdict =
@@ -129,7 +136,7 @@ export interface HeldLock {
 interface Taker {
   readonly lockPath: string;
   readonly me: LockOwner;
-  /** The real lock path, which keys {@link HELD}. */
+  /** The real lock path, which keys {@link OURS}. */
   readonly realLock: string;
   readonly kill: KillFn;
   readonly readStart: LeaderStartReader;
@@ -164,15 +171,40 @@ export async function acquireLock(
 ): Promise<HeldLock> {
   const lockPath = join(stateDir, LOCK_FILE);
   const taker = await takerOf(stateDir, lockPath, deps);
+  const key = heldKey(taker.realLock, taker.me.token);
+  // Only an injected token can be in use already: refused, since dropping it on failure below would
+  // take it from the start that holds it.
+  if (OURS.has(key)) throw lockRefusal(lockPath, taker.me, taker.me, "self");
+  OURS.add(key);
+  try {
+    const leftovers = await takeLock(stateDir, taker, deps.now ?? Date.now);
+    return held(lockPath, taker, leftovers);
+  } catch (error) {
+    // Not taken: no lock holds the token, and every claim under it is dropped as it is left.
+    OURS.delete(key);
+    throw error;
+  }
+}
+
+/**
+ * Creates the lock — removing a dead owner's first — then sweeps the leftovers. The taker's token is
+ * in {@link OURS} throughout.
+ *
+ * @param stateDir - the state directory.
+ * @param taker - who takes it.
+ * @param now - the time, for the leftovers' age.
+ * @returns what the sweep did.
+ * @throws as {@link acquireLock} does.
+ */
+async function takeLock(
+  stateDir: string,
+  taker: Taker,
+  now: () => number,
+): Promise<LeftoverSweep> {
+  const { lockPath } = taker;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
-    if (await createExclusive(lockPath, formatOwner(taker.me), taker.link)) {
-      HELD.add(heldKey(taker.realLock, taker.me.token));
-      const leftovers = await sweepLeftovers(
-        stateDir,
-        (deps.now ?? Date.now)(),
-      );
-      return held(lockPath, taker, leftovers);
-    }
+    if (await createExclusive(lockPath, formatOwner(taker.me), taker.link))
+      return sweepLeftovers(stateDir, now());
     const found = await readOwnerFile(
       lockPath,
       LOCK_WHAT,
@@ -221,7 +253,7 @@ async function takerOf(
   const check = await checkOwnFolder(stateDir, STATE_FOLDER);
   if (check.kind !== "ok")
     throw new StateError(
-      `The state directory ${stateDir} ${describeFolderProblem(check)}: it must be this user's, and no one else may write in it${check.kind === "open" ? ` (chmod go-w ${shellWord(stateDir)})` : ""}.`,
+      `The state directory ${stateDir} ${describeFolderProblem(check)}: it must be this user's, and no one else may write in it${check.kind === "notFolder" ? "" : ` (${ownFolderRemedy(stateDir, check, STATE_FOLDER)})`}.`,
     );
   const [space, start] = await Promise.all([
     (deps.space ?? readPidSpace)(),
@@ -253,7 +285,8 @@ async function takerOf(
  *
  * @param owner - the owner, as read.
  * @param taker - who judges: its PID, start and space, `kill` and start reader.
- * @returns `self` for this process's own. From another space, `foreign` — `dead` when it is an
+ * @returns `self` for this process's own: a token it holds or is taking the lock with, or its own
+ *   PID and known start. From another space, `foreign` — `dead` when it is an
  *   earlier boot of this machine. In this space, `dead` when no process has that PID or it started
  *   at another time than recorded; `alive` otherwise, a start that cannot be read included.
  * @throws what `kill` throws besides `ESRCH` and `EPERM`.
@@ -263,7 +296,7 @@ export async function judgeOwner(
   taker: Pick<Taker, "me" | "realLock" | "kill" | "readStart">,
 ): Promise<OwnerVerdict> {
   const { me } = taker;
-  if (HELD.has(heldKey(taker.realLock, owner.token))) return { kind: "self" };
+  if (OURS.has(heldKey(taker.realLock, owner.token))) return { kind: "self" };
   if (!sameSpace(owner.space, me.space))
     return earlierBoot(owner.space, me.space)
       ? { kind: "dead" }
@@ -393,7 +426,7 @@ function lockRefusal(
       );
     case "foreign":
       return new StateError(
-        `${path} was written by pid ${pid} in another PID space (${describeSpace(owner.space)}; this process: ${describeSpace(me.space)}) — another container, host or boot, where this process cannot tell whether it still runs. If no orchestrator runs on this state directory there, remove the lock: rm ${shellWord(path)}`,
+        `${path} was written by pid ${pid} in another PID space (${describeSpace(owner.space)}; this process: ${describeSpace(me.space)}) — another container, host or boot, where this process cannot tell whether it still runs.${containerHint(owner.space, me.space)} If no orchestrator runs on this state directory there, remove the lock: rm ${shellWord(path)}`,
       );
     case "alive":
       return new StateError(
@@ -427,12 +460,34 @@ function claimRefusal(
       return new StateError(
         `A start in another PID space (pid ${pid}, ${describeSpace(claimant.space)}) is taking over ${taker.lockPath}, or died doing so. If no orchestrator is starting there, ${remove}`,
       );
-    case "alive":
     case "self":
+      return new StateError(
+        `This process is already taking over ${taker.lockPath} (its claim ${claim}): a second start in one process is refused.`,
+      );
+    case "alive":
       return new StateError(
         `Another start (pid ${pid}${onHost(claimant)}) is taking over ${taker.lockPath}. If pid ${pid} is no orchestrator starting, ${remove}`,
       );
   }
+}
+
+/**
+ * What avoids a refusal between two PID namespaces of one boot — most often this orchestrator's own
+ * container, restarted after a crash into a new namespace, its lock left behind.
+ *
+ * @param theirs - the space the lock was written in.
+ * @param mine - this process's.
+ * @returns a sentence to end the refusal with, or `""` when the spaces are not one boot's.
+ */
+function containerHint(theirs: PidSpace, mine: PidSpace): string {
+  const oneBoot =
+    theirs.platform === "linux" &&
+    mine.platform === "linux" &&
+    theirs.boot !== null &&
+    theirs.boot === mine.boot;
+  return oneBoot
+    ? " A container restarts into a new PID namespace, so its own lock reads as another's: running the orchestrator on the host, or its container with --pid=host, keeps one namespace across restarts."
+    : "";
 }
 
 /**
@@ -552,16 +607,16 @@ function held(path: string, taker: Taker, leftovers: LeftoverSweep): HeldLock {
           () => undefined,
         );
         if (current?.token !== owner.token) {
-          HELD.delete(key);
+          OURS.delete(key);
           return false;
         }
         // While this process lives no other start takes its lock over, so it is still ours here.
         await unlink(path);
-        HELD.delete(key);
+        OURS.delete(key);
         return true;
       } catch (error) {
         // Gone meanwhile: no longer held. Any other failure leaves it held, and this process's own.
-        if (errorCode(error) === "ENOENT") HELD.delete(key);
+        if (errorCode(error) === "ENOENT") OURS.delete(key);
         return false;
       }
     },
@@ -569,7 +624,7 @@ function held(path: string, taker: Taker, leftovers: LeftoverSweep): HeldLock {
 }
 
 /**
- * {@link HELD}'s key.
+ * {@link OURS}'s key.
  *
  * @param realLock - the lock's real path.
  * @param token - the holder's token.
