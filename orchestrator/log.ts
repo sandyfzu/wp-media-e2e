@@ -4,7 +4,12 @@ import { dirname } from "node:path";
 
 import { errorCode } from "./error-code";
 import { checkOwnFolder, describeFolderProblem, STATE_FOLDER } from "./folders";
-import { stdoutTerminal, type Terminal } from "./terminal";
+import {
+  assertWaitMs,
+  drainTerminal,
+  stdoutTerminal,
+  type Terminal,
+} from "./terminal";
 import { safeLine } from "./text";
 
 export type { Terminal } from "./terminal";
@@ -22,8 +27,11 @@ export type { Terminal } from "./terminal";
  * first failure stops terminal writes for good. It may stall — a paused terminal, a pipe nobody reads —
  * so standard output is made non-blocking where Node allows it ({@link stdoutTerminal}: its limits are
  * there), and while more than {@link TERMINAL_BACKLOG_BYTES} wait for it, its lines are skipped and
- * counted, and the count shown when it takes a line again. The file is written through one queue, in call order, and its failure
- * never reaches the caller: a log must not stop what it logs.
+ * counted, and the count shown when it takes a line again. Being non-blocking, the terminal takes a
+ * line after it is written, so {@link Logger.flush} and {@link Logger.close} wait for it too, within
+ * their bound: a `process.exit` right after them would otherwise cut what it had not taken yet. The
+ * file is written through one queue, in call order, and its failure never reaches the caller: a log
+ * must not stop what it logs.
  *
  * The {@link Logger} interface is deliberately small, so a structured logger can later sit behind it
  * without touching its callers.
@@ -41,17 +49,20 @@ export interface Logger {
    */
   line(scope: string, text: string): void;
   /**
-   * Settles once every line logged so far is in the file (or failed to be), or after `maxWaitMs` —
-   * a file write that hangs (a stalled network mount) must not hang its caller. Never rejects.
+   * Settles once every line logged so far is in the file (or failed to be) and taken by the terminal
+   * ({@link drainTerminal}; not waited for once the terminal is gone), or after `maxWaitMs` — a file
+   * write that hangs (a stalled network mount) or a paused terminal must not hang its caller. Never
+   * rejects.
    *
    * @param maxWaitMs - the longest wait; {@link DEFAULT_WAIT_MS} by default.
    * @throws {@link RangeError} when `maxWaitMs` is not a whole number of milliseconds a timer takes.
    */
   flush(maxWaitMs?: number): Promise<void>;
   /**
-   * Stops taking lines, flushes, then closes the file — waiting `maxWaitMs` at most for both: what is
-   * still unwritten then is given up, and the file is left to the process's end. Idempotent (the
-   * first call's wait applies); never rejects.
+   * Stops taking lines, flushes — the file and the terminal, as {@link Logger.flush} —, then closes the
+   * file, waiting `maxWaitMs` at most for all of it: what is still unwritten then is given up, and the
+   * file is left to the process's end. Call it before `process.exit`, which drops what the terminal has
+   * not taken. Idempotent (the first call's wait applies); never rejects.
    *
    * @param maxWaitMs - the longest wait; {@link DEFAULT_WAIT_MS} by default.
    * @throws {@link RangeError} when `maxWaitMs` is not a whole number of milliseconds a timer takes.
@@ -91,15 +102,14 @@ export const MAX_TEXT_LENGTH = 2_000;
 
 /**
  * The most bytes left waiting for the terminal before its lines are skipped: about 4,000 ordinary
- * lines, so a slow terminal loses none, and a stalled one costs at most this much memory.
+ * lines, so a slow terminal loses none, and a stalled one costs at most this much memory. Bytes indeed:
+ * the logger writes its lines UTF-8 encoded, which the stream counts by the byte (a string it would
+ * count by UTF-16 unit, a third of the bytes of a `✔`).
  */
 export const TERMINAL_BACKLOG_BYTES = 1024 * 1024;
 
 /** How long {@link Logger.flush} and {@link Logger.close} wait at most, by default. */
 export const DEFAULT_WAIT_MS = 5_000;
-
-/** The longest wait a Node timer takes; a longer one would fire at once. */
-const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /** The scope of the logger's own lines about its outputs; three characters, so never a task's id. */
 const LOG_SCOPE = "log";
@@ -426,19 +436,6 @@ function formatMode(mode: number): string {
 }
 
 /**
- * Checks a wait's length.
- *
- * @param ms - the wait, in milliseconds.
- * @throws {@link RangeError} when it is not a whole number from 0 to a timer's longest.
- */
-function assertWait(ms: number): void {
-  if (!Number.isSafeInteger(ms) || ms < 0 || ms > MAX_TIMER_MS)
-    throw new RangeError(
-      `A log's wait is a whole number of milliseconds from 0 to ${String(MAX_TIMER_MS)}, got ${String(ms)}.`,
-    );
-}
-
-/**
  * Settles when `work` does, or after `ms`, whichever comes first. The timer does not keep the process
  * alive, and is cleared when the work wins.
  *
@@ -549,20 +546,43 @@ class TwoWayLogger implements Logger {
 
   /** {@inheritDoc Logger.flush} */
   flush(maxWaitMs: number = DEFAULT_WAIT_MS): Promise<void> {
-    assertWait(maxWaitMs);
-    return within(this.queue, maxWaitMs);
+    assertWaitMs(maxWaitMs);
+    const deadline = performance.now() + maxWaitMs;
+    // The file first: a failed write is told to the terminal, which is then waited for with it.
+    return within(
+      this.queue.then(() => this.drain(deadline)),
+      maxWaitMs,
+    );
   }
 
   /** {@inheritDoc Logger.close} */
   close(maxWaitMs: number = DEFAULT_WAIT_MS): Promise<void> {
     if (this.closing !== undefined) return this.closing;
-    assertWait(maxWaitMs);
+    assertWaitMs(maxWaitMs);
+    const deadline = performance.now() + maxWaitMs;
     this.unwatch();
     this.closing = within(
-      this.queue.then(() => this.options.file.close().catch(() => undefined)),
+      this.queue.then(async () => {
+        await Promise.all([
+          this.options.file.close().catch(() => undefined),
+          this.drain(deadline),
+        ]);
+      }),
       maxWaitMs,
     );
     return this.closing;
+  }
+
+  /**
+   * Waits until the terminal has taken every line written to it, or the deadline passed; at once when
+   * the terminal is gone. Never rejects.
+   *
+   * @param deadline - when to give up, on `performance.now()`'s clock.
+   */
+  private async drain(deadline: number): Promise<void> {
+    if (this.terminalGone) return;
+    const left = Math.max(0, Math.ceil(deadline - performance.now()));
+    await drainTerminal(this.terminal, left);
   }
 
   /**
@@ -608,14 +628,15 @@ class TwoWayLogger implements Logger {
   }
 
   /**
-   * Writes to the terminal; a failure, thrown or called back, makes it gone.
+   * Writes to the terminal, UTF-8 encoded, so its backlog counts bytes ({@link TERMINAL_BACKLOG_BYTES});
+   * a failure, thrown or called back, makes it gone.
    *
    * @param line - the line, with its line end.
    */
   private writeTerminal(line: string): void {
     if (this.terminalGone) return;
     try {
-      this.terminal.write(line, (error) => {
+      this.terminal.write(Buffer.from(line, "utf8"), (error) => {
         if (error) this.loseTerminal(error);
       });
     } catch (error) {

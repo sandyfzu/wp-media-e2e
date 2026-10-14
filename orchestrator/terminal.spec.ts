@@ -1,6 +1,15 @@
 import { test, expect } from "@playwright/test";
 
-import { stdoutTerminal, unblockTerminal } from "./terminal";
+import { runSlowlyRead } from "./__fixtures__/slow-reader";
+import {
+  DRAIN_POLL_MS,
+  drainTerminal,
+  stdoutTerminal,
+  unblockTerminal,
+} from "./terminal";
+
+/** This module, as a child imports it. */
+const TERMINAL_MODULE = new URL("./terminal.ts", import.meta.url).href;
 
 /**
  * A stream stand-in with Node's internal handle.
@@ -72,5 +81,95 @@ test.describe("stdoutTerminal", () => {
     expect(stdoutTerminal(terminal)).toBe(terminal);
     expect(stdoutTerminal(terminal)).toBe(terminal);
     expect(calls).toEqual([[false]]);
+  });
+});
+
+test.describe("drainTerminal", () => {
+  test("settles at once, taken, when nothing waits, or the stream is destroyed", async () => {
+    expect(await drainTerminal({ writableLength: 0 }, 1_000)).toBe(true);
+    expect(
+      await drainTerminal({ writableLength: 10, destroyed: true }, 1_000),
+    ).toBe(true);
+  });
+
+  test("waits until the terminal has taken what waits for it", async () => {
+    let backlog = 4096;
+    setTimeout(() => (backlog = 0), 60);
+    const started = performance.now();
+    expect(
+      await drainTerminal(
+        {
+          get writableLength() {
+            return backlog;
+          },
+        },
+        5_000,
+      ),
+    ).toBe(true);
+    const waited = performance.now() - started;
+    expect(waited).toBeGreaterThanOrEqual(55);
+    expect(waited).toBeLessThan(60 + 20 * DRAIN_POLL_MS);
+  });
+
+  test("gives up on a stalled terminal after its wait, untaken", async () => {
+    const started = performance.now();
+    expect(await drainTerminal({ writableLength: 1 }, 50)).toBe(false);
+    const waited = performance.now() - started;
+    expect(waited).toBeGreaterThanOrEqual(49);
+    expect(waited).toBeLessThan(1_000);
+  });
+
+  test("never rejects, even when the stream's getter throws", async () => {
+    const throwing = {
+      get writableLength(): number {
+        throw new Error("EBADF");
+      },
+    };
+    await expect(drainTerminal(throwing, 50)).resolves.toBe(true);
+  });
+
+  test("refuses a wait that is not a whole number of milliseconds a timer takes", () => {
+    for (const wait of [-1, 1.5, Number.NaN, Infinity, 2 ** 31])
+      expect(
+        () => drainTerminal({ writableLength: 0 }, wait),
+        String(wait),
+      ).toThrow(RangeError);
+  });
+
+  /** A child writing 1 MiB in lines to its standard output, then exiting `0`; `drain` waits first. */
+  function burst(drain: string): string {
+    return `
+      import { drainTerminal } from ${JSON.stringify(TERMINAL_MODULE)};
+      let text = "";
+      for (let i = 0; i < 8192; i++) text += "line " + String(i).padStart(5, "0") + " " + "y".repeat(116) + "\\n";
+      process.stdout.write(text);
+      ${drain}
+      process.exit(0);
+    `;
+  }
+
+  test("keeps what a process writes just before process.exit, when the reader is slower", async () => {
+    // Without it, the exit cuts what the non-blocking stream still queued: the control shows the loss.
+    const cut = await runSlowlyRead(burst(""), 300);
+    expect(cut.code).toBe(0);
+    expect(cut.stdout.length).toBeLessThan(1024 * 1024);
+    const kept = await runSlowlyRead(
+      burst("await drainTerminal(process.stdout, 15000);"),
+      300,
+    );
+    expect(kept.code).toBe(0);
+    expect(kept.stdout.length).toBe(1024 * 1024);
+  });
+
+  test("cannot hold a process past its wait when nobody reads", async () => {
+    const result = await runSlowlyRead(
+      burst(
+        "const taken = await drainTerminal(process.stdout, 300); process.stderr.write(String(taken));",
+      ),
+      undefined,
+    );
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe("false");
+    expect(result.ranMs).toBeLessThan(10_000);
   });
 });

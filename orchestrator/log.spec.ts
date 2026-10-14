@@ -38,6 +38,7 @@ import {
   type LogFile,
   type Terminal,
 } from "./log";
+import { runSlowlyRead } from "./__fixtures__/slow-reader";
 
 /** A fixed local time, so a line's clock reads the same in every time zone: 10:15:30. */
 const AT = new Date(2026, 9, 13, 10, 15, 30);
@@ -499,7 +500,7 @@ test.describe("createLogger", () => {
     let backlog = TERMINAL_BACKLOG_BYTES;
     const terminal: Terminal = {
       write: (chunk, callback) => {
-        written.push(chunk);
+        written.push(Buffer.from(chunk).toString("utf8"));
         callback();
         return true;
       },
@@ -684,6 +685,111 @@ test.describe("createLogger", () => {
       terminal: fakeTerminal().terminal,
     });
     await expect(logger.close(20)).resolves.toBeUndefined();
+  });
+
+  /**
+   * A terminal whose backlog is set by the test, taking every write at once otherwise.
+   *
+   * @param backlog - what it holds at first.
+   */
+  function heldTerminal(backlog: number) {
+    const state = { backlog };
+    const terminal: Terminal = {
+      write: (_chunk, callback) => {
+        callback();
+        return true;
+      },
+      on: () => undefined,
+      get writableLength() {
+        return state.backlog;
+      },
+    };
+    return { terminal, state };
+  }
+
+  test("flush and close wait until the terminal has taken what was written: a process.exit next would cut it", async () => {
+    for (const settle of [
+      (logger: ReturnType<typeof createLogger>) => logger.flush(),
+      (logger: ReturnType<typeof createLogger>) => logger.close(),
+    ]) {
+      const { terminal, state } = heldTerminal(4096);
+      const logger = createLogger({ file: fakeFile().file, terminal });
+      logger.line("bpng", "one");
+      setTimeout(() => (state.backlog = 0), 80);
+      const started = performance.now();
+      await settle(logger);
+      expect(performance.now() - started).toBeGreaterThanOrEqual(75);
+    }
+  });
+
+  test("flush and close give up on a stalled terminal after their wait", async () => {
+    const { terminal } = heldTerminal(4096);
+    const logger = createLogger({ file: fakeFile().file, terminal });
+    logger.line("bpng", "one");
+    const started = performance.now();
+    await expect(logger.flush(40)).resolves.toBeUndefined();
+    await expect(logger.close(40)).resolves.toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(1_500);
+  });
+
+  test("never waits for a terminal that is gone", async () => {
+    const terminal: Terminal = {
+      write: () => {
+        throw systemError("EIO");
+      },
+      on: () => undefined,
+      // What it holds will never be taken.
+      writableLength: 4096,
+    };
+    const logger = createLogger({ file: fakeFile().file, terminal });
+    logger.line("bpng", "one");
+    const started = performance.now();
+    await logger.close();
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  test("hands every line to a slow reader before process.exit, once closed", async () => {
+    const result = await runSlowlyRead(
+      `
+        import { createLogger } from ${JSON.stringify(new URL("./log.ts", import.meta.url).href)};
+        const logger = createLogger({ file: { append: async () => {}, close: async () => {} } });
+        for (let i = 0; i < 2000; i++)
+          logger.line("bpng", "MARK-" + i + " passed · 52 scenarios: 51 passed, 1 flaky · " + "z".repeat(100));
+        await logger.close(15000);
+        process.exit(130);
+      `,
+      300,
+    );
+    expect(result.code).toBe(130);
+    expect(result.stdout.match(/MARK-\d+ /g)).toHaveLength(2000);
+  });
+
+  test("counts the terminal's backlog in bytes, not UTF-16 units: a line of ✔ weighs three bytes each", async () => {
+    // A stream that keeps strings as they are counts them by UTF-16 unit, as a terminal does.
+    const stalled = new Writable({
+      decodeStrings: false,
+      write: () => undefined,
+    });
+    let bytes = 0;
+    let lines = 0;
+    const terminal: Terminal = {
+      write: (chunk, callback) => {
+        bytes += Buffer.byteLength(chunk);
+        lines++;
+        return stalled.write(chunk, callback);
+      },
+      on: (event, listener) => stalled.on(event, listener),
+      get writableLength() {
+        return stalled.writableLength;
+      },
+    };
+    const logger = createLogger({ file: fakeFile().file, terminal });
+    // 600 checkmarks: 600 units, 1,800 bytes; 1,000 lines are 1.8 MB, 0.6 Mi units.
+    for (let i = 0; i < 1000; i++) logger.line("bpng", "✔".repeat(600));
+    expect(lines).toBeLessThan(1000);
+    expect(bytes).toBeGreaterThan(TERMINAL_BACKLOG_BYTES);
+    expect(bytes).toBeLessThan(TERMINAL_BACKLOG_BYTES + 2 * 1900);
+    await logger.close(0);
   });
 
   test("refuses a wait that is not a whole number of milliseconds a timer takes", () => {
