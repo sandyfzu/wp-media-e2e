@@ -8,8 +8,8 @@
 > 5A–5D, the logger, lock, counter, leader identity, orphan check and run-folder retention (2026-10-13,
 > §7.15; audited and re-audited the same day, §7.16); 5E, the notification subscribers (2026-10-13, §7.17); 5F, one
 > run (2026-10-13, §7.18; audited 2026-10-14, the same section); 5G, the loop (2026-10-14, §7.19); 5H, the
-> process (2026-10-14, §7.20; audited the same day).
-> **Next:** step 5's 5I–5K (§7.14), with §7.20's notes for 5I. Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> process (2026-10-14, §7.20; audited the same day); 5I.1, the dry run's report (2026-10-14, §7.21; audited the same day).
+> **Next:** step 5's 5I.2–5K (§7.14), with §7.20's notes for 5I and §7.21's for 5I.2. Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -1578,6 +1578,131 @@ Every finding reproduced, fixed, and proved by a test that fails without the fix
   npm's relay), each drain and exit 130. Keep `--task` repeatable (commander's
   variadic option) and hand the ids as they are: `selectTasks` dedupes and refuses unknown ones.
 
+### 7.21 5I.1 — Implemented (2026-10-14, V451–V454; audited the same day, V455–V461; re-audited, V462–V463)
+
+`orchestrator/dry-run.ts`, next to `start-lines.ts` (§5 is silent; it is the start's pure part, like
+them), and `dry-run.spec.ts`; the state directory's read-only check in `state/inspect.ts`. As built after
+the audit (below):
+
+- **`dryRunReport(prepared, { checkout?, stateWarnings? })` → `string[]`**: `prepared` is
+  `Pick<PreparedStart, "list" | "loaded" | "selected">`, so 5I.2 hands it `prepareStart`'s result as it
+  is; `checkout` shows paths relative to it (`showPath`, as the started line does), absolute when absent;
+  `stateWarnings` are `inspectState(stateDir)`'s, shown first among the warnings. Lines, not one string,
+  as every line builder here; each is one line, cut at 2,000 code points, its own indentation kept.
+- **What it says**, over the example config (sites read by the suite's `loadSites` from a temporary
+  `sites.json`; BackWPup's manifest):
+
+  ```text
+  dry run · nothing is run · config .orchestrator/config.json · state .orchestrator/
+  2 tasks (bpng, bfap)
+  bpng · BackWPup Pro on nginx
+    backwpup pro@nginx · develop · version 9.99.99 · every scenario · cooldown 5m
+    site https://bwu2.qa.test/ · QA-LNMP
+    site https://bwu3.qa.test/ · qa-lnmp
+  bfap · BackWPup Free on Apache, smoke only
+    backwpup free@apache · develop (default) · version 9.99.99 (default) · grep @smoke · cooldown 5m
+    site https://bwu4.qa.test/ · qa-apache
+  servers: QA-LNMP (bpng), qa-apache (bfap)
+  runs: retries 2 · reports kept 20
+  notifications: slack ("AutoE2E nginx", scp from auto-e2e) · datator
+  secrets for the runs: GITHUB_TOKEN, BWP_S3_ACCESS_KEY_ID, BWP_S3_SECRET_ACCESS_KEY
+  no warnings
+  ```
+
+  The plugin is what the run will **build**, by the suite's own planner (`buildArtifactPlan`, given the
+  task's ref and version as the run is given them — `src/common/artifacts/request.ts`, admitted to
+  `suite-imports.json`; it loads only `manifest.ts`, `env.ts`, `guards.ts`): the product's default ref and
+  version marked `(default)`, a release's `version from the release` (a task's own there `ignored`), an
+  embedded-version product's `version from the source`. Hosts as written (lowercased only to group
+  servers). Unset settings read `the suite's default`, `reportsKeep: 0` `without a cap`, no notification
+  `none`; each warning `warning: …` (the state directory's, then the loader's).
+- **Never a secret, twice over.** No field holding one is printed: a site is its URL without user,
+  password, query or fragment, and its server — anything but an `http(s)` URL is `(not a valid http(s)
+  URL)`; a notification is named, never its URL or key; a secret by its name. Every value printed is
+  masked by **every** secret the orchestrator holds (`allSecretValues`: the config's and every task's
+  sites' passwords and storage keys, selected or not) **before** it is normalised — a site's address
+  before the URL parser encodes or case-folds it — and every line again.
+
+**Verification.** `dry-run.spec.ts`, 23 tests, the config loaded through `prepareStart` and the real
+loader, the product list's cells read by the real `loadSites`: the example, line for line; absolute
+paths; `--task` and an unknown one; a nameless task, a server two tasks share (as first written); warnings
+(the state's first, mode, an ignored version, crowded servers); nothing optional; a task's own cooldown and
+version; Slack with only its scp host, each notification alone; secrets planted in every secret field and
+in the instance, names, refs, grep, scp host, a site's URL and the config's folder; a secret pasted as a
+host (lowercased in the suite's warning) or into a URL path the parser encodes; secrets under 8
+characters kept out by never printing their fields; an unselected task's site password; malformed
+addresses; the cap with and without indentation; `pluginText` (required, embedded, a manifest refused)
+and `siteAddress`. `state/inspect.spec.ts` (10): a sound folder, an open one (the lock's own refusal and
+`chmod go-w`), a file in its place, a missing one, a live, a dead, a foreign lock and two unreadable
+ones (not one it wrote, a folder), a failing judgement — each said, never thrown, nothing written — and once with the real process (a
+live child's lock refused, then not once it ended).
+
+**Audit (2026-10-14, V455–V461).** Two reviewers (security, correctness), each on its own copy; no high.
+Each finding fixed and proved by a test that fails without the fix (V459):
+
+- **A clean report for a state directory the start refuses (medium; correctness).** §6.4's Ubuntu `0775`
+  passed the dry run and failed the start. `inspectState` (read-only) judges the folder by the lock's own
+  rule (`checkOwnFolder(stateDir, STATE_FOLDER)`; the sentence is `lock.ts`'s `stateFolderProblem`, now
+  shared with `acquireLock`), then the lock by its own judgement (`inspectLock`, new in `lock.ts`: reads
+  the lock and `judgeOwner`s it, writing nothing): a live orchestrator's, another PID space's or an
+  unreadable lock is the start's own refusal, as a warning; a dead one's is none (a start takes it over).
+- **The plugin as configured, not as built (low-medium; correctness).** A release ref showed a version
+  the suite drops; `default ref` hid `develop` and `9.99.99`. Now the suite's planner says it (above).
+- **A malformed `baseURL` printed raw (low-medium; security), and the shared userinfo mask stopped at
+  `/ ? #` or a space in a password (low; security, cross-cutting).** `siteAddress` shows only an `http(s)`
+  URL, else a stand-in. `src/common/text.ts`'s `redactSecrets` gains `URL_LOOSE_PASSWORD`: from a
+  scheme, `user:password@` up to the last `@` before the next space, within 256 characters, the password
+  never read as a port (digits, then the authority's end) — so the run facts, the preflight, `run.finished`,
+  Slack and Datator mask it too, while an email or a path's `@` later on a line is left (tested); no
+  existing case changed.
+- **Case and encoding defeated masking by value (low; both).** A secret pasted as an SSH host showed
+  lowercased (`serverOf`), and one in a URL path percent-encoded. Values are masked before they are
+  normalised, hosts shown as written, and `secretForms` adds each secret lowercased — what masks the
+  suite's own crowded-server warning, which lowercases hosts (`check.ts` unchanged).
+- **Sites' credentials outside the masks (defence in depth; security).** `config/secrets.ts` gains
+  `siteSecretValues(tasks)` and `allSecretValues(config, tasks)`; `start.ts` masks the log, the terminal,
+  the bus, every run's lines and events and standard error with them, and hands them to the notification
+  senders (`NotificationOptions.secrets`). One existing assertion changed, because the behaviour it pins
+  changed by design: the secrets handed to the loops are now `[SECRET, "pw"]` (the stand-in site's
+  password), not `[SECRET]`.
+- **Tests and reuse (low).** Slack with only `reports.sshHost`; the product list built from `loadSites`
+  over a temporary `sites.json` (no cast); TSDoc on every spec helper; `N task(s) (ids)` is
+  `start-lines.ts`'s `tasksText`, the server grouping `check.ts`'s `tasksByServer`; the `default ref`
+  literal no longer appears here.
+- **Kept, on purpose:** a value under 8 characters is masked nowhere (it would mask words), so only never
+  printing its field keeps it out — a short site password pasted into a task's name shows; a scheme
+  without `//` (`foo:user:pw@host`) is no URL any shape masks (the dry run prints the stand-in).
+- **Re-audit (2026-10-14, V462–V463).** No high or medium; the lock refactor, `inspectState`, the
+  admission of `request.ts` and the site secrets' plumbing verified. Lows fixed, each proved by a test
+  that fails without it:
+  - **`URL_LOOSE_PASSWORD` both under- and over-masked**: allowing spaces, it swallowed a line
+    (`https://a.test:wrong/ logged in as admin@a.test`), and run after `URL_USERINFO` it left
+    `ss/word@host` of `https://admin:p@ss/word@host`. A site's `baseURL` no longer relies on a shape:
+    `src/common/text.ts`'s `maskSiteUrl` (parse; an `http(s)` URL keeps host, port and path as written,
+    credentials `***@`, no query or fragment; anything else `(not a valid http(s) URL)`) names a site in
+    the auth setup's site info, the run facts (both kinds of site fact), the summary, the preflight report
+    and the elevation banner; the orchestrator's `safeSiteUrl` (`orchestrator/text.ts`: masked by value,
+    then `maskSiteUrl`, then masked again) in `run.finished` — so Slack and Datator — and the dry run,
+    whose own `siteAddress` is gone. `URL_LOOSE_PASSWORD` now takes no whitespace and runs **before**
+    `URL_USERINFO`. One existing fixture changed: `elevation-report.spec.ts` named its sites by bare
+    hosts (`needs-it.test`), which are no URLs and now show as the stand-in; they are `https://<host>`,
+    every assertion as it was.
+  - **The lowercase secret form masked words everywhere** (a site password `BackWPup` masked
+    `backwpup pro@nginx`). Gone from `secretForms`; `config/secrets.ts`'s `hostSecretForms` adds, to
+    `allSecretValues`, only the lowercased SSH hosts that hold a secret — what the suite's crowded-server
+    warning shows.
+  - The dry run is proved deaf to the orchestrator's own `E2E_PLUGIN_REF`/`E2E_PLUGIN_VERSION`; three
+    stale TSDoc references to `secretValues(config)` (`log.ts`, `tasks/cycle.ts`, `runs/end.ts`) fixed.
+
+- **For 5I.2:** `--dry-run` does `const prepared = await prepareStart(options)`, then
+  `dryRunReport(prepared, { checkout: CHECKOUT, stateWarnings: await inspectState(prepared.loaded.stateDir) })`,
+  and writes `lines.join("\n") + "\n"` to **stdout** (it is the command's output, to pipe or redirect);
+  exit `0` whatever the warnings — a refused state directory or a held lock included, which are warnings
+  naming their repair. A `ConfigError` from `prepareStart` (config, product list, `--task`) goes to
+  **stderr**, masked as `start` reports one (`not started: …` there; here `dry run failed: …`), exit `1`.
+  Never `start`, the lock, the log or `--once`: a dry run writes nothing (`inspectState` only reads), so it
+  runs beside a running orchestrator. `--once` with `--dry-run` is accepted and changes nothing.
+
 ## 8. What later phases change, and keep
 
 | Here | Later | Kept |
@@ -1757,3 +1882,16 @@ Every finding reproduced, fixed, and proved by a test that fails without the fix
 | V448 | The reviewers' surviving mutants and the first pass's, re-run — 18/19 killed: leftover lines, unread lines, the "no run recorded" line, `pending` not pruned, standard error unmasked, an unexpected failure exiting 0, a failed release unsaid, `KILL_SETTLE_MS`, `EXIT_WAIT_MS`, `CHECKOUT`, `loopsExitCode` ignoring `--once`, handlers, give-up timer, stdout, log close, terminal drain, dispose. Equivalent: the bus without `secrets` (V440). The reviewer's `RUN_FOLDER -0` mutant no longer applies (the regex is gone) | ✅ 2026-10-14 | `mutate2.py` in the scratchpad |
 | V449 | The gates pass; a full unit run: 3021 passed, 8 skipped by their environment guards; `import-boundary.spec.ts` passes with `start.ts`, `start-lines.ts` and `state/run-folders.ts` imported | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
 | V450 | Re-audit of the fixes: no high or medium. Closed with tests, each mutant failing one — 5/5: `onRunBegun` moved after the launch (`cycle.spec.ts`: an injected launch sees the id already told), the stuck-task filter on records dropped (a finished task's record forced back to `running`, its group a live matching process: never named), `named.add` dropped (no "no run recorded" line beside a named run), the give-up's warnings no longer limited to runs this start began (a stuck task's foreign unreadable folder: warned once, by the orphan check) or to the stuck tasks (a finished task's run whose record was corrupted: never said). V446 lists all four changed tests. `--repeat-each 20 --workers 6` on the start specs: 1160 passed; full unit run: 3023 passed, 8 skipped | ✅ 2026-10-14 | `mutate3.py` in the scratchpad; the four gates |
+| V451 | `dryRunReport(prepared, checkout?)` takes `prepareStart`'s result as it is (`Pick<PreparedStart, "loaded" \| "selected">`); over the example config it prints each task, its product, cell, ref, version, filter, cooldown, sites and servers, the runs' settings, the notifications and secrets by name and the warnings — line for line as §7.21; over the real product list (`bwu2`/`bwu3`) too | ✅ 2026-10-14 | `dry-run.spec.ts`; a `node --import tsx` probe over the example with its second cell moved to `free@nginx` |
+| V452 | No secret in the report: one planted in every secret field (the config's and the sites' credentials) and in every printed name, ref, filter, host, URL path and the config's folder never appears; one under 8 characters (no mask) never appears either, its field never printed; an unselected task's site password is masked | ✅ 2026-10-14 | `dry-run.spec.ts`, 17 tests |
+| V453 | Mutations of `dry-run.ts`, each in a copy of the worktree — 26/26 killed **of that first set** (after 4 tests added for its survivors: an unselected task's credentials, a non-default cooldown, the cap with indentation, an S3 secret masked alone). The audit's broader set left two more: Slack with only `reports.sshHost` (closed, V459) and `trimStart`→`trim` (equivalent: a line's own text never starts with a space) | ✅ 2026-10-14, corrected the same day | A mutation script in the scratchpad; the correctness reviewer's |
+| V454 | The gates pass; a full unit run: 3040 passed (+17), 8 skipped by their environment guards; `import-boundary.spec.ts` imports `dry-run.ts` with `suite-imports.json` unchanged; no existing spec changed | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V455 | Reproduced before the fixes: a `0775` state directory (Ubuntu's default, §6.4) passed the dry run while `start` refused it; a `release:` ref showed the version the suite drops, and `default ref` hid `develop`/`9.99.99`; a `baseURL` that does not parse, or holds `/ ? #` or a space in its password, printed its password (the dry run and `redactSecrets`, so Slack, Datator and the run facts); a secret pasted as an SSH host printed lowercased, one in a URL path percent-encoded; `start` masked no site password | ✅ 2026-10-14 | The reviewers' probes (`probe-5i1/state.ts`, `probes-5i1/`), re-run on the fixed code: all masked but a non-secret path and a 6-character password (kept, §7.21) |
+| V456 | `inspectState` judges the state directory by the lock's own rule and sentence (`stateFolderProblem`, shared with `acquireLock`) and the lock by `inspectLock` (`judgeOwner`, read-only): open folder, file in its place, missing folder, live, foreign and unreadable locks warned with the start's refusal; a dead one's lock not; a failing judgement said; nothing written (entries and lock unchanged); a real live child's lock refused, then not once it ended | ✅ 2026-10-14 | `state/inspect.spec.ts`, 10 tests; `lock.spec.ts` unmodified, passing |
+| V457 | `src/common/artifacts/request.ts` admitted to `suite-imports.json`: `import-boundary.spec.ts` passes (it loads `manifest.ts`, `env.ts`, `guards.ts` — never `load-env.ts` or `run-context.ts` — and importing it changes nothing in the process); `pluginText` says what `buildArtifactPlan` builds | ✅ 2026-10-14 | `import-boundary.spec.ts`, `dry-run.spec.ts` (`pluginText`, 3 tests) |
+| V458 | `redactSecrets` masks a password a URL parser would refuse — `/`, `?`, `#`, `@` — to its last `@` before a space; **corrected by the re-audit (V462)**: as first built it also took spaces, swallowing a line, and ran after `URL_USERINFO`, which left part of a password holding `@`; a password holding a space is now no shape at all, a site's address being shown by `maskSiteUrl` | ✅ 2026-10-14, corrected the same day | `src/common/text.spec.ts` |
+| V459 | Each fix undone in a copy, each failing a test — 52 mutants, 47 killed on the first pass; the 5 survivors closed (a non-`http(s)` URL with a host and a password a quote hides, with tests; the hostname check removed as dead: the parser refuses an `http(s)` URL without a host; the last-`@` mutant re-run) but one: `start` not handing the sites' secrets to the senders — equivalent today, their one output is the notification line the logger masks with the same values, and `subscribe.spec.ts` proves the option | ✅ 2026-10-14 | `mutate2.py`, `mutate3.py` in the scratchpad |
+| V460 | Site credentials masked end to end: a site password in the state directory's path never reaches the log, the terminal, a run's started line or a lock refusal on standard error; a sender's answer quoting one is masked | ✅ 2026-10-14 | `start.spec.ts` (+1), `notify/subscribe.spec.ts` (+1), `config/secrets.spec.ts` (+3), `text.spec.ts` (+1: the lowercase form) |
+| V461 | The gates pass; a full unit run: 3064 passed (+24), 8 skipped by their environment guards; one existing assertion changed by design (`start.spec.ts`: the loops' secrets now include the stand-in site's password, §7.21); no other existing spec changed | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V462 | Re-audit fixes, each undone in a copy and failing a test — 26 mutants, 24 killed, of which 9 only after tests were added (each call site of `maskSiteUrl`/`safeSiteUrl`: site info, run facts ×2, summary, preflight, elevation banner, `run.finished`; the pre-mask; a user part holding `/`); 2 equivalent: a greedy password (the last-`@` lookahead admits only one `@`, so greedy and lazy match alike) and, from V459, the senders' extra secrets. Kept readable: `https://a.test:wrong/ logged in as admin@a.test`, `http://[2001:db8::1]/ user@host`, `s3://bucket:key/path owner@x`, `https://github.com:wp-media/x.git by dev@wp-media.me`, `https://a.test/2024:report written by admin@a.test`; masked whole: `https://admin:p@ss/word@host`, a loose password over 16 characters; the dry run unmoved by the shell's `E2E_PLUGIN_*`; a site password `BackWPup` leaves `backwpup pro@nginx` | ✅ 2026-10-14 | `mutate4.py`–`mutate6.py` in the scratchpad; `src/common/text.spec.ts`, `orchestrator/text.spec.ts`, `config/secrets.spec.ts`, `dry-run.spec.ts`, the call sites' specs (added cases) |
+| V463 | `redactSecrets` stays linear: 1 MB and 4 MB of nine adversarial shapes take the same ms/MB; the worst (`a://b:` repeated, each a scheme scanning its 256-character window) about 70–86 ms/MB against HEAD's 2–4 ms/MB; every other shape 4–8 ms/MB (HEAD 1–5). The gates pass; a full unit run: 3078 passed (+14 over V461), 8 skipped by their environment guards; the suite's text and reporting specs changed only by added cases | ✅ 2026-10-14 | `timing/time.mts` (HEAD's and the new `text.ts`, best of two); `npm run typecheck`, `lint`, `format`, `test:unit` |
