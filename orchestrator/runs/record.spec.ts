@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { finishedEvent } from "../__fixtures__/run-finished";
+import { finishedEvent, scenario } from "../__fixtures__/run-finished";
+import { MAX_SCENARIO_ERROR } from "../events/run-finished";
 import type { LeaderStart, LeaderStartReader } from "./leader";
+import { MAX_REASON_LENGTH } from "./outcome";
 import {
   MAX_RECORD_BYTES,
   RUN_STATES,
@@ -71,7 +73,7 @@ test.describe("run records", () => {
     });
   });
 
-  test("an ended record keeps how the processes ended, the stop and the event", () => {
+  test("an ended record keeps how the processes ended, the stop, and the event's status, reason and counts", () => {
     const event = finishedEvent();
     const launch = {
       bddgen: { code: 0, signal: null },
@@ -87,8 +89,43 @@ test.describe("run records", () => {
       startedAt: "2026-10-13T10:15:31.042Z",
       endedAt: event.endedAt,
       ...launch,
-      event,
+      status: "failed",
+      reason: null,
+      counts: event.counts,
     });
+    const stopped = finishedEvent({ status: "stopped", reason: "stopped" });
+    expect(endedRecord(IDENTITY, "bpng", LAUNCH, stopped).reason).toBe(
+      "stopped",
+    );
+  });
+
+  test("an ended record stays small whatever the run did: 1,000 scenarios failed at the error cap, a reason past its cap", async () => {
+    const event = finishedEvent({
+      status: "error",
+      reason: "é".repeat(MAX_REASON_LENGTH * 4),
+      scenarios: Array.from({ length: 1_000 }, (_, i) =>
+        scenario({
+          name: `Scenario ${String(i)}`,
+          status: "failed",
+          error: "😀".repeat(MAX_SCENARIO_ERROR),
+        }),
+      ),
+    });
+    const record = endedRecord(IDENTITY, "bpng", LAUNCH, event);
+    expect(Array.from(record.reason ?? "")).toHaveLength(MAX_REASON_LENGTH);
+    const dir = await mkdtemp(join(tmpdir(), "e2e-record-"));
+    try {
+      const path = join(dir, "run.json");
+      await writeRunRecord(path, record);
+      // The text as written: well under the cap, and read back as a run that is over.
+      expect((await readFile(path)).length).toBeLessThan(4 * 1024);
+      expect(await readRunRecordFile(path, "bpng-12")).toMatchObject({
+        kind: "over",
+        record: { state: "ended" },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   test("a lost record keeps who the run was, its process, when it was found and why", () => {

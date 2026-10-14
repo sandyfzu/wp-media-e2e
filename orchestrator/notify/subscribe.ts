@@ -48,12 +48,15 @@ interface Sender {
   ) => Promise<SenderOutcome>;
 }
 
-/** What {@link subscribeNotifications} subscribed, and the Datator record a run's `run.json` keeps. */
+/**
+ * What {@link subscribeNotifications} subscribed, and the Datator record a run keeps in its
+ * `datator.json`.
+ */
 export interface Notifications {
   /** The senders subscribed, in {@link SENDERS} order; none when nothing is configured. */
   readonly senders: readonly SenderName[];
   /**
-   * The record Datator is (or was) sent for `event`, to keep in its `run.json` — the very object
+   * The record Datator is (or was) sent for `event`, to keep in its `datator.json` — the very object
    * posted, whichever is asked first; `undefined` when Datator is not configured or the run did not
    * test. Call it with the event object that is published. Frozen, `test_cases` and each case too:
    * what is kept can never differ from what is posted.
@@ -84,7 +87,7 @@ export interface NotificationOptions {
  * @example
  * ```ts
  * const notifications = subscribeNotifications(bus, config, logger);
- * const posted = notifications.datatorPayload(event); // kept in the run's `run.json`
+ * const posted = notifications.datatorPayload(event); // kept in the run's `datator.json`
  * bus.publish(event); // 11:09:42 bpng  slack ✓ · datator ✓ 201
  * ```
  */
@@ -96,7 +99,7 @@ export function subscribeNotifications(
 ): Notifications {
   const secrets = secretValues(config);
   const { slack, datator } = config.notifications ?? {};
-  // One record per event object: what `run.json` keeps is what was posted.
+  // One record per event object: what `datator.json` keeps is what was posted.
   const payloads = new WeakMap<RunFinishedEvent, DatatorPayload | undefined>();
   const payloadOf = (event: RunFinishedEvent): DatatorPayload | undefined => {
     if (datator === undefined) return undefined;
@@ -169,7 +172,7 @@ function slackSender(
  * Datator's sender: the run's record, when it tested ({@link datatorPayload}); else nothing posted.
  *
  * @param datator - the endpoint and its key.
- * @param payloadOf - the run's record, the one `run.json` keeps.
+ * @param payloadOf - the run's record, the one `datator.json` keeps.
  * @param secrets - the values to mask in Datator's answer.
  * @param options - the time limit and `fetch`.
  * @returns the sender.
@@ -280,7 +283,7 @@ function outcomeText(
 
 /**
  * A Datator record frozen through: itself, `test_cases` and each case — so the object handed out for
- * `run.json` and the one posted cannot drift apart.
+ * `datator.json` and the one posted cannot drift apart.
  *
  * @param payload - the record, or `undefined` for a run not posted.
  * @returns the same object, frozen.

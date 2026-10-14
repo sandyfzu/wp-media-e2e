@@ -207,6 +207,10 @@ test.describe("datatorPayload", () => {
       status: "passed",
       error_message: null,
     });
+    const [failed] = payloadOf({
+      scenarios: [scenario({ status: "failed", error: "x\udc00y" })],
+    }).test_cases;
+    expect(failed?.error_message).toBe("x�y");
   });
 });
 

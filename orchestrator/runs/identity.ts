@@ -13,11 +13,17 @@ import { TASK_ID_PATTERN } from "../config/schema";
 /** The state directory's folder of run folders. */
 export const RUNS_DIR = "runs";
 
-/** A run folder's files: the processes' output, the run's record, and the drain's stop file. */
+/**
+ * A run folder's files: the processes' output, the run's record, the drain's stop file, and — beside
+ * the record, for whoever looks into the run, never parsed by the orchestrator — its whole
+ * `run.finished` and the Datator record it was sent.
+ */
 export const RUN_FILES = {
   log: "run.log",
   record: "run.json",
   stop: "stop",
+  finished: "run-finished.json",
+  datator: "datator.json",
 } as const;
 
 /** Everything that names a run, and every path it uses — all absolute. */

@@ -25,6 +25,11 @@ export interface FakeBehaviour {
   readonly childFile?: string;
   /** Writes its environment's names, sorted, as JSON, to this file. */
   readonly envFile?: string;
+  /**
+   * Files it writes as it starts, their folders made — a runner's results stream, say — before it
+   * exits or waits.
+   */
+  readonly writes?: readonly { readonly path: string; readonly text: string }[];
 }
 
 /** What the fake writes. */
@@ -41,6 +46,10 @@ const { spawn } = require("node:child_process");
 const b = JSON.parse(process.argv[1]);
 const say = (text) => process.stdout.write(text + "\n");
 if (b.envFile) fs.writeFileSync(b.envFile, JSON.stringify(Object.keys(process.env).sort()));
+for (const w of b.writes ?? []) {
+  fs.mkdirSync(require("node:path").dirname(w.path), { recursive: true });
+  fs.writeFileSync(w.path, w.text);
+}
 if (b.exitCode !== undefined) process.exit(b.exitCode);
 process.on("SIGINT", () => {
   say("got " + "SIGINT");

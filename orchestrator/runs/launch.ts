@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants, writeFileSync } from "node:fs";
-import { lstat, mkdir, open, type FileHandle } from "node:fs/promises";
+import { lstat, mkdir, open, rmdir, type FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -145,7 +145,9 @@ const NOT_STARTED: ProcessExit = { code: null, signal: null };
  * @throws {@link Error} when anything is already at the run's folder — a run of that id ran before,
  *   and sharing its folder would mix two runs' logs, records and stop files — when the folder is not
  *   a private folder of this user's, when its stop file or log is already there, or when any of them
- *   cannot be made; or when `onSpawning` fails for `bddgen`. Nothing is spawned then.
+ *   cannot be made; or when `onSpawning` fails for `bddgen`. Nothing is spawned then; a folder this
+ *   launch made is removed again when it failed before `onSpawning` was called (see
+ *   {@link prepareFolder}).
  */
 export async function launchRun(options: LaunchOptions): Promise<LaunchedRun> {
   const { identity } = options;
@@ -157,12 +159,7 @@ export async function launchRun(options: LaunchOptions): Promise<LaunchedRun> {
       `The run's folder is already there (${identity.dir}): a run of that id ran before.`,
     );
   });
-  await assertPrivateFolder(identity.dir);
-  if (await exists(identity.stopFile))
-    throw new Error(
-      `The run's stop file is already there (${identity.stopFile}): a run of that id ran before.`,
-    );
-  const log = await openRunLog(identity.log);
+  const log = await prepareFolder(identity);
   try {
     await options.onSpawning?.("bddgen");
   } catch (error) {
@@ -173,6 +170,32 @@ export async function launchRun(options: LaunchOptions): Promise<LaunchedRun> {
     );
   }
   return new Launch(options, log).start();
+}
+
+/**
+ * Checks the run's new folder and opens its log. A failure removes the folder — only when it is still
+ * empty, never through a link (`rmdir`) — since nothing has run there and nothing will record it: a
+ * folder left without a `run.json` would be undated, so kept by run-folder retention for ever.
+ *
+ * @param identity - the run's folder, log and stop file.
+ * @returns the open log.
+ * @throws {@link Error} when the folder is not a private folder of this user's, when its stop file is
+ *   already there, or when the log cannot be made.
+ */
+async function prepareFolder(
+  identity: Pick<RunIdentity, "dir" | "log" | "stopFile">,
+): Promise<FileHandle> {
+  try {
+    await assertPrivateFolder(identity.dir);
+    if (await exists(identity.stopFile))
+      throw new Error(
+        `The run's stop file is already there (${identity.stopFile}): a run of that id ran before.`,
+      );
+    return await openRunLog(identity.log);
+  } catch (error) {
+    await rmdir(identity.dir).catch(() => undefined);
+    throw error;
+  }
 }
 
 /**

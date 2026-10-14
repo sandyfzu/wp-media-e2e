@@ -8,14 +8,18 @@ import { errorCode } from "../error-code";
 import type { RunFinishedEvent } from "../events/run-finished";
 import { readCapped, type CappedMiss } from "../files";
 import { writeJsonAtomic } from "../state/atomic";
+import { cut } from "../text";
 import type { RunIdentity } from "./identity";
 import type { LaunchResult } from "./launch";
 import type { LeaderStart, LeaderStartReader } from "./leader";
+import { MAX_REASON_LENGTH, type RunStatus } from "./outcome";
 
 /**
  * A run's record, `run.json` in its folder: written as it starts (`running`, with the process group
- * once one exists) and again as it ends (`ended`, with how its processes ended and its
- * `run.finished`). A record still `running` when an orchestrator starts is either an **orphan** — its
+ * once one exists) and again as it ends (`ended`, with how its processes ended and its status, reason
+ * and counts — small and bounded whatever the run did; its whole `run.finished` and its Datator record
+ * are kept beside it, in files no reader parses, so neither can ever make a record unreadable). A
+ * record still `running` when an orchestrator starts is either an **orphan** — its
  * group still the run's, holding its cell's sites — or over without its end recorded, and then
  * rewritten `lost` (`state/orphans.ts`). Each run's writes go through one {@link RecordWriter}, in
  * order, so a late `running` never replaces the end.
@@ -39,7 +43,10 @@ export type RunState = (typeof RUN_STATES)[number];
 /** The states of a run that is over. */
 const OVER_STATES = ["ended", "lost"] as const satisfies readonly RunState[];
 
-/** The largest `run.json` read, in bytes: a running one is under 1 KiB, an ended one a few KiB. */
+/**
+ * The largest `run.json` read, in bytes. A running one is under 1 KiB, an ended one a few KiB: no field
+ * grows with the run. A record over this is never dated, so never pruned.
+ */
 export const MAX_RECORD_BYTES = 1024 * 1024;
 
 /** What every record says. */
@@ -85,11 +92,14 @@ export interface RunningProcess {
   readonly leaderStartUnread?: string;
 }
 
-/** A run that has ended. */
+/** A run that has ended: how its processes ended, and what its `run.finished` says of it. */
 export interface EndedRecord extends RecordBase, LaunchResult {
   readonly state: "ended";
   readonly endedAt: string;
-  readonly event: RunFinishedEvent;
+  readonly status: RunStatus;
+  /** Why, for `error`, `stopped` and `killed`, at most {@link MAX_REASON_LENGTH} code points. */
+  readonly reason: string | null;
+  readonly counts: RunFinishedEvent["counts"];
 }
 
 /**
@@ -116,6 +126,7 @@ export type RunRecord = RunningRecord | EndedRecord | LostRecord;
  * @param identity - the run.
  * @param taskId - its task.
  * @param process - the process running now, once one is ({@link leaderProcess}).
+ * @returns the record.
  */
 export function runningRecord(
   identity: Pick<RunIdentity, "id" | "runId" | "startedAt">,
@@ -141,6 +152,7 @@ export function runningRecord(
  * @param identity - the run.
  * @param taskId - its task.
  * @param name - the process about to be spawned.
+ * @returns the record.
  */
 export function startingRecord(
   identity: Pick<RunIdentity, "id" | "runId" | "startedAt">,
@@ -156,12 +168,14 @@ export function startingRecord(
 }
 
 /**
- * The record of a run that has ended.
+ * The record of a run that has ended: of its `run.finished`, only the status, the reason (cut to
+ * {@link MAX_REASON_LENGTH}) and the counts — so its size never depends on the run's scenarios.
  *
  * @param identity - the run.
  * @param taskId - its task.
  * @param launch - how its processes ended.
  * @param event - its `run.finished`.
+ * @returns the record.
  */
 export function endedRecord(
   identity: Pick<RunIdentity, "id" | "runId" | "startedAt">,
@@ -175,7 +189,9 @@ export function endedRecord(
     ...base(identity, taskId),
     endedAt: event.endedAt,
     ...launch,
-    event,
+    status: event.status,
+    reason: event.reason === null ? null : cut(event.reason, MAX_REASON_LENGTH),
+    counts: event.counts,
   };
 }
 
@@ -184,6 +200,7 @@ export function endedRecord(
  *
  * @param identity - the run.
  * @param taskId - its task.
+ * @returns the run's id, RUN_ID, task and start.
  */
 function base(
   identity: Pick<RunIdentity, "id" | "runId" | "startedAt">,
@@ -202,6 +219,7 @@ function base(
  *
  * @param path - the run's `run.json`.
  * @param record - the record.
+ * @returns once it is on disk.
  */
 export function writeRunRecord(path: string, record: RunRecord): Promise<void> {
   return writeJsonAtomic(path, record);
@@ -260,6 +278,7 @@ const baseShape = {
  * `toISOString`'s (no zone, read as local time; no milliseconds) is no record's.
  *
  * @param record - the identity read back.
+ * @returns whether the three agree.
  */
 function consistent(record: {
   readonly id: string;
@@ -341,6 +360,7 @@ export function parseRunRecord(text: string, id: string): RecordRead {
  * A parsed record that is not a running one: over, or malformed.
  *
  * @param json - the parsed text.
+ * @returns the record as read back, or why it is none.
  */
 function overOrMalformed(json: unknown): RecordRead {
   const over = overSchema.safeParse(json);
@@ -371,6 +391,7 @@ export async function readRunRecordFile(
  * @param record - its running record, as read back.
  * @param reason - why it is taken to be over.
  * @param foundAt - now.
+ * @returns the record.
  */
 export function lostRecord(
   record: RunningRecordRead,
@@ -399,6 +420,7 @@ export function lostRecord(
  * @param name - the process.
  * @param pgid - its group: its PID.
  * @param read - reads a process's start (`readLeaderStart`).
+ * @returns the process, with its start or why it is unread.
  */
 export async function leaderProcess(
   name: RunningProcess["name"],
@@ -454,6 +476,7 @@ export interface RecordWriterDeps {
  *
  * @param path - the run's `run.json`.
  * @param deps - the writer and the existence check; the real ones by default.
+ * @returns the writer.
  */
 export function createRecordWriter(
   path: string,
@@ -494,6 +517,7 @@ export function createRecordWriter(
  * Whether anything is at `path` — a file, a folder, a link, even a dangling one.
  *
  * @param path - the path.
+ * @returns whether anything is there.
  * @throws what `lstat` throws besides `ENOENT`.
  */
 async function pathTaken(path: string): Promise<boolean> {

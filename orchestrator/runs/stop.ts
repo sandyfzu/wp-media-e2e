@@ -71,7 +71,7 @@ export const INITIAL_RUN_STOP: RunStopState = {
 };
 
 /** Each level's rank: a stop only ever goes further. */
-const RANK: Readonly<Record<StopTaken["level"], number>> = {
+export const STOP_RANK: Readonly<Record<StopTaken["level"], number>> = {
   none: 0,
   drained: 1,
   interrupted: 2,
@@ -120,7 +120,7 @@ export function mayStartPlaywright(state: RunStopState): boolean {
 function stop(state: RunStopState, level: StopLevel, why: string): RunStopStep {
   const { phase, taken } = state;
   const unchanged = { state, actions: [] };
-  if (phase.name === "ended" || RANK[level] <= RANK[taken.level])
+  if (phase.name === "ended" || STOP_RANK[level] <= STOP_RANK[taken.level])
     return unchanged;
   if (phase.name !== "playwright") {
     // Nothing was tested yet: any stop is a drain, and a drain only once.

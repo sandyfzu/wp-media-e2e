@@ -275,6 +275,29 @@ test.describe("launchRun", () => {
     expect(existsSync(opts.identity.log)).toBe(false);
   });
 
+  test("removes the folder it made when it fails before anything could record the run", async () => {
+    // A log that cannot be made (its folder is missing), then a stop file that cannot be checked.
+    for (const broken of [
+      { log: join(root, "runs", "bpng-1", "missing", "run.log") },
+      { stopFile: join(root, "file", "stop") },
+    ]) {
+      await writeFile(join(root, "file"), "");
+      const opts = options({ exitCode: 0 }, { exitCode: 0 });
+      const spawning: string[] = [];
+      await expect(
+        launchRun({
+          ...opts,
+          identity: { ...opts.identity, ...broken },
+          onSpawning: (name) => {
+            spawning.push(name);
+          },
+        }),
+      ).rejects.toMatchObject({ code: expect.any(String) });
+      expect(spawning).toEqual([]);
+      expect(await readdir(join(root, "runs"))).toEqual([]);
+    }
+  });
+
   test("refuses a run whose folder already holds a stop file, which would drain it", async () => {
     const opts = options({ exitCode: 0 }, { exitCode: 0 });
     await mkdir(opts.identity.dir, { recursive: true, mode: 0o700 });
