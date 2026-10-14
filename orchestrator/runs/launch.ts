@@ -144,8 +144,20 @@ export async function launchRun(options: LaunchOptions): Promise<LaunchedRun> {
     throw new Error(
       `The run's stop file is already there (${identity.stopFile}): a run of that id ran before.`,
     );
-  const log = await open(identity.log, LOG_FLAGS, 0o600);
+  const log = await openRunLog(identity.log);
   return new Launch(options, log).start();
+}
+
+/**
+ * Opens a run's new log, `0600` (a umask only narrows it). The run's folder is new and private by then,
+ * so nothing should be there; refusing anything that is keeps that true if the folder ever is not.
+ *
+ * @param path - the log.
+ * @returns the open log, for reading and appending.
+ * @throws {@link Error} (`EEXIST`, `ELOOP`) when anything — a file, a link, a FIFO — is already there.
+ */
+export async function openRunLog(path: string): Promise<FileHandle> {
+  return open(path, LOG_FLAGS, 0o600);
 }
 
 /**

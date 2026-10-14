@@ -25,6 +25,7 @@ import {
   describeCommand,
   launchRun,
   LOG_PREFIX,
+  openRunLog,
   type LaunchedRun,
   type LaunchOptions,
 } from "./launch";
@@ -439,6 +440,47 @@ test.describe("launchRun", () => {
     } finally {
       process.umask(previous);
     }
+  });
+});
+
+test.describe("openRunLog", () => {
+  let dir: string;
+  test.beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "e2e-run-log-"));
+  });
+  test.afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("creates a new log, 0600 under umask 0", async () => {
+    const previous = process.umask(0);
+    try {
+      const log = await openRunLog(join(dir, "run.log"));
+      await log.close();
+      expect((await stat(join(dir, "run.log"))).mode & 0o777).toBe(0o600);
+    } finally {
+      process.umask(previous);
+    }
+  });
+
+  test("refuses anything already there — a file, a link, a FIFO — never writing through nor waiting on it", async () => {
+    const path = join(dir, "run.log");
+    await writeFile(path, "earlier\n");
+    await expect(openRunLog(path)).rejects.toMatchObject({ code: "EEXIST" });
+    expect(await readFile(path, "utf8")).toBe("earlier\n");
+    await rm(path);
+    const victim = join(dir, "victim");
+    await writeFile(victim, "victim\n");
+    await symlink(victim, path);
+    await expect(openRunLog(path)).rejects.toMatchObject({ code: "EEXIST" });
+    expect(await readFile(victim, "utf8")).toBe("victim\n");
+    await rm(path);
+    await symlink(join(dir, "nowhere"), path);
+    await expect(openRunLog(path)).rejects.toMatchObject({ code: "EEXIST" });
+    expect(existsSync(join(dir, "nowhere"))).toBe(false);
+    await rm(path);
+    execFileSync("mkfifo", [path]);
+    await expect(openRunLog(path)).rejects.toMatchObject({ code: "EEXIST" });
   });
 });
 
