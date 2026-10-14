@@ -113,7 +113,7 @@ async function readConfigFile(
  * @param limit - the most bytes to read.
  * @returns what was read.
  */
-async function readAtMost(
+export async function readAtMost(
   handle: FileHandle,
   limit: number,
 ): Promise<Uint8Array> {
