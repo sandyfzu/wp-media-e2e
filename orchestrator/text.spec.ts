@@ -1,5 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { execFileSync } from "node:child_process";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import {
   cut,
@@ -110,6 +112,22 @@ test.describe("safeLine", () => {
     expect(safeLine("pw Tr0ub4\u200bdor&3xyz", 500, ["Tr0ub4dor&3xyz"])).toBe(
       "pw ***",
     );
+  });
+
+  test("masks a secret whole even where a credential's shape matches inside it", () => {
+    // By shape first, `pwd=\u2026` and the token's head went alone, and the rest matched no value.
+    for (const secret of [
+      "Pr1vate;pwd=Zq8vLm2p",
+      "ghp_shortish_but_has_1234567890-tail!!",
+    ]) {
+      expect(
+        safeLine(`login failed with ${secret} for user`, 200, [secret]),
+        secret,
+      ).toBe("login failed with *** for user");
+      expect(safeBlock(`failed: ${secret}`, 200, [secret]), secret).toBe(
+        "failed: ***",
+      );
+    }
   });
 });
 
@@ -238,5 +256,20 @@ test.describe("shellWord", () => {
           encoding: "utf8",
         }),
       ).toBe(path);
+  });
+});
+
+test.describe("the orchestrator's own source", () => {
+  test("holds no invisible character: each is written as an escape, so a reader sees it", async () => {
+    // Format characters and the non-characters U+FFFE and U+FFFF: none shows in an editor.
+    const invisible = /[\p{Cf}\uFFFE\uFFFF]/u;
+    const sources = (await readdir(import.meta.dirname, { recursive: true }))
+      .filter((name) => name.endsWith(".ts") && !name.endsWith(".spec.ts"))
+      .filter((name) => !name.startsWith("__fixtures__"));
+    expect(sources).toContain("text.ts");
+    for (const name of sources) {
+      const source = await readFile(join(import.meta.dirname, name), "utf8");
+      expect(invisible.test(source), name).toBe(false);
+    }
   });
 });

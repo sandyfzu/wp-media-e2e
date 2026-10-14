@@ -50,12 +50,13 @@ const CONTROL_BUT_LINES = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
 const FORMAT = /\p{Cf}/gu;
 
 /**
- * `text` with every credential masked: by its shape ({@link redactSecrets}), and by the value of every
- * secret the orchestrator holds ({@link maskValues}) — each also as a URL, a form or a JSON string
- * writes it ({@link secretForms}), since a service's answer may echo it so. A secret under
- * {@link MIN_MASKED_LENGTH} (8) characters, spaces around it aside, is masked in no form: it would mask
- * ordinary words. The longest form first: a value inside a longer one, masked first, would leave the
- * longer one's rest in clear.
+ * `text` with every credential masked: by the value of every secret the orchestrator holds
+ * ({@link maskValues}) — each also as a URL, a form or a JSON string writes it ({@link secretForms}),
+ * since a service's answer may echo it so —, then by its shape ({@link redactSecrets}). Values first:
+ * a shape matching inside a secret (`pwd=…`, a token's head) masks that part alone and leaves the rest
+ * of the secret in clear, which no value then matches. A secret under {@link MIN_MASKED_LENGTH} (8)
+ * characters, spaces around it aside, is masked in no form: it would mask ordinary words. The longest
+ * form first: a value inside a longer one, masked first, would leave the longer one's rest in clear.
  *
  * @param text - the text.
  * @param secrets - the secret values to mask wherever they appear, in any order.
@@ -66,7 +67,7 @@ function mask(text: string, secrets: readonly string[]): string {
     .filter((secret) => secret.trim().length >= MIN_MASKED_LENGTH)
     .flatMap(secretForms);
   const longestFirst = [...new Set(forms)].sort((a, b) => b.length - a.length);
-  return maskValues(redactSecrets(text), longestFirst);
+  return redactSecrets(maskValues(text, longestFirst));
 }
 
 /**
@@ -97,14 +98,14 @@ function escapeMarks(encoded: string): string {
 /**
  * A JSON string's content with every character past ASCII escaped as `\uXXXX` — lowercase hex, one
  * per UTF-16 unit, so a pair for a character past U+FFFF — as PHP's `json_encode` writes by default
- * (`ö` → `ö`).
+ * (`ö` → `\u00f6`).
  *
  * @param json - a JSON string's content, as `JSON.stringify` writes it.
  * @returns it, ASCII only.
  */
 function asciiJson(json: string): string {
   return json.replace(
-    /[\u0080-￿]/g,
+    /[\u0080-\uffff]/g,
     (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
   );
 }
