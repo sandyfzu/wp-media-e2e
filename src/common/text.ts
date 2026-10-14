@@ -95,7 +95,7 @@ export function redactSecrets(text: string): string {
 }
 
 /** The shortest value {@link maskValues} masks: a shorter one would mask ordinary words. */
-const MIN_MASKED_LENGTH = 8;
+export const MIN_MASKED_LENGTH = 8;
 
 /**
  * `text` with each of `values` masked wherever it appears verbatim — for a credential no pattern can

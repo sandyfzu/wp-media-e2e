@@ -143,14 +143,40 @@ test.describe("safeBlock", () => {
 });
 
 test.describe("secretForms", () => {
-  test("gives a secret as written, URL-encoded, and JSON-escaped as JavaScript and PHP write it", () => {
+  test("gives a secret as written, URL-encoded with either case of hex, and JSON-escaped as JavaScript and PHP write it", () => {
     expect(secretForms('a"b\\c/d+e')).toEqual([
       'a"b\\c/d+e',
       "a%22b%5Cc%2Fd%2Be",
+      "a%22b%5cc%2fd%2be",
       'a\\"b\\\\c/d+e',
       'a\\"b\\\\c\\/d+e',
     ]);
     expect(secretForms("plainvalue")).toEqual(["plainvalue"]);
+  });
+
+  test("gives a secret form-encoded as URLSearchParams writes it: a space as +, ! escaped", () => {
+    const forms = secretForms("pass word!x");
+    expect(forms).toContain("pass+word%21x");
+    expect(forms).toContain("pass%20word!x");
+    expect(new URLSearchParams("s=pass+word%21x").get("s")).toBe("pass word!x");
+  });
+
+  test("gives a secret as PHP's rawurlencode and urlencode write it, with !'()* escaped", () => {
+    // Both measured in PHP 8.4.
+    const forms = secretForms("a*b!c(d)e'f~g h");
+    expect(forms).toContain("a%2Ab%21c%28d%29e%27f~g%20h");
+    expect(forms).toContain("a%2Ab%21c%28d%29e%27f%7Eg+h");
+    expect(forms).toContain("a%2ab%21c%28d%29e%27f%7eg+h");
+  });
+
+  test("gives a non-ASCII secret JSON-escaped as PHP's json_encode writes it by default", () => {
+    // PHP: json_encode("pässwörd/😀") === "\"p\\u00e4ssw\\u00f6rd\\/\\ud83d\\ude00\""
+    const forms = secretForms("pässwörd/😀");
+    expect(forms).toContain("p\\u00e4ssw\\u00f6rd\\/\\ud83d\\ude00");
+    expect(forms).toContain("p\\u00e4ssw\\u00f6rd/\\ud83d\\ude00");
+    expect(forms).toContain("pässwörd/😀");
+    expect(forms).toContain("p%C3%A4ssw%C3%B6rd%2F%F0%9F%98%80");
+    expect(forms).toContain("p%c3%a4ssw%c3%b6rd%2f%f0%9f%98%80");
   });
 
   test("survives a lone surrogate, which has no URL form", () => {
@@ -169,6 +195,28 @@ test.describe("secretForms", () => {
         [key],
       ),
     ).toBe('*** "***"');
+  });
+
+  test("lets safeLine mask lowercase URL escapes, a form's + and PHP's \\u escapes", () => {
+    const key = "kéy/with space";
+    const php = "k\\u00e9y\\/with space";
+    expect(
+      safeLine(
+        `url ${encodeURIComponent(key).toLowerCase()} form ${new URLSearchParams({ k: key }).toString().slice(2)} php "${php}"`,
+        200,
+        [key],
+      ),
+    ).toBe('url *** form *** php "***"');
+  });
+
+  test("masks no form of a secret under 8 characters, which would mask ordinary words", () => {
+    // Its URL form is 13 characters long: the floor is the secret's, never its forms'.
+    expect(safeLine("a/b/c/d a%2Fb%2Fc%2Fd", 100, ["a/b/c/d"])).toBe(
+      "a/b/c/d a%2Fb%2Fc%2Fd",
+    );
+    expect(safeLine("a/b/c/de a%2Fb%2Fc%2Fde", 100, ["a/b/c/de"])).toBe(
+      "*** ***",
+    );
   });
 });
 

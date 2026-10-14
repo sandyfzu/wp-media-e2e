@@ -1,6 +1,11 @@
 import { stripVTControlCharacters } from "node:util";
 
-import { maskValues, plain, redactSecrets } from "../src/common/text";
+import {
+  MIN_MASKED_LENGTH,
+  maskValues,
+  plain,
+  redactSecrets,
+} from "../src/common/text";
 
 /**
  * Small string helpers for what the orchestrator shows or sends — a run's reason, an error in an
@@ -46,38 +51,94 @@ const FORMAT = /\p{Cf}/gu;
 
 /**
  * `text` with every credential masked: by its shape ({@link redactSecrets}), and by the value of every
- * secret the orchestrator holds ({@link maskValues}; values under 8 characters are not masked, as
- * they would mask ordinary words) — each also as a URL or a JSON string writes it ({@link secretForms}),
- * since a service's answer may echo it so. The longest value first: a value inside a longer one,
- * masked first, would leave the longer one's rest in clear.
+ * secret the orchestrator holds ({@link maskValues}) — each also as a URL, a form or a JSON string
+ * writes it ({@link secretForms}), since a service's answer may echo it so. A secret under
+ * {@link MIN_MASKED_LENGTH} (8) characters, spaces around it aside, is masked in no form: it would mask
+ * ordinary words. The longest form first: a value inside a longer one, masked first, would leave the
+ * longer one's rest in clear.
  *
  * @param text - the text.
  * @param secrets - the secret values to mask wherever they appear, in any order.
  * @returns the masked text.
  */
 function mask(text: string, secrets: readonly string[]): string {
-  const longestFirst = [...new Set(secrets.flatMap(secretForms))].sort(
-    (a, b) => b.length - a.length,
-  );
+  const forms = secrets
+    .filter((secret) => secret.trim().length >= MIN_MASKED_LENGTH)
+    .flatMap(secretForms);
+  const longestFirst = [...new Set(forms)].sort((a, b) => b.length - a.length);
   return maskValues(redactSecrets(text), longestFirst);
 }
 
 /**
- * A secret as it may be written back: as it is, URL-encoded (`%2F`), and inside a JSON string —
- * escaped as JavaScript does, and with `\/` as PHP does.
+ * Percent escapes with lowercase hex digits (`%2f`), as some encoders write them; a URL reads both
+ * cases alike.
+ *
+ * @param encoded - percent-encoded text, its escapes uppercase.
+ * @returns the same text, its escapes lowercase.
+ */
+function lowercaseEscapes(encoded: string): string {
+  return encoded.replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase());
+}
+
+/**
+ * URL-encoded text with `!`, `'`, `(`, `)` and `*` escaped too, as RFC 3986 encoders do — PHP's
+ * `rawurlencode` over `encodeURIComponent`'s output, its `urlencode` over a form's.
+ *
+ * @param encoded - percent-encoded text.
+ * @returns it, those five escaped.
+ */
+function escapeMarks(encoded: string): string {
+  return encoded.replace(
+    /[!'()*]/g,
+    (mark) => `%${mark.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+/**
+ * A JSON string's content with every character past ASCII escaped as `\uXXXX` — lowercase hex, one
+ * per UTF-16 unit, so a pair for a character past U+FFFF — as PHP's `json_encode` writes by default
+ * (`ö` → `ö`).
+ *
+ * @param json - a JSON string's content, as `JSON.stringify` writes it.
+ * @returns it, ASCII only.
+ */
+function asciiJson(json: string): string {
+  return json.replace(
+    /[\u0080-￿]/g,
+    (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
+/**
+ * A secret as it may be written back: as it is; URL-encoded (`encodeURIComponent`: `%2F`) and
+ * form-encoded (`URLSearchParams`: `+` for a space, `%21` for `!`), each also with `!'()*` escaped
+ * (PHP's `rawurlencode` and `urlencode`), and each with uppercase and with lowercase escapes; and inside a JSON string — escaped as JavaScript does, with `\/` as PHP does,
+ * and with every non-ASCII character `\uXXXX` as PHP's `json_encode` does, with and without `\/`.
+ * A secret holding a lone surrogate has no URL or form form: a URL cannot carry it.
  *
  * @param secret - the secret.
  * @returns its forms, each once.
  */
 export function secretForms(secret: string): string[] {
   const json = JSON.stringify(secret).slice(1, -1);
-  let url = secret;
-  try {
-    url = encodeURIComponent(secret);
-  } catch {
-    // A lone surrogate cannot be URL-encoded; it has no such form.
+  const ascii = asciiJson(json);
+  const encoded: string[] = [];
+  if (secret.isWellFormed()) {
+    const url = encodeURIComponent(secret);
+    const form = new URLSearchParams({ s: secret }).toString().slice(2);
+    for (const written of [url, escapeMarks(url), form, escapeMarks(form)])
+      encoded.push(written, lowercaseEscapes(written));
   }
-  return [...new Set([secret, url, json, json.replaceAll("/", "\\/")])];
+  return [
+    ...new Set([
+      secret,
+      ...encoded,
+      json,
+      json.replaceAll("/", "\\/"),
+      ascii,
+      ascii.replaceAll("/", "\\/"),
+    ]),
+  ];
 }
 
 /**
