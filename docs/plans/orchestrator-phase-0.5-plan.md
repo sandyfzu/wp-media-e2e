@@ -8,8 +8,9 @@
 > 5A–5D, the logger, lock, counter, leader identity, orphan check and run-folder retention (2026-10-13,
 > §7.15; audited and re-audited the same day, §7.16); 5E, the notification subscribers (2026-10-13, §7.17); 5F, one
 > run (2026-10-13, §7.18; audited 2026-10-14, the same section); 5G, the loop (2026-10-14, §7.19); 5H, the
-> process (2026-10-14, §7.20; audited the same day); 5I.1, the dry run's report (2026-10-14, §7.21; audited the same day).
-> **Next:** step 5's 5I.2–5K (§7.14), with §7.20's notes for 5I and §7.21's for 5I.2. Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> process (2026-10-14, §7.20; audited the same day); 5I.1, the dry run's report (2026-10-14, §7.21; audited the same day); 5I.2,
+> the command (2026-10-14, §7.22; audited the same day).
+> **Next:** step 5's 5J–5K (§7.14), with §7.22's notes for 5J. Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -108,13 +109,19 @@ Phase 0.5 starts once Phase 0 is done; this is why each item matters here.
 ### 4.1 M1 — The command
 
 - `npm run orchestrator -- start [--config <file>] [--task <id>…] [--once] [--dry-run]` — commander,
-  entry `orchestrator/cli.ts`, script `"orchestrator": "tsx orchestrator/cli.ts"`.
+  entry `orchestrator/cli.ts`, script `"orchestrator": "exec node --import tsx orchestrator/cli.ts"` (never
+  the `tsx` CLI, V443; `exec` so no shell stays between npm and Node, V467).
 - **Every task in the config runs**, at once, each in its own loop — any number of cells, of any
   product, one task per product × cell (§4.3).
 - **Foreground.** It holds the terminal until stopped, like AutoE2E's `node auto-e2e.js`; on a server,
   inside `tmux`, so it outlives the SSH session and can be watched again (§6). Closing the session
-  without `tmux` stops it (SIGHUP, §4.5). The same process later runs under systemd unchanged
-  (`Type=simple`; it already stops on SIGTERM).
+  without `tmux` stops it (SIGHUP, §4.5). The same process later runs under systemd (`Type=simple`;
+  it already stops on SIGTERM) — but not with the defaults, unmeasured so far: `KillMode=control-group`
+  would SIGTERM the runners too, and `TimeoutStopSec=90s` SIGKILL everything mid-drain; it needs
+  `KillMode=mixed` and a `TimeoutStopSec` beyond the drain and interrupt budgets (~20 min), and
+  `Type=simple` or `exec`, never `forking`: the orchestrator drains once its parent ends (§7.22), so
+  any launcher that exits after starting it — a backgrounding wrapper, cron's `&`, a forking unit —
+  stops it.
 - `--task` runs only those tasks; `--once` runs each selected task once and exits — `0` if every run
   passed or was flaky, `1` otherwise, `130` if stopped. It is how a deployment is tried (§6).
 - `--dry-run` validates the config and prints what would run — each task, its sites and their servers,
@@ -407,7 +414,8 @@ Which machine is D4. On it:
 1. **Tools**: Node ≥ 24.16 and npm; git; for BackWPup builds npm, composer (PHP CLI) and `gulp-cli`
    (V123); Chromium and its system libraries (`npx playwright install --with-deps chromium`, once,
    with `sudo`); `tmux`. No X server.
-2. **Checkout** of `develop` and `npm ci`; the cells' `sites.json` (`0600`), with SSH keys reaching the
+2. **Checkout** of `develop` and `npm ci` — never `--omit=dev` nor `NODE_ENV=production`: tsx, zod and
+   commander are dev dependencies; the cells' `sites.json` (`0600`), with SSH keys reaching the
    WordPress servers; `npm run healthcheck` passing for those cells — the parent's setup step.
 3. **GitHub**: `gh auth login` as that user, or `secrets.GITHUB_TOKEN` (BackWPup's repo is private).
 4. **Config**: copy `orchestrator/config.example.json` to `.orchestrator/config.json` (`0600`), add
@@ -421,7 +429,14 @@ Which machine is D4. On it:
    WP Rocket instances stay: this suite has only WP Rocket's three scaffolding scenarios (V125).
 6. **Start**, detached: `tmux new -d -s orchestrator 'npm run orchestrator -- start'`. Watch:
    `tmux attach -t orchestrator` (leave with Ctrl-b d), or `tail -f .orchestrator/orchestrator.log`.
-   Stop: `tmux send-keys -t orchestrator C-c` (the drain, §4.5), or attach and Ctrl-C.
+   Stop: `tmux send-keys -t orchestrator C-c` (the drain, §4.5), or attach and Ctrl-C. Use `tmux`, not
+   `nohup`: Node's own SIGHUP handler replaces the `SIG_IGN` `nohup` sets, so a hangup still stops it.
+   A signal by hand: SIGINT/SIGTERM to the orchestrator's PID (the started line's) or to npm's; SIGHUP
+   to the group (a SIGHUP to npm's PID alone ends npm, and the orchestrator drains once it sees its
+   parent gone, within a second). The same parent watch means it cannot be started by a launcher that
+   exits (a backgrounding wrapper, `… &` from cron, a forking service): it would drain at once. Every
+   option goes after `--`: npm 12 takes `--dry-run` for itself, npm 11 (Node 24's own) `--once`,
+   `--task=<id>` and `--config=<file>` too — the command refuses then.
 7. **Update** (D3): stop, wait for the drain; `git pull --ff-only && npm ci`; start again.
 
 ## 7. Implementation order
@@ -1168,7 +1183,7 @@ so the fake suite (§7.12) can drive everything up to 5I with real signals and n
 - **5I.1 — Dry run.** `dryRunReport(checked)`, pure: each task, its sites and their servers, and the
   warnings, never a secret. **Done:** a spec over the example config.
 - **5I.2 — The command.** `cli.ts`: commander 15, `start [--config] [--task…] [--once] [--dry-run]`,
-  and `"orchestrator": "tsx orchestrator/cli.ts"`. It is the boundary spec's one exclusion, and
+  and the `orchestrator` script (as built: `exec node --import tsx orchestrator/cli.ts`, §7.22). It is the boundary spec's one exclusion, and
   `suite-imports.json` stays unchanged. **Done:** a child-process spec covers `--help`, an unknown
   task, `--dry-run` on the example config, and exit codes.
 - **5J — Live (§9).** First, name to the user the sites to be used. Then: both cells `--once`
@@ -1703,6 +1718,142 @@ Each finding fixed and proved by a test that fails without the fix (V459):
   Never `start`, the lock, the log or `--once`: a dry run writes nothing (`inspectState` only reads), so it
   runs beside a running orchestrator. `--once` with `--dry-run` is accepted and changes nothing.
 
+### 7.22 5I.2 — Implemented (2026-10-14, V464–V470; audited the same day, V471–V478; re-audited, V479–V485)
+
+`orchestrator/cli.ts`, one line — `process.exit(await runCommand(process.argv.slice(2)))` — and
+`orchestrator/command.ts`, where everything else is, injectable (`runCommand`, `dryRun`, `toStartOptions`,
+`checkoutVersion`); `commander` `^15.0.0` (a dev dependency, as `zod`; `playwright-bdd` keeps its own
+13.1.0, nested). As §7.20's and §7.21's notes ask, with one change and these decisions:
+
+- **The script is `exec node --import tsx orchestrator/cli.ts`** — §7.20 asked for it without `exec`.
+  Measured on Ubuntu 24.04 (V467): npm runs a script through `sh -c`, and dash, unlike macOS's bash, does
+  not replace itself with the command, so it stays between npm and Node and swallows npm's relay — a
+  SIGINT to npm's PID never reached the orchestrator, and a SIGTERM ended npm and **left the
+  orchestrator running, unsignalled**. With `exec`, Node is npm's own child on both systems: every route
+  reaches it, and a group Ctrl-C arrives as two SIGINTs milliseconds apart — the pattern 5H counts as one.
+- **`start` path:** commander parses, then `start(options)`'s code is returned untouched — `start` already
+  made stdout non-blocking, settled, released and drained; nothing runs before `process.exit`. Help,
+  `--version`, usage errors and the dry run print through Node's blocking default and wait for both
+  outputs to empty (`drainTerminal`, bounded by `EXIT_WAIT_MS`) before the exit.
+- **Exit codes:** `start`'s (0/1/130); help and `--version` 0; a usage error — unknown option or command,
+  an extra argument, an option missing its value — 1, commander's own, printed on stderr with
+  `(add --help for usage)`; no command at all prints the help on stderr, 1. Commander's messages go to
+  stderr masked by shape (`safeBlock`: no config is loaded yet, so no value is known).
+- **`--dry-run`** as §7.21's note says (stdout, 0 whatever the warnings; a refusal `orchestrator: dry run
+  failed: …` on stderr, 1; never the lock, the log or `start`). **`--once --dry-run`** is accepted and
+  `--once` ignored. **`--task`** is variadic and repeatable (`--task a b --task c`), its ids handed as
+  given; commander takes a value starting with `-` as the first id (`--task --once`), which `selectTasks`
+  then refuses by name. **`--config`** relative to the working directory — the checkout, under npm.
+  **`--version`** is the checkout's `package.json` version (`unknown` if unreadable).
+- **Help** (`start --help`) ends with the run form (`npm run orchestrator -- start [options]`), the exit
+  codes and three examples.
+
+**Verification.** `command.spec.ts` (35, in process, every collaborator a stand-in) and `cli.spec.ts`
+(20, child processes): the real `cli.ts` in a copy of the checkout whose BackWPup `sites.json` declares
+the example's cells with non-placeholder hosts (a checkout's own sites file may lack them; placeholder
+sites are refused) — help whole through a pipe, version, usage errors, an unknown `--task` (start and dry
+run, masked, nothing written), a missing and a malformed config, the dry run on the committed example
+**line for line** with the state directory's snapshot (kind, mode, size, mtime) unchanged, a dry run beside
+a live lock (warned, exit 0, lock untouched), and `npm run orchestrator` passing 0 and 1. Signals through
+`__fixtures__/fake-cli.ts` — `runCommand` with the fake suite — run by the checkout's own script with only
+the entry swapped, directly and under `npm run`, in a process group of their own, 10 tries per pattern
+(V466). Mutations, 23/23 killed (V469) — of a set that could not see `cli.ts`'s signal behaviour (below).
+
+**Audit (2026-10-14, V471–V478).** Two reviewers (security and signals, correctness), each on its own copy;
+the `exec` script confirmed independently on Ubuntu 24.04. No high. Each finding fixed and proved by a test
+that fails without the fix (V476):
+
+- **`npm run orchestrator start --dry-run` — no `--` — ran a real start (medium; security).** npm 12 takes
+  `--dry-run` as its own setting, runs the script without it and says so only in `npm_config_dry_run=true`.
+  `runCommand` now refuses first, whenever that variable is `true`: exit 1, nothing read or written,
+  naming the right form. `npm run orchestrator -- start …` sets no such variable (measured).
+- **The signal tests did not run `cli.ts` (medium; correctness).** `__fixtures__/fake-cli.ts` copied its
+  line, so a listener or delay added to `cli.ts` passed every spec. Gone: `__fixtures__/swap-start.mjs`,
+  preloaded through `NODE_OPTIONS=--import=tsx --import=<it>` (tsx first, so its `registerHooks`
+  resolve hook runs before tsx's), makes the real `command.ts` import `__fixtures__/fake-start.ts` for
+  `./start` — the real `start` over the fake suite. The tests now run the checkout's `package.json` and
+  `orchestrator/` as they are (linked into a package folder), directly and under npm. The stand-in cell
+  is `fake@cell`, which no real sites file has: should the swap ever fail, the real start refuses the
+  config. (That guard came from an incident while building this: a first try of the preload, ordered
+  before tsx, did not swap, and the real start ran a real `pro@nginx` run on `bwu3` — its auth setup
+  logged in, ending that cell's saved session, and an artifact build; the drain then skipped all 70
+  scenarios, so no plugin was installed.) A spec also pins `cli.ts` to its one statement.
+- **A signal after `start` removed its handlers killed the process by Node's default (low; security).**
+  Between `start`'s return and `process.exit`, a late SIGINT ended it by the signal, not 130 (once in a
+  full run). `runCommand` now gives every shutdown signal a do-nothing handler just before `start`, kept
+  until the exit (`CommandDeps.signals`); the dry run, help and usage errors hold none, so a dry run still
+  ends at once on Ctrl-C.
+- **A SIGHUP to npm's PID alone left the orchestrator running, lock held (low; security).** npm relays only
+  SIGINT and SIGTERM. `start` now watches its parent (`StartDeps.parentWatch`: `process.ppid` every second,
+  unreferenced, stopped by `unlisten`): a changed parent PID is said and treated as SIGHUP — the drain.
+- **An option missing its value took the next flag (low; correctness).** `--task --dry-run` ran a real
+  start for a task `--dry-run`; `--config --dry-run`, a start with config `./--dry-run`. Both options'
+  values starting with `-` are a usage error naming the option (`optionValue`, `taskIds`); a path that
+  must start with `-` is written `./-…`.
+- **The help's exit codes said the dry run could be refused by the lock or a running run (low).** It
+  warns and exits 0; the line now splits the start's refusals from the dry run's, and says which signal
+  goes where.
+- **The non-`start` paths waited at most 5 s for their output (low; correctness).** Over 64 KB into a
+  reader slower than 5 s was cut, silently, exit 0. They keep standard output blocking, so they now wait
+  without a bound (`MAX_WAIT_MS`); `start`'s own bounded drain is unchanged.
+- **A relative `--config` was taken from the package's folder under npm (nit).** Now from `INIT_CWD` —
+  where npm was run — when set, else the working directory (`configBase`); the help says so.
+- **Tests and TSDoc (nit):** SIGHUP to the group and to npm's PID, repeated SIGINTs to npm's own PID, a
+  dry run's SIGINT, a 4 s ceiling on every stop (a delay before the exit fails it), `checkoutVersion`
+  through `runCommand` with a checkout of a known version; every field and helper documented.
+- **Kept, on purpose:** usage errors echo the operator's own argv masked by shape only (no config is loaded
+  yet), on stderr only; importing commander creates `process.stdin` (harmless); `npx`/`npm exec` keep
+  dash between npm and Node, and are not how it is run.
+- **For later:** the systemd settings in §4.1; §6's `npm ci` without `--omit=dev`, and `tmux` rather than
+  `nohup`.
+- **Re-audit (2026-10-14, V479–V485).** One critical, in the specs; each finding fixed and proved by a
+  test that fails without the fix (V483):
+  - **`cli.spec.ts` could empty the checkout's parent (critical; tests).** Its `afterEach` removed
+    `join(stateDir, "..")`; with the `beforeEach` interrupted before `mkdtemp` (Ctrl-C,
+    `--max-failures`, a timeout), `stateDir` was `""` and that is `..` — every worktree; `/` in Docker.
+    It fired in the reviewer's copy. Now the test's temporary root is its own variable, removed only
+    through `removeTempDir` (`src/common/__fixtures__/temp-dir.ts`: nothing for `""`; otherwise only an
+    absolute folder inside the temporary folder, by real paths, else a throw), then reset. Every
+    recursive `rm` in the repository's specs and fixtures was read: a bare variable is safe (`rm("")`
+    removes nothing, `undefined` throws); the ones built with `join` in a hook — `authenticate.spec.ts`,
+    `staging.spec.ts` — go through `removeTempDir` too. Reproduced, with an 8 s delay before `mkdtemp` and
+    a SIGINT during it: the old hook emptied the sandbox's parent, the new one left it.
+  - **npm 11 swallows more options (medium).** Without `--`, npm 11 takes `--once`, `--task=<id>` and
+    `--config=<file>` as well as `--dry-run`, so a single task or a dry run ran every task. The command
+    refuses whenever `npm_config_dry_run`, `_once`, `_task` or `_config` is set (not empty, not `false`)
+    **and** its option is missing from the arguments (`npmTookOption`), naming the variable, the `--`
+    form, and an `.npmrc` or the environment as the source when `--` was written. A global
+    `dry-run=true` with `-- start --dry-run` is therefore no refusal (low, closed by the same rule).
+  - **Children that could reach the real `start` (medium, latent).** Every child of `cli.spec.ts` runs
+    in the copy or the test's own temporary folder, every `start` has a temporary `--config`, the
+    signal tests' package links the copy's `orchestrator/` (its stand-in sites), tsx is given by its
+    file URL, and an in-process body gets a `start` that throws. Every child still running when a test
+    ends is SIGKILLed with its process group — each is a group's leader, so npm's script goes with npm (an
+    orphan whose copy was then removed was found spinning for minutes); `EPERM` from a group left with only
+    its unreaped leader is no error. Each signal try SIGKILLs its group and orchestrator in a `finally`
+    (an earlier mutation run had left six for nearly two hours).
+  - **A closed standard output crashed `--help` and `--dry-run` with a stack (low).** Both outputs get a
+    failure listener that drops it; the exit code is the command's.
+  - **A launcher that exits stops the orchestrator (low, documentation):** §4.1 and §6 say so.
+  - **Survivors:** the watch is stopped as it fires (a slowly draining run, one line), a reparent to a
+    subreaper is a parent's end too, and npm's refusal waits for its message.
+  - **Speed:** the file runs in parallel and the fake's parent watch polls every 100 ms
+    (`FAKE_PARENT_WATCH_MS`): `cli.spec.ts` alone 55 s, still 10 tries per route.
+  - **Kept:** under Docker as root, `start.spec.ts`'s "a stuck run … an earlier orchestrator's stale run"
+    fails (root ignores the read-only folder it relies on) — a test environment's limit, from 5H.
+
+- **For 5J:** sites — `bwu2`/`bwu3` (this checkout's `free@nginx` and `pro@nginx`), named to the user first.
+  Config: `cp orchestrator/config.example.json .orchestrator/config.json && chmod 600
+  .orchestrator/config.json`; tasks `bpng` (`pro@nginx`) and `bfng` (`free@nginx`), `cooldownMinutes: 1`;
+  Slack's `webhookUrl` the local sink, Datator's `url` the local Datator (D5, D6). Then, each under
+  `caffeinate -i`: `npm run orchestrator -- start --dry-run` (no warning); `npm run orchestrator -- start
+  --once` (both cells together, exit 0/1); `npm run orchestrator -- start` (two cycles, then Ctrl-C
+  mid-scenario: drained, `stopped`, exit 130, site as found); again with Ctrl-C twice (interrupted);
+  again with `kill -TERM <pid>` (the started line's `pid`); again with `kill -KILL <pid>`, then `npm run
+  orchestrator -- start` refusing on the orphan, and `kill -KILL -<pgid>` as it says. Stop by the
+  terminal (Ctrl-C, `tmux send-keys -t orchestrator C-c`), the orchestrator's own PID, or npm's for
+  SIGINT/SIGTERM; options always after `--`.
+
 ## 8. What later phases change, and keep
 
 | Here | Later | Kept |
@@ -1895,3 +2046,25 @@ Each finding fixed and proved by a test that fails without the fix (V459):
 | V461 | The gates pass; a full unit run: 3064 passed (+24), 8 skipped by their environment guards; one existing assertion changed by design (`start.spec.ts`: the loops' secrets now include the stand-in site's password, §7.21); no other existing spec changed | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
 | V462 | Re-audit fixes, each undone in a copy and failing a test — 26 mutants, 24 killed, of which 9 only after tests were added (each call site of `maskSiteUrl`/`safeSiteUrl`: site info, run facts ×2, summary, preflight, elevation banner, `run.finished`; the pre-mask; a user part holding `/`); 2 equivalent: a greedy password (the last-`@` lookahead admits only one `@`, so greedy and lazy match alike) and, from V459, the senders' extra secrets. Kept readable: `https://a.test:wrong/ logged in as admin@a.test`, `http://[2001:db8::1]/ user@host`, `s3://bucket:key/path owner@x`, `https://github.com:wp-media/x.git by dev@wp-media.me`, `https://a.test/2024:report written by admin@a.test`; masked whole: `https://admin:p@ss/word@host`, a loose password over 16 characters; the dry run unmoved by the shell's `E2E_PLUGIN_*`; a site password `BackWPup` leaves `backwpup pro@nginx` | ✅ 2026-10-14 | `mutate4.py`–`mutate6.py` in the scratchpad; `src/common/text.spec.ts`, `orchestrator/text.spec.ts`, `config/secrets.spec.ts`, `dry-run.spec.ts`, the call sites' specs (added cases) |
 | V463 | `redactSecrets` stays linear: 1 MB and 4 MB of nine adversarial shapes take the same ms/MB; the worst (`a://b:` repeated, each a scheme scanning its 256-character window) about 70–86 ms/MB against HEAD's 2–4 ms/MB; every other shape 4–8 ms/MB (HEAD 1–5). The gates pass; a full unit run: 3078 passed (+14 over V461), 8 skipped by their environment guards; the suite's text and reporting specs changed only by added cases | ✅ 2026-10-14 | `timing/time.mts` (HEAD's and the new `text.ts`, best of two); `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V464 | `runCommand` maps commander to `start`: every option as given (`--task a b --task=a` → `["a","b","a"]`), `start`'s code returned at once (no second drain); the dry run's wiring (`prepareStart` → `inspectState` → the report on stdout, 0 with warnings, `--once` ignored), a refusal masked on stderr, 1; help, `start --help`, `help start`, `--version` → 0 on stdout; no command, unknown option or command, an extra argument, a missing value → 1 on stderr with the hint, nothing run; a credential in a usage error masked; the outputs waited for, within the bound | ✅ 2026-10-14 | `orchestrator/command.spec.ts`, 35 tests |
+| V465 | The real `cli.ts` in a child: help and `start --help` whole through a pipe, exit 0; usage errors 1; an unknown `--task` refused before the lock (start and dry run), its credential masked, the state directory unchanged; a missing or malformed config 1; `--dry-run --once` on the committed example prints §7.21's report line for line (hosts aside), exit 0, the state directory's snapshot unchanged; beside a live lock it warns, exit 0, the lock untouched; `npm run orchestrator` passes 0 and 1 | ✅ 2026-10-14 | `orchestrator/cli.spec.ts`, 15 tests |
+| V466 | Real signals, the fake suite under the checkout's own script, each launcher in its own group (macOS, Node 24.21.0, npm 12.0.2): SIGINTs ×3 1 ms apart to the script's PID — directly and under npm; the group's SIGINT then one to the PID 1–31 ms later — both ways; SIGINT or SIGTERM to npm's own PID: **40/40 clean each** (the full unit run plus `--repeat-each 3`), and before `exec` 12/12/12/31 in a harness — every one drained once (one `stopping:` line, no interrupt, `was drained`, no SIGINT reached the runner), the run `stopped`, exit 130 (npm's too), the lock gone; the script's process is the orchestrator itself (directly) or npm's own child | ✅ 2026-10-14 | `cli.spec.ts`'s signal tests; `measure.mjs` in the scratchpad |
+| V467 | Ubuntu 24.04 (Docker; Node 24.21.0, npm 12.0.2, dash): `npm run` keeps `sh -c` between npm and Node (dash does not exec a lone command); then a group SIGINT reaches Node once (npm's relay goes to dash), a SIGINT to npm's PID never (still running after 4 s), a SIGTERM to npm's PID ends npm (143) and leaves Node running, unsignalled. With `exec`: group SIGINT → 2 SIGINTs, npm's SIGINT → 1, SIGTERM → 1, each exit 130. macOS's `sh` (bash) already execs: Node is npm's child | ✅ 2026-10-14, a signal-logging probe ×2 per route | `dash/run.sh`, `dash/probe.mjs` in the scratchpad |
+| V468 | commander 15.0.0 as used: ESM; `exitOverride`/`configureOutput` set before `command()` are inherited by `start`; a variadic `--task` collects repeats; `CommanderError.exitCode` 0 for help/version, 1 for usage errors; `--task --once` reads `--once` as an id. `npm ci` in a clean copy installs it and `playwright-bdd`'s nested 13.1.0; `npm audit --omit=dev`: 0 vulnerabilities (the full audit's critical `handlebars` predates this change) | ✅ 2026-10-14 | A probe of the installed package; `npm ci --ignore-scripts` in the scratchpad |
+| V469 | **Corrected by the audit (V471, V476):** the signal tests ran a copy of `cli.ts`'s line, not `cli.ts`, so `cli.ts`'s own signal behaviour was untested — the reviewer's `process.once("SIGINT", () => process.exit(0))`, `process.exitCode` for `process.exit`, extra listeners and a delay all survived, as did `checkoutVersion` ignoring `deps.checkout`. As first reported: mutations of `cli.ts`, `command.ts` and the script, each in a copy — 23/23 killed: no `process.exit`; the `tsx` CLI (also with the script's equality test removed: the one-process assertion fails); no `exec`; `--once`/`--config` dropped; `--task` deduped; a dry run 1 on warnings, to stderr, not inspecting, without the checkout, running `start`; errors or commander's messages unmasked; outputs not waited; `start` drained twice; every commander exit 1; no hint; argv read `from: "node"`; version `unknown`; `start`'s code ignored; an unexpected failure 0 | ✅ 2026-10-14 | `mutate.py` in the scratchpad |
+| V470 | The gates pass; a full unit run: 3133 passed (+55 over V463), 8 skipped by their environment guards; `import-boundary.spec.ts` probes `command.ts` (commander included) with `cli.ts` its one exclusion and `suite-imports.json` unchanged; no existing spec changed | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V471 | Reproduced before the fixes (the reviewers' harnesses): `npm run orchestrator start --dry-run` ran a real start (`npm_config_dry_run=true`, argv `["start"]`); a SIGHUP to npm's PID left the orchestrator running, lock held (macOS 2/2, Linux 3/3); a late SIGINT killed the process once in a full run; `--task --dry-run` and `--config --dry-run` started for real; 2 MB of dry-run output into a reader 6 s late cut at 5 s; the 5 survivors of V469 | ✅ 2026-10-14 | `sec5i2/`, `mutate5i2.py` in the scratchpad |
+| V472 | `command.spec.ts`, 48 tests (+13): npm's dry run refused (nothing run, held or read; `false`, empty and absent run), `INIT_CWD` for a relative `--config`, `configBase`, `optionValue`, `taskIds` (order across occurrences), usage errors for `--task`/`--config` values starting with `-`, the signals held before `start` and never by the dry run, help or a usage error, the help's exit codes, the version of a given checkout | ✅ 2026-10-14 | `orchestrator/command.spec.ts` |
+| V473 | `cli.spec.ts`, 31 tests (+11), over the real script, `cli.ts` and `command.ts` (`swap-start.mjs` + `fake-start.ts`): `cli.ts` pinned to its one statement; `npm run orchestrator start --dry-run` refused, nothing written, and `-- start --dry-run` the dry run; a relative `--config` from npm's folder; 2 MB of dry-run output whole to a reader 6 s late; per route, 10 tries — SIGINTs ×3 to the orchestrator's PID and the group-then-PID pattern (directly and under npm), SIGHUP to the group (both), SIGINTs ×3 and SIGTERM to npm's PID, SIGHUP to npm's PID (npm ends, the orchestrator drains on its parent's end), a late SIGINT after `start` returned (exit 130), a dry run's SIGINT (ends by it at once) — each stop drained once, exit 130, lock gone, under 4 s | ✅ 2026-10-14 | `orchestrator/cli.spec.ts` |
+| V474 | `start.spec.ts`, 47 tests (+2): a parent PID that changes drains as SIGHUP (said once, one `stopping:`, 130, the watch stopped), an unchanged one never; no watch left once `start` returns | ✅ 2026-10-14 | `orchestrator/start.spec.ts` |
+| V475 | The signal tests, 11 routes × 10 tries: macOS 30/30 each (a full unit run plus `--repeat-each 2`); Ubuntu 24.04 (Node 24.21.0, npm 12.0.2, dash) 10/10 each, with `command.spec.ts` and the rest of `cli.spec.ts` — 79/79 | ✅ 2026-10-14 | `npm run test:unit`; the reviewer's `sec5i2-ubuntu` image (`dk.sh`) |
+| V476 | Each fix undone in a copy, each failing a test — 13/13: npm's dry run not refused; `cli.ts` exiting 0 on SIGINT, `process.exitCode`, exit 0 always, extra listeners, a 6 s delay (m33–m36); signals not held; no parent watch, and one that never fires; `-` values accepted; the 5 s output bound; `INIT_CWD` ignored; the version from `CHECKOUT` (m26). Each behavioural one also by a child-process test alone: npm's dry run, the signal routes, the dry run's SIGINT, the 4 s ceiling, the late signal, npm's SIGHUP | ✅ 2026-10-14 | `mutate2.py`, `mutate3.py` in the scratchpad |
+| V477 | An incident while building the swap (before the `fake@cell` guard): a preload ordered before tsx did not swap, and one real `pro@nginx` run started on `bwu3` from the worktree — auth setup (that cell's saved session ended, a new login) and an artifact build (`develop`, cd26255); the drain skipped all 70 scenarios, nothing installed; its report in `reports/backwpup/pro@nginx/2026-10-14T17-48-03-107Z-bpng-1` | ⚠️ 2026-10-14 | That run's `run.log` |
+| V478 | The gates pass; a full unit run: 3159 passed (+26 over V470), 8 skipped by their environment guards; `fake-cli.ts` removed; no spec of an earlier phase changed but `start.spec.ts`'s two added tests; `suite-imports.json` unchanged | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V479 | Reproduced before the fixes: `cli.spec.ts`'s `afterEach` with `stateDir` `""` removed the copy's parent (the reviewer's copy, and here a sandbox: an 8 s delay before `mkdtemp`, a SIGINT during it — the sentinel and the copy gone); npm 11.21.0 hands `npm run o start --once`, `--task=a`, `--config=c.json` and `--dry-run` to the script as `["start"]` plus `npm_config_once`, `_task`, `_config`, `_dry_run` (npm 12.0.2: `--dry-run` only, the rest refused); `--help`/`--dry-run` into a closed pipe crashed with a stack | ✅ 2026-10-14 | `rmrepro.sh`, `envp/` in the scratchpad; the reviewer's `re5i2-tools/` |
+| V480 | `removeTempDir` and `isTempDir`: a folder inside the temporary folder removed by either spelling; `""` removes nothing; `..`, `.`, a relative path (even with the working directory a temporary folder), the temporary folder itself, a parent of it, the working directory, `/` and a link leading outside all refused, nothing removed. With it, the interrupted `beforeEach` leaves the parent, its sentinel and the copy | ✅ 2026-10-14 | `src/common/__fixtures__/temp-dir.spec.ts`, 5 tests; `rmrepro.sh` |
+| V481 | `command.spec.ts`, 55 tests (+7): each of the four variables refused (exit 1, nothing run, held or prepared, the message exact), none when its option is there or the variable is empty or `false`, `npmTookOption`'s order, the refusal drained, a failure listener on both outputs. `cli.spec.ts`, 37 (+6): a help and a dry run into a closed pipe (exit 0, no stack), what npm 11 hands the script for each variable refused with nothing written | ✅ 2026-10-14 | `orchestrator/command.spec.ts`, `orchestrator/cli.spec.ts` |
+| V482 | `start.spec.ts`, 49 (+2): a parent lost while a run drains slowly is said once; a reparent to a subreaper (100 → 4321) drains as SIGHUP | ✅ 2026-10-14 | `orchestrator/start.spec.ts` |
+| V483 | Each fix undone in a copy without real sites files, each failing a test — 8/8: npm 11's three variables not refused (by the child test), a refusal although the option is there, output failures not dropped (also by the closed-pipe child test), the refusal not drained, the watch not stopped as it fires, only PID 1 as a lost parent, the temporary-folder guard without its absolute check (after a test was added) or its real path; and the old `afterEach`, by the repro | ✅ 2026-10-14 | `mutate4.py` in the scratchpad |
+| V484 | The specs in a copy without real sites files: `cli.spec.ts`, `command.spec.ts`, `start.spec.ts`, `temp-dir.spec.ts` 145/145 on macOS; on Ubuntu 24.04 (Docker, root) 144/145, the one a 5H test that relies on a read-only folder root ignores | ✅ 2026-10-14 | `x3/`; the reviewer's `sec5i2-ubuntu` image |
+| V485 | The gates pass; a full unit run, twice: 3179 passed (+20 over V478), 8 skipped by their environment guards, 102 s and 115 s wall; no child of the specs left running after either (nor after three runs stopped by `--max-failures=1`) | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
