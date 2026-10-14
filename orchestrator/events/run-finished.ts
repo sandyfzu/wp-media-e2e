@@ -6,7 +6,7 @@ import {
   type ScenarioResult,
   type TestStatus,
 } from "../runs/results";
-import { safeBlock, safeLine } from "../text";
+import { safeBlock, safeLine, safeSiteUrl } from "../text";
 
 /**
  * `run.finished`, version 1: the one event this orchestrator publishes, once per run, whatever its
@@ -182,7 +182,7 @@ export function buildRunFinished(input: RunFinishedInput): RunFinishedEvent {
       name: fact(plugin?.name),
     },
     sites: (facts?.sites ?? []).map((site) => ({
-      baseURL: safeLine(site.baseURL, MAX_FACT, secrets),
+      baseURL: safeSiteUrl(site.baseURL, MAX_FACT, secrets),
       wordpress: fact(site.wordpress),
       php: fact(site.php),
     })),

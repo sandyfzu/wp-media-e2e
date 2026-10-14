@@ -72,6 +72,11 @@ export interface NotificationOptions {
   readonly timeoutMs?: number;
   /** The `fetch` the senders use; the global one by default. */
   readonly fetch?: typeof globalThis.fetch;
+  /**
+   * Secret values to mask besides the config's own (`secretValues(config)`, always masked): the
+   * sites' credentials (`siteSecretValues`).
+   */
+  readonly secrets?: readonly string[];
 }
 
 /**
@@ -81,7 +86,7 @@ export interface NotificationOptions {
  * @param bus - the event bus.
  * @param config - the checked config: the senders, `instance`, `reports.sshHost` and the secrets.
  * @param logger - where each run's line goes, under its task's id.
- * @param options - the time limit and `fetch`; the defaults in production.
+ * @param options - the time limit, `fetch` and the secrets beyond the config's; the defaults in production.
  * @returns the senders subscribed, and the Datator record of a run ({@link Notifications}).
  *
  * @example
@@ -97,7 +102,9 @@ export function subscribeNotifications(
   logger: Pick<Logger, "line">,
   options: NotificationOptions = {},
 ): Notifications {
-  const secrets = secretValues(config);
+  const secrets = [
+    ...new Set([...secretValues(config), ...(options.secrets ?? [])]),
+  ];
   const { slack, datator } = config.notifications ?? {};
   // One record per event object: what `datator.json` keeps is what was posted.
   const payloads = new WeakMap<RunFinishedEvent, DatatorPayload | undefined>();

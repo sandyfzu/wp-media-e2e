@@ -93,7 +93,7 @@ export interface LoggerOptions {
   readonly file: LogFile;
   /** The terminal; standard output by default ({@link stdoutTerminal}). */
   readonly terminal?: Terminal;
-  /** Secret values to mask wherever a line holds them (`secretValues(config)`). */
+  /** Secret values to mask wherever a line holds them (`allSecretValues(config, tasks)`). */
   readonly secrets?: readonly string[];
   /** The clock a line's time is read from; local time is shown. */
   readonly now?: () => Date;

@@ -1,6 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
 
 import {
+  maskSiteUrl,
   MIN_MASKED_LENGTH,
   maskValues,
   plain,
@@ -160,6 +161,27 @@ export function safeLine(
   secrets: readonly string[] = [],
 ): string {
   return cut(mask(oneLine(mask(text, secrets)), secrets), max);
+}
+
+/**
+ * A site's address as one safe line: masked by value as written ({@link safeLine}) — before a URL
+ * parser could encode or case-fold a secret in it — then shown as the suite shows one
+ * (`maskSiteUrl`: user and password `***@`, no query or fragment, anything but an `http(s)` URL a
+ * stand-in), then masked again.
+ *
+ * @param baseURL - the site's `baseURL`.
+ * @param max - the most code points kept.
+ * @param secrets - secret values to mask wherever they appear.
+ * @returns the address to show.
+ */
+export function safeSiteUrl(
+  baseURL: string,
+  max: number,
+  secrets: readonly string[] = [],
+): string {
+  // Masked whole before it is cut: a cut address would no longer parse.
+  const masked = safeLine(baseURL, Number.MAX_SAFE_INTEGER, secrets);
+  return safeLine(maskSiteUrl(masked), max, secrets);
 }
 
 /**

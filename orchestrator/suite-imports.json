@@ -1,4 +1,5 @@
 [
+  "src/common/artifacts/request.ts",
   "src/common/config/run-env.ts",
   "src/common/config/run-id.ts",
   "src/common/config/sites.ts",

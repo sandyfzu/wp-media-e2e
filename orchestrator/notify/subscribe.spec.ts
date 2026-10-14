@@ -380,6 +380,20 @@ test.describe("subscribeNotifications", () => {
     });
   });
 
+  test("an answer quoting a secret given beside the config's — a site's password — never shows it", async () => {
+    const sitePassword = "site-Password-Of-No-Shape-4567";
+    const echo: Answer = reply(403, `bad login ${sitePassword}`);
+    await withSink(route(echo, echo), async (sink) => {
+      const h = harness(configFor(sink.url, { slack: true, datator: true }), {
+        secrets: [sitePassword],
+      });
+      await deliver(h, finishedEvent());
+      expect(h.lines).toEqual([
+        "bpng  slack ✗ 403 bad login *** · datator ✗ 403 bad login ***",
+      ]);
+    });
+  });
+
   test("a sender that throws is told as its own failure, masked; the other still reports", async () => {
     await withSink(route(reply(200, "ok"), reply(201)), async (sink) => {
       const h = harness(configFor(sink.url, { slack: true, datator: true }));

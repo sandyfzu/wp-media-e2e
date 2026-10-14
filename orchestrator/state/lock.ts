@@ -9,6 +9,7 @@ import {
   describeFolderProblem,
   ownFolderRemedy,
   STATE_FOLDER,
+  type OwnFolderCheck,
 } from "../folders";
 import { readLeaderStart, type LeaderStartReader } from "../runs/leader";
 import type { KillFn } from "../runs/process-group";
@@ -252,19 +253,8 @@ async function takerOf(
     );
   const check = await checkOwnFolder(stateDir, STATE_FOLDER);
   if (check.kind !== "ok")
-    throw new StateError(
-      `The state directory ${stateDir} ${describeFolderProblem(check)}: it must be this user's, and no one else may write in it${check.kind === "notFolder" ? "" : ` (${ownFolderRemedy(stateDir, check, STATE_FOLDER)})`}.`,
-    );
-  const [space, start] = await Promise.all([
-    (deps.space ?? readPidSpace)(),
-    readStart(pid),
-  ]);
-  const me: LockOwner = {
-    pid,
-    token,
-    start: start.kind === "start" ? start.value : null,
-    space,
-  };
+    throw new StateError(stateFolderProblem(stateDir, check));
+  const me = await ownerOf(pid, token, readStart, deps);
   if (!isWritableOwner(me))
     throw new RangeError(
       "This process's start or PID space cannot be written.",
@@ -278,6 +268,101 @@ async function takerOf(
     link: deps.link ?? link,
     afterRecheck: deps.afterRecheck,
   };
+}
+
+/**
+ * This process as a lock's owner: its PID, the token, its start and its PID space.
+ *
+ * @param pid - its PID.
+ * @param token - the token.
+ * @param readStart - the start reader.
+ * @param deps - the PID space's reader.
+ * @returns the owner; its start `null` when it cannot be read.
+ */
+async function ownerOf(
+  pid: number,
+  token: string,
+  readStart: LeaderStartReader,
+  deps: Pick<LockDeps, "space">,
+): Promise<LockOwner> {
+  const [space, start] = await Promise.all([
+    (deps.space ?? readPidSpace)(),
+    readStart(pid),
+  ]);
+  return {
+    pid,
+    token,
+    start: start.kind === "start" ? start.value : null,
+    space,
+  };
+}
+
+/**
+ * Why a start refuses a state directory {@link checkOwnFolder} did not pass, and its repair — the
+ * sentence {@link acquireLock} throws, and `--dry-run` warns with.
+ *
+ * @param stateDir - the state directory.
+ * @param check - what was wrong with it.
+ * @returns the sentence.
+ */
+export function stateFolderProblem(
+  stateDir: string,
+  check: Exclude<OwnFolderCheck, { kind: "ok" }>,
+): string {
+  return `The state directory ${stateDir} ${describeFolderProblem(check)}: it must be this user's, and no one else may write in it${check.kind === "notFolder" ? "" : ` (${ownFolderRemedy(stateDir, check, STATE_FOLDER)})`}.`;
+}
+
+/** The lock as a start would find it, judged without taking it. */
+export type LockInspection =
+  /** No lock: a start takes it. */
+  | { readonly kind: "free" }
+  /** A lock whose owner has ended: a start takes it over. */
+  | { readonly kind: "dead"; readonly owner: LockOwner }
+  /** A lock a start refuses — a live owner's, another PID space's, unreadable: the refusal. */
+  | { readonly kind: "refused"; readonly message: string };
+
+/**
+ * Judges the state directory's lock as {@link acquireLock} would, writing nothing: no lock, no claim,
+ * no take-over, no sweep. For `--dry-run`, which runs beside an orchestrator that may hold it.
+ *
+ * @param stateDir - the state directory.
+ * @param deps - this process's PID, `kill`, start reader and PID space; the real ones by default.
+ * @returns what a start would find.
+ * @throws what `kill` throws besides `ESRCH` and `EPERM`, or the file system resolving the folder.
+ */
+export async function inspectLock(
+  stateDir: string,
+  deps: Pick<LockDeps, "pid" | "kill" | "space" | "readStart"> = {},
+): Promise<LockInspection> {
+  const lockPath = join(stateDir, LOCK_FILE);
+  let found: LockOwner | undefined;
+  try {
+    found = await readOwnerFile(lockPath, LOCK_WHAT, lockRemedy(lockPath));
+  } catch (error) {
+    if (error instanceof StateError)
+      return { kind: "refused", message: error.message };
+    throw error;
+  }
+  if (found === undefined) return { kind: "free" };
+  const readStart = deps.readStart ?? readLeaderStart;
+  const me = await ownerOf(
+    deps.pid ?? process.pid,
+    newToken(),
+    readStart,
+    deps,
+  );
+  const verdict = await judgeOwner(found, {
+    me,
+    realLock: join(await realpath(stateDir), LOCK_FILE),
+    kill: deps.kill ?? ((target, signal) => process.kill(target, signal)),
+    readStart,
+  });
+  return verdict.kind === "dead"
+    ? { kind: "dead", owner: found }
+    : {
+        kind: "refused",
+        message: lockRefusal(lockPath, found, me, verdict.kind).message,
+      };
 }
 
 /**

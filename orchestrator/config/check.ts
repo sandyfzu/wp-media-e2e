@@ -158,11 +158,7 @@ function crowdedServers(
   tasks: readonly CheckedTask[],
   threshold: number,
 ): string[] {
-  const byServer = new Map<string, CheckedTask[]>();
-  for (const checked of tasks)
-    for (const server of checked.servers)
-      byServer.set(server, [...(byServer.get(server) ?? []), checked]);
-  return [...byServer]
+  return [...tasksByServer(tasks)]
     .filter(([, reaching]) => reaching.length >= threshold)
     .map(
       ([server, reaching]) =>
@@ -171,4 +167,20 @@ function crowdedServers(
           .map(({ task }) => `${task.id} (${task.product} ${task.cell})`)
           .join(", "),
     );
+}
+
+/**
+ * The tasks each server carries, in the order servers first appear (see {@link serverOf}).
+ *
+ * @param tasks - checked tasks.
+ * @returns each server and its tasks, in their order.
+ */
+export function tasksByServer<T extends Pick<CheckedTask, "servers">>(
+  tasks: readonly T[],
+): Map<string, T[]> {
+  const byServer = new Map<string, T[]>();
+  for (const checked of tasks)
+    for (const server of checked.servers)
+      byServer.set(server, [...(byServer.get(server) ?? []), checked]);
+  return byServer;
 }

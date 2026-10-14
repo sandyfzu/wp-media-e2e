@@ -1042,7 +1042,8 @@ test.describe("start — what it hands on and leaves", () => {
         },
       },
       r.proc.env,
-      [SECRET],
+      // The config's secrets, then its sites' credentials (the stand-in sites' password).
+      [SECRET, "pw"],
     ]);
     await expectCleanEnd(r.proc);
   });
@@ -1060,6 +1061,53 @@ test.describe("start — what it hands on and leaves", () => {
     expect(log).toContain("chmod 600");
     expect(log).not.toContain(SECRET);
     expect(r.proc.stdout.text).not.toContain(SECRET);
+    await expectCleanEnd(r.proc);
+  });
+
+  test("a site's credentials are masked like the config's: in the log, the terminal, a run's lines and standard error", async () => {
+    const sitePassword = "site-Password-Of-No-Shape-4567";
+    const list = {
+      ...PRODUCT_LIST,
+      PRODUCTS: [
+        {
+          name: "backwpup",
+          sites: {
+            "pro@nginx": {
+              edition: "pro",
+              sites: [
+                { ...sshSite("https://a.qa.test"), password: sitePassword },
+              ],
+            },
+          },
+        },
+      ],
+    } as unknown as ProductList;
+    // The state directory's path holds it: the config's mode warning and each run's lines quote it.
+    stateDir = join(checkout, sitePassword);
+    await mkdir(stateDir, { mode: 0o700 });
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    await chmod(config, 0o644);
+    const r = rig((id) => runner(id, 1, "passed"), {
+      loadProductList: () => Promise.resolve(list),
+    });
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    const log = await logText();
+    expect(log).toContain("chmod 600");
+    expect(log).toContain("bpng-1 started");
+    for (const text of [log, r.proc.stdout.text])
+      expect(text).not.toContain(sitePassword);
+    // Refused on standard error, before the log: masked there too.
+    const held = await acquireLock(stateDir);
+    try {
+      const refused = rig(undefined, {
+        loadProductList: () => Promise.resolve(list),
+      });
+      expect(await start({ config }, refused.deps)).toBe(1);
+      expect(refused.proc.stderrText).toContain("orchestrator.lock");
+      expect(refused.proc.stderrText).not.toContain(sitePassword);
+    } finally {
+      await held.release();
+    }
     await expectCleanEnd(r.proc);
   });
 

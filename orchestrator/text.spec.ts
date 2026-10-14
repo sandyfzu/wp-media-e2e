@@ -9,6 +9,7 @@ import {
   oneLine,
   safeBlock,
   safeLine,
+  safeSiteUrl,
   secretForms,
   shellWord,
   textOf,
@@ -333,5 +334,43 @@ test.describe("the orchestrator's own source", () => {
       const source = await readFile(join(import.meta.dirname, name), "utf8");
       expect(invisible.test(source), name).toBe(false);
     }
+  });
+});
+
+test.describe("safeSiteUrl", () => {
+  test("shows an http(s) URL as the suite does: credentials ***@, no query or fragment", () => {
+    expect(safeSiteUrl("https://u:p@a.qa.test:8443/wp/?k=v#f", 200)).toBe(
+      "https://***@a.qa.test:8443/wp/",
+    );
+    expect(safeSiteUrl("http://localhost:8100", 200)).toBe(
+      "http://localhost:8100",
+    );
+  });
+
+  test("anything but an http(s) URL is the stand-in, never its text", () => {
+    for (const baseURL of [
+      "not a url",
+      "foo:admin:s3cr3tpw@host",
+      "https://admin:hunter 22x@bad host/",
+      "ftp://files.qa.test/",
+    ])
+      expect(safeSiteUrl(baseURL, 200), baseURL).toBe(
+        "(not a valid http(s) URL)",
+      );
+  });
+
+  test("masks by value before parsing, so encoding cannot hide a secret; cuts last", () => {
+    expect(
+      safeSiteUrl("https://a.qa.test/My Pass@word12/", 200, ["My Pass@word12"]),
+    ).toBe("https://a.qa.test/***/");
+    // A secret running from the path into the query: dropped half-way, only masked whole first.
+    expect(
+      safeSiteUrl("https://a.qa.test/Secret-Path-0001?k=v", 200, [
+        "Secret-Path-0001?k=v",
+      ]),
+    ).toBe("https://a.qa.test/***");
+    const long = safeSiteUrl(`https://a.qa.test/${"p".repeat(500)}`, 40);
+    expect(Array.from(long)).toHaveLength(40);
+    expect(long.startsWith("https://a.qa.test/ppp")).toBe(true);
   });
 });

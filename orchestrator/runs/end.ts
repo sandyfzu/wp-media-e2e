@@ -112,7 +112,7 @@ export interface RunEndInput {
   >;
   readonly task: RunFinishedInput["task"];
   readonly launch: LaunchResult;
-  /** The secret values the orchestrator holds (`secretValues(config)`). */
+  /** The secret values the orchestrator holds (`allSecretValues(config, tasks)`). */
   readonly secrets: readonly string[];
   /** When the run ended. */
   readonly endedAt: Date;

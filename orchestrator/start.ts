@@ -8,7 +8,7 @@ import {
   type LoadedConfig,
 } from "./config/load";
 import { loadProductList, type ProductList } from "./config/product-list";
-import { secretValues } from "./config/secrets";
+import { allSecretValues } from "./config/secrets";
 import { createEventBus, DEFAULT_DELIVERY_TIMEOUT_MS } from "./events/bus";
 import type { RunFinishedEvent } from "./events/run-finished";
 import { openLogger, type Logger } from "./log";
@@ -285,7 +285,7 @@ class Orchestrator {
   private giveUpTimer: unknown;
   /** The log, once open: until then, lines go to standard error. */
   private logger: Logger | undefined;
-  /** Every secret of the config, once loaded: masked wherever a line goes. */
+  /** Every secret of the config and of its tasks' sites, once loaded: masked wherever a line goes. */
   private secrets: readonly string[] = [];
   /** Every loop started: what a stop reaches. */
   private loops: readonly TaskLoop[] = [];
@@ -372,7 +372,7 @@ class Orchestrator {
       return 1;
     }
     const { loaded } = prepared;
-    this.secrets = secretValues(loaded.config);
+    this.secrets = allSecretValues(loaded.config, loaded.tasks);
     let lock: HeldLock;
     try {
       lock = await acquireLock(loaded.stateDir, this.deps.lock);
@@ -475,12 +475,10 @@ class Orchestrator {
       },
       secrets: this.secrets,
     });
-    const notifications = subscribeNotifications(
-      bus,
-      loaded.config,
-      logger,
-      this.deps.notifications,
-    );
+    const notifications = subscribeNotifications(bus, loaded.config, logger, {
+      ...this.deps.notifications,
+      secrets: this.secrets,
+    });
     const checkout = this.deps.checkout ?? CHECKOUT;
     const once = this.options.once === true;
     const ids = selected.map(({ task }) => task.id);

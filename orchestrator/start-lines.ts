@@ -41,6 +41,16 @@ export function selectTasks<
 }
 
 /**
+ * The tasks a line names: `2 tasks (bpng, bfap)`.
+ *
+ * @param ids - their ids.
+ * @returns the text.
+ */
+export function tasksText(ids: readonly string[]): string {
+  return `${String(ids.length)} task${ids.length === 1 ? "" : "s"} (${ids.join(", ")})`;
+}
+
+/**
  * The line the orchestrator starts its loops with: `started · 2 tasks (bpng, bpap) · .orchestrator/ ·
  * pid 4242`, `once` after the tasks with `--once`.
  *
@@ -56,10 +66,9 @@ export function startedLine(
   stateDir: string,
   pid: number,
 ): string {
-  const tasks = `${String(ids.length)} task${ids.length === 1 ? "" : "s"} (${ids.join(", ")})`;
   return [
     "started",
-    tasks,
+    tasksText(ids),
     ...(once ? ["once"] : []),
     `${stateDir}/`,
     `pid ${String(pid)}`,

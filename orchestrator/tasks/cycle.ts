@@ -115,7 +115,7 @@ export interface CycleDeps {
   readonly checkout: string;
   /** The config's runs settings and secrets, for the run's environment and pruning. */
   readonly config: Pick<OrchestratorConfig, "runs" | "secrets">;
-  /** Every secret value the orchestrator holds (`secretValues(config)`), masked in every line. */
+  /** Every secret value the orchestrator holds (`allSecretValues(config, tasks)`), masked in every line. */
   readonly secrets: readonly string[];
   /** The orchestrator's environment: only what `runEnvironment` inherits is read. */
   readonly inherited: Readonly<Record<string, string | undefined>>;

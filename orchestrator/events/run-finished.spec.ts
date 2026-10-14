@@ -204,6 +204,25 @@ test.describe("buildRunFinished", () => {
     ).toBe(0);
   });
 
+  test("names each site by safeSiteUrl: masked by value first, credentials ***@, no query, never a baseURL that is no URL", () => {
+    const secret = "Secret-Path-0001?k=v";
+    const event = buildRunFinished({
+      ...INPUT,
+      secrets: [secret],
+      facts: {
+        sites: [
+          { baseURL: `https://u:pw-0001@a.test/${secret}` },
+          { baseURL: "https://u:pa ss-word9@bad host/" },
+        ],
+        setupFailures: [],
+      },
+    });
+    expect(event.sites.map(({ baseURL }) => baseURL)).toEqual([
+      "https://***@a.test/***",
+      "(not a valid http(s) URL)",
+    ]);
+  });
+
   test("makes every text from the run's files safe: one-line names and facts, an error a block, secrets masked", () => {
     const secret = "Tr0ub4dor&3xyz";
     const results = readRunResults(
