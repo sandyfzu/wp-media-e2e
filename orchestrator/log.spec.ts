@@ -14,17 +14,27 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 
 import {
   clockTime,
   createLogger,
+  DEFAULT_WAIT_MS,
+  formatFileLine,
   formatLine,
+  localIsoTime,
+  MAX_SCOPE_LENGTH,
   openLogFile,
   openLogger,
+  pathKind,
   refuseLogFile,
+  systemCode,
+  TERMINAL_BACKLOG_BYTES,
   type LogFile,
   type Terminal,
 } from "./log";
@@ -32,9 +42,30 @@ import {
 /** A fixed local time, so a line's clock reads the same in every time zone: 10:15:30. */
 const AT = new Date(2026, 9, 13, 10, 15, 30);
 
+/** {@link AT} as a file line starts with; {@link localIsoTime} is tested on its own, by zone. */
+const F = localIsoTime(AT);
+
 /** A system error with a code, as Node raises one. */
 function systemError(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(`${code}: failed`), { code });
+}
+
+/**
+ * Runs `body` in the time zone `zone`, then restores the process's own. Node reads `TZ` again when
+ * it is assigned, so local time follows at once.
+ *
+ * @param zone - an IANA zone.
+ * @param body - the test's code.
+ */
+function inZone(zone: string, body: () => void): void {
+  const previous = process.env.TZ;
+  process.env.TZ = zone;
+  try {
+    body();
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
 }
 
 /** A file stand-in: what was appended, in order; each append may be held or made to fail. */
@@ -108,12 +139,68 @@ test.describe("clockTime", () => {
   test("shows midnight as 00:00:00, not 24:00:00", () => {
     expect(clockTime(new Date(2026, 9, 14, 0, 0, 0))).toBe("00:00:00");
   });
+
+  test("shows local time, not UTC", () => {
+    inZone("America/New_York", () => {
+      expect(clockTime(new Date(Date.UTC(2026, 9, 13, 14, 5, 3)))).toBe(
+        "10:05:03",
+      );
+    });
+  });
 });
 
-test.describe("formatLine", () => {
-  test("reads time, scope, two spaces, then the text", () => {
+test.describe("localIsoTime", () => {
+  test("shows the local date, time and offset from UTC", () => {
+    inZone("Europe/Madrid", () => {
+      expect(localIsoTime(new Date(Date.UTC(2026, 9, 13, 8, 5, 3)))).toBe(
+        "2026-10-13T10:05:03+02:00",
+      );
+    });
+  });
+
+  test("shows UTC as +00:00, and the local date when it differs from UTC's", () => {
+    inZone("UTC", () => {
+      expect(localIsoTime(new Date(Date.UTC(2026, 0, 2, 3, 4, 5)))).toBe(
+        "2026-01-02T03:04:05+00:00",
+      );
+    });
+    inZone("America/Los_Angeles", () => {
+      expect(localIsoTime(new Date(Date.UTC(2026, 0, 1, 3, 0, 0)))).toBe(
+        "2025-12-31T19:00:00-08:00",
+      );
+    });
+  });
+
+  test("shows a half-hour offset on either side of UTC", () => {
+    inZone("Asia/Kolkata", () => {
+      expect(localIsoTime(new Date(Date.UTC(2026, 9, 13, 0, 0, 0)))).toBe(
+        "2026-10-13T05:30:00+05:30",
+      );
+    });
+    inZone("America/St_Johns", () => {
+      expect(localIsoTime(new Date(Date.UTC(2026, 9, 13, 12, 0, 0)))).toBe(
+        "2026-10-13T09:30:00-02:30",
+      );
+    });
+  });
+
+  test("tells apart the hour a fall-back to winter time repeats", () => {
+    inZone("America/New_York", () => {
+      const first = localIsoTime(new Date(Date.UTC(2026, 10, 1, 5, 30, 0)));
+      const second = localIsoTime(new Date(Date.UTC(2026, 10, 1, 6, 30, 0)));
+      expect(first).toBe("2026-11-01T01:30:00-04:00");
+      expect(second).toBe("2026-11-01T01:30:00-05:00");
+    });
+  });
+});
+
+test.describe("formatLine and formatFileLine", () => {
+  test("read time, scope, two spaces, then the text", () => {
     expect(formatLine(AT, "bpng", "bpng-12 started")).toBe(
       "10:15:30 bpng  bpng-12 started",
+    );
+    expect(formatFileLine(AT, "bpng", "bpng-12 started")).toBe(
+      `${F} bpng  bpng-12 started`,
     );
   });
 
@@ -156,7 +243,7 @@ test.describe("formatLine", () => {
   });
 
   test("flattens a text of several lines into one line", () => {
-    expect(formatLine(AT, "bpng", "one\ntwo\r\n  three four\tfive")).toBe(
+    expect(formatLine(AT, "bpng", "one\ntwo\r\n  three four\tfive")).toBe(
       "10:15:30 bpng  one two three four five",
     );
   });
@@ -166,17 +253,27 @@ test.describe("formatLine", () => {
     expect(Array.from(text)).toHaveLength(2000);
     expect(text.endsWith("…")).toBe(true);
   });
+
+  test("cuts a scope past 40 code points with an ellipsis", () => {
+    expect(MAX_SCOPE_LENGTH).toBe(40);
+    expect(formatLine(AT, "s".repeat(40), "t")).toBe(
+      `10:15:30 ${"s".repeat(40)}  t`,
+    );
+    expect(formatLine(AT, "s".repeat(41), "t")).toBe(
+      `10:15:30 ${"s".repeat(39)}…  t`,
+    );
+  });
 });
 
 test.describe("createLogger", () => {
-  test("writes the same line to the terminal and the file", async () => {
+  test("writes the line to the terminal with its time and to the file with its date, time and offset", async () => {
     const { file, lines } = fakeFile();
     const { terminal, written } = fakeTerminal();
     const logger = createLogger({ file, terminal, now: () => AT });
     logger.line("orchestrator", "started");
     await logger.flush();
     expect(written).toEqual(["10:15:30 orchestrator  started\n"]);
-    expect(lines).toEqual(written);
+    expect(lines).toEqual([`${F} orchestrator  started\n`]);
   });
 
   test("masks with the given secrets on both outputs", async () => {
@@ -191,7 +288,7 @@ test.describe("createLogger", () => {
     logger.line("bpng", "slack ✗ webhook-token-123");
     await logger.flush();
     expect(written).toEqual(["10:15:30 bpng  slack ✗ ***\n"]);
-    expect(lines).toEqual(written);
+    expect(lines).toEqual([`${F} bpng  slack ✗ ***\n`]);
   });
 
   test("writes each line with exactly one line end, even for a text of several lines", async () => {
@@ -203,24 +300,29 @@ test.describe("createLogger", () => {
     });
     logger.line("bpng", "a\nb\n");
     await logger.flush();
-    expect(lines).toEqual(["10:15:30 bpng  a b\n"]);
+    expect(lines).toEqual([`${F} bpng  a b\n`]);
   });
 
-  test("reads the clock for each line", async () => {
+  test("reads the clock for each line, the file dating each across midnight", async () => {
     const { file, lines } = fakeFile();
+    const { terminal, written } = fakeTerminal();
     const times = [
       new Date(2026, 9, 13, 23, 59, 59),
       new Date(2026, 9, 14, 0, 0, 1),
     ];
     const logger = createLogger({
       file,
-      terminal: fakeTerminal().terminal,
+      terminal,
       now: () => times.shift() ?? AT,
     });
     logger.line("bpng", "one");
     logger.line("bpng", "two");
     await logger.flush();
-    expect(lines).toEqual(["23:59:59 bpng  one\n", "00:00:01 bpng  two\n"]);
+    expect(written).toEqual(["23:59:59 bpng  one\n", "00:00:01 bpng  two\n"]);
+    expect(lines.map((line) => line.slice(0, 19))).toEqual([
+      "2026-10-13T23:59:59",
+      "2026-10-14T00:00:01",
+    ]);
   });
 
   for (const code of ["EPIPE", "EIO"]) {
@@ -234,6 +336,9 @@ test.describe("createLogger", () => {
           return terminal.write(chunk, callback);
         },
         on: (event, listener) => terminal.on(event, listener),
+        get writableLength() {
+          return terminal.writableLength;
+        },
       };
       const logger = createLogger({ file, terminal: counted, now: () => AT });
       logger.line("bpng", "one");
@@ -244,10 +349,10 @@ test.describe("createLogger", () => {
       expect(writes).toBe(1);
       expect(written).toEqual([]);
       expect(lines).toEqual([
-        "10:15:30 bpng  one\n",
-        `10:15:30 log  terminal gone (${code}): lines go to the file only\n`,
-        "10:15:30 bpng  two\n",
-        "10:15:30 bpng  three\n",
+        `${F} bpng  one\n`,
+        `${F} log  terminal gone (${code}): lines go to the file only\n`,
+        `${F} bpng  two\n`,
+        `${F} bpng  three\n`,
       ]);
     });
   }
@@ -261,6 +366,7 @@ test.describe("createLogger", () => {
         throw systemError("EIO");
       },
       on: () => undefined,
+      writableLength: 0,
     };
     const logger = createLogger({ file, terminal, now: () => AT });
     expect(() => {
@@ -270,9 +376,9 @@ test.describe("createLogger", () => {
     await logger.flush();
     expect(writes).toBe(1);
     expect(lines).toEqual([
-      "10:15:30 bpng  one\n",
-      "10:15:30 log  terminal gone (EIO): lines go to the file only\n",
-      "10:15:30 bpng  two\n",
+      `${F} bpng  one\n`,
+      `${F} log  terminal gone (EIO): lines go to the file only\n`,
+      `${F} bpng  two\n`,
     ]);
   });
 
@@ -286,6 +392,7 @@ test.describe("createLogger", () => {
         return false;
       },
       on: () => undefined,
+      writableLength: 0,
     };
     const logger = createLogger({ file, terminal, now: () => AT });
     logger.line("bpng", "one");
@@ -293,9 +400,9 @@ test.describe("createLogger", () => {
     await logger.flush();
     expect(writes).toBe(1);
     expect(lines).toEqual([
-      "10:15:30 bpng  one\n",
-      "10:15:30 log  terminal gone (EPIPE): lines go to the file only\n",
-      "10:15:30 bpng  two\n",
+      `${F} bpng  one\n`,
+      `${F} log  terminal gone (EPIPE): lines go to the file only\n`,
+      `${F} bpng  two\n`,
     ]);
   });
 
@@ -310,10 +417,121 @@ test.describe("createLogger", () => {
     await logger.flush();
     expect(written).toEqual(["10:15:30 bpng  one\n"]);
     expect(lines).toEqual([
-      "10:15:30 bpng  one\n",
-      "10:15:30 log  terminal gone (EIO): lines go to the file only\n",
-      "10:15:30 bpng  two\n",
+      `${F} bpng  one\n`,
+      `${F} log  terminal gone (EIO): lines go to the file only\n`,
+      `${F} bpng  two\n`,
     ]);
+  });
+
+  test("tells every open logger of a terminal's error, through one listener however many loggers there were", async () => {
+    const { terminal } = fakeTerminal();
+    const warnings: Error[] = [];
+    const onWarning = (warning: Error): void => {
+      warnings.push(warning);
+    };
+    process.on("warning", onWarning);
+    try {
+      for (let i = 0; i < 50; i++)
+        await createLogger({ file: fakeFile().file, terminal }).close();
+      const open = fakeFile();
+      const closed = fakeFile();
+      const kept = createLogger({ file: open.file, terminal, now: () => AT });
+      await createLogger({ file: closed.file, terminal }).close();
+      expect(terminal.listenerCount("error")).toBe(1);
+      terminal.emit("error", systemError("EIO"));
+      await kept.flush();
+      expect(open.lines).toEqual([
+        `${F} log  terminal gone (EIO): lines go to the file only\n`,
+      ]);
+      expect(closed.lines).toEqual([]);
+      await kept.close();
+      // Every logger closed: a late error still finds the listener, and crashes nothing.
+      expect(() => terminal.emit("error", systemError("EIO"))).not.toThrow();
+      await tick();
+      expect(warnings).toEqual([]);
+    } finally {
+      process.off("warning", onWarning);
+    }
+  });
+
+  test("lets a closed logger go: the terminal it wrote to keeps no hold on it", async () => {
+    const { terminal } = fakeTerminal();
+    setFlagsFromString("--expose_gc");
+    const collect = runInNewContext("gc") as () => void;
+    const made = async (): Promise<WeakRef<object>> => {
+      const logger = createLogger({ file: fakeFile().file, terminal });
+      await logger.close();
+      return new WeakRef(logger);
+    };
+    const kept = createLogger({ file: fakeFile().file, terminal });
+    const closed = await made();
+    for (let i = 0; i < 10 && closed.deref() !== undefined; i++) {
+      await tick();
+      collect();
+    }
+    expect(closed.deref()).toBeUndefined();
+    await kept.close();
+  });
+
+  test("says nothing of a terminal failing once closing, a write's late callback included", async () => {
+    const { file, lines } = fakeFile();
+    let fail: ((error: Error) => void) | undefined;
+    const terminal: Terminal = {
+      write: (_chunk, callback) => {
+        fail = callback;
+        return true;
+      },
+      on: () => undefined,
+      writableLength: 0,
+    };
+    const logger = createLogger({ file, terminal, now: () => AT });
+    logger.line("bpng", "one");
+    const closing = logger.close();
+    fail?.(systemError("EIO"));
+    await closing;
+    expect(lines).toEqual([`${F} bpng  one\n`]);
+  });
+
+  test("skips terminal lines while more than 1 MiB waits for the terminal, then says how many, the file getting every line", async () => {
+    expect(TERMINAL_BACKLOG_BYTES).toBe(1024 * 1024);
+    const { file, lines } = fakeFile();
+    const written: string[] = [];
+    let backlog = TERMINAL_BACKLOG_BYTES;
+    const terminal: Terminal = {
+      write: (chunk, callback) => {
+        written.push(chunk);
+        callback();
+        return true;
+      },
+      on: () => undefined,
+      get writableLength() {
+        return backlog;
+      },
+    };
+    const logger = createLogger({ file, terminal, now: () => AT });
+    logger.line("bpng", "at the cap");
+    backlog++;
+    logger.line("bpng", "two");
+    logger.line("bpng", "three");
+    backlog = 0;
+    logger.line("bpng", "four");
+    backlog = TERMINAL_BACKLOG_BYTES + 1;
+    logger.line("bpng", "five");
+    backlog = 0;
+    logger.line("bpng", "six");
+    await logger.flush();
+    expect(written).toEqual([
+      "10:15:30 bpng  at the cap\n",
+      "10:15:30 log  2 lines not shown: the terminal was not keeping up (the log file has them)\n",
+      "10:15:30 bpng  four\n",
+      "10:15:30 log  1 line not shown: the terminal was not keeping up (the log file has them)\n",
+      "10:15:30 bpng  six\n",
+    ]);
+    expect(lines).toEqual(
+      ["at the cap", "two", "three", "four", "five", "six"].map(
+        (text) => `${F} bpng  ${text}\n`,
+      ),
+    );
   });
 
   test("writes the file in call order, one write at a time, however long each takes", async () => {
@@ -329,7 +547,7 @@ test.describe("createLogger", () => {
     const expected = ["a", "b", "c", "d", "e", "f"];
     for (const text of expected) logger.line("bpng", text);
     await logger.flush();
-    expect(lines).toEqual(expected.map((t) => `10:15:30 bpng  ${t}\n`));
+    expect(lines).toEqual(expected.map((t) => `${F} bpng  ${t}\n`));
     expect(maxInFlight()).toBe(1);
   });
 
@@ -352,7 +570,37 @@ test.describe("createLogger", () => {
       "10:15:30 bpng  three\n",
       "10:15:30 log  writing the log file failed (ENOSPC): its lines may be missing\n",
     ]);
-    expect(lines).toEqual(["10:15:30 bpng  three\n"]);
+    expect(lines).toEqual([`\n${F} bpng  three\n`]);
+  });
+
+  test("starts the line after a failed append on a line of its own, so half a line never merges with it", async () => {
+    let content = "";
+    let full = true;
+    const file: LogFile = {
+      append(text) {
+        if (!full) {
+          content += text;
+          return Promise.resolve();
+        }
+        // A disk filling up: part of the line is written, then the write fails.
+        content += text.slice(0, 10);
+        full = false;
+        return Promise.reject(systemError("ENOSPC"));
+      },
+      close: () => Promise.resolve(),
+    };
+    const logger = createLogger({
+      file,
+      terminal: fakeTerminal().terminal,
+      now: () => AT,
+    });
+    logger.line("bpng", "one");
+    logger.line("bpng", "two");
+    logger.line("bpng", "three");
+    await logger.flush();
+    expect(content).toBe(
+      `${F.slice(0, 10)}\n${F} bpng  two\n${F} bpng  three\n`,
+    );
   });
 
   test("flush waits for every line logged so far", async () => {
@@ -372,7 +620,7 @@ test.describe("createLogger", () => {
     expect(flushed).toBe(false);
     held.resolve();
     await flushing;
-    expect(lines).toEqual(["10:15:30 bpng  one\n"]);
+    expect(lines).toEqual([`${F} bpng  one\n`]);
   });
 
   test("close waits for pending lines, closes the file once, and drops later lines", async () => {
@@ -390,7 +638,7 @@ test.describe("createLogger", () => {
     expect(closed()).toBe(1);
     logger.line("bpng", "late");
     await logger.flush();
-    expect(lines).toEqual(["10:15:30 bpng  one\n"]);
+    expect(lines).toEqual([`${F} bpng  one\n`]);
     expect(written).toEqual(["10:15:30 bpng  one\n"]);
   });
 
@@ -403,6 +651,50 @@ test.describe("createLogger", () => {
       terminal: fakeTerminal().terminal,
     });
     await expect(logger.close()).resolves.toBeUndefined();
+  });
+
+  test("flush and close give up on a hung append after their wait, 5 s by default", async () => {
+    expect(DEFAULT_WAIT_MS).toBe(5_000);
+    let closed = 0;
+    const logger = createLogger({
+      file: {
+        append: () => new Promise<void>(() => undefined),
+        close: () => {
+          closed++;
+          return Promise.resolve();
+        },
+      },
+      terminal: fakeTerminal().terminal,
+    });
+    logger.line("bpng", "one");
+    const started = Date.now();
+    await expect(logger.flush(30)).resolves.toBeUndefined();
+    await expect(logger.close(30)).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    // The file is never closed under a write still in flight.
+    expect(closed).toBe(0);
+  });
+
+  test("close gives up on a hung file close after its wait", async () => {
+    const logger = createLogger({
+      file: {
+        append: () => Promise.resolve(),
+        close: () => new Promise<void>(() => undefined),
+      },
+      terminal: fakeTerminal().terminal,
+    });
+    await expect(logger.close(20)).resolves.toBeUndefined();
+  });
+
+  test("refuses a wait that is not a whole number of milliseconds a timer takes", () => {
+    const logger = createLogger({
+      file: fakeFile().file,
+      terminal: fakeTerminal().terminal,
+    });
+    for (const wait of [-1, 1.5, Number.NaN, Infinity, 2 ** 31]) {
+      expect(() => logger.flush(wait), String(wait)).toThrow(RangeError);
+      expect(() => logger.close(wait), String(wait)).toThrow(RangeError);
+    }
   });
 });
 
@@ -425,8 +717,48 @@ test.describe("refuseLogFile", () => {
   });
 });
 
+test.describe("systemCode and pathKind", () => {
+  test("names a system error by its code, and one Node has no name for by its errno", () => {
+    expect(systemCode(systemError("ELOOP"))).toBe("ELOOP");
+    expect(
+      systemCode(
+        Object.assign(new Error("x"), {
+          code: "Unknown system error -102",
+          errno: -102,
+        }),
+      ),
+    ).toBe("errno 102");
+    expect(systemCode(new Error("x"))).toBe("unknown error");
+  });
+
+  test("names what is in a path's place, and nothing for a regular file or a failed read", async () => {
+    const kinds = {
+      isSymbolicLink: () => false,
+      isFIFO: () => false,
+      isSocket: () => false,
+      isDirectory: () => false,
+      isBlockDevice: () => false,
+      isCharacterDevice: () => false,
+    };
+    const as = (kind?: keyof typeof kinds) => () =>
+      Promise.resolve(
+        kind === undefined ? kinds : { ...kinds, [kind]: () => true },
+      );
+    expect(await pathKind("p", as("isSymbolicLink"))).toBe("a symbolic link");
+    expect(await pathKind("p", as("isFIFO"))).toBe("a FIFO");
+    expect(await pathKind("p", as("isSocket"))).toBe("a socket");
+    expect(await pathKind("p", as("isDirectory"))).toBe("a folder");
+    expect(await pathKind("p", as("isBlockDevice"))).toBe("a device");
+    expect(await pathKind("p", as("isCharacterDevice"))).toBe("a device");
+    expect(await pathKind("p", as())).toBeUndefined();
+    expect(
+      await pathKind("p", () => Promise.reject(systemError("ENOENT"))),
+    ).toBeUndefined();
+  });
+});
+
 test.describe("openLogFile and openLogger", () => {
-  /** A fresh folder per test, removed after it. */
+  /** A fresh folder per test, `0700` as `mkdtemp` makes it, removed after it. */
   let dir: string;
   test.beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "e2e-log-"));
@@ -456,7 +788,7 @@ test.describe("openLogFile and openLogger", () => {
     second.line("orchestrator", "started again");
     await second.close();
     expect(await readFile(path, "utf8")).toBe(
-      "10:15:30 orchestrator  started\n10:15:30 orchestrator  started again\n",
+      `${F} orchestrator  started\n${F} orchestrator  started again\n`,
     );
   });
 
@@ -497,7 +829,7 @@ test.describe("openLogFile and openLogger", () => {
     const path = join(dir, "orchestrator.log");
     await symlink(target, path);
     await expect(openLogFile(path)).rejects.toThrow(
-      `The orchestrator's log cannot be opened (ELOOP): ${path} must be a regular file, not a link, a FIFO or a folder.`,
+      `The orchestrator's log cannot be opened (ELOOP): ${path} is a symbolic link, not a regular file.`,
     );
     expect(await readFile(target, "utf8")).toBe("keep\n");
     expect((await stat(target)).mode & 0o777).toBe(0o644);
@@ -511,10 +843,12 @@ test.describe("openLogFile and openLogger", () => {
     await expect(lstat(target)).rejects.toThrow("ENOENT");
   });
 
-  test("refuses a FIFO with no reader at once, never waiting for one", async () => {
+  test("refuses a FIFO with no reader at once, never waiting for one, and names it a FIFO", async () => {
     const path = join(dir, "orchestrator.log");
     execFileSync("mkfifo", [path]);
-    await expect(openLogFile(path)).rejects.toThrow("(ENXIO)");
+    await expect(openLogFile(path)).rejects.toThrow(
+      `The orchestrator's log cannot be opened (ENXIO): ${path} is a FIFO, not a regular file.`,
+    );
   });
 
   test("refuses a FIFO that has a reader, by its type", async () => {
@@ -530,10 +864,28 @@ test.describe("openLogFile and openLogger", () => {
     }
   });
 
+  test("refuses a Unix socket, naming it a socket — not a FIFO, nor an unknown error", async () => {
+    const path = join(dir, "orchestrator.log");
+    const server = createServer();
+    await new Promise<void>((resolve) => server.listen(path, resolve));
+    try {
+      // Linux answers ENXIO, as for a FIFO with no reader; macOS errno 102, which Node has no name for.
+      await expect(openLogFile(path)).rejects.toThrow(
+        new RegExp(
+          `^The orchestrator's log cannot be opened \\((ENXIO|errno 102)\\): .* is a socket, not a regular file\\.$`,
+        ),
+      );
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   test("refuses a folder", async () => {
     const path = join(dir, "orchestrator.log");
     await mkdir(path);
-    await expect(openLogFile(path)).rejects.toThrow("(EISDIR)");
+    await expect(openLogFile(path)).rejects.toThrow(
+      `(EISDIR): ${path} is a folder, not a regular file.`,
+    );
   });
 
   test("refuses a file with a second hard link, writing nothing into it", async () => {
@@ -546,6 +898,30 @@ test.describe("openLogFile and openLogger", () => {
     );
     expect(await readFile(other, "utf8")).toBe("keep\n");
     expect((await stat(other)).mode & 0o777).toBe(0o644);
+  });
+
+  test("refuses another user's file, and closes its handle", async () => {
+    const path = join(dir, "orchestrator.log");
+    const handle = await open(path, "w");
+    const realStat = handle.stat.bind(handle);
+    const realClose = handle.close.bind(handle);
+    let closed = false;
+    const foreign = Object.assign(handle, {
+      stat: async () => {
+        const stats = await realStat();
+        return Object.assign(stats, { uid: stats.uid + 1 });
+      },
+      close: () => {
+        closed = true;
+        return realClose();
+      },
+    });
+    await expect(
+      openLogFile(path, () => Promise.resolve(foreign)),
+    ).rejects.toThrow(
+      `The orchestrator's log is refused: ${path} is another user's.`,
+    );
+    expect(closed).toBe(true);
   });
 
   test("names the open's error code, and closes a handle it refuses", async () => {
@@ -574,6 +950,36 @@ test.describe("openLogFile and openLogger", () => {
     expect(closed).toBe(true);
   });
 
+  test("openLogger refuses a log folder others may write in, or reached through a link, opening nothing", async () => {
+    const open = join(dir, "open");
+    await mkdir(open, { mode: 0o700 });
+    await chmod(open, 0o770);
+    await expect(
+      openLogger(join(open, "orchestrator.log"), {
+        terminal: fakeTerminal().terminal,
+      }),
+    ).rejects.toThrow(
+      `The orchestrator's log folder must be this user's alone (mode 0700): ${open} is mode 770.`,
+    );
+    await expect(lstat(join(open, "orchestrator.log"))).rejects.toThrow(
+      "ENOENT",
+    );
+    const linked = join(dir, "linked");
+    const real = join(dir, "real");
+    await mkdir(real, { mode: 0o700 });
+    await symlink(real, linked);
+    await expect(
+      openLogger(join(linked, "orchestrator.log"), {
+        terminal: fakeTerminal().terminal,
+      }),
+    ).rejects.toThrow(
+      `The orchestrator's log folder is not a folder: ${linked}.`,
+    );
+    await expect(lstat(join(real, "orchestrator.log"))).rejects.toThrow(
+      "ENOENT",
+    );
+  });
+
   test("keeps writing the file after the terminal is gone", async () => {
     const path = join(dir, "orchestrator.log");
     const { terminal } = fakeTerminal("EIO");
@@ -584,9 +990,9 @@ test.describe("openLogFile and openLogger", () => {
     await logger.close();
     expect(await readFile(path, "utf8")).toBe(
       [
-        "10:15:30 bpng  one",
-        "10:15:30 log  terminal gone (EIO): lines go to the file only",
-        "10:15:30 bpng  two",
+        `${F} bpng  one`,
+        `${F} log  terminal gone (EIO): lines go to the file only`,
+        `${F} bpng  two`,
         "",
       ].join("\n"),
     );
