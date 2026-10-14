@@ -7,8 +7,8 @@
 > launch and end and M5's stop machines (2026-10-13, §7.12; audited the same day, §7.13); step 5's
 > 5A–5D, the logger, lock, counter, leader identity, orphan check and run-folder retention (2026-10-13,
 > §7.15; audited and re-audited the same day, §7.16); 5E, the notification subscribers (2026-10-13, §7.17); 5F, one
-> run (2026-10-13, §7.18; audited 2026-10-14, the same section).
-> **Next:** step 5's 5G–5K (§7.14), with §7.16's notes for 5H and §7.18's for 5G and 5H. Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> run (2026-10-13, §7.18; audited 2026-10-14, the same section); 5G, the loop (2026-10-14, §7.19).
+> **Next:** step 5's 5H–5K (§7.14), with §7.16's, §7.18's and §7.19's notes for 5H. Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -127,7 +127,7 @@ Phase 0.5 starts once Phase 0 is done; this is why each item matters here.
   10:15:31 bpng  bpng-12 started · backwpup pro@nginx · develop · .orchestrator/runs/bpng-12/run.log
   11:09:41 bpng  bpng-12 ✔ passed · 52 scenarios: 51 passed, 1 flaky · 54m 10s · reports/backwpup/pro@nginx/<RUN_ID>
   11:09:42 bpng  slack ✓ · datator ✓ 201
-  11:09:42 bpng  next run 11:14:42 (cooldown 5m)
+  11:09:42 bpng  next run 11:14:41 (cooldown 5m)
   ```
 
 ### 4.2 M2 — Configuration
@@ -1397,6 +1397,81 @@ finding reproduced, fixed, and proved by a test that fails without it.
   (a full disk) keeps its folder without `run.json`, said twice in the log; and a `run.finished` that
   cannot be built leaves the `running` record for the next start's orphan check, as before.
 
+### 7.19 5G — Implemented (2026-10-14, V430–V433; audited the same day, V434–V437)
+
+`orchestrator/tasks/loop.ts`, as §7.14 asks, following §7.18's notes. Decided here, where §7.14 was
+silent:
+
+- **The handle: `runTask(task, deps)` → `{ stop(level, why), done }`, at once**, the shape of
+  `runOnce`'s. The first run starts on a later turn, so a stop asked right away starts none. `deps` are
+  one run's `CycleDeps` — handed to each run as they are — plus `once`, and the seams `runOnce` and
+  `timers` (`setTimeout`/`clearTimeout`; Node's by default, **kept referenced**: while every task cools
+  down, a cooldown is all that keeps the process alive — a signal handler does not). The clock is
+  `deps.now`, shared with the runs.
+- **States:** running (the run's handle held), cooling (one timer), ended — a class over three fields,
+  no reducer: the transitions are the loop's own sequence. **A stop** is made one masked line within
+  500 code points (as `Cycle.stop`), remembered (the furthest wins), handed to the run in flight —
+  every call, so the run's escalation is its own rule — and ends a cooldown at once, its timer
+  cleared. It is honoured wherever it lands: before the first run (none starts), during a run (handed
+  on; the loop ends once the run is recorded and announced), while `runOnce` is being called (the
+  furthest is handed to the new handle once it exists), as a run settles, while the cooldown line is
+  said (checked again once the timer is armed), from within `setTimeout` (the armed timer cleared), as
+  the timer fires (checked before the next run). A stop ending the loop says `no next run: <why>`;
+  after the end, a stop does nothing.
+- **The cooldown** counts from `endedAt`; for a `notStarted` run, which had no end, from when its
+  attempt settled — so a start that fails at once still waits a whole cooldown and never spins. The
+  wait is clamped to `[0, cooldown]`: a prune slower than the cooldown waits nothing; a clock stepped
+  back, or an end that is not a time, waits the cooldown from now. It logs `next run HH:MM:SS (cooldown
+  Nm)`, local time through the logger's own `clockTime`. A run that failed, could not test, or was
+  stopped or killed by anything but the loop does not end it (§4.3: no backoff).
+- **`--once`** — one run, no cooldown, no line of its own; `TaskEnd = { ended: "stopped" | "once" |
+  "failed", last?, verdict }`. `onceVerdict`: `stopped` whenever the loop was stopped, whatever its
+  run said; else `passed` for an `ended` `passed` or `flaky`; else `failed` — `failed`, `error` (the
+  run could not test), `stopped` or `killed` by anything but this loop (the try did not test, and
+  130 would claim a stop the operator never asked for), `notStarted` either way. `onceExitCode`: `130`
+  when any verdict is `stopped`, else `1` when any `failed`, else `0` (§4.1).
+- **Never rejects:** a `runOnce` that throws or a `done` that rejects (both against its contract) is
+  `the run failed: …` and a `notStarted` `failed`, then a cooldown; a handle whose `stop` throws, a
+  line; a logger that throws loses the line; timers that cannot arm end the loop `failed` (`the loop
+  failed, no next run: …`), verdict `failed` — never a spin.
+- **For 5H:** one `runTask` per selected task, `once` from `--once`; on `onEscalate(level, why)` call
+  every loop's `stop(level, why)` — never only the runs': a stop must also end cooldowns and start
+  nothing. Await every `done`, then `bus.settle()`. With `--once`, the exit is `onceExitCode` of the
+  verdicts — but `130` whenever the shutdown was signalled at all, even after the loops ended (it then
+  stopped no run, yet the operator stopped the process). Without `--once`: `130` whenever a shutdown
+  was signalled, else `1` when a loop ended `failed` (never expected: log it, keep the other loops,
+  and exit once they end). **A run whose `done` never settles** — an unkillable process: the launch
+  waits for its group to empty with no cap — holds its loop's `done` for ever, so 5H's wait for the
+  loops needs a bounded budget past the kill (as `runs/shutdown.ts` bounds each step), and on running
+  out must say what it leaves behind (the task, the run, its group, `kill -KILL -<pgid>`).
+
+**Verification.** `loop.spec.ts`, 40 tests: the pure parts (the delay's clamps, the line, every
+`RunResult` kind's verdict, the exit code's precedence), the loop over a fake cycle and fake timers that
+keep every timer armed — each stop case above, escalating and repeated stops, `--once` for every
+result kind, each failure seam —, Node's timer referenced, and two specs over the real `runOnce` and the
+fake suite: two cycles (passed, failed; recorded, published, the cooldown between, a stop from within
+the second `setTimeout`) and a stop mid-run (drained, `stopped`, no cooldown).
+
+**Audit (2026-10-14, V434–V437).** Two reviewers (security, correctness), each on its own copy; no
+behavioural bug. Fixed, each proved by a test that fails without it:
+
+- **"Not kept" was untested (low-medium).** A no-op `clearTimeout` in Node's cooldown timers passed
+  every spec, though a stopped process then stays alive for the rest of the cooldown (the reviewer's
+  probe). Now the default-timers spec counts the process's armed `Timeout`s
+  (`process.getActiveResourcesInfo()`) and requires them back to their baseline after a stop.
+- **A cooldown outside the config's bounds was not refused at the loop (low, latent).** `NaN`, a
+  negative, `Infinity` or 40,000 minutes reached `setTimeout`, which Node turns into a 1 ms timer
+  (`TimeoutOverflowWarning`): runs back to back, and a `NaN:NaN:NaN` line. Now `runTask` checks
+  `cooldownMinutes` first (`cooldownProblem`: whole minutes within `MIN_COOLDOWN_MINUTES` and
+  `MAX_COOLDOWN_MINUTES`, both from `config/schema.ts`, the minimum exported for this) and otherwise
+  ends `failed` before any run, `no run: the task's cooldown (…) must be …`; and `cooldownDelay` is
+  total — always within `[0, min(cooldown, MAX_TIMER_MS = 2³¹−1)]`, a `NaN` cooldown waiting nothing.
+- **Smaller (low):** `StopAsked` defined twice (now once, in `run-lines.ts` beside `furtherStop`);
+  missing member docs (`TaskEnd.verdict`, the loop's and the cycle's `asked`/`current`/`launched`/
+  `now`); `TaskEnd.ended`'s `failed` now names every cause (a bad cooldown, timers, a throwing
+  clock — the last now tested); §4.1's example line now counts from the end (`11:14:41`); the 5H note's
+  exit rule and an unsettling `done`, above.
+
 ## 8. What later phases change, and keep
 
 | Here | Later | Kept |
@@ -1555,3 +1630,11 @@ finding reproduced, fixed, and proved by a test that fails without it.
 | V427 | `cycle.spec.ts` under `--repeat-each 20 --workers 6`: 720 passed; `launch.spec.ts` passes with its 29 tests unmodified (one added) | ✅ 2026-10-14 | `npx playwright test -c playwright.unit.config.ts orchestrator/tasks/cycle.spec.ts --repeat-each 20 --workers 6` |
 | V428 | The gates pass; a full unit run: 2901 passed, 8 skipped by their environment guards | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
 | V429 | Re-audit fixes, each undone in a copy and failing a test: a stop's `why` kept raw (a secret, a line feed, an ESC code, 600+ characters — masked, one line, 500 code points in the event, `run.json`'s `reason` and `stop.why`, `run-finished.json`, the lines and the run log, before the spawn and during `bddgen`); `folder.stopped` dropped (a stop asked while a failing first record is written read `stopped`, now `error`). The gates then pass: a full unit run, 2904 passed, 8 skipped | ✅ 2026-10-14 | A mutation script in the scratchpad; `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V430 | `orchestrator/tasks/loop.spec.ts`, 40 tests: the cooldown from `endedAt` (and from the settle for a `notStarted` run), its clamps (a slow prune, a clock stepped back, `NaN`), the `next run HH:MM:SS (cooldown Nm)` line in local time; a stop before the first run, mid-run, while `runOnce` is called, as a run settles, while the cooldown line is said, from within `setTimeout`, as the timer fires, in the cooldown, repeated and escalating (each handed to the run, masked), after the end; `--once` for passed, flaky, failed, error, stopped, killed and `notStarted`; a throwing `runOnce`, a rejecting `done`, a throwing handle `stop`, logger and `setTimeout`; no timer left armed; Node's cooldown timer referenced; two cycles and a mid-run stop over the real `runOnce` and the fake suite. `--repeat-each 20 --workers 6`: 800 passed | ✅ 2026-10-14 | `npx playwright test -c playwright.unit.config.ts orchestrator/tasks/loop.spec.ts --repeat-each 20 --workers 6` |
+| V431 | Mutations of `loop.ts`, each in a copy of the worktree, each failing a test — 32/32: no deferral, no furthest stop, no wake, the reason unmasked, no forward (on stop, after creation), no check before or after a run or after arming, `once` ignored, the cooldown from the settle or from the epoch, either clamp, no `isFinite`, the armed timer kept, `finish` keeping its timer, `runOnce`'s throw escaping, the handle kept after its run, no `no next run` line, a broken loop's verdict from its run, flaky failing, the stop ignored by the verdict, the exit code's precedence, the line's minutes and time, an `unref`'d timer, the logger's and the handle's throws uncaught, failures unmasked, the loop's catch rethrowing, seconds for minutes. Two redundancies found while writing them were removed (an `over` flag a stop after the end never needed) or proven needed (the check after arming: a stop while the line is said) | ✅ 2026-10-14 | A mutation script in the scratchpad |
+| V432 | A stop from within `setTimeout` (and from the logger, as the cooldown line is said) would have waited the whole cooldown without the wake set before arming and the check after; a cooldown timer `unref`'d would let the process exit while every task cools down | ✅ 2026-10-14 | The specs above, failing on those mutants |
+| V433 | The gates pass; a full unit run: 2944 passed, 8 skipped by their environment guards; `import-boundary.spec.ts` passes with `suite-imports.json` unchanged | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V434 | Reproduced before the fixes: a no-op `NODE_COOLDOWN_TIMERS.clearTimeout` passed all 40 specs; a cooldown of `NaN`, `-1`, `Infinity` or 40,000 minutes armed a 1 ms timer (`TimeoutOverflowWarning`) and ran back to back, its line `next run NaN:NaN:NaN` | ✅ 2026-10-14 | The reviewers' probes |
+| V435 | `loop.spec.ts`, 57 tests (+17): Node's armed `Timeout`s back to their baseline after a stop, and one more and back for the bare timers; `cooldownDelay` total (`NaN` → 0, negative → 0, `±Infinity`, 40,000 min and a `NaN` end within `[0, 2³¹−1]`); a cooldown of `NaN`, -1, 0, 2.5, `Infinity`, 1441 and 40,000 ends the loop `failed` before any run, with and without `--once`; 1 and 1440 waited; a clock that throws ends it `failed`. `--repeat-each 20 --workers 6`: 1140 passed | ✅ 2026-10-14 | `npx playwright test -c playwright.unit.config.ts orchestrator/tasks/loop.spec.ts --repeat-each 20 --workers 6` |
+| V436 | The fixes undone, each in a copy, each failing a test — 10/10: the no-op `clearTimeout`, no cooldown check, no integer check, either bound, no `NaN` guard, no timer cap, no floor on the cap, a non-finite wait uncapped, a wrong `MAX_TIMER_MS` | ✅ 2026-10-14 | A mutation script in the scratchpad |
+| V437 | The gates pass; a full unit run: 2961 passed, 8 skipped by their environment guards; the `cycle.ts`, `run-lines.ts` and `schema.ts` specs pass unmodified | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
