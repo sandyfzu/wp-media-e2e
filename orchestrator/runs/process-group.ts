@@ -1,3 +1,5 @@
+import { errorCode } from "../error-code";
+
 /**
  * A run's process group: whether anything in it is still alive, and waiting until nothing is. A run
  * has ended only when its group is empty — the runner exits while its workers still tear down, and
@@ -106,19 +108,4 @@ function assertGroupId(pgid: number): void {
     throw new RangeError(
       `A run's process group id must be a whole number above 1, got ${String(pgid)}.`,
     );
-}
-
-/**
- * A system error's code (`ESRCH`), when it has one: never its message, which may name a path or an
- * argument.
- *
- * @param error - what was thrown.
- */
-export function errorCode(error: unknown): string | undefined {
-  return typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    typeof error.code === "string"
-    ? error.code
-    : undefined;
 }

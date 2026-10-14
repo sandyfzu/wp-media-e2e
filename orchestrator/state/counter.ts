@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { z } from "zod";
 
 import { TASK_ID_PATTERN } from "../config/schema";
-import { errorCode } from "../runs/process-group";
+import { errorCode } from "../error-code";
 import { writeJsonAtomic } from "./atomic";
 import { StateError } from "./errors";
 import { readStateFile } from "./read";

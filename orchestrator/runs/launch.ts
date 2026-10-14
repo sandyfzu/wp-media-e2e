@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { RESULTS_FILE } from "../../src/common/reporting/results-schema";
+import { errorCode } from "../error-code";
 
 import type { Command, RunCommands } from "./commands";
 import { variableNames } from "./environment";
 import type { RunIdentity } from "./identity";
 import { describeExit, type ProcessExit, type StopTaken } from "./outcome";
 import {
-  errorCode,
   signalGroup,
   waitForEmptyGroup,
   type KillFn,

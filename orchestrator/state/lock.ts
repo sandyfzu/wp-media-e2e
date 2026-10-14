@@ -3,8 +3,9 @@ import { constants } from "node:fs";
 import { link, open, rm, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
-import { shellWord } from "../config/load";
-import { errorCode, type KillFn } from "../runs/process-group";
+import { errorCode } from "../error-code";
+import type { KillFn } from "../runs/process-group";
+import { shellWord } from "../text";
 import { StateError } from "./errors";
 import { readStateFile } from "./read";
 

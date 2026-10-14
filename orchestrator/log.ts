@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { open, type FileHandle } from "node:fs/promises";
 
-import { errorCode } from "./runs/process-group";
+import { errorCode } from "./error-code";
 import { safeLine } from "./text";
 
 /**

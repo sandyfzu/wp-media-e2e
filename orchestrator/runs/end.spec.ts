@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,7 +15,6 @@ import { RESULTS_FILE } from "../../src/common/reporting/results-schema";
 import {
   endRun,
   MAX_RESULTS_BYTES,
-  readCapped,
   readLogTail,
   type RunEndInput,
 } from "./end";
@@ -240,54 +239,13 @@ test.describe("endRun", () => {
   });
 });
 
-test.describe("readCapped", () => {
-  test("refuses a FIFO where a report should be, without waiting for a writer", async () => {
-    const fifo = join(root, "results.jsonl");
+test.describe("readLogTail", () => {
+  test("reads nothing from a FIFO in the log's place, without waiting for a writer", async () => {
+    const fifo = join(root, "run.log");
     execFileSync("mkfifo", [fifo]);
-    expect(await readCapped(fifo, 10)).toEqual({
-      kind: "unreadable",
-      code: "not a file",
-    });
     expect(await readLogTail(fifo)).toEqual([]);
   });
 
-  test("reads a file within the cap, and tells a missing, an oversized and an unreadable one apart", async () => {
-    const file = join(root, "f.txt");
-    await writeFile(file, "héllo");
-    expect(await readCapped(file, 6)).toEqual({ kind: "text", text: "héllo" });
-    expect(await readCapped(file, 5)).toEqual({ kind: "tooLarge", bytes: 6 });
-    expect(await readCapped(join(root, "none"), 10)).toEqual({
-      kind: "missing",
-    });
-    // A folder opens, and is no file to read.
-    expect(await readCapped(root, 10)).toEqual({
-      kind: "unreadable",
-      code: "not a file",
-    });
-  });
-
-  test("follows a link in the file's place by default, and refuses it when told not to", async () => {
-    const file = join(root, "f.txt");
-    const link = join(root, "link.txt");
-    await writeFile(file, "target");
-    await symlink(file, link);
-    expect(await readCapped(link, 10)).toEqual({
-      kind: "text",
-      text: "target",
-    });
-    expect(await readCapped(link, 10, { followLink: false })).toEqual({
-      kind: "unreadable",
-      code: "ELOOP",
-    });
-    // A regular file reads the same either way.
-    expect(await readCapped(file, 10, { followLink: false })).toEqual({
-      kind: "text",
-      text: "target",
-    });
-  });
-});
-
-test.describe("readLogTail", () => {
   test("keeps the last lines, drops ours, blank ones and a line cut by the read's start", async () => {
     const file = join(root, "run.log");
     await writeFile(

@@ -1,7 +1,6 @@
 import { test, expect } from "@playwright/test";
 
 import {
-  errorCode,
   groupAlive,
   signalGroup,
   waitForEmptyGroup,
@@ -106,15 +105,5 @@ test.describe("waitForEmptyGroup", () => {
     // It gives up as soon as it has waited its limit: never one poll more.
     expect(emptied).toBe(false);
     expect(slept).toBe(200);
-  });
-});
-
-test.describe("errorCode", () => {
-  test("gives a system error's code, and nothing for anything else", () => {
-    expect(errorCode(systemError("ESRCH"))).toBe("ESRCH");
-    expect(errorCode(new Error("plain"))).toBeUndefined();
-    expect(errorCode({ code: 3 })).toBeUndefined();
-    expect(errorCode(null)).toBeUndefined();
-    expect(errorCode("ESRCH")).toBeUndefined();
   });
 });

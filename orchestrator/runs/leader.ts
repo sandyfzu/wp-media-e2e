@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 
-import { errorCode } from "./process-group";
+import { errorCode } from "../error-code";
 
 /**
  * Who leads a process group: its leader's start time, read as the leader is spawned and kept in the

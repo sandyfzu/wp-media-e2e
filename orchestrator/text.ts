@@ -122,3 +122,16 @@ export function safeBlock(
     .trim();
   return cut(mask(clean, secrets), max);
 }
+
+/**
+ * `path` as one word of a POSIX shell command: as it is when it holds only characters no shell
+ * treats specially, else in single quotes.
+ *
+ * @param path - a file path.
+ * @returns the quoted path.
+ */
+export function shellWord(path: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(path)
+    ? path
+    : `'${path.replaceAll("'", `'\\''`)}'`;
+}

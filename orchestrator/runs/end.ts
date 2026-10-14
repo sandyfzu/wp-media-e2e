@@ -8,11 +8,11 @@ import {
   type RunFinishedEvent,
   type RunFinishedInput,
 } from "../events/run-finished";
+import { readCapped, type CappedRead } from "../files";
 import { readRunFacts, RUN_FACTS_FILE } from "./facts";
 import type { RunIdentity } from "./identity";
 import { LOG_PREFIX, type LaunchResult } from "./launch";
 import { runOutcome, type RunOutcome } from "./outcome";
-import { errorCode } from "./process-group";
 import { readRunResults } from "./results";
 
 /**
@@ -37,72 +37,10 @@ export const LOG_TAIL_BYTES = 64 * 1024;
 export const LOG_TAIL_MAX_LINES = 40;
 
 /**
- * Opens for reading without waiting: a FIFO put where a report should be would otherwise block the
- * open until something writes to it. A regular file reads the same either way.
+ * Opens the log for reading without waiting: a FIFO put in its place would otherwise block the open
+ * until something writes to it. A regular file reads the same either way.
  */
 const READ_NONBLOCKING = constants.O_RDONLY | constants.O_NONBLOCK;
-
-/** A file read within a cap. */
-export type CappedRead =
-  | { readonly kind: "text"; readonly text: string }
-  | { readonly kind: "missing" }
-  | { readonly kind: "tooLarge"; readonly bytes: number }
-  /** It is there, and could not be read: the system error's code. */
-  | { readonly kind: "unreadable"; readonly code: string };
-
-/** How {@link readCapped} opens a file. */
-export interface ReadCappedOptions {
-  /**
-   * `false`: a link in the file's place is refused (`ELOOP`) rather than read — for a file only its
-   * place vouches for. Followed by default.
-   */
-  readonly followLink?: boolean;
-}
-
-/**
- * Reads a whole file, unless it is larger than `maxBytes`.
- *
- * @param path - the file.
- * @param maxBytes - the cap.
- * @param options - whether a link in its place is followed.
- * @returns its text (UTF-8), or why there is none.
- */
-export async function readCapped(
-  path: string,
-  maxBytes: number,
-  options: ReadCappedOptions = {},
-): Promise<CappedRead> {
-  const flags =
-    options.followLink === false
-      ? READ_NONBLOCKING | constants.O_NOFOLLOW
-      : READ_NONBLOCKING;
-  let handle;
-  try {
-    handle = await open(path, flags);
-  } catch (error) {
-    const code = errorCode(error);
-    return code === "ENOENT"
-      ? { kind: "missing" }
-      : { kind: "unreadable", code: code ?? "unknown error" };
-  }
-  try {
-    const stats = await handle.stat();
-    if (!stats.isFile()) return { kind: "unreadable", code: "not a file" };
-    const { size } = stats;
-    if (size > maxBytes) return { kind: "tooLarge", bytes: size };
-    // Read through the cap, not to the size: a file still growing must not grow the read.
-    const buffer = Buffer.alloc(Math.min(size, maxBytes));
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    return {
-      kind: "text",
-      text: buffer.subarray(0, bytesRead).toString("utf8"),
-    };
-  } catch (error) {
-    return { kind: "unreadable", code: errorCode(error) ?? "unknown error" };
-  } finally {
-    await handle.close().catch(() => undefined);
-  }
-}
 
 /**
  * The run log's last lines, ours left out — a reason quotes what the run said, not our header lines.

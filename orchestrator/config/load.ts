@@ -1,8 +1,8 @@
-import { constants } from "node:fs";
-import { open, type FileHandle } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { NOT_A_FILE, readCappedBytes } from "../files";
+import { shellWord } from "../text";
 import { checkConfig, type CheckedProduct, type CheckedTask } from "./check";
 import { ConfigError } from "./errors";
 import { lostKeys } from "./json-keys";
@@ -70,9 +70,9 @@ export async function loadConfig<P extends CheckedProduct>(
 }
 
 /**
- * The file's permission bits and bytes. Opened once — non-blocking, so a FIFO cannot hang the open —
- * and checked, measured and read through that one handle, so the file cannot be swapped between the
- * check and the read.
+ * The file's permission bits and bytes, read by {@link readCappedBytes}: without waiting on a FIFO,
+ * only a regular file, within {@link MAX_CONFIG_BYTES}, checked and read through one handle. A link
+ * is followed: the config's place is the operator's choice.
  *
  * @param path - the config, absolute.
  * @returns its `stat` mode and content.
@@ -81,69 +81,25 @@ export async function loadConfig<P extends CheckedProduct>(
 async function readConfigFile(
   path: string,
 ): Promise<{ mode: number; bytes: Uint8Array }> {
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
-    const info = await handle.stat();
-    if (!info.isFile())
-      throw new ConfigError(`The orchestrator config ${path} is not a file.`);
-    const bytes = await readAtMost(handle, MAX_CONFIG_BYTES + 1);
-    if (bytes.length > MAX_CONFIG_BYTES)
+  const read = await readCappedBytes(path, MAX_CONFIG_BYTES);
+  switch (read.kind) {
+    case "bytes":
+      return { mode: read.mode, bytes: read.bytes };
+    case "missing":
+      throw new ConfigError(
+        `No orchestrator config at ${path}: copy orchestrator/config.example.json there, chmod 600, and fill it in.`,
+      );
+    case "tooLarge":
       throw new ConfigError(
         `The orchestrator config ${path} is over the ${String(MAX_CONFIG_BYTES)} bytes a config can be.`,
       );
-    return { mode: info.mode, bytes };
-  } catch (error) {
-    if (error instanceof ConfigError) throw error;
-    throw new ConfigError(
-      codeOf(error) === "ENOENT"
-        ? `No orchestrator config at ${path}: copy orchestrator/config.example.json there, chmod 600, and fill it in.`
-        : `The orchestrator config ${path} cannot be read (${codeOf(error) ?? "unknown error"}).`,
-    );
-  } finally {
-    await handle?.close();
+    case "unreadable":
+      throw new ConfigError(
+        read.code === NOT_A_FILE
+          ? `The orchestrator config ${path} is not a file.`
+          : `The orchestrator config ${path} cannot be read (${read.code}).`,
+      );
   }
-}
-
-/**
- * Reads from the start of `handle` until its end or `limit` bytes, whichever comes first — never
- * more, however large the file is or grows.
- *
- * @param handle - an open file.
- * @param limit - the most bytes to read.
- * @returns what was read.
- */
-export async function readAtMost(
-  handle: FileHandle,
-  limit: number,
-): Promise<Uint8Array> {
-  const buffer = new Uint8Array(limit);
-  let length = 0;
-  while (length < limit) {
-    const { bytesRead } = await handle.read(
-      buffer,
-      length,
-      limit - length,
-      length,
-    );
-    if (bytesRead === 0) break;
-    length += bytesRead;
-  }
-  return buffer.subarray(0, length);
-}
-
-/**
- * A Node system error's code (`ENOENT`, `EACCES`), if `error` has one.
- *
- * @param error - what was thrown.
- * @returns the code, or `undefined`.
- */
-function codeOf(error: unknown): string | undefined {
-  return error instanceof Error &&
-    "code" in error &&
-    typeof error.code === "string"
-    ? error.code
-    : undefined;
 }
 
 /**
@@ -188,19 +144,6 @@ export function parseJson(text: string, path: string): unknown {
       `The orchestrator config ${path} is not valid JSON${where === null ? "" : ` (${where[0]})`}.`,
     );
   }
-}
-
-/**
- * `path` as one word of a POSIX shell command: as it is when it holds only characters no shell
- * treats specially, else in single quotes.
- *
- * @param path - a file path.
- * @returns the quoted path.
- */
-export function shellWord(path: string): string {
-  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(path)
-    ? path
-    : `'${path.replaceAll("'", `'\\''`)}'`;
 }
 
 /**

@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { failClose, withHandleMethod } from "../__fixtures__/file-handle";
 import { writeJsonAtomic } from "./atomic";
 
 /** A fresh folder per test, removed after it. */
@@ -48,5 +49,77 @@ test.describe("writeJsonAtomic", () => {
     );
     await expect(writeJsonAtomic(path, { a: 1 })).rejects.toThrow();
     expect((await readdir(dir)).sort()).toEqual(["busy", "keep"]);
+  });
+
+  test("flushes the new content before the rename, and the folder after it", async () => {
+    const path = join(dir, "c.json");
+    await writeFile(path, "old");
+    const seen: string[] = [];
+    await withHandleMethod(
+      "datasync",
+      async function (original, ...args) {
+        seen.push(`datasync: target holds ${await readFile(path, "utf8")}`);
+        return original(...args);
+      },
+      () =>
+        withHandleMethod(
+          "sync",
+          async function (original, ...args) {
+            seen.push(`sync: target holds ${await readFile(path, "utf8")}`);
+            return original(...args);
+          },
+          () => writeJsonAtomic(path, 1),
+        ),
+    );
+    expect(seen).toEqual([
+      "datasync: target holds old",
+      "sync: target holds 1\n",
+    ]);
+  });
+
+  test("fails, keeping the old file and no temporary one, when the new content cannot be flushed", async () => {
+    const path = join(dir, "c.json");
+    await writeFile(path, "old");
+    await expect(
+      withHandleMethod(
+        "datasync",
+        () =>
+          Promise.reject(Object.assign(new Error("flush"), { code: "EIO" })),
+        () => writeJsonAtomic(path, 1),
+      ),
+    ).rejects.toMatchObject({ code: "EIO" });
+    expect(await readFile(path, "utf8")).toBe("old");
+    expect(await readdir(dir)).toEqual(["c.json"]);
+  });
+
+  test("fails, keeping the old file and no temporary one, when the temporary file cannot be closed", async () => {
+    const path = join(dir, "c.json");
+    await writeFile(path, "old");
+    await expect(
+      withHandleMethod(
+        "datasync",
+        function (original, ...args) {
+          failClose(this);
+          return original(...args);
+        },
+        () => writeJsonAtomic(path, 1),
+      ),
+    ).rejects.toMatchObject({ code: "EIO" });
+    expect(await readFile(path, "utf8")).toBe("old");
+    expect(await readdir(dir)).toEqual(["c.json"]);
+  });
+
+  test("fails when the folder cannot be flushed, the new content already in place", async () => {
+    const path = join(dir, "c.json");
+    await expect(
+      withHandleMethod(
+        "sync",
+        () =>
+          Promise.reject(Object.assign(new Error("flush"), { code: "EIO" })),
+        () => writeJsonAtomic(path, 2),
+      ),
+    ).rejects.toMatchObject({ code: "EIO" });
+    expect(await readFile(path, "utf8")).toBe("2\n");
+    expect(await readdir(dir)).toEqual(["c.json"]);
   });
 });

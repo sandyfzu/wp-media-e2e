@@ -23,7 +23,6 @@ import {
   decodeUtf8,
   modeWarning,
   parseJson,
-  shellWord,
 } from "./load";
 import { parseConfig } from "./parse";
 
@@ -268,27 +267,6 @@ test.describe("decodeUtf8", () => {
           "The orchestrator config /c is not UTF-8: save it as UTF-8.",
         ),
       );
-  });
-});
-
-test.describe("shellWord", () => {
-  test("leaves a plain path alone and single-quotes anything else", () => {
-    expect(shellWord("/srv/e2e/.orchestrator/config.json")).toBe(
-      "/srv/e2e/.orchestrator/config.json",
-    );
-    expect(shellWord("/srv/my e2e/config.json")).toBe(
-      "'/srv/my e2e/config.json'",
-    );
-    expect(shellWord("/srv/it's/$HOME;x")).toBe("'/srv/it'\\''s/$HOME;x'");
-  });
-
-  test("gives back the path when a shell reads it", () => {
-    for (const path of ["/a b/c", "/it's", "/$(x)`y`", "/a\\b", "/-x"])
-      expect(
-        execFileSync("/bin/sh", ["-c", `printf %s ${shellWord(path)}`], {
-          encoding: "utf8",
-        }),
-      ).toBe(path);
   });
 });
 

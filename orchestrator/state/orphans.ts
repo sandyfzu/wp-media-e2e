@@ -2,10 +2,11 @@ import type { Dirent } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
-import { readCapped, type CappedRead } from "../runs/end";
+import { errorCode } from "../error-code";
+import { readCapped, type CappedRead } from "../files";
 import { RUN_FILES, RUNS_DIR } from "../runs/identity";
 import type { LeaderStartReader } from "../runs/leader";
-import { errorCode, groupAlive, type KillFn } from "../runs/process-group";
+import { groupAlive, type KillFn } from "../runs/process-group";
 import {
   lostRecord,
   matchLeader,

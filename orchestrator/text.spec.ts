@@ -1,6 +1,14 @@
 import { test, expect } from "@playwright/test";
+import { execFileSync } from "node:child_process";
 
-import { cut, oneLine, safeBlock, safeLine, secretForms } from "./text";
+import {
+  cut,
+  oneLine,
+  safeBlock,
+  safeLine,
+  secretForms,
+  shellWord,
+} from "./text";
 
 /** A GitHub token by its shape, and its 36 characters after the prefix. */
 const BODY = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
@@ -161,5 +169,26 @@ test.describe("secretForms", () => {
         [key],
       ),
     ).toBe('*** "***"');
+  });
+});
+
+test.describe("shellWord", () => {
+  test("leaves a plain path alone and single-quotes anything else", () => {
+    expect(shellWord("/srv/e2e/.orchestrator/config.json")).toBe(
+      "/srv/e2e/.orchestrator/config.json",
+    );
+    expect(shellWord("/srv/my e2e/config.json")).toBe(
+      "'/srv/my e2e/config.json'",
+    );
+    expect(shellWord("/srv/it's/$HOME;x")).toBe("'/srv/it'\\''s/$HOME;x'");
+  });
+
+  test("gives back the path when a shell reads it", () => {
+    for (const path of ["/a b/c", "/it's", "/$(x)`y`", "/a\\b", "/-x"])
+      expect(
+        execFileSync("/bin/sh", ["-c", `printf %s ${shellWord(path)}`], {
+          encoding: "utf8",
+        }),
+      ).toBe(path);
   });
 });
