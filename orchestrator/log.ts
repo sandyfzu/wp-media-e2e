@@ -3,7 +3,12 @@ import { lstat, open, type FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { errorCode } from "./error-code";
-import { checkOwnFolder, describeFolderProblem, STATE_FOLDER } from "./folders";
+import {
+  checkOwnFolder,
+  describeFolderProblem,
+  ownFolderRemedy,
+  STATE_FOLDER,
+} from "./folders";
 import {
   assertWaitMs,
   drainTerminal,
@@ -257,7 +262,7 @@ export async function openLogger(
   const check = await checkOwnFolder(folder, STATE_FOLDER);
   if (check.kind !== "ok")
     throw new Error(
-      `The orchestrator's log folder ${folder} ${describeFolderProblem(check)}: it must be this user's, and no one else may write in it.`,
+      `The orchestrator's log folder ${folder} ${describeFolderProblem(check)}: it must be this user's, and no one else may write in it${check.kind === "notFolder" ? "" : ` (${ownFolderRemedy(folder, check, STATE_FOLDER)})`}.`,
     );
   const opened = await openLogFile(path);
   const logger = createLogger({ ...options, file: opened.file });

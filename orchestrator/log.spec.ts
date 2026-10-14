@@ -1065,7 +1065,7 @@ test.describe("openLogFile and openLogger", () => {
         terminal: fakeTerminal().terminal,
       }),
     ).rejects.toThrow(
-      `The orchestrator's log folder ${open} is mode 770: it must be this user's, and no one else may write in it.`,
+      `The orchestrator's log folder ${open} is mode 770: it must be this user's, and no one else may write in it (chmod go-w ${open}).`,
     );
     await expect(lstat(join(open, "orchestrator.log"))).rejects.toThrow(
       "ENOENT",

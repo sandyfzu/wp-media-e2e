@@ -611,20 +611,37 @@ test.describe("describeCommand", () => {
 });
 
 test.describe("runFolderRefusal", () => {
-  test("names the owner of a folder of another user's, and the mode of one open to others", () => {
+  test("names the owner of a folder of another user's, and the mode of one open to others, each with its repair", () => {
     expect(
-      runFolderRefusal("/s/runs/bpng-1", {
-        kind: "notOwn",
-        uid: 0,
-        mode: 0o700,
-      }),
+      runFolderRefusal(
+        "/s/runs/bpng-1",
+        {
+          kind: "notOwn",
+          uid: 0,
+          mode: 0o700,
+        },
+        "alice",
+      ),
     ).toBe(
-      "The run's folder must be this user's alone (mode 0700): /s/runs/bpng-1 is owned by uid 0, not this user.",
+      "The run's folder must be this user's alone (mode 0700): /s/runs/bpng-1 is owned by uid 0, not this user (sudo chown alice /s/runs/bpng-1).",
+    );
+    expect(
+      runFolderRefusal(
+        "/s/runs/bpng-1",
+        {
+          kind: "notOwn",
+          uid: 0,
+          mode: 0o755,
+        },
+        "alice",
+      ),
+    ).toBe(
+      "The run's folder must be this user's alone (mode 0700): /s/runs/bpng-1 is owned by uid 0, not this user (sudo chown alice /s/runs/bpng-1 && chmod 700 /s/runs/bpng-1).",
     );
     expect(
       runFolderRefusal("/s/runs/bpng-1", { kind: "open", mode: 0o755 }),
     ).toBe(
-      "The run's folder must be this user's alone (mode 0700): /s/runs/bpng-1 is mode 755.",
+      "The run's folder must be this user's alone (mode 0700): /s/runs/bpng-1 is mode 755 (chmod 700 /s/runs/bpng-1).",
     );
     expect(runFolderRefusal("/s/runs/bpng-1", { kind: "notFolder" })).toBe(
       "The run's folder is not a folder: /s/runs/bpng-1.",

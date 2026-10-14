@@ -9,6 +9,7 @@ import { errorCode } from "../error-code";
 import {
   checkOwnFolder,
   describeFolderProblem,
+  ownFolderRemedy,
   PRIVATE_FOLDER,
   type OwnFolderCheck,
 } from "../folders";
@@ -200,19 +201,21 @@ async function assertPrivateFolder(dir: string): Promise<void> {
 
 /**
  * Why a run's folder is refused, in words: what {@link checkOwnFolder} found — its owner's uid for a
- * folder of another user's, which its mode alone would not say.
+ * folder of another user's, which its mode alone would not say — and the command that repairs it.
  *
  * @param dir - the run's folder.
  * @param check - the failed check.
+ * @param user - who must own it, for the repair: this process's user by default.
  * @returns the message.
  */
 export function runFolderRefusal(
   dir: string,
   check: Exclude<OwnFolderCheck, { kind: "ok" }>,
+  user?: string,
 ): string {
   if (check.kind === "notFolder")
     return `The run's folder is not a folder: ${dir}.`;
-  return `The run's folder must be this user's alone (mode 0700): ${dir} ${describeFolderProblem(check)}.`;
+  return `The run's folder must be this user's alone (mode 0700): ${dir} ${describeFolderProblem(check)} (${ownFolderRemedy(dir, check, PRIVATE_FOLDER, user)}).`;
 }
 
 /** One run's processes and stop: the state {@link launchRun} hands out. */
