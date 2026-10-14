@@ -134,6 +134,12 @@ function countsText(counts: RunFinishedEvent["counts"]): string {
   return parts.length === 0 ? total : `${total}: ${parts.join(", ")}`;
 }
 
+/** A stop asked for: how far, and why. */
+export interface StopAsked {
+  readonly level: StopLevel;
+  readonly why: string;
+}
+
 /**
  * The stop that goes further of two: the one already asked for, or a new one.
  *

@@ -20,6 +20,9 @@ export const TASK_ID_PATTERN = /^[a-hjkmnp-z][a-hjkmnp-z2-9]{3}$/;
 /** How long a loop task waits after a run ends before the next, unless it says otherwise. */
 export const DEFAULT_COOLDOWN_MINUTES = 5;
 
+/** The shortest cooldown accepted: none at all would hammer a broken site. */
+export const MIN_COOLDOWN_MINUTES = 1;
+
 /** The longest cooldown accepted: a day. Waiting longer is a schedule, not a loop. */
 export const MAX_COOLDOWN_MINUTES = 1440;
 
@@ -185,9 +188,11 @@ const taskSchema = z.strictObject({
   plugin: z
     .strictObject({ ref: token.optional(), version: token.optional() })
     .optional(),
-  cooldownMinutes: wholeNumber(1, MAX_COOLDOWN_MINUTES, " minutes").default(
-    DEFAULT_COOLDOWN_MINUTES,
-  ),
+  cooldownMinutes: wholeNumber(
+    MIN_COOLDOWN_MINUTES,
+    MAX_COOLDOWN_MINUTES,
+    " minutes",
+  ).default(DEFAULT_COOLDOWN_MINUTES),
   grep: lineOfText(500)
     .refine(isValidGrep, {
       error: "must be a regular expression Playwright's --grep accepts",

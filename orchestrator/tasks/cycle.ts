@@ -54,6 +54,7 @@ import {
   outcomeLine,
   showPath,
   startedLine,
+  type StopAsked,
   unreadOutcome,
   type CycleTask,
 } from "./run-lines";
@@ -151,12 +152,6 @@ export interface CycleDeps {
   readonly writeJson?: (path: string, value: unknown) => Promise<void>;
 }
 
-/** A stop asked for. */
-interface StopAsked {
-  readonly level: StopLevel;
-  readonly why: string;
-}
-
 /** What a run that ended may record: its writer, and how its processes ended. */
 interface EndToRecord {
   readonly writer: RecordWriter;
@@ -193,8 +188,11 @@ const NOTHING_RAN: LaunchResult["bddgen"] = { code: null, signal: null };
 
 /** One run's state: the stop asked for, the launched run once there is one. */
 class Cycle {
+  /** The furthest stop asked for so far, its reason already masked. */
   private asked: StopAsked | undefined;
+  /** The launched run, once `launchRun` has handed it out: what a stop is forwarded to. */
   private launched: LaunchedRun | undefined;
+  /** The clock: `deps.now`, else the system's. */
   private readonly now: () => Date;
 
   /**
