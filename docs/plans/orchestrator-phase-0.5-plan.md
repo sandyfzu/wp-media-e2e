@@ -7,8 +7,9 @@
 > launch and end and M5's stop machines (2026-10-13, §7.12; audited the same day, §7.13); step 5's
 > 5A–5D, the logger, lock, counter, leader identity, orphan check and run-folder retention (2026-10-13,
 > §7.15; audited and re-audited the same day, §7.16); 5E, the notification subscribers (2026-10-13, §7.17); 5F, one
-> run (2026-10-13, §7.18; audited 2026-10-14, the same section); 5G, the loop (2026-10-14, §7.19).
-> **Next:** step 5's 5H–5K (§7.14), with §7.16's, §7.18's and §7.19's notes for 5H. Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> run (2026-10-13, §7.18; audited 2026-10-14, the same section); 5G, the loop (2026-10-14, §7.19); 5H, the
+> process (2026-10-14, §7.20; audited the same day).
+> **Next:** step 5's 5I–5K (§7.14), with §7.20's notes for 5I. Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -1472,6 +1473,111 @@ behavioural bug. Fixed, each proved by a test that fails without it:
   clock — the last now tested); §4.1's example line now counts from the end (`11:14:41`); the 5H note's
   exit rule and an unsettling `done`, above.
 
+### 7.20 5H — Implemented (2026-10-14, V438–V443; audited the same day, V444–V450)
+
+`orchestrator/start.ts`, as §7.14 asks, following §7.16's, §7.17's, §7.18's and §7.19's notes; its pure
+parts (the `--task` selection, its lines, the exit code) in `start-lines.ts`; the run folders' reader
+it shares with the orphan check in `state/run-folders.ts` (the audit's, below). Decided here, where §7.14 was silent:
+
+- **`start(options, deps)` returns the exit code; the command calls `process.exit(code)`.** `start` does
+  every step of §7.16's sequence but that one — the loops, `bus.settle()`, `release()`, `logger.close(5 s)`,
+  `drainTerminal(stdout, 5 s)` — so nothing runs between its return and the exit. Called with an injected
+  `exit` instead, a spec's stand-in would return and let code run that never runs in production; returning
+  keeps `start` callable in a spec's own process. It never rejects (an unexpected throw is a line and `1`).
+  `options` are 5I.2's: `config`, `tasks`, `once`. **`--dry-run`'s seam:** `prepareStart(options)` — the
+  product list, the config, the selection; everything before the lock — which 5I.2 hands to 5I.1's report.
+- **Order:** the signal handlers first (so a Ctrl-C at any point is honoured, and removed in a `finally`
+  whatever happens) → `stdoutTerminal(stdout)` → `prepareStart` → `acquireLock` → `openLogger` (after the
+  lock, so `orchestrator.log` is only ever written by the lock's holder) → the leftover sweep's and the
+  config's warnings → `checkOrphans` (every task's folders; stale runs said, each orphan's
+  `orphanRefusal`) → a signal so far: `stopped before any run started`, 130 → the bus
+  (`secrets: secretValues(config)`) and `subscribeNotifications` → `started · 2 tasks (bpng, bfap) [· once]
+  · .orchestrator/ · pid 4242` → one `runTask` per selected task, all in one turn, with §7.18's deps
+  (`suiteCommands` from `productByName`/`playwrightConfigFor`, `process.env`, `process.execPath`) → wait →
+  `bus.settle()` → `release()` (in a `finally` from the moment the lock is held) → `exiting N` → close →
+  drain. Before the log is open (a config error, `--task`, a refused lock, a log that cannot be opened),
+  the refusal goes to standard error, masked, its lines kept; `1`.
+- **Signals:** `SHUTDOWN_SIGNALS` → `createShutdown`; each escalation is a line saying what happens now
+  and next (`stopping: … — no new run; every run finishes its scenario in progress. Ctrl-C again to
+  interrupt them; interrupted anyway after 15 min`; `interrupting every run: …`; `killing every run: …`)
+  and is handed to **every loop's** `stop` — so cooldowns end and nothing starts. A signal while the bus
+  settles still makes the exit 130.
+- **The bounded wait (§7.19):** the loops are awaited without limit — a run lasts an hour, a loop for
+  ever — until the shutdown reaches `killed` (a third Ctrl-C, or the budgets); from then, `KILL_SETTLE_MS`
+  (60 s, a referenced timer: a SIGKILLed group empties at once, the rest is reading and announcing the
+  end). On running out: `stopped waiting: bpng did not end within 1 min of the kill`, then, under each
+  task, each run **this start began** (the cycle's `onRunBegun`) whose record still says it runs, its
+  group judged now by the orphan check's own `classifyRunning`: shown to be the run's — `bpng-12 left
+  behind, still running in process group 4242: end it with kill -KILL -4242`; not shown so — `may be left
+  behind … — unconfirmed: <why>. Check it first: ps -o … -g 4242` (or `lsof` on its `run.log` before its
+  group was recorded), no kill command; ended or another's — `bpng-12 left nothing to kill (process group
+  ended): its loop is stuck after its processes, …` — and exit 130 with the lock released: the next
+  start's orphan check refuses on a run still alive.
+- **Exit code** (`loopsExitCode`): `130` whenever a signal was counted, even after every loop ended;
+  with `--once`, `onceExitCode` of the verdicts; without it, `1` (a loop ends unsignalled only when it
+  broke). `1` for every refusal before the loops.
+
+**Verification.** `start.spec.ts`, 32 tests over the fake suite, each in a state directory of its own,
+signals emitted on a stand-in process and a moved shutdown clock: two tasks at once (both started before
+either ended), `--once` 0 and 1, `--task` (and an unknown one refused before the lock), a signal after the
+loops ended (130), a config error, a product list that will not load, a refused lock (left alone), an
+orphan of an unselected task, a stale record marked lost, a log that cannot open, a linked `runs/`, a
+state directory others may write; one SIGINT (both runs drained, both loops ended), two within a second
+(one), two (interrupted), three (killed), an ignored interrupt escalated by the budget to a kill (never a
+give-up), SIGTERM then SIGHUP, a stop in the cooldown, a signal before any run, a run that never settles
+(named with its group after `killSettleMs`); the commands, environment and secrets handed to the loops,
+masking (a warning quoting a path that holds a secret), the Datator record kept, stdout made non-blocking,
+the terminal drained (also once the log gave up on it), no timer, budget or file descriptor left; every
+test checks no handler is left, the lock is gone and no output holds the secret. Two run `start` in a
+child Node and send it **real** signals — two SIGINTs 5 ms apart (npm's relay) and SIGTERM: drained, exit
+130, lock released. `start-lines.spec.ts` (13) and `still-running.spec.ts` (4) cover the pure parts. The
+fake suite gained `ignoreDrain` (a scenario that never finishes), a new option; no existing spec changed.
+
+**Audit (2026-10-14, V444–V449).** Two reviewers (security, correctness), each on its own copy; no high.
+Every finding reproduced, fixed, and proved by a test that fails without the fix:
+
+- **A kill command for a group that may not be the run's (low-medium; both).** The give-up named every
+  record of the stuck tasks still saying `running` — an earlier orchestrator's stale run that could not
+  be marked lost included — and printed `kill -KILL -<pgid>` unjudged, for a group that had ended (the
+  security reviewer's repro) and whose id could be reused. Now only the runs this start began are named
+  (`CycleDeps.onRunBegun`, called once the run has its number and is about to launch; a throwing hook is
+  a line), and each group is judged by `classifyRunning` — the kill command only when confirmed.
+- **The reader duplicated the orphan check's and followed a linked run folder (low; both).**
+  `state/still-running.ts` is gone; `state/run-folders.ts` (`readRunningFolders`: the runs' folder never
+  through a link, each run folder by its entry's own type, each record only its folder's) serves both;
+  `orphans.spec.ts` passes unmodified.
+- **`--task` did not narrow the servers' warning (low).** `checkConfig`/`loadConfig` take the selected
+  ids (optional; their specs unchanged), so a server's load counts only what runs — `--dry-run` too.
+- **Test gaps (low):** a secret on standard error after the config is loaded (lock refusal, log refusal),
+  a signal before the log, the give-up with two tasks (only the stuck one named), a record unreadable at
+  the give-up, a loop stuck with no running record, a lock gone before release, the leftover sweep's line,
+  the unexpected-failure path (`1`), `loopsExitCode` without `--once`, `CHECKOUT` and the constants. The
+  "signal after every loop ended" test proved nothing (its flag was set unconditionally): it now watches
+  the run's handle settle first; a title fixed; a 100 ms bound widened to 400 ms.
+- **Smaller:** `runLoops` split (`loopDeps`); TSDoc for `PreparedStart`'s members.
+- **Kept, on purpose:** the bus's `secrets` — equivalent today (its one subscriber logs through the
+  logger, which masks with the same values), kept for a subscriber that could throw.
+- **Kept, on purpose (a known limit, from before 5H):** a valid run folder whose `run.json` cannot be read
+  — `EACCES`, a link, a FIFO, over its cap, malformed, naming another folder — is warned about and passed
+  over by the orphan check, not refused. Only tampering in the `0700` state directory reaches it, and
+  refusing would block every start for good on a folder whose first record write failed (a full disk).
+- **Re-audit (2026-10-14, V450).** No high or medium; `run-folders.ts` proven exactly as strict as the
+  reader it replaced (a 30-tree differential). Closed: `onRunBegun` pinned before the launch; the give-up's
+  filters each proven — a finished task's run forced back to `running` (its group a live, matching
+  process) is never named, a stuck task's line is never doubled by "no run of it is recorded running",
+  and its unreadable-record warnings are said only for runs this start began of the stuck tasks (now
+  restricted to those tasks too).
+
+- **For 5I:** `cli.ts` parses, then `process.exit(await start(options))` — nothing between; `--dry-run`
+  calls `prepareStart` (a `ConfigError` printed alone, exit 1) and 5I.1's report, never `start`. **The
+  `orchestrator` script runs `node --import tsx orchestrator/cli.ts`, never the `tsx` CLI**: the CLI runs
+  the code in a child and relays signals to it, and SIGINTs sent to its PID alone, 1 ms apart, made it
+  SIGKILL the child in about half the tries — the lock left, the runs draining, their records `running`
+  (V443); under `node --import tsx` there is one process and it was always clean. 5I.2's child-process
+  spec must prove both: repeated SIGINTs to the script's PID, and npm's pattern (the group's SIGINT and
+  npm's relay), each drain and exit 130. Keep `--task` repeatable (commander's
+  variadic option) and hand the ids as they are: `selectTasks` dedupes and refuses unknown ones.
+
 ## 8. What later phases change, and keep
 
 | Here | Later | Kept |
@@ -1638,3 +1744,16 @@ behavioural bug. Fixed, each proved by a test that fails without it:
 | V435 | `loop.spec.ts`, 57 tests (+17): Node's armed `Timeout`s back to their baseline after a stop, and one more and back for the bare timers; `cooldownDelay` total (`NaN` → 0, negative → 0, `±Infinity`, 40,000 min and a `NaN` end within `[0, 2³¹−1]`); a cooldown of `NaN`, -1, 0, 2.5, `Infinity`, 1441 and 40,000 ends the loop `failed` before any run, with and without `--once`; 1 and 1440 waited; a clock that throws ends it `failed`. `--repeat-each 20 --workers 6`: 1140 passed | ✅ 2026-10-14 | `npx playwright test -c playwright.unit.config.ts orchestrator/tasks/loop.spec.ts --repeat-each 20 --workers 6` |
 | V436 | The fixes undone, each in a copy, each failing a test — 10/10: the no-op `clearTimeout`, no cooldown check, no integer check, either bound, no `NaN` guard, no timer cap, no floor on the cap, a non-finite wait uncapped, a wrong `MAX_TIMER_MS` | ✅ 2026-10-14 | A mutation script in the scratchpad |
 | V437 | The gates pass; a full unit run: 2961 passed, 8 skipped by their environment guards; the `cycle.ts`, `run-lines.ts` and `schema.ts` specs pass unmodified | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V438 | `orchestrator/start.spec.ts`, 32 tests: two tasks at once, `--once` 0/1, `--task` and an unknown one, a signal after the loops ended, a config error, a product list that will not load, a refused lock, an orphan of an unselected task, a stale record, a log that cannot open, a linked `runs/`, a group-writable state directory, one/two-close/two/three SIGINTs, a budget escalating an ignored interrupt to a kill, SIGTERM then SIGHUP, a stop in the cooldown, a signal before any run, a run that never settles named with its group; the commands, environment and secrets handed on, masking, the Datator record kept, stdout unblocked, the terminal drained, no timer, budget or descriptor left; handlers removed, lock released and no secret in any output after every test; `start-lines.spec.ts` 13, `still-running.spec.ts` 4. `--repeat-each 10 --workers 6`: 490 passed | ✅ 2026-10-14 | `npx playwright test -c playwright.unit.config.ts orchestrator/start.spec.ts orchestrator/start-lines.spec.ts orchestrator/state/still-running.spec.ts --repeat-each 10 --workers 6` |
+| V439 | Real signals to a real process: `start` in a child Node (tsx) over the fake suite; two SIGINTs 5 ms apart count as one (the run drained, never sent a SIGINT) and SIGTERM drains; both exit 130 with the lock removed and `exiting 130` logged | ✅ 2026-10-14 | The child-process tests in `start.spec.ts` |
+| V440 | Mutations of `start.ts`, each in a copy of the worktree — 26/27 killed (of those 27; the audit's own 68 found 10 more surviving, V448): no handler installed or removed, the give-up timer not cleared, stdout not unblocked, the log not closed, the terminal not drained, no secrets, the lock not released, orphans ignored, a signal before the loops ignored, `--once` dropped (exit or loops), stale lines dropped, the orphan verdict ignored, the logger without secrets, the Datator record, environment or `--grep` dropped, the bus not settled, loops not stopped, the give-up armed on an interrupt or never, the left-behind lines or their scope dropped, `signalled` always false, the shutdown not disposed. Equivalent: the bus without `secrets` — its only subscriber logs through the logger, which masks with the same values, and never throws a message of its own. The first pass left five survivors (log close, terminal drain, dispose, Datator record, an interrupt-armed give-up), each now killed by a test added for it | ✅ 2026-10-14 | A mutation script in the scratchpad |
+| V441 | `import-boundary.spec.ts` imports `start.ts`, `start-lines.ts` and `state/still-running.ts` (since replaced by `state/run-folders.ts`, V446) in a fresh Node (environment, listeners, working directory and exit code unchanged) with `suite-imports.json` unchanged | ✅ 2026-10-14 | `npm run test:unit` |
+| V442 | The gates pass; a full unit run: 3010 passed, 8 skipped by their environment guards; no existing spec changed | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V443 | `tsx` (4.23.15) runs a script in a child Node of its own (the script's parent PID is tsx's) and relays a single SIGINT sent to tsx to that child, which handled it. Not safe for the orchestrator: the security audit's probe sent repeated SIGINTs (1 ms apart) to tsx's PID alone and tsx SIGKILLed the child in about half the tries; the group's SIGINT plus a PID SIGINT (npm's pattern) was clean 18/18, and `node --import tsx` always — hence §7.20's note for 5I | ✅ 2026-10-14 | `tsx t.ts &`, then `kill -INT` of tsx's PID; the audit's probe (`audit-5h-sec-probe/`) |
+| V444 | Reproduced before the fixes: a stuck run whose group had ended got `kill -KILL -<pgid>`; an earlier orchestrator's stale `running` record (leader differs, its folder read-only so not marked lost) was named with a kill command for a stranger's group; a linked run folder was followed; `--task bpng` still warned about a server carrying `bpng` and `bfng` | ✅ 2026-10-14 | The reviewers' probes |
+| V445 | `start.spec.ts`, 43 tests (+11): a group gone → `left nothing to kill`, no kill command; a live group led by the run's own process → its kill command, while a stale foreign run and a task whose loop ended (two tasks) are not named; a loop stuck with no running record; a record unreadable at the give-up; secrets masked on standard error (lock refusal, log refusal); a signal before the log; a lock gone before release; the leftover sweep's line; the unexpected-failure path exits 1; `--task` narrowing the servers' warning; `CHECKOUT` and the constants; the "after the loops ended" test now proven by the run's own handle. `start-lines.spec.ts` 14 (+1), `cycle.spec.ts` +2 (`onRunBegun`, a throwing hook), `check.spec.ts` +1 (the selection). `--repeat-each 20 --workers 6` on the start specs: 1140 passed | ✅ 2026-10-14 | `npx playwright test -c playwright.unit.config.ts orchestrator/start.spec.ts orchestrator/start-lines.spec.ts --repeat-each 20 --workers 6` |
+| V446 | `state/run-folders.ts` replaces `still-running.ts` and the orphan check's own reader; `orphans.spec.ts` (30) passes unmodified. Changed existing tests, four: `start-lines.spec.ts`'s left-behind line (its signature now takes the group's verdict) and `start.spec.ts`'s "never settles" test (its group really ended: it now asserts no kill command) — both because the behaviour under test is the fix —; "a signal after every loop ended" (its flag was set unconditionally: it now watches the run's handle settle first, and is retitled) and "the budgets escalate without a signal" (retitled; its give-up bound widened from 100 to 400 ms) | ✅ 2026-10-14 | `npm run test:unit` |
+| V447 | Each fix reverted, in a copy, each failing a test — 8/8: no group judgement (two forms), runs not launched here named, the seams dropped from the loops' deps, the hook never called, a linked run folder followed, `loadConfig` without the selection, `checkConfig` counting every task | ✅ 2026-10-14 | `mutate2.py` in the scratchpad |
+| V448 | The reviewers' surviving mutants and the first pass's, re-run — 18/19 killed: leftover lines, unread lines, the "no run recorded" line, `pending` not pruned, standard error unmasked, an unexpected failure exiting 0, a failed release unsaid, `KILL_SETTLE_MS`, `EXIT_WAIT_MS`, `CHECKOUT`, `loopsExitCode` ignoring `--once`, handlers, give-up timer, stdout, log close, terminal drain, dispose. Equivalent: the bus without `secrets` (V440). The reviewer's `RUN_FOLDER -0` mutant no longer applies (the regex is gone) | ✅ 2026-10-14 | `mutate2.py` in the scratchpad |
+| V449 | The gates pass; a full unit run: 3021 passed, 8 skipped by their environment guards; `import-boundary.spec.ts` passes with `start.ts`, `start-lines.ts` and `state/run-folders.ts` imported | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V450 | Re-audit of the fixes: no high or medium. Closed with tests, each mutant failing one — 5/5: `onRunBegun` moved after the launch (`cycle.spec.ts`: an injected launch sees the id already told), the stuck-task filter on records dropped (a finished task's record forced back to `running`, its group a live matching process: never named), `named.add` dropped (no "no run recorded" line beside a named run), the give-up's warnings no longer limited to runs this start began (a stuck task's foreign unreadable folder: warned once, by the orphan check) or to the stuck tasks (a finished task's run whose record was corrupted: never said). V446 lists all four changed tests. `--repeat-each 20 --workers 6` on the start specs: 1160 passed; full unit run: 3023 passed, 8 skipped | ✅ 2026-10-14 | `mutate3.py` in the scratchpad; the four gates |
