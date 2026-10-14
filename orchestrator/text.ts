@@ -186,6 +186,41 @@ export function safeBlock(
 }
 
 /**
+ * What a value says, as raw text — for a thrown value above all: an `Error`'s message, else the value
+ * itself, through `String` when it is not a string. Total: a message that is not text, an object with
+ * no prototype, a getter or `toString` that throws — `""` when nothing printable comes of it. Neither
+ * masked nor cleaned: show it through {@link safeLine}, or {@link failureLine}.
+ *
+ * @param value - what was thrown, or any value to show.
+ * @returns its text; `""` when it has none.
+ */
+export function textOf(value: unknown): string {
+  try {
+    const message: unknown = value instanceof Error ? value.message : value;
+    return typeof message === "string" ? message : String(message);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * A failure as one safe line: what it says ({@link textOf}) through {@link safeLine}, `failed` when
+ * that leaves nothing. Total, whatever was thrown.
+ *
+ * @param error - what was thrown.
+ * @param max - the most code points kept.
+ * @param secrets - secret values to mask wherever they appear.
+ * @returns the line, never blank.
+ */
+export function failureLine(
+  error: unknown,
+  max: number,
+  secrets: readonly string[] = [],
+): string {
+  return safeLine(textOf(error), max, secrets) || "failed";
+}
+
+/**
  * `path` as one word of a POSIX shell command: as it is when it holds only characters no shell
  * treats specially, else in single quotes.
  *

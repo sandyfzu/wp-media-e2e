@@ -3,6 +3,7 @@ import type {
   playwrightConfigFor,
   productByName,
 } from "../../src/projects/products";
+import { textOf } from "../text";
 import { ConfigError } from "./errors";
 
 /**
@@ -60,7 +61,7 @@ export async function loadProductList(
     list = await importList();
   } catch (error) {
     throw new ConfigError(
-      `The product list could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+      `The product list could not be loaded: ${textOf(error)}`,
     );
   }
   const { PRODUCTS, productByName, playwrightConfigFor } = list;

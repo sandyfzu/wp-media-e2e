@@ -29,6 +29,7 @@ import {
   type RecordFileRead,
   type RunState,
 } from "../runs/record";
+import { textOf } from "../text";
 
 /**
  * Run-folder retention: a task's `runs/<task>-<n>/` folders pruned by the suite's own report policy
@@ -350,13 +351,12 @@ function nothingDone(policy: RetentionPolicy): RunRetentionReport {
  *
  * @param path - what it was about.
  * @param error - what was thrown.
+ * @returns the failure.
  */
 function failure(path: string, error: unknown): RemovalFailure {
   return {
     path,
-    error:
-      errorCode(error) ??
-      (error instanceof Error ? error.message : String(error)),
+    error: errorCode(error) ?? textOf(error),
   };
 }
 

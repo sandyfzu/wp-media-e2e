@@ -1,4 +1,4 @@
-import { safeLine } from "../text";
+import { failureLine, safeLine } from "../text";
 
 /**
  * The orchestrator's event bus: whoever announces something publishes it, and each subscriber —
@@ -174,30 +174,12 @@ async function runBounded<E extends BusEvent>(
     // Called inside the async body, so a handler that throws synchronously is caught too.
     await subscription.handler(event, controller.signal);
     return undefined;
-  })().catch((error: unknown) => describeFailure(error, options.secrets ?? []));
+  })().catch((error: unknown) =>
+    failureLine(error, MAX_FAILURE_LENGTH, options.secrets ?? []),
+  );
   try {
     return await Promise.race([run, timeout]);
   } finally {
     clearTimeout(timer);
   }
-}
-
-/**
- * A handler's failure as one safe line ({@link safeLine}): its message, else what `String` makes of
- * it, else `failed`. Total: whatever was thrown — an object with no prototype, a message that is not
- * text, a getter that throws — it returns a line.
- *
- * @param error - what it threw.
- * @param secrets - the secret values to mask.
- */
-function describeFailure(error: unknown, secrets: readonly string[]): string {
-  let text = "";
-  try {
-    const message: unknown = error instanceof Error ? error.message : error;
-    text = typeof message === "string" ? message : String(message);
-  } catch {
-    // Not printable: said as `failed` below.
-  }
-  const line = safeLine(text, MAX_FAILURE_LENGTH, secrets);
-  return line === "" ? "failed" : line;
 }

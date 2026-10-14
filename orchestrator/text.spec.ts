@@ -5,11 +5,13 @@ import { join } from "node:path";
 
 import {
   cut,
+  failureLine,
   oneLine,
   safeBlock,
   safeLine,
   secretForms,
   shellWord,
+  textOf,
 } from "./text";
 
 /** A GitHub token by its shape, and its 36 characters after the prefix. */
@@ -235,6 +237,66 @@ test.describe("secretForms", () => {
     expect(safeLine("a/b/c/de a%2Fb%2Fc%2Fde", 100, ["a/b/c/de"])).toBe(
       "*** ***",
     );
+  });
+});
+
+test.describe("textOf", () => {
+  test("an Error's message, else the value, as text", () => {
+    expect(textOf(new Error("disk full"))).toBe("disk full");
+    expect(textOf(new TypeError(""))).toBe("");
+    expect(textOf("plain")).toBe("plain");
+    expect(textOf(42)).toBe("42");
+    expect(textOf(undefined)).toBe("undefined");
+    expect(textOf(null)).toBe("null");
+    expect(textOf(Symbol("s"))).toBe("Symbol(s)");
+    expect(textOf({ toString: () => "custom" })).toBe("custom");
+  });
+
+  test("a message that is not text is made text", () => {
+    const error = new Error("replaced");
+    Object.defineProperty(error, "message", {
+      value: { toString: () => "obj" },
+    });
+    expect(textOf(error)).toBe("obj");
+    Object.defineProperty(error, "message", { value: 7 });
+    expect(textOf(error)).toBe("7");
+  });
+
+  test("total: nothing printable is the empty text, never a throw", () => {
+    const throwing = {
+      toString(): never {
+        throw new Error("no");
+      },
+    };
+    const error = new Error("replaced");
+    Object.defineProperty(error, "message", {
+      get(): never {
+        throw new Error("no");
+      },
+    });
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    for (const value of [throwing, Object.create(null), error, revoked.proxy])
+      expect(textOf(value)).toBe("");
+  });
+});
+
+test.describe("failureLine", () => {
+  test("one masked line, cut", () => {
+    expect(failureLine(new Error(`bad\nkey ${TOKEN}`), 100)).toBe(
+      "bad key ***",
+    );
+    expect(
+      failureLine(new Error("storage pw no shape 42 refused"), 100, [
+        "storage pw no shape 42",
+      ]),
+    ).toBe("*** refused");
+    expect(failureLine("abcdef", 4)).toBe("abc…");
+  });
+
+  test("`failed` when it says nothing", () => {
+    for (const value of [new Error(""), " \n ", Object.create(null)])
+      expect(failureLine(value, 100)).toBe("failed");
   });
 });
 
