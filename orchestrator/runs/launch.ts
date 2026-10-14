@@ -1,11 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants, writeFileSync } from "node:fs";
 import { lstat, mkdir, open, type FileHandle } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { RESULTS_FILE } from "../../src/common/reporting/results-schema";
 import { errorCode } from "../error-code";
+import { checkOwnFolder, PRIVATE_FOLDER } from "../folders";
 
 import type { Command, RunCommands } from "./commands";
 import { variableNames } from "./environment";
@@ -123,13 +124,21 @@ const NOT_STARTED: ProcessExit = { code: null, signal: null };
  *
  * @param options - the run, its commands, where and with what it runs.
  * @returns the run, once `bddgen` was spawned.
- * @throws {@link Error} when the run's folder is not a private folder of this user's, when its stop
- *   file or log is already there — a run of that id ran before, and its stop file would drain this
- *   one from its first scenario — or when either cannot be made.
+ * @throws {@link Error} when anything is already at the run's folder — a run of that id ran before,
+ *   and sharing its folder would mix two runs' logs, records and stop files — when the folder is not
+ *   a private folder of this user's, when its stop file or log is already there, or when any of them
+ *   cannot be made. Nothing is spawned then.
  */
 export async function launchRun(options: LaunchOptions): Promise<LaunchedRun> {
   const { identity } = options;
-  await mkdir(identity.dir, { recursive: true, mode: 0o700 });
+  await mkdir(dirname(identity.dir), { recursive: true, mode: 0o700 });
+  // Created here, never reused: a run number handed out twice fails now, before anything runs.
+  await mkdir(identity.dir, { mode: 0o700 }).catch((error: unknown) => {
+    if (errorCode(error) !== "EEXIST") throw error;
+    throw new Error(
+      `The run's folder is already there (${identity.dir}): a run of that id ran before.`,
+    );
+  });
   await assertPrivateFolder(identity.dir);
   if (await exists(identity.stopFile))
     throw new Error(
@@ -147,13 +156,12 @@ export async function launchRun(options: LaunchOptions): Promise<LaunchedRun> {
  * @throws {@link Error} naming what is wrong.
  */
 async function assertPrivateFolder(dir: string): Promise<void> {
-  const stats = await lstat(dir);
-  const uid = process.getuid?.();
-  if (!stats.isDirectory())
+  const check = await checkOwnFolder(dir, PRIVATE_FOLDER);
+  if (check.kind === "notFolder")
     throw new Error(`The run's folder is not a folder: ${dir}.`);
-  if ((uid !== undefined && stats.uid !== uid) || (stats.mode & 0o077) !== 0)
+  if (check.kind !== "ok")
     throw new Error(
-      `The run's folder must be this user's alone (mode 0700): ${dir} is mode ${(stats.mode & 0o777).toString(8)}.`,
+      `The run's folder must be this user's alone (mode 0700): ${dir} is mode ${check.mode.toString(8)}.`,
     );
 }
 

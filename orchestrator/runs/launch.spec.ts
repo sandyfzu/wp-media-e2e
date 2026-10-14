@@ -4,8 +4,10 @@ import { execFileSync } from "node:child_process";
 import {
   chmod,
   mkdtemp,
+  readdir,
   readFile,
   rm,
+  stat,
   symlink,
   writeFile,
   mkdir,
@@ -260,11 +262,21 @@ test.describe("launchRun", () => {
     );
   });
 
-  test("refuses a run whose stop file is already there", async () => {
+  test("refuses a run whose folder is already there, even empty and private, spawning nothing", async () => {
+    const opts = options({ exitCode: 0 }, { exitCode: 0 });
+    await mkdir(opts.identity.dir, { recursive: true, mode: 0o700 });
+    await expect(launchRun(opts)).rejects.toThrow(
+      `The run's folder is already there (${opts.identity.dir}): a run of that id ran before.`,
+    );
+    // No log: nothing was spawned, nor written.
+    expect(existsSync(opts.identity.log)).toBe(false);
+  });
+
+  test("refuses a run whose folder already holds a stop file, which would drain it", async () => {
     const opts = options({ exitCode: 0 }, { exitCode: 0 });
     await mkdir(opts.identity.dir, { recursive: true, mode: 0o700 });
     await writeFile(opts.identity.stopFile, "");
-    await expect(launchRun(opts)).rejects.toThrow(/stop file is already there/);
+    await expect(launchRun(opts)).rejects.toThrow(/folder is already there/);
   });
 
   test("ignores a stop once nothing runs any more, even while the log is flushed", async () => {
@@ -384,35 +396,49 @@ test.describe("launchRun", () => {
     );
   });
 
-  test("refuses a log already there — a file, a symlink or a FIFO — never following nor waiting on it", async () => {
+  test("refuses a folder already holding a log — a file, a symlink or a FIFO — never following nor waiting on it", async () => {
     const opts = options({ exitCode: 0 }, { exitCode: 0 });
     await mkdir(opts.identity.dir, { recursive: true, mode: 0o700 });
     const victim = join(root, "victim");
     await writeFile(victim, "victim\n");
     await symlink(victim, opts.identity.log);
-    await expect(launchRun(opts)).rejects.toMatchObject({ code: "EEXIST" });
+    await expect(launchRun(opts)).rejects.toThrow(/folder is already there/);
     expect(await readFile(victim, "utf8")).toBe("victim\n");
     await rm(opts.identity.log);
     execFileSync("mkfifo", [opts.identity.log]);
-    await expect(launchRun(opts)).rejects.toMatchObject({ code: "EEXIST" });
-    await rm(opts.identity.log);
-    await writeFile(opts.identity.log, "");
-    await expect(launchRun(opts)).rejects.toMatchObject({ code: "EEXIST" });
+    await expect(launchRun(opts)).rejects.toThrow(/folder is already there/);
   });
 
-  test("refuses a run folder that is a link, or open to others", async () => {
+  test("refuses a run folder that is a link — even a dangling one — or a folder open to others, writing nothing through it", async () => {
     const opts = options({ exitCode: 0 }, { exitCode: 0 });
     const elsewhere = join(root, "elsewhere");
     await mkdir(elsewhere, { mode: 0o700 });
     await mkdir(join(root, "runs"), { recursive: true });
     await symlink(elsewhere, opts.identity.dir);
-    await expect(launchRun(opts)).rejects.toThrow(/is not a folder/);
+    await expect(launchRun(opts)).rejects.toThrow(/folder is already there/);
+    expect(await readdir(elsewhere)).toEqual([]);
+    await rm(opts.identity.dir);
+    await symlink(join(root, "nowhere"), opts.identity.dir);
+    await expect(launchRun(opts)).rejects.toThrow(/folder is already there/);
+    expect(existsSync(join(root, "nowhere"))).toBe(false);
     await rm(opts.identity.dir);
     await mkdir(opts.identity.dir, { mode: 0o700 });
     await chmod(opts.identity.dir, 0o755);
-    await expect(launchRun(opts)).rejects.toThrow(
-      /must be this user's alone .* mode 755/,
-    );
+    await expect(launchRun(opts)).rejects.toThrow(/folder is already there/);
+  });
+
+  test("makes the run's folder, and runs/ when missing, private under umask 0", async () => {
+    const previous = process.umask(0);
+    try {
+      const opts = options({ exitCode: 1 }, {});
+      await (
+        await launchRun(opts)
+      ).done;
+      expect((await stat(opts.identity.dir)).mode & 0o777).toBe(0o700);
+      expect((await stat(join(root, "runs"))).mode & 0o777).toBe(0o700);
+    } finally {
+      process.umask(previous);
+    }
   });
 });
 
