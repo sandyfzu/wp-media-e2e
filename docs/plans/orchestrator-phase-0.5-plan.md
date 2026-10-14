@@ -6,8 +6,8 @@
 > Slack and Datator formatters and senders (2026-10-13, §7.10; audited the same day, §7.11); step 4, M4's
 > launch and end and M5's stop machines (2026-10-13, §7.12; audited the same day, §7.13); step 5's
 > 5A–5D, the logger, lock, counter, leader identity, orphan check and run-folder retention (2026-10-13,
-> §7.15; audited and re-audited the same day, §7.16).
-> **Next:** step 5's 5E, then 5F–5K (§7.14), with §7.16's notes for 5F and 5H. Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> §7.15; audited and re-audited the same day, §7.16); 5E, the notification subscribers (2026-10-13, §7.17).
+> **Next:** step 5's 5F–5K (§7.14), with §7.16's notes for 5F and 5H and §7.17's for 5F. Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -1252,7 +1252,55 @@ reproduced first, and every fix proved by a test that fails without it (V412).
   `logger.close(ms)`, `drainTerminal(process.stdout, ms)`, then `process.exit(code)` — a paused
   terminal keeps the event loop alive. Call `stdoutTerminal()` only once `start` runs, after the
   command line is parsed, so `--help` and errors stay blocking. Specs that start twice in one process
-  are refused by the lock, as they should be: inject distinct state directories.
+  are refused by the lock, as they should be: inject distinct state directories. Create the bus with
+  `secrets: secretValues(config)`: a subscriber's throw — a `logger.line` failing with a message that
+  quotes a secret — is masked by the bus's own secrets, and by shape alone without them (5E's audit).
+
+### 7.17 5E — Implemented (2026-10-13, V415–V420)
+
+`orchestrator/notify/subscribe.ts`, as §7.14 asks; decided here, where it was silent:
+
+- **One subscriber, `notifications`, for both senders.** The line waits for both and always names
+  Slack first, whichever answers first; two subscribers would need a join that a timed-out one never
+  reaches. Both get the bus's signal and `secretValues(config)`, Slack also `instance` and
+  `reports.sshHost`. Neither configured: nothing subscribed, nothing logged.
+- **The line**, under the run's task id: `slack ✓ · datator ✓ 201` (Slack's success is only ever `200
+  ok`, so it shows no status); a failure `✗`, its status, then the answer or our own words
+  (`✗ 404 no_service`, `✗ HTTP 500`, `✗ no answer within 15000 ms`, `✗ cancelled`,
+  `✗ request failed: ECONNREFUSED`); a run that did not test, `datator not posted (stopped)`. Every
+  part masked again and made one line; a formatter that throws is that sender's `✗ not sent: …`, so
+  the other still reports and nothing reaches the bus.
+- **For 5F — the payload:** `subscribeNotifications` returns `{ senders, datatorPayload(event) }`.
+  Call `datatorPayload(event)` with the event object to be published, before writing the `ended`
+  record, and keep it there (`EndedRecord` gains the field in 5F): it is memoised per event object, so
+  the record kept is the very one posted, frozen through; `undefined` when Datator is not configured
+  or the run did not test. It can throw (building the record reads the event): catch it there, so a
+  record that cannot be built never stops the `ended` record — the sender then says `✗ not sent: …`.
+- **Not added:** an unsubscribe. The bus has none, and nothing publishes after the loops end (5H
+  settles the bus then); the senders' own 15 s limit is under the bus's 30 s, so the bus's limit only
+  cancels a request when it is set lower.
+
+**Audit (2026-10-13, V418–V420).** Two reviewers (security, correctness), each on its own copy; every
+finding reproduced, fixed, and proved by a test that fails without it.
+
+- **A thrown message that is not text lost the line (low-medium).** `errorText` read `error.message`
+  as it was: a number or an object reached `safeLine` outside the `try`, the subscriber rejected, and
+  the bus logged `not delivered` instead of the line; so did a `run.finished` status that is not text.
+  Now one total helper in `text.ts` — `textOf` (any value as text, `""` when unprintable) and
+  `failureLine` (that, masked, one line, `failed` when blank) — replaces the four copies (`bus.ts`'s
+  `describeFailure`, `product-list.ts`, `run-retention.ts`, `subscribe.ts`; the same text for every
+  printable value, their specs unchanged), and every part of the line goes through it.
+- **Nothing proved the senders get the secrets (medium).** The line masks again, so dropping either
+  sender's `secrets` passed; it matters where only the sender can act: a secret under 8 characters,
+  which only `postJson` withholds, and an answer cut inside a secret longer than `CUT_TAIL`, whose start
+  only the sender's longer tail drops. Both now tested per sender, beside a shapeless secret echoed in
+  every form; nor that the two run at once (one after the other passed): both hang, 100 ms each, the
+  bus's limit 180 ms.
+- **Smaller (low):** the Datator record handed out could be changed after, and the change posted (now
+  frozen through: a write throws); a detail starting `HTTP ` hid the status (`HTTP method not allowed`;
+  now hidden only for `HTTP <status>` and `HTTP <status> …`); a plan phase named in a TSDoc; missing
+  `@returns` and member docs; untested `failed` fallback, raw `notPosted`, subscriber name and `fetch`
+  seam.
 
 ## 8. What later phases change, and keep
 
@@ -1397,3 +1445,9 @@ reproduced first, and every fix proved by a test that fails without it (V412).
 | V412 | Mutations of the fixes, each in a copy, each failing a test: the shared reader and durable write 21/21; lock and counter 17 + the deterministic race; records, orphans and retention 30/30; logger and masking 43/43; the re-audit's fixes 17/17 and 22/22; the exclusive log open and the log folder's rule 3/3. The re-audit's own runs found 4 survivors (fixed, or the two equivalents of §7.16) | ✅ 2026-10-13 | The mutation harnesses in copies of the worktree |
 | V413 | Re-audit of the fixes: every claimed fix present and behaving as stated, but for the ten findings §7.16 lists as the re-audit's | ✅ 2026-10-13 | Two reviewers, each on its own copy |
 | V414 | The gates pass after both rounds; a full unit run: 2814 passed, 8 skipped by their environment guards; `import-boundary.spec.ts` passes with `suite-imports.json` unchanged | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format:check`, `test:unit` |
+| V415 | `subscribeNotifications` over real sockets (`http-sink.ts`): each sender alone, both, each failing while the other succeeds, both failing (an empty `500`, no server), the request's own time limit, the bus's time limit cancelling both through its signal, an unconfigured sender never sent nor named, `error`/`stopped`/`killed` posted to Slack only, answers echoing the webhook's token and path, Datator's key and a run's `GITHUB_TOKEN` masked in the line — by the line's own masking: it cannot tell whether a sender got the secrets (the audit; V418 does) —, a throwing formatter told per sender; the Datator record handed out is the object posted | ✅ 2026-10-13 | `orchestrator/notify/subscribe.spec.ts`, 18 tests |
+| V416 | Mutations of `subscribe.ts`, each failing a test: no signal, no secrets, no catch, no memo, Slack's status shown, a status shown twice, subscribing with nothing configured, no time limit, no instance — 9/9. Not listed, and surviving (the audit's runs): no secrets to either sender, the senders one after the other, no `failed`, a raw `notPosted`, the subscriber's name, the `fetch` seam unused — all killed since (V419) | ✅ 2026-10-13 | Each applied in place to a backup, run, restored |
+| V417 | The gates pass; a full unit run: 2832 passed, 8 skipped by their environment guards; `import-boundary.spec.ts` passes with `suite-imports.json` unchanged | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V418 | The audit's cases, over real sockets: a thrown message that is a number, an object, empty or blank, and a status that is not text, each still making the line; a 7-character secret echoed by each sender's answer withheld whole; a shapeless secret echoed plain, URL-encoded and JSON-escaped masked in both; an answer cut 690 characters into a 700-character secret showing none of it; both senders hanging end at 100 ms each under a 180 ms bus limit; a write to the record handed out, its `test_cases` or a case throws `TypeError` and the body posted is unchanged; a `fetch` given reaches both senders; `HTTP method not allowed` keeps its `405`; `textOf`/`failureLine` total on a revoked proxy, a throwing getter or `toString`, `Object.create(null)` | ✅ 2026-10-13 | `subscribe.spec.ts` (30 tests), `text.spec.ts` (+5) |
+| V419 | Mutations, each in a copy of the worktree, each failing the test meant for it — 19/19: the 8 earlier survivors (no secrets to Slack, to Datator; one after the other; no `failed`; raw `notPosted`; the subscriber's name; no `fetch` to Slack, to Datator), the old behaviour of each fix (the old `errorText`, `notPosted`, detail and `HTTP ` rule; no freeze, of the cases, of the array) and of the helper (`textOf` without `String`, without its `catch`; the `HTTP ` rule exact only, or without its space) | ✅ 2026-10-13 | A mutation harness in a copy |
+| V420 | The gates pass; a full unit run: 2849 passed, 8 skipped by their environment guards; the specs of `bus.ts`, `product-list.ts` and `run-retention.ts` pass unmodified on the shared helper | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format`, `test:unit` |
