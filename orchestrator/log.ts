@@ -3,7 +3,7 @@ import { lstat, open, type FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { errorCode } from "./error-code";
-import { assertPrivateFolder } from "./private-folder";
+import { checkOwnFolder, describeFolderProblem, STATE_FOLDER } from "./folders";
 import { stdoutTerminal, type Terminal } from "./terminal";
 import { safeLine } from "./text";
 
@@ -228,11 +228,12 @@ export function createLogger(options: LoggerOptions): Logger {
 }
 
 /**
- * Opens `orchestrator.log` ({@link openLogFile}) in a folder of this user's alone, and makes a logger
- * over it. When the file had a wider mode than `0600`, it was tightened, and the first line says so.
+ * Opens `orchestrator.log` ({@link openLogFile}) and makes a logger over it. When the file had a wider
+ * mode than `0600`, it was tightened, and the first line says so.
  *
- * @param path - the log's path; its folder must exist, be this user's and be closed to everyone else
- *   (mode `0700`), so no one else can put a link or another file in the log's place.
+ * @param path - the log's path, in the state directory: its folder must exist, be this user's, and no
+ *   one else may write in it — the lock's own rule ({@link STATE_FOLDER}) — so no one else can put a
+ *   link or another file in the log's place.
  * @param options - the terminal, the secrets, the clock.
  * @returns the logger.
  * @throws {@link Error} when the folder is refused, or the log cannot be opened or is refused
@@ -242,7 +243,12 @@ export async function openLogger(
   path: string,
   options: Omit<LoggerOptions, "file"> = {},
 ): Promise<Logger> {
-  await assertPrivateFolder(dirname(path), "orchestrator's log folder");
+  const folder = dirname(path);
+  const check = await checkOwnFolder(folder, STATE_FOLDER);
+  if (check.kind !== "ok")
+    throw new Error(
+      `The orchestrator's log folder ${folder} ${describeFolderProblem(check)}: it must be this user's, and no one else may write in it.`,
+    );
   const opened = await openLogFile(path);
   const logger = createLogger({ ...options, file: opened.file });
   if (opened.tightenedFrom !== undefined)

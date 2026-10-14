@@ -950,7 +950,7 @@ test.describe("openLogFile and openLogger", () => {
     expect(closed).toBe(true);
   });
 
-  test("openLogger refuses a log folder others may write in, or reached through a link, opening nothing", async () => {
+  test("openLogger takes the state directory's rule: refuses a folder others may write in, opening nothing; takes one others only read", async () => {
     const open = join(dir, "open");
     await mkdir(open, { mode: 0o700 });
     await chmod(open, 0o770);
@@ -959,25 +959,24 @@ test.describe("openLogFile and openLogger", () => {
         terminal: fakeTerminal().terminal,
       }),
     ).rejects.toThrow(
-      `The orchestrator's log folder must be this user's alone (mode 0700): ${open} is mode 770.`,
+      `The orchestrator's log folder ${open} is mode 770: it must be this user's, and no one else may write in it.`,
     );
     await expect(lstat(join(open, "orchestrator.log"))).rejects.toThrow(
       "ENOENT",
     );
-    const linked = join(dir, "linked");
-    const real = join(dir, "real");
-    await mkdir(real, { mode: 0o700 });
-    await symlink(real, linked);
+    const file = join(dir, "file");
+    await writeFile(file, "");
     await expect(
-      openLogger(join(linked, "orchestrator.log"), {
+      openLogger(join(file, "orchestrator.log"), {
         terminal: fakeTerminal().terminal,
       }),
-    ).rejects.toThrow(
-      `The orchestrator's log folder is not a folder: ${linked}.`,
-    );
-    await expect(lstat(join(real, "orchestrator.log"))).rejects.toThrow(
-      "ENOENT",
-    );
+    ).rejects.toThrow(`The orchestrator's log folder ${file} is not a folder`);
+    await chmod(open, 0o755);
+    const logger = await openLogger(join(open, "orchestrator.log"), {
+      terminal: fakeTerminal().terminal,
+    });
+    await logger.close();
+    expect((await lstat(join(open, "orchestrator.log"))).isFile()).toBe(true);
   });
 
   test("keeps writing the file after the terminal is gone", async () => {
