@@ -348,3 +348,32 @@ export function createRecordWriter(
     },
   };
 }
+
+/** What is read back of any record to tell whose run it is, when it started and whether it ended. */
+const summarySchema = z.object({
+  v: z.literal(RUN_RECORD_VERSION),
+  state: z.enum(["running", "ended"]),
+  id: z.string(),
+  taskId: z.string(),
+  startedAt: z.string(),
+});
+
+/** A record's identity, start and state, as read back; `startedAt` unchecked, as written. */
+export type RunRecordSummary = z.output<typeof summarySchema>;
+
+/**
+ * Reads a record's text back for its identity, start and state — what pruning dates a run folder by.
+ *
+ * @param text - `run.json`'s text.
+ * @returns the summary, or `undefined` for a text that is not a record of this version.
+ */
+export function readRecordSummary(text: string): RunRecordSummary | undefined {
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  const parsed = summarySchema.safeParse(json);
+  return parsed.success ? parsed.data : undefined;
+}

@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -263,6 +263,26 @@ test.describe("readCapped", () => {
     expect(await readCapped(root, 10)).toEqual({
       kind: "unreadable",
       code: "not a file",
+    });
+  });
+
+  test("follows a link in the file's place by default, and refuses it when told not to", async () => {
+    const file = join(root, "f.txt");
+    const link = join(root, "link.txt");
+    await writeFile(file, "target");
+    await symlink(file, link);
+    expect(await readCapped(link, 10)).toEqual({
+      kind: "text",
+      text: "target",
+    });
+    expect(await readCapped(link, 10, { followLink: false })).toEqual({
+      kind: "unreadable",
+      code: "ELOOP",
+    });
+    // A regular file reads the same either way.
+    expect(await readCapped(file, 10, { followLink: false })).toEqual({
+      kind: "text",
+      text: "target",
     });
   });
 });

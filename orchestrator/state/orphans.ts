@@ -228,7 +228,7 @@ async function readRunning(
       text: `${name} in the runs' folder is not a folder: passed over`,
     };
   const path = join(runsDir, entry.name, RUN_FILES.record);
-  const read = await readCapped(path, MAX_RECORD_BYTES, { noFollow: true });
+  const read = await readCapped(path, MAX_RECORD_BYTES, { followLink: false });
   if (read.kind === "missing") return { kind: "skip" };
   if (read.kind !== "text")
     return {

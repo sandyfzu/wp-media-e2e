@@ -50,27 +50,35 @@ export type CappedRead =
   /** It is there, and could not be read: the system error's code. */
   | { readonly kind: "unreadable"; readonly code: string };
 
+/** How {@link readCapped} opens a file. */
+export interface ReadCappedOptions {
+  /**
+   * `false`: a link in the file's place is refused (`ELOOP`) rather than read — for a file only its
+   * place vouches for. Followed by default.
+   */
+  readonly followLink?: boolean;
+}
+
 /**
  * Reads a whole file, unless it is larger than `maxBytes`.
  *
  * @param path - the file.
  * @param maxBytes - the cap.
- * @param options - `noFollow`: a symbolic link at `path` is unreadable (`ELOOP`), never followed.
+ * @param options - whether a link in its place is followed.
  * @returns its text (UTF-8), or why there is none.
  */
 export async function readCapped(
   path: string,
   maxBytes: number,
-  options: { readonly noFollow?: boolean } = {},
+  options: ReadCappedOptions = {},
 ): Promise<CappedRead> {
+  const flags =
+    options.followLink === false
+      ? READ_NONBLOCKING | constants.O_NOFOLLOW
+      : READ_NONBLOCKING;
   let handle;
   try {
-    handle = await open(
-      path,
-      options.noFollow === true
-        ? READ_NONBLOCKING | constants.O_NOFOLLOW
-        : READ_NONBLOCKING,
-    );
+    handle = await open(path, flags);
   } catch (error) {
     const code = errorCode(error);
     return code === "ENOENT"

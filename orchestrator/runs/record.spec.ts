@@ -13,6 +13,7 @@ import {
   lostRecord,
   matchLeader,
   readRecord,
+  readRecordSummary,
   readRunningRecord,
   runningRecord,
   writeRunRecord,
@@ -200,6 +201,48 @@ test.describe("run records", () => {
         JSON.stringify(
           runningRecord(IDENTITY, "bpng", { ...process, leaderStart: "" }),
         ),
+      ),
+    ).toBeUndefined();
+  });
+
+  test("reads back any record's identity, start and state, and nothing that is not a record", () => {
+    const summary = {
+      v: 1,
+      id: "bpng-12",
+      taskId: "bpng",
+      startedAt: "2026-10-13T10:15:31.042Z",
+    };
+    const running = JSON.stringify(runningRecord(IDENTITY, "bpng"));
+    expect(readRecordSummary(running)).toEqual({
+      ...summary,
+      state: "running",
+    });
+    const ended = JSON.stringify(
+      endedRecord(
+        IDENTITY,
+        "bpng",
+        { bddgen: { code: 0, signal: null }, stop: { level: "none" } },
+        finishedEvent(),
+      ),
+    );
+    expect(readRecordSummary(ended)).toEqual({ ...summary, state: "ended" });
+    expect(readRecordSummary("{not json")).toBeUndefined();
+    expect(readRecordSummary("null")).toBeUndefined();
+    expect(
+      readRecordSummary(JSON.stringify({ ...summary, state: "paused" })),
+    ).toBeUndefined();
+    expect(
+      readRecordSummary(JSON.stringify({ ...summary, v: 2, state: "ended" })),
+    ).toBeUndefined();
+    // No start, or one that is no text: no record.
+    expect(
+      readRecordSummary(
+        JSON.stringify({ v: 1, id: "bpng-12", taskId: "bpng", state: "ended" }),
+      ),
+    ).toBeUndefined();
+    expect(
+      readRecordSummary(
+        JSON.stringify({ ...summary, startedAt: 1, state: "ended" }),
       ),
     ).toBeUndefined();
   });
