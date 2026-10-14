@@ -10,13 +10,20 @@ import {
   createRecordWriter,
   endedRecord,
   leaderProcess,
+  lostRecord,
   matchLeader,
+  readRecord,
   readRunningRecord,
   runningRecord,
   writeRunRecord,
   type RecordWriter,
   type RunRecord,
 } from "./record";
+
+/** Fails a test that reached a value it should not have. */
+function assertNever(): never {
+  throw new Error("unreachable");
+}
 
 /** A leader's start as macOS's `ps` reads it. */
 const START = "ps:Tue Oct 13 23:57:39 2026";
@@ -74,6 +81,9 @@ test.describe("run records", () => {
       v: 1,
       state: "running",
       id: "bpng-12",
+      runId: IDENTITY.runId,
+      taskId: "bpng",
+      startedAt: "2026-10-13T10:15:31.042Z",
       process: { name: "bddgen", pgid: 77 },
     });
     const ended = endedRecord(
@@ -91,6 +101,83 @@ test.describe("run records", () => {
         running.replace('"v": 1', '"v": 2').replace('"v":1', '"v":2'),
       ),
     ).toBeUndefined();
+  });
+
+  test("sorts a record's text: running, over, or malformed", () => {
+    const running = runningRecord(IDENTITY, "bpng", {
+      name: "bddgen",
+      pgid: 77,
+    });
+    expect(readRecord(JSON.stringify(running)).kind).toBe("running");
+    const ended = endedRecord(
+      IDENTITY,
+      "bpng",
+      { bddgen: { code: 0, signal: null }, stop: { level: "none" } },
+      finishedEvent(),
+    );
+    expect(readRecord(JSON.stringify(ended))).toEqual({ kind: "over" });
+    const lost = lostRecord(
+      readRunningRecord(JSON.stringify(running)) ?? assertNever(),
+      "process group ended",
+      new Date("2026-10-13T11:00:00.000Z"),
+    );
+    expect(readRecord(JSON.stringify(lost))).toEqual({ kind: "over" });
+    for (const text of [
+      "{not json",
+      "null",
+      "[]",
+      JSON.stringify({ ...ended, v: 2 }),
+      JSON.stringify({ ...ended, state: "paused" }),
+      JSON.stringify({ ...running, v: 2 }),
+    ])
+      expect(readRecord(text)).toEqual({ kind: "malformed" });
+  });
+
+  test("reads a running record only when every field a message quotes is the orchestrator's", () => {
+    const running = runningRecord(IDENTITY, "bpng", {
+      name: "bddgen",
+      pgid: 77,
+    });
+    const variants: Record<string, unknown>[] = [
+      // Not a task's id, or a run id with a control character in it.
+      { ...running, taskId: "BPNG" },
+      { ...running, id: "bpng-12\u001b[2J" },
+      // A run of another task, or a RUN_ID that is not this run's.
+      { ...running, id: "bqng-12" },
+      { ...running, runId: "2026-10-13T10-15-31-042Z-bpng-13" },
+      { ...running, runId: "not a run id" },
+      { ...running, startedAt: "yesterday" },
+      { ...running, id: "bpng-0", runId: IDENTITY.runId.replace("-12", "-0") },
+    ];
+    for (const variant of variants)
+      expect(readRecord(JSON.stringify(variant))).toEqual({
+        kind: "malformed",
+      });
+  });
+
+  test("a lost record keeps who the run was, when it was found and why", () => {
+    const read =
+      readRunningRecord(
+        JSON.stringify(
+          runningRecord(IDENTITY, "bpng", {
+            name: "playwright",
+            pgid: 78,
+            leaderStart: START,
+          }),
+        ),
+      ) ?? assertNever();
+    expect(
+      lostRecord(read, "leader differs", new Date("2026-10-13T11:00:00.000Z")),
+    ).toEqual({
+      v: 1,
+      state: "lost",
+      id: "bpng-12",
+      runId: IDENTITY.runId,
+      taskId: "bpng",
+      startedAt: "2026-10-13T10:15:31.042Z",
+      foundAt: "2026-10-13T11:00:00.000Z",
+      reason: "leader differs",
+    });
   });
 
   test("reads back the leader's start, and a record without one", () => {

@@ -55,15 +55,22 @@ export type CappedRead =
  *
  * @param path - the file.
  * @param maxBytes - the cap.
+ * @param options - `noFollow`: a symbolic link at `path` is unreadable (`ELOOP`), never followed.
  * @returns its text (UTF-8), or why there is none.
  */
 export async function readCapped(
   path: string,
   maxBytes: number,
+  options: { readonly noFollow?: boolean } = {},
 ): Promise<CappedRead> {
   let handle;
   try {
-    handle = await open(path, READ_NONBLOCKING);
+    handle = await open(
+      path,
+      options.noFollow === true
+        ? READ_NONBLOCKING | constants.O_NOFOLLOW
+        : READ_NONBLOCKING,
+    );
   } catch (error) {
     const code = errorCode(error);
     return code === "ENOENT"

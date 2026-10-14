@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { parseRunId } from "../../src/common/config/run-id";
+import { TASK_ID_PATTERN } from "../config/schema";
 import type { RunFinishedEvent } from "../events/run-finished";
 import { writeJsonAtomic } from "../state/atomic";
 import type { RunIdentity } from "./identity";
@@ -10,7 +12,8 @@ import type { LeaderStartReader } from "./leader";
  * A run's record, `run.json` in its folder: written as it starts (`running`, with the process group
  * once one exists) and again as it ends (`ended`, with how its processes ended and its
  * `run.finished`). A record still `running` whose live group is led by the process it names is a run
- * the orchestrator lost — killed or crashed under it — and still holding its cell's sites. Each run's
+ * the orchestrator lost — killed or crashed under it — and still holding its cell's sites; any other
+ * still `running` is rewritten `lost` (`state/orphans.ts`), so it is not read again. Each run's
  * writes go through one {@link RecordWriter}, in order, so a late `running` never replaces the end.
  *
  * The version stays 1 through additive fields: `process.leaderStart` is optional, and a record without
@@ -58,8 +61,21 @@ export interface EndedRecord extends RecordBase, LaunchResult {
   readonly event: RunFinishedEvent;
 }
 
+/**
+ * A run found over without its end recorded: still `running` when the orchestrator started again, its
+ * group gone or led by another process. How its processes ended is unknown and it never had its
+ * `run.finished`, so it is no {@link EndedRecord}, which promises both.
+ */
+export interface LostRecord extends RecordBase {
+  readonly state: "lost";
+  /** When it was found over: ISO 8601. */
+  readonly foundAt: string;
+  /** Why it is taken to be over. */
+  readonly reason: string;
+}
+
 /** A run's record. */
-export type RunRecord = RunningRecord | EndedRecord;
+export type RunRecord = RunningRecord | EndedRecord | LostRecord;
 
 /**
  * The record of a run starting, or of its process starting.
@@ -133,39 +149,106 @@ export function writeRunRecord(path: string, record: RunRecord): Promise<void> {
   return writeJsonAtomic(path, record);
 }
 
-/** What is read back of a record still running: enough to find its group. */
-const runningSchema = z.object({
-  v: z.literal(RUN_RECORD_VERSION),
-  state: z.literal("running"),
-  id: z.string(),
-  process: z
-    .object({
-      name: z.enum(["bddgen", "playwright"]),
-      pgid: z.number().int().min(2),
-      leaderStart: z.string().min(1).max(200).optional(),
-    })
-    .optional(),
-});
+/** A run's id as `runIdOf` makes it: a task's id, then a number from 1. */
+const RUN_ID_PATTERN = /^[a-z0-9]+-[1-9][0-9]{0,15}$/;
+
+/**
+ * What is read back of a record still running: who the run is — every field a message may quote is
+ * checked to be what the orchestrator writes, so none can carry a control character — and enough to
+ * find its group.
+ */
+const runningSchema = z
+  .object({
+    v: z.literal(RUN_RECORD_VERSION),
+    state: z.literal("running"),
+    id: z.string().regex(RUN_ID_PATTERN),
+    runId: z.string(),
+    taskId: z.string().regex(TASK_ID_PATTERN),
+    startedAt: z.iso.datetime(),
+    process: z
+      .object({
+        name: z.enum(["bddgen", "playwright"]),
+        pgid: z.number().int().min(2),
+        leaderStart: z.string().min(1).max(200).optional(),
+      })
+      .optional(),
+  })
+  // The run's id is its task's, and its RUN_ID ends with it.
+  .refine(
+    (record) =>
+      record.id.startsWith(`${record.taskId}-`) &&
+      parseRunId(record.runId)?.suffix === record.id,
+  );
 
 /** A record that says its run is still running, as read back. */
 export type RunningRecordRead = z.output<typeof runningSchema>;
+
+/** What tells a record of a run that is over: its version and its state, nothing else read. */
+const overSchema = z.object({
+  v: z.literal(RUN_RECORD_VERSION),
+  state: z.enum(["ended", "lost"]),
+});
+
+/** A record's text, sorted ({@link readRecord}). */
+export type RecordRead =
+  | { readonly kind: "running"; readonly record: RunningRecordRead }
+  /** A record of this version for a run that is over: `ended` or `lost`. */
+  | { readonly kind: "over" }
+  /** Not a record this orchestrator reads: not JSON, another version, or a field that is wrong. */
+  | { readonly kind: "malformed" };
+
+/**
+ * Sorts a record's text: still running (and read back), over, or malformed.
+ *
+ * @param text - `run.json`'s text.
+ */
+export function readRecord(text: string): RecordRead {
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    return { kind: "malformed" };
+  }
+  const running = runningSchema.safeParse(json);
+  if (running.success) return { kind: "running", record: running.data };
+  return overSchema.safeParse(json).success
+    ? { kind: "over" }
+    : { kind: "malformed" };
+}
 
 /**
  * Reads a record's text back, when it says its run is still running.
  *
  * @param text - `run.json`'s text.
- * @returns the run's id and its process group, or `undefined` for an ended run or a text that is not
- *   a record.
+ * @returns the run's record, or `undefined` for a run that is over or a text that is not a record.
  */
 export function readRunningRecord(text: string): RunningRecordRead | undefined {
-  let json: unknown;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-  const parsed = runningSchema.safeParse(json);
-  return parsed.success ? parsed.data : undefined;
+  const read = readRecord(text);
+  return read.kind === "running" ? read.record : undefined;
+}
+
+/**
+ * The record of a run found over: what its running record said, now `lost`.
+ *
+ * @param record - its running record, as read back.
+ * @param reason - why it is taken to be over.
+ * @param foundAt - now.
+ */
+export function lostRecord(
+  record: RunningRecordRead,
+  reason: string,
+  foundAt: Date,
+): LostRecord {
+  return {
+    v: RUN_RECORD_VERSION,
+    state: "lost",
+    id: record.id,
+    runId: record.runId,
+    taskId: record.taskId,
+    startedAt: record.startedAt,
+    foundAt: foundAt.toISOString(),
+    reason,
+  };
 }
 
 /** How a record's leader compares with the process that has its PID now ({@link matchLeader}). */
