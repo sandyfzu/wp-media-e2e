@@ -4,8 +4,10 @@
 > what that audit left open (2026-10-13, §7.3–§7.4; audited the same day, §7.5); step 1, M2 configuration (2026-10-13, §7.6; audited the same day, §7.7);
 > step 2, M4's pure parts and M6's builder and bus (2026-10-13, §7.8; audited the same day, §7.9); step 3, the
 > Slack and Datator formatters and senders (2026-10-13, §7.10; audited the same day, §7.11); step 4, M4's
-> launch and end and M5's stop machines (2026-10-13, §7.12; audited the same day, §7.13).
-> **Next:** step 5, M3 and M1 with M9, in §7.14's sub-phases (5A first). Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> launch and end and M5's stop machines (2026-10-13, §7.12; audited the same day, §7.13); step 5's
+> 5A–5D, the logger, lock, counter, leader identity, orphan check and run-folder retention (2026-10-13,
+> §7.15; audited and re-audited the same day, §7.16).
+> **Next:** step 5's 5E, then 5F–5K (§7.14), with §7.16's notes for 5F and 5H. Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -397,7 +399,11 @@ Which machine is D4. On it:
 3. **GitHub**: `gh auth login` as that user, or `secrets.GITHUB_TOKEN` (BackWPup's repo is private).
 4. **Config**: copy `orchestrator/config.example.json` to `.orchestrator/config.json` (`0600`), add
    one task per cell and the AutoE2E Slack webhook and Datator key (D5); check it with
-   `npm run orchestrator -- start --dry-run`; try one cell with `… start --task <id> --once`.
+   `npm run orchestrator -- start --dry-run`; try one cell with `… start --task <id> --once`. The
+   state directory must be this user's and closed to other writers: Ubuntu's default umask for a user
+   (`002`, with `USERGROUPS_ENAB`) makes a `mkdir`'d one `0775`, which the start refuses with the
+   `chmod go-w` that fixes it. Run the orchestrator on the host (or its container with `--pid=host`):
+   a container restarting into a new PID namespace reads its own lock as another's (§7.16).
 5. **Stop AutoE2E's instance for those cells first** — the sites are dedicated (parent §1). AutoE2E's
    WP Rocket instances stay: this suite has only WP Rocket's three scaffolding scenarios (V125).
 6. **Start**, detached: `tmux new -d -s orchestrator 'npm run orchestrator -- start'`. Watch:
@@ -1158,6 +1164,96 @@ so the fake suite (§7.12) can drive everything up to 5I with real signals and n
 - **5K — Audit.** As for steps 1–4: a reviewer on security and one on correctness, each on its own
   copy; mutations of every phase; findings fixed and proven; V-rows in §11.
 
+### 7.15 5A–5D — Implemented (2026-10-13, V406–V408)
+
+Four workers in parallel, one branch each from `74018ff`, merged in order; the two overlaps (a
+"don't follow a link" option added to `readCapped` by 5C and 5D under two names, and both adding
+record specs) were merged by hand. As built, before the audit (§7.16 lists what it changed):
+
+- **5A — `log.ts`.** `createLogger`/`openLogger`: `HH:MM:SS <scope>  <text>` (two spaces, §4.1),
+  scope and text through `safeLine` with the secrets; the file opened `O_APPEND|O_NOFOLLOW|O_NONBLOCK`,
+  `fstat`-checked (a regular file of this user's, one link), a wider mode tightened to `0600` and said
+  so; one write queue; a failed terminal (`EPIPE`, `EIO`) stops terminal writes, the file goes on.
+- **5B — `state/lock.ts`, `state/counter.ts`.** The lock linked into place (`link` never replaces nor
+  follows), a dead holder's lock taken over behind an exclusive claim and a re-check; the counter
+  `{"v":1,"lastRun":n}`, saved before the number is returned, never reset on a file it cannot trust.
+- **5C.1 — `runs/leader.ts`, `record.ts`.** The leader's start: Linux `/proc/<pid>/stat` field 22 with
+  the boot id (`linux:<boot_id>:<ticks>`, parsed from the last `)`); macOS `/bin/ps -o lstart=` under
+  `LC_ALL=C TZ=UTC` (its output changed with both); a failure is `gone` or `unknown`, never a throw.
+  A per-run record writer: in call order, no `running` after an end.
+- **5C.2 — `state/orphans.ts`.** As §7.14, but a stale record becomes `state: "lost"` (with `foundAt`
+  and the reason), not `ended`: an ended record promises the exits and the event, which a lost run
+  lacks.
+- **5D — `state/run-retention.ts`.** A task's folders are those whose number `runIdOf` gives back
+  exactly; dated by the record's `startedAt` only; the run in progress and every `running` folder
+  kept; `0` lifts only the cap, as `E2E_REPORTS_KEEP`; removal through the suite's `applyRetention`,
+  rooted at the state directory.
+
+### 7.16 Audit of 5A–5D, and of its fixes (2026-10-13, V409–V414)
+
+Five reviewers, each on its own copy: one per phase and one across them. Their findings were fixed in
+a shared stage (one reader, durable writes) and then by three fixers in parallel, on disjoint files;
+two more reviewers then audited the fixes, and two fixers fixed what they found. Every finding was
+reproduced first, and every fix proved by a test that fails without it (V412).
+
+- **A `lost` run was never pruned (high; three reviewers).** 5D's record reader knew `running` and
+  `ended` only, so every crash left a folder kept for ever, silently. Now one classifier
+  (`parseRunRecord`, `readRunRecordFile`) on one base schema serves both: a `lost` folder is dated and
+  pruned, never complete; a malformed one is undated, kept and counted in a warning line.
+- **A live run read as stale (medium-high).** A leader gone while its group lives was taken for a
+  stranger's group — but the kernel never hands out a PID still in use as a group's id (measured:
+  `ns_last_pid` set below a live leaderless group, fork skipped it). After the runner dies its worker
+  lives ~30 s (Playwright's force-exit timeout). Now that is an unconfirmed orphan, which refuses; so
+  are a start unread at spawn (`leaderStartUnread`, one retry), a group of another user's processes
+  only (`EPERM` — a `sudo` child on a `local` cell; first read as stale, found by the re-audit), and a
+  process recorded as starting (the record is written before each spawn, `onSpawning`). The refusal
+  says how to check (`ps -o pid,user,lstart,command -g <pgid>`, or `lsof -- <run.log>`), how to end it,
+  and how to mark a false positive `lost`. A linked `runs/` is refused; `lost` keeps the process.
+- **Two orchestrators held the lock across PID namespaces (high, when a state directory is shared).**
+  Two containers on one volume: both PID 1, so "a lock with my own PID is dead" let the second in.
+  Now the lock holds `{pid, token, start, space}` (Linux: boot id, `/proc/self/ns/pid`, machine id;
+  else the host), and a PID is judged only in its own space; a reused PID with another start is dead;
+  an earlier boot of the same machine (same machine id and host, host namespace) is taken over; a
+  second start in one process is refused, by a token registered before anything is written (the
+  re-audit found a gap while the start time was unknown); a dead claimant's claim is cleared behind a
+  claim of its own, three deep at most. The re-audit also found the re-check under the claim untested,
+  and the earlier-boot rule taking a live lock between cloned machines (same machine id): both fixed.
+- **The terminal could freeze the process (medium).** A TTY is written synchronously: a paused one
+  (Ctrl-S, a frozen client) blocked every timer and signal handler (measured, macOS and Linux). Now
+  stdout is made non-blocking once (`terminal.ts`, Node's own `setBlocking`, guarded), the terminal's
+  backlog is capped at 1 MiB in bytes (`N lines not shown`, the file keeps them), and — the re-audit's
+  find — `flush`/`close` and `drainTerminal` wait for it, bounded, since `process.exit` otherwise drops
+  what a reading terminal has not taken yet (78 of 2000 lines on macOS).
+- **The counter restarted at 1 without its file (medium).** Now the next number is past both the
+  counter and the task's highest run folder, on every call; `writeJsonAtomic` syncs the file, then its
+  folder; `launchRun` creates the run's folder exclusively, so a reused number fails before anything
+  runs.
+- **Smaller (low):** three safe readers became one (`files.ts`: capped by what is read, not by an
+  earlier `stat`; a failed close never replaces the result) and one `errorCode`; each logger added a
+  stdout listener (now one per terminal); a half line after `ENOSPC` merged with the next; file lines
+  carried no date (now ISO with the offset); `close` could wait for ever; masking missed lowercase
+  hex, form encoding and PHP's escapes, and masked by shape before by value, leaking parts of a
+  secret; the state directory, `tasks/` and the log's folder were not checked for owner and mode (now
+  `folders.ts`, one rule per kind, each refusal naming its `chown`/`chmod`); the lock gave a raw error
+  on a filesystem without hard links; `release()` could reject; crash leftovers were never swept;
+  retention read every folder at once, lost its report when the leftover listing threw, and took an
+  infinite `now`; the writer could record a reason its reader refuses; a run folder's refusal did not
+  name its owner; and several tests could not fail.
+- **Kept, on purpose:** a container restarting into a new PID namespace reads its own lock as
+  another's and is refused until the lock is removed — it cannot tell that namespace is gone; the
+  message says so and names `--pid=host` (§6). Equivalent mutants: the lock's `datasync` and one
+  `HELD` removal on a path that cannot run.
+- **For 5F:** write each record through one `createRecordWriter` per run, and await or catch every
+  write (a failed one rejects); `onSpawning: (n) => writer.write(startingRecord(…, n))`, then
+  `onProcess` writes `runningRecord(…, await leaderProcess(…))`; the first write refuses a path already
+  there. Prune with `pruneTaskRuns` after the `ended` record, `current` the run's id.
+- **For 5H:** under the lock, before any loop: `checkOrphans`, refusing through `orphanRefusal` (it
+  reads every task's folders, selected or not). At exit: the loops, `bus.settle()`, `release()`,
+  `logger.close(ms)`, `drainTerminal(process.stdout, ms)`, then `process.exit(code)` — a paused
+  terminal keeps the event loop alive. Call `stdoutTerminal()` only once `start` runs, after the
+  command line is parsed, so `--help` and errors stay blocking. Specs that start twice in one process
+  are refused by the lock, as they should be: inject distinct state directories.
+
 ## 8. What later phases change, and keep
 
 | Here | Later | Kept |
@@ -1292,3 +1388,12 @@ so the fake suite (§7.12) can drive everything up to 5I with real signals and n
 | V403 | Before the fixes, each reproduced: a throwing `onProcess` left a live unwatched group and an async one exited the orchestrator 1; a symlinked `run.log` was written through and a FIFO blocked `launchRun` past `process.exit`; a stop during a failed `bddgen`'s flush read `stopped`; output without a newline put our line in the reason; a whole line at the tail's window start was dropped; a wall clock stepped back 1 h ignored every Ctrl-C; a failed SIGKILL after the linger ended the run with its group alive | ✅ 2026-10-13 | Both reviewers' probes; the new specs fail on the old code |
 | V404 | 23 mutations of the audit's fixes — the skipped SIGINT, the stop after the run, the rejection handled, the exclusive log, the folder checks (three), the newline guard, the wait after a failed kill, actions at once, the tail's boundary and shift, ours stripped mid-line, the late interrupt both ways, the line cap both ways, `run.end` by type, the monotonic clock — each fails a test but three equivalent ones (`O_NOFOLLOW`, the stream's file check, a no-op on the throw path); two redundant guards reduced to one; and step 4's first 30 again, all caught | ✅ 2026-10-13 | The mutation harness in a copy of the worktree |
 | V405 | The four gates pass after the audit; a full unit run: 2422 passed, 8 skipped by their environment guards; the real suite again on `pro@nginx` with no matching scenario (`error`, "no scenario ran: none matched") and stopped during `bddgen` (`stopped`), a reused run folder refused (`EEXIST` on `run.log`) | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format`, `test:unit`; the V396 script |
+| V406 | 5A–5D built in parallel from `74018ff`, each passing the four gates on its branch: 5A 36 specs, 21/21 mutants; 5B 16/17 (one equivalent: `rm --force` for `unlink` under the claim); 5C.1 21/21 and 5C.2 29/29; 5D 22/22 | ✅ 2026-10-13 | Each worker's mutation harness in a copy |
+| V407 | The leader's start: Linux procfs (`ubuntu:24.04`, `node:24`; a command `x) y (z` parsed from the last `)`); macOS `ps -o lstart=` changes with `TZ` and the locale (`Tue Oct 13 18:57:39` → `mer. 14 oct. 08:57:39`), so it runs under `LC_ALL=C TZ=UTC`; `ps` exits 1 with nothing for a missing PID on both | ✅ 2026-10-13 | `docker run node:24`, `ubuntu:24.04`; the leader specs |
+| V408 | Merged on `feat/orchestrator` (`2fbcf25`…`d1f6166`): the gates pass; 2598 passed, 8 skipped | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format:check`, `test:unit` |
+| V409 | Reproduced before the fixes: 30 `lost` folders, keep 5 → none removed; a live group whose leader exited (and a real Playwright worker living 30 059 ms after its runner's SIGKILL) rewritten `lost`; two `node:24` containers on one volume both holding the lock, with and without `--init`; a pty nobody reads freezing timers and a SIGTERM handler (macOS, Linux); a missing counter giving 1 beside `runs/bpng-42`; `\| sleep 6` growing stdout's buffer to 110 MB; a half line after `ENOSPC` (16 KiB tmpfs) merging with the next | ✅ 2026-10-13 | The reviewers' probes and containers |
+| V410 | Reproduced by the re-audit, before its fixes: removing the claim's re-check passed every spec; two cloned machines' locks judged an earlier boot; two acquires in one process both won with the start time unknown; `process.exit` after `stdoutTerminal()` kept 1004 of 198 000 bytes on a read pty; a root `sudo` child left in a killed group read `stale` (`EPERM`); masking by shape first leaked `Pr1vate;pwd=***` | ✅ 2026-10-13 | The re-auditors' probes; `node:24 --init` with a sudoer |
+| V411 | After the fixes, measured: the second container refused (another PID space), a `--pid=host` successor taking a killed holder's lock; a pid allocator skipping a live leaderless group's id; a paused pty bounding the exit to the wait given (~1 s), a reading one receiving all 2000 lines; stdout's queue flat at 1 MiB under a stalled pipe; no `O_NONBLOCK` reaching children, stderr or the parent shell | ✅ 2026-10-13 | The fixers' pty, pipe and container scripts, macOS and `node:24` |
+| V412 | Mutations of the fixes, each in a copy, each failing a test: the shared reader and durable write 21/21; lock and counter 17 + the deterministic race; records, orphans and retention 30/30; logger and masking 43/43; the re-audit's fixes 17/17 and 22/22; the exclusive log open and the log folder's rule 3/3. The re-audit's own runs found 4 survivors (fixed, or the two equivalents of §7.16) | ✅ 2026-10-13 | The mutation harnesses in copies of the worktree |
+| V413 | Re-audit of the fixes: every claimed fix present and behaving as stated, but for the ten findings §7.16 lists as the re-audit's | ✅ 2026-10-13 | Two reviewers, each on its own copy |
+| V414 | The gates pass after both rounds; a full unit run: 2814 passed, 8 skipped by their environment guards; `import-boundary.spec.ts` passes with `suite-imports.json` unchanged | ✅ 2026-10-13 | `npm run typecheck`, `lint`, `format:check`, `test:unit` |
