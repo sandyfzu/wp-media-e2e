@@ -200,6 +200,23 @@ test.describe("checkConfig", () => {
     ]);
   });
 
+  test("counts only the selected tasks on a server; none selected counts every task", () => {
+    const config = configOf([
+      ["bpng", "backwpup", "pro@nginx"],
+      ["bfng", "backwpup", "free@nginx"],
+    ]);
+    const crowded = { ...config, serverWarningThreshold: 2 };
+    expect(
+      checkConfig(crowded, PRODUCTS, "/x/config.json", ["bpng"]).warnings,
+    ).toEqual([]);
+    for (const selected of [undefined, [], ["bpng", "bfng"]])
+      expect(
+        checkConfig(crowded, PRODUCTS, "/x/config.json", selected).warnings,
+      ).toEqual([
+        "qa-lnmp carries 2 tasks at once (serverWarningThreshold 2): bpng (backwpup pro@nginx), bfng (backwpup free@nginx)",
+      ]);
+  });
+
   test("warns when a release: ref comes with a version the suite will ignore", () => {
     const { warnings } = checkConfig(
       configOf([

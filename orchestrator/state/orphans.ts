@@ -1,21 +1,17 @@
-import type { Dirent } from "node:fs";
-import { lstat, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { errorCode } from "../error-code";
-import type { CappedMiss } from "../files";
-import { RUN_FILES, RUNS_DIR } from "../runs/identity";
+import { RUN_FILES } from "../runs/identity";
 import type { LeaderStartReader } from "../runs/leader";
 import { probeGroup, type KillFn } from "../runs/process-group";
 import {
-  MAX_RECORD_BYTES,
   lostRecord,
-  readRunRecordFile,
   writeRunRecord,
   type RunningRecordRead,
   type RunRecord,
 } from "../runs/record";
 import { safeLine, shellWord } from "../text";
+import { readRunningFolders } from "./run-folders";
 
 /**
  * The orphan check, as the orchestrator starts: every run whose record still says `running` is either
@@ -181,18 +177,11 @@ export async function checkOrphans(
   stateDir: string,
   deps: OrphanCheckDeps,
 ): Promise<OrphanCheck> {
-  const runsDir = join(stateDir, RUNS_DIR);
   const orphans: Orphan[] = [];
   const stale: StaleRun[] = [];
-  const warnings: string[] = [];
-  for (const entry of await listRuns(runsDir)) {
-    const read = await readRunning(runsDir, entry);
-    if (read.kind === "skip") continue;
-    if (read.kind === "warning") {
-      warnings.push(read.text);
-      continue;
-    }
-    const { record, path } = read;
+  const folders = await readRunningFolders(stateDir);
+  const warnings = folders.warnings.map(({ text }) => text);
+  for (const { record, path } of folders.running) {
     const verdict = await classifyRunning(record, deps);
     if (verdict.kind === "orphan") {
       orphans.push({
@@ -269,87 +258,6 @@ function groupUnknownRefusal(orphan: Orphan, markLost: string): string {
   );
 }
 
-/** One run folder's record, read: a running one, nothing to do, or a warning. */
-type RunningRead =
-  | {
-      readonly kind: "running";
-      readonly record: RunningRecordRead;
-      readonly path: string;
-    }
-  | { readonly kind: "skip" }
-  | { readonly kind: "warning"; readonly text: string };
-
-/**
- * Reads one run folder's record, when it still says `running` (`readRunRecordFile`: never through a
- * link, never a FIFO, within its cap, and only when it names the folder it is in).
- *
- * @param runsDir - `<state>/runs`.
- * @param entry - the folder's entry.
- */
-async function readRunning(
-  runsDir: string,
-  entry: Dirent,
-): Promise<RunningRead> {
-  // Hidden: a folder the retention is removing.
-  if (entry.name.startsWith(".")) return { kind: "skip" };
-  const name = safeLine(entry.name, 80);
-  // A link to a folder is not followed: an entry's type is the entry's own.
-  if (!entry.isDirectory())
-    return {
-      kind: "warning",
-      text: `${name} in the runs' folder is not a folder: passed over`,
-    };
-  const path = join(runsDir, entry.name, RUN_FILES.record);
-  const read = await readRunRecordFile(path, entry.name);
-  switch (read.kind) {
-    case "missing":
-    case "over":
-      return { kind: "skip" };
-    case "running":
-      return { kind: "running", record: read.record, path };
-    case "malformed":
-      return {
-        kind: "warning",
-        text: `run ${name}'s record is not one this orchestrator reads (${read.why}): passed over`,
-      };
-    default:
-      return {
-        kind: "warning",
-        text: `run ${name}'s record ${describeUnread(read)}: passed over`,
-      };
-  }
-}
-
-/**
- * The runs' folder's entries, sorted by name; none when it does not exist yet. The folder itself is
- * never followed: through a link, the check would rewrite records outside the state directory.
- *
- * @param runsDir - `<state>/runs`.
- * @throws an error coded `ELOOP` for a link, `ENOTDIR` for anything else but a folder, or what
- *   `lstat` and `readdir` throw besides `ENOENT`.
- */
-async function listRuns(runsDir: string): Promise<Dirent[]> {
-  try {
-    const stats = await lstat(runsDir);
-    if (stats.isSymbolicLink())
-      throw Object.assign(
-        new Error("the runs' folder is a symbolic link, never followed"),
-        { code: "ELOOP" },
-      );
-    if (!stats.isDirectory())
-      throw Object.assign(new Error("the runs' folder is not a folder"), {
-        code: "ENOTDIR",
-      });
-    const entries = await readdir(runsDir, { withFileTypes: true });
-    return entries.sort((a, b) =>
-      a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
-    );
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") return [];
-    throw error;
-  }
-}
-
 /**
  * Rewrites a stale record as `lost`, atomically.
  *
@@ -374,19 +282,4 @@ async function markLost(
   } catch (error) {
     return errorCode(error) ?? "unknown error";
   }
-}
-
-/**
- * Why a record could not be read, in words.
- *
- * @param read - the failed read.
- */
-function describeUnread(
-  read: Exclude<CappedMiss, { kind: "missing" }>,
-): string {
-  if (read.kind === "tooLarge")
-    return `is over ${String(MAX_RECORD_BYTES)} bytes`;
-  return read.code === "ELOOP"
-    ? "is a symbolic link"
-    : `could not be read (${read.code})`;
 }

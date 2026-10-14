@@ -150,6 +150,11 @@ export interface CycleDeps {
   readonly buildEvent?: (input: RunFinishedInput) => RunFinishedEvent;
   /** Writes a file kept beside the record, atomically and `0600`; `writeJsonAtomic` by default. */
   readonly writeJson?: (path: string, value: unknown) => Promise<void>;
+  /**
+   * Told each run's id as it begins — numbered, not stopped, about to launch: so the process knows
+   * which runs are its own. A throw is a line, never the run's.
+   */
+  readonly onRunBegun?: (id: string) => void;
 }
 
 /** What a run that ended may record: its writer, and how its processes ended. */
@@ -250,6 +255,7 @@ class Cycle {
       this.say(`${identity.id} not started: ${asked.why}`);
       return { kind: "notStarted", why: "stopped" };
     }
+    this.begun(identity.id);
     const writer = (this.deps.recordWriter ?? createRecordWriter)(
       identity.record,
     );
@@ -683,6 +689,19 @@ class Cycle {
       this.launched.stop(this.asked.level, this.asked.why);
     } catch (error) {
       this.say(`stopping the run failed: ${this.failure(error)}`);
+    }
+  }
+
+  /**
+   * Tells `onRunBegun` the run's id; a hook that throws is a line.
+   *
+   * @param id - the run's id.
+   */
+  private begun(id: string): void {
+    try {
+      this.deps.onRunBegun?.(id);
+    } catch (error) {
+      this.say(`${id}: telling that it began failed: ${this.failure(error)}`);
     }
   }
 

@@ -37,6 +37,8 @@ export interface LoadedConfig<P extends CheckedProduct = CheckedProduct> {
  *
  * @param file - the config's path; relative to the working directory.
  * @param products - the suite's products (`loadProductList().PRODUCTS`).
+ * @param selected - the ids `--task` selects, for the servers' load (`checkConfig`); every task when
+ *   absent or empty.
  * @returns the config, its tasks joined to the suite, and the warnings — a file others can read
  *   among them.
  * @throws {@link ConfigError} when the file is missing, unreadable, not a regular file, too large,
@@ -51,6 +53,7 @@ export interface LoadedConfig<P extends CheckedProduct = CheckedProduct> {
 export async function loadConfig<P extends CheckedProduct>(
   file: string,
   products: readonly P[],
+  selected?: readonly string[],
 ): Promise<LoadedConfig<P>> {
   const path = resolve(file);
   const { mode, bytes } = await readConfigFile(path);
@@ -59,7 +62,7 @@ export async function loadConfig<P extends CheckedProduct>(
   const lost = lostKeys(text);
   if (lost.length > 0) throw configProblems(path, "loses keys", lost);
   const config = parseConfig(json, path);
-  const { tasks, warnings } = checkConfig(config, products, path);
+  const { tasks, warnings } = checkConfig(config, products, path, selected);
   return {
     file: path,
     stateDir: dirname(path),

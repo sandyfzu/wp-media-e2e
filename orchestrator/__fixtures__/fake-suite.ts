@@ -19,6 +19,8 @@ export interface FakeBehaviour {
   readonly runMs?: number;
   /** Ignores SIGINT (writing that it got one), so only SIGKILL ends it. */
   readonly ignoreSigint?: boolean;
+  /** Ignores the drain's stop file, as a scenario that never finishes would. */
+  readonly ignoreDrain?: boolean;
   /** Leaves a child in its group that outlives it by this long, then writes `childFile`. */
   readonly childMs?: number;
   /** The file the child writes as it ends. */
@@ -61,7 +63,7 @@ if (b.childMs !== undefined) {
 }
 const stopFile = process.env.E2E_INTERNAL_STOP_FILE;
 setInterval(() => {
-  if (stopFile && fs.existsSync(stopFile)) { say("was " + "drained"); process.exit(0); }
+  if (stopFile && !b.ignoreDrain && fs.existsSync(stopFile)) { say("was " + "drained"); process.exit(0); }
 }, 10);
 setTimeout(() => process.exit(0), b.runMs ?? 60000);
 say("fake " + "ready");

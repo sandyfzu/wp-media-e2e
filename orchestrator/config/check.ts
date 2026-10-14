@@ -58,6 +58,8 @@ export function serverOf(site: Site): string {
  * @param config - a config the schema accepted.
  * @param products - the suite's products (`PRODUCTS`).
  * @param file - the config's path, for the message.
+ * @param selected - the ids `--task` selects; every task when absent or empty. Only the selected tasks
+ *   run, so only they count towards a server's load.
  * A product or cell the suite does not know is named by its path, never quoted: what sits in its
  * place could be anything pasted there. Once matched, it is the suite's own name and is shown.
  *
@@ -68,6 +70,7 @@ export function checkConfig<P extends CheckedProduct>(
   config: OrchestratorConfig,
   products: readonly P[],
   file: string,
+  selected?: readonly string[],
 ): CheckedConfig<P> {
   const problems: string[] = [];
   const tasks: CheckedTask<P>[] = [];
@@ -82,7 +85,12 @@ export function checkConfig<P extends CheckedProduct>(
     tasks,
     warnings: [
       ...tasks.flatMap(({ task }, index) => versionIgnored(task, index)),
-      ...crowdedServers(tasks, config.serverWarningThreshold),
+      ...crowdedServers(
+        selected === undefined || selected.length === 0
+          ? tasks
+          : tasks.filter(({ task }) => selected.includes(task.id)),
+        config.serverWarningThreshold,
+      ),
     ],
   };
 }

@@ -426,6 +426,60 @@ test.describe("runOnce — runs to their end", () => {
 });
 
 test.describe("runOnce — stopped at each stage", () => {
+  test("tells onRunBegun each run's id as it begins, never one a stop kept from starting", async () => {
+    const begun: string[] = [];
+    const { deps } = harness(
+      { exitCode: 1 },
+      {},
+      {
+        onRunBegun: (id) => {
+          begun.push(id);
+        },
+      },
+    );
+    await runOnce(TASK, deps).done;
+    const stopped = runOnce(TASK, deps);
+    stopped.stop("drained", "stop");
+    await stopped.done;
+    expect(begun).toEqual(["bpng-1"]);
+  });
+
+  test("onRunBegun fires before the launch", async () => {
+    const begun: string[] = [];
+    const seenAtLaunch: string[][] = [];
+    const { deps } = harness(
+      {},
+      {},
+      {
+        onRunBegun: (id) => {
+          begun.push(id);
+        },
+        launch: () => {
+          seenAtLaunch.push([...begun]);
+          return Promise.reject(new Error("no launch here"));
+        },
+      },
+    );
+    expect(ended(await runOnce(TASK, deps).done).status).toBe("error");
+    expect(seenAtLaunch).toEqual([["bpng-1"]]);
+  });
+
+  test("an onRunBegun that throws is a line, and the run goes on", async () => {
+    const { deps, seen } = harness(
+      { exitCode: 1 },
+      {},
+      {
+        onRunBegun: () => {
+          throw new Error(`hook broke ${SECRET}`);
+        },
+      },
+    );
+    expect(ended(await runOnce(TASK, deps).done).status).toBe("error");
+    expect(seen.lines).toContain(
+      "bpng bpng-1: telling that it began failed: hook broke ***",
+    );
+  });
+
   test("a stop asked as the handle is given starts nothing, not even a number", async () => {
     const { deps, seen } = harness({}, {});
     const run = runOnce(TASK, deps);
