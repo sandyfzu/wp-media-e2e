@@ -60,6 +60,18 @@ export interface LaunchOptions {
   /** The run's whole environment ({@link runEnvironment}): nothing else is inherited. */
   readonly env: Readonly<Record<string, string>>;
   /**
+   * Awaited just before each process is spawned, for the run's record (`startingRecord`): the process
+   * is spawned only once it settles, so an orchestrator that dies between the spawn and
+   * {@link LaunchOptions.onProcess}'s write leaves a record saying a process was starting — never one
+   * naming the previous process's ended group, which would read as over while the new one runs. A
+   * throw or a rejection spawns nothing: `bddgen`'s makes {@link launchRun} reject, the runner's ends
+   * the run as one whose runner could not start, saying why in the log. A stop asked for while it is
+   * awaited is honoured before the runner is spawned.
+   */
+  readonly onSpawning?: (
+    process: "bddgen" | "playwright",
+  ) => void | Promise<void>;
+  /**
    * Told each process's group as it starts, for the run's record. A throw or a rejection is a log
    * line: the process is still watched to its end.
    */
@@ -132,7 +144,7 @@ const NOT_STARTED: ProcessExit = { code: null, signal: null };
  * @throws {@link Error} when anything is already at the run's folder — a run of that id ran before,
  *   and sharing its folder would mix two runs' logs, records and stop files — when the folder is not
  *   a private folder of this user's, when its stop file or log is already there, or when any of them
- *   cannot be made. Nothing is spawned then.
+ *   cannot be made; or when `onSpawning` fails for `bddgen`. Nothing is spawned then.
  */
 export async function launchRun(options: LaunchOptions): Promise<LaunchedRun> {
   const { identity } = options;
@@ -150,6 +162,15 @@ export async function launchRun(options: LaunchOptions): Promise<LaunchedRun> {
       `The run's stop file is already there (${identity.stopFile}): a run of that id ran before.`,
     );
   const log = await openRunLog(identity.log);
+  try {
+    await options.onSpawning?.("bddgen");
+  } catch (error) {
+    await log.close().catch(() => undefined);
+    throw new Error(
+      `Recording that the run's bddgen starts failed (${errorCode(error) ?? "unknown error"}): nothing was spawned.`,
+      { cause: error },
+    );
+  }
   return new Launch(options, log).start();
 }
 
@@ -241,8 +262,9 @@ class Launch {
     const bddgenExit = await this.waitFor("bddgen", bddgen);
     let playwrightExit: ProcessExit | undefined;
     if (isSuccess(bddgenExit) && mayStartPlaywright(this.state)) {
-      const runner = this.spawn("playwright", this.options.commands.playwright);
-      playwrightExit = await this.waitFor("playwright", runner);
+      const runner = await this.spawnRunner();
+      if (runner !== undefined)
+        playwrightExit = await this.waitFor("playwright", runner);
     }
     // Nothing runs any more: a stop from here on, while the log is flushed, must not change the run.
     this.over = true;
@@ -253,6 +275,24 @@ class Launch {
       ...(playwrightExit === undefined ? {} : { playwright: playwrightExit }),
       stop: this.state.taken,
     };
+  }
+
+  /**
+   * Spawns the runner once `onSpawning` has settled — not when it failed, nor when a stop came
+   * meanwhile.
+   *
+   * @returns its process, a refusal to start it, or `undefined` when a stop means it never starts.
+   */
+  private async spawnRunner(): Promise<ChildProcess | NotStarted | undefined> {
+    try {
+      await this.options.onSpawning?.("playwright");
+    } catch (error) {
+      return {
+        notStarted: `recording that it starts failed (${errorCode(error) ?? "unknown error"})`,
+      };
+    }
+    if (!mayStartPlaywright(this.state)) return undefined;
+    return this.spawn("playwright", this.options.commands.playwright);
   }
 
   /**

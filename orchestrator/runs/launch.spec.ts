@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import {
   FAKE_LINES,
@@ -375,6 +376,119 @@ test.describe("launchRun", () => {
       expect(log).toContain("recording bddgen's process group failed");
       expect(log).toContain("recording playwright's process group failed");
     }
+  });
+
+  test("awaits onSpawning before each spawn, so a process is never running before its record says it is starting", async () => {
+    const events: string[] = [];
+    const run = await launchRun(
+      options(
+        { exitCode: 0 },
+        { runMs: 50 },
+        {
+          onSpawning: async (name) => {
+            events.push(`spawning ${name}`);
+            await delay(80);
+            events.push(`recorded ${name}`);
+          },
+          onProcess: (name) => {
+            events.push(`started ${name}`);
+          },
+        },
+      ),
+    );
+    expect(await run.done).toEqual({
+      bddgen: { code: 0, signal: null },
+      playwright: { code: 0, signal: null },
+      stop: { level: "none" },
+    });
+    expect(events).toEqual([
+      "spawning bddgen",
+      "recorded bddgen",
+      "started bddgen",
+      "spawning playwright",
+      "recorded playwright",
+      "started playwright",
+    ]);
+  });
+
+  test("spawns nothing when onSpawning fails for bddgen, and says why", async () => {
+    const started: string[] = [];
+    const opts = options(
+      { exitCode: 0 },
+      { exitCode: 0 },
+      {
+        onSpawning: () =>
+          Promise.reject(
+            Object.assign(new Error("disk full"), { code: "ENOSPC" }),
+          ),
+        onProcess: (name) => {
+          started.push(name);
+        },
+      },
+    );
+    await expect(launchRun(opts)).rejects.toThrow(
+      "Recording that the run's bddgen starts failed (ENOSPC): nothing was spawned.",
+    );
+    expect(started).toEqual([]);
+    expect(await readFile(opts.identity.log, "utf8")).toBe("");
+  });
+
+  test("never starts the runner when onSpawning fails for it, and ends the run saying why", async () => {
+    const started: string[] = [];
+    const opts = options(
+      { exitCode: 0 },
+      { exitCode: 0 },
+      {
+        onSpawning: (name) => {
+          if (name === "playwright")
+            throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+        },
+        onProcess: (name) => {
+          started.push(name);
+        },
+      },
+    );
+    const run = await launchRun(opts);
+    expect(await run.done).toEqual({
+      bddgen: { code: 0, signal: null },
+      playwright: { code: null, signal: null },
+      stop: { level: "none" },
+    });
+    expect(started).toEqual(["bddgen"]);
+    const log = await readFile(opts.identity.log, "utf8");
+    expect(log).toContain(
+      "playwright could not start: recording that it starts failed (ENOSPC)",
+    );
+    expect(log).not.toContain("playwright starts:");
+  });
+
+  test("never starts the runner when a stop comes while onSpawning is awaited", async () => {
+    const started: string[] = [];
+    const control: { run?: LaunchedRun } = {};
+    const run = await launchRun(
+      options(
+        { exitCode: 0 },
+        { exitCode: 0 },
+        {
+          onSpawning: async (name) => {
+            if (name !== "playwright") return;
+            control.run?.stop(
+              "drained",
+              "stopped while the record was written",
+            );
+            await delay(20);
+          },
+          onProcess: (name) => {
+            started.push(name);
+          },
+        },
+      ),
+    );
+    control.run = run;
+    const result = await run.done;
+    expect(result.playwright).toBeUndefined();
+    expect(result.stop.level).toBe("drained");
+    expect(started).toEqual(["bddgen"]);
   });
 
   test("starts our line on a line of its own after output without a newline", async () => {

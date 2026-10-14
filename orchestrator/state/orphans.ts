@@ -1,6 +1,6 @@
 import type { Dirent } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { errorCode } from "../error-code";
 import type { CappedMiss } from "../files";
@@ -40,7 +40,10 @@ import { safeLine, shellWord } from "../text";
  *   **unconfirmed** orphan that says so.
  *
  * Anything else that cannot be checked now — the leader's start unreadable now or at spawn, the group
- * not askable — is an unconfirmed orphan too: a refusal can be retried, a record rewritten cannot.
+ * not askable — is an unconfirmed orphan too: a refusal can be retried, a record rewritten cannot. So
+ * is a record saying a process was **starting** (`startingRecord`): its orchestrator stopped between
+ * writing it and recording the process's group, the process may run, and with no group recorded there
+ * is nothing to probe — the refusal says how to find its processes instead.
  *
  * Run it under the orchestrator's lock, before any run starts: a run of this orchestrator still
  * starting, with no process recorded yet, would read as stale.
@@ -51,7 +54,8 @@ export interface Orphan {
   readonly taskId: string;
   /** The run's id, `bpng-12`. */
   readonly id: string;
-  readonly pgid: number;
+  /** Its process group; absent when the record names none — a process was starting. */
+  readonly pgid?: number;
   /** Its `run.json`, absolute. */
   readonly record: string;
   /** `false` when the group could not be shown to be the run's, and is assumed to be. */
@@ -97,7 +101,8 @@ export type Classification =
   | { readonly kind: "orphan"; readonly pgid: number; readonly confirmed: true }
   | {
       readonly kind: "orphan";
-      readonly pgid: number;
+      /** Absent when the record names no group: a process was starting. */
+      readonly pgid?: number;
       readonly confirmed: false;
       readonly why: string;
     }
@@ -111,9 +116,15 @@ export type Classification =
  * @returns orphan (confirmed, or not and why) or stale, and why.
  */
 export async function classifyRunning(
-  record: Pick<RunningRecordRead, "process">,
+  record: Pick<RunningRecordRead, "process" | "starting">,
   deps: Pick<OrphanCheckDeps, "kill" | "readLeaderStart">,
 ): Promise<Classification> {
+  if (record.starting !== undefined)
+    return {
+      kind: "orphan",
+      confirmed: false,
+      why: `its orchestrator stopped while starting its ${record.starting} process, before recording the process's group`,
+    };
   const { process } = record;
   if (process === undefined)
     return { kind: "stale", reason: "no process recorded" };
@@ -187,7 +198,7 @@ export async function checkOrphans(
       orphans.push({
         taskId: record.taskId,
         id: record.id,
-        pgid: verdict.pgid,
+        ...(verdict.pgid === undefined ? {} : { pgid: verdict.pgid }),
         record: path,
         confirmed: verdict.confirmed,
         ...(verdict.confirmed ? {} : { why: verdict.why }),
@@ -212,12 +223,16 @@ export async function checkOrphans(
  * The refusal an orphan makes: the task, the run, its group, and the way out. A confirmed one names
  * the command that ends it; an unconfirmed one first says how to look at the group — `ps -g` selects
  * a process group on macOS and a session on Linux, the same thing for a run, which is spawned in a
- * session of its own — and how to mark the run over when the group is not its.
+ * session of its own — and how to mark the run over when the group is not its. One with no group
+ * recorded says how to find the run's processes: each the run spawned writes its output to the run's
+ * log, so `lsof` on the log lists them while they run.
  *
  * @param orphan - the orphan.
  * @returns one line for the terminal and the log.
  */
 export function orphanRefusal(orphan: Orphan): string {
+  const markLost = `mark the run over: in ${safeLine(shellWord(orphan.record), 1000)}, set "state" to "lost".`;
+  if (orphan.pgid === undefined) return groupUnknownRefusal(orphan, markLost);
   const pgid = String(orphan.pgid);
   const end = `kill -KILL -${pgid}`;
   if (orphan.confirmed)
@@ -229,8 +244,28 @@ export function orphanRefusal(orphan: Orphan): string {
     `Task ${orphan.taskId} may still have run ${orphan.id} running, in process group ${pgid} — ` +
     `unconfirmed: ${orphan.why ?? "it could not be checked"}. A second run would share its sites. ` +
     `Check the group first: ps -o pid,user,lstart,command -g ${pgid}. If those are the run's ` +
-    `processes, end them with: ${end}. If not, mark the run over: in ` +
-    `${safeLine(shellWord(orphan.record), 1000)}, set "state" to "lost".`
+    `processes, end them with: ${end}. If not, ${markLost}`
+  );
+}
+
+/**
+ * The refusal of an orphan whose record names no group: how to find the run's processes by its log,
+ * which each of them writes its output to.
+ *
+ * @param orphan - the orphan, without a group.
+ * @param markLost - how to mark the run over, as the sentence's end.
+ * @returns one line for the terminal and the log.
+ */
+function groupUnknownRefusal(orphan: Orphan, markLost: string): string {
+  const log = safeLine(
+    shellWord(join(dirname(orphan.record), RUN_FILES.log)),
+    1000,
+  );
+  return (
+    `Task ${orphan.taskId} may still have run ${orphan.id} running — unconfirmed: ` +
+    `${orphan.why ?? "it could not be checked"}. A second run would share its sites. Look for its ` +
+    `processes first: lsof -- ${log} lists those writing its log. End each one's group with: ` +
+    `kill -KILL -<PGID>, its PGID from: ps -o pgid= -p <PID>. If there are none, ${markLost}`
   );
 }
 

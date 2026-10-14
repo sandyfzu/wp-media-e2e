@@ -19,6 +19,7 @@ import {
   parseRunRecord,
   readRunRecordFile,
   runningRecord,
+  startingRecord,
   writeRunRecord,
   type RecordWriter,
   type RunningRecordRead,
@@ -198,6 +199,28 @@ test.describe("parseRunRecord", () => {
       parseRunRecord(JSON.stringify({ ...running, state: "lost" }), "bpng-12"),
     ).toMatchObject({ kind: "over", record: { state: "lost" } });
     expect(RUN_STATES).toEqual(["running", "ended", "lost"]);
+  });
+
+  test("reads a record of a process starting back, and refuses a process it does not know", () => {
+    for (const name of ["bddgen", "playwright"] as const)
+      expect(readBack(startingRecord(IDENTITY, "bpng", name))).toEqual({
+        v: 1,
+        state: "running",
+        id: "bpng-12",
+        runId: IDENTITY.runId,
+        taskId: "bpng",
+        startedAt: IDENTITY.startedAt.toISOString(),
+        starting: name,
+      });
+    expect(
+      parseRunRecord(
+        JSON.stringify({
+          ...startingRecord(IDENTITY, "bpng", "bddgen"),
+          starting: "node",
+        }),
+        "bpng-12",
+      ).kind,
+    ).toBe("malformed");
   });
 
   test("a record is only its own folder's", () => {

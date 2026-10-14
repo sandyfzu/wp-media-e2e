@@ -4,6 +4,7 @@ import { once } from "node:events";
 import {
   mkdir,
   mkdtemp,
+  open,
   readFile,
   rm,
   symlink,
@@ -22,6 +23,7 @@ import {
   endedRecord,
   leaderProcess,
   runningRecord,
+  startingRecord,
   writeRunRecord,
   type RunningProcess,
 } from "../runs/record";
@@ -87,6 +89,16 @@ function deps(overrides: Partial<OrphanCheckDeps> = {}): OrphanCheckDeps {
     now: () => FOUND,
     ...overrides,
   };
+}
+
+/** Whether `lsof` runs here: macOS and Ubuntu have it, a slim container may not. */
+function hasLsof(): boolean {
+  try {
+    execFileSync("lsof", ["-v"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** A real process group whose leader has exited while a member lives on. */
@@ -277,6 +289,33 @@ test.describe("classifyRunning", () => {
     ).toEqual({ kind: "stale", reason: "leader differs" });
   });
 
+  test("a process starting, its group never recorded, is an unconfirmed orphan, without asking anything", async () => {
+    const asked: number[] = [];
+    const ask = {
+      kill: (pid: number) => {
+        asked.push(pid);
+      },
+      readLeaderStart: (pid: number) => {
+        asked.push(pid);
+        return Promise.resolve({ kind: "gone" } as const);
+      },
+    };
+    for (const name of ["bddgen", "playwright"] as const)
+      expect(await classifyRunning({ starting: name }, ask)).toEqual({
+        kind: "orphan",
+        confirmed: false,
+        why: `its orchestrator stopped while starting its ${name} process, before recording the process's group`,
+      });
+    // Whatever else the record says: the previous process's ended group does not make it over.
+    expect(
+      await classifyRunning(
+        { ...recorded, starting: "playwright" },
+        { ...ask, kill: killWith([]) },
+      ),
+    ).toMatchObject({ kind: "orphan", confirmed: false });
+    expect(asked).toEqual([]);
+  });
+
   test("no process recorded is stale, without asking anything", async () => {
     const asked: number[] = [];
     expect(
@@ -459,6 +498,31 @@ test.describe("checkOrphans", () => {
         "pid,user,lstart,command -g 4242. If those are the run's processes, end them with: kill " +
         `-KILL -4242. If not, mark the run over: in ${path}, set "state" to "lost".`,
     );
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  test("refuses on a run whose process was starting, naming no group, and keeps its record", async () => {
+    const dir = await runFolder("bpng-12");
+    const path = join(dir, "run.json");
+    await writeRunRecord(
+      path,
+      startingRecord(identity("bpng-12"), "bpng", "playwright"),
+    );
+    const before = await readFile(path, "utf8");
+    const check = await checkOrphans(stateDir, deps());
+    expect(check).toEqual({
+      orphans: [
+        {
+          taskId: "bpng",
+          id: "bpng-12",
+          record: path,
+          confirmed: false,
+          why: "its orchestrator stopped while starting its playwright process, before recording the process's group",
+        },
+      ],
+      stale: [],
+      warnings: [],
+    });
     expect(await readFile(path, "utf8")).toBe(before);
   });
 
@@ -788,6 +852,64 @@ test.describe("orphanRefusal", () => {
         "are the run's processes, end them with: kill -KILL -4242. If not, mark the run over: in " +
         `'/srv/my state/runs/bpng-12/run.json', set "state" to "lost".`,
     );
+  });
+
+  test("one with no group recorded says how to find the run's processes by its log, and how to mark it over", () => {
+    expect(
+      orphanRefusal({
+        taskId: "bpng",
+        id: "bpng-12",
+        record: "/srv/my state/runs/bpng-12/run.json",
+        confirmed: false,
+        why: "its orchestrator stopped while starting its playwright process, before recording the process's group",
+      }),
+    ).toBe(
+      "Task bpng may still have run bpng-12 running — unconfirmed: its orchestrator stopped while " +
+        "starting its playwright process, before recording the process's group. A second run would " +
+        "share its sites. Look for its processes first: lsof -- '/srv/my state/runs/bpng-12/run.log' " +
+        "lists those writing its log. End each one's group with: kill -KILL -<PGID>, its PGID from: " +
+        "ps -o pgid= -p <PID>. If there are none, mark the run over: in " +
+        `'/srv/my state/runs/bpng-12/run.json', set "state" to "lost".`,
+    );
+  });
+
+  test("the lsof it gives lists a process writing the run's log", async () => {
+    test.skip(!hasLsof(), "lsof is not installed here");
+    const dir = await runFolder("bpng-12");
+    const log = join(dir, "run.log");
+    const handle = await open(log, "a");
+    // A process of the run: its output is the run's log, as `launchRun` spawns it.
+    const child = spawn(
+      process.execPath,
+      ["-e", "setTimeout(() => {}, 60000)"],
+      {
+        stdio: ["ignore", handle.fd, handle.fd],
+      },
+    );
+    await once(child, "spawn");
+    await handle.close();
+    try {
+      const command = /Look for its processes first: (lsof -- \S+) lists/.exec(
+        orphanRefusal({
+          taskId: "bpng",
+          id: "bpng-12",
+          record: join(dir, "run.json"),
+          confirmed: false,
+          why: "x",
+        }),
+      )?.[1];
+      const [file, ...args] = (command ?? "").split(" ");
+      const out = execFileSync(file ?? "", args, { encoding: "utf8" });
+      const pids = out
+        .trim()
+        .split("\n")
+        .slice(1)
+        .map((line) => Number(line.trim().split(/\s+/)[1]));
+      expect(pids).toContain(child.pid);
+    } finally {
+      child.kill("SIGKILL");
+      await once(child, "exit");
+    }
   });
 
   test("the command it gives lists exactly the group's processes, its leader gone", async () => {

@@ -23,8 +23,8 @@ import type { LeaderStart, LeaderStartReader } from "./leader";
  * Every reader — the orphan check and run-folder retention — sorts a record through
  * {@link readRunRecordFile} alone, so the two can never disagree on what a record is.
  *
- * The version stays 1 through additive fields: `process.leaderStart` and `process.leaderStartUnread`
- * are optional, and a record with neither was written before they existed.
+ * The version stays 1 through additive fields: `process.leaderStart`, `process.leaderStartUnread` and
+ * `starting` are optional, and a record without them was written before they existed.
  */
 
 /** The record's schema version. */
@@ -58,11 +58,22 @@ export interface RunningRecord extends RecordBase {
   readonly state: "running";
   /** The process running now and its group; absent before the first one started. */
   readonly process?: RunningProcess;
+  /**
+   * A process about to be spawned, its group not known yet ({@link startingRecord}). Read back, it
+   * makes the run an unconfirmed orphan whatever else the record says: the process may have started.
+   */
+  readonly starting?: RunProcessName;
 }
+
+/** The processes a run spawns, in order. */
+export const RUN_PROCESSES = ["bddgen", "playwright"] as const;
+
+/** A process a run spawns. */
+export type RunProcessName = (typeof RUN_PROCESSES)[number];
 
 /** The process a running record names. */
 export interface RunningProcess {
-  readonly name: "bddgen" | "playwright";
+  readonly name: RunProcessName;
   /** Its group's id: its own PID, as it leads its group. */
   readonly pgid: number;
   /**
@@ -116,6 +127,31 @@ export function runningRecord(
     state: "running",
     ...base(identity, taskId),
     ...(process === undefined ? {} : { process }),
+  };
+}
+
+/**
+ * The record of a run about to spawn a process: write it, and wait for the write, just before the
+ * spawn (`launchRun`'s `onSpawning`), then {@link runningRecord} with the process once it runs. A crash
+ * between the spawn and that second write would otherwise leave the record naming the previous
+ * process's ended group, or none — read as over while the new process holds the cell's sites. Its group
+ * is not known yet, so it names none: the orphan check cannot probe it, and refuses the start until an
+ * operator has looked.
+ *
+ * @param identity - the run.
+ * @param taskId - its task.
+ * @param name - the process about to be spawned.
+ */
+export function startingRecord(
+  identity: Pick<RunIdentity, "id" | "runId" | "startedAt">,
+  taskId: string,
+  name: RunProcessName,
+): RunningRecord {
+  return {
+    v: RUN_RECORD_VERSION,
+    state: "running",
+    ...base(identity, taskId),
+    starting: name,
   };
 }
 
@@ -246,13 +282,14 @@ const runningSchema = z
     state: z.literal("running"),
     process: z
       .object({
-        name: z.enum(["bddgen", "playwright"]),
+        name: z.enum(RUN_PROCESSES),
         // A group id that would reach every process (1), or the orchestrator's own (0), is no run's.
         pgid: z.number().int().min(2).max(Number.MAX_SAFE_INTEGER),
         leaderStart: WORDS.optional(),
         leaderStartUnread: WORDS.optional(),
       })
       .optional(),
+    starting: z.enum(RUN_PROCESSES).optional(),
   })
   .refine(consistent);
 
