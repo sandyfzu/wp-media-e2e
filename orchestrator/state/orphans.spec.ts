@@ -245,15 +245,36 @@ test.describe("classifyRunning", () => {
     ).toEqual({ kind: "stale", reason: "process group ended" });
   });
 
-  test("a group with no member ours to signal is a stranger's: stale", async () => {
+  test("a group with no member ours to signal, its leader gone, is an unconfirmed orphan: a run's sudo command may still work", async () => {
+    const eperm: KillFn = () => {
+      throw Object.assign(new Error(), { code: "EPERM" });
+    };
     expect(
       await classifyRunning(recorded, {
-        kill: () => {
-          throw Object.assign(new Error(), { code: "EPERM" });
-        },
+        kill: eperm,
+        readLeaderStart: startsOf({}),
+      }),
+    ).toEqual({
+      kind: "orphan",
+      pgid: 4242,
+      confirmed: false,
+      why: "its playwright process has exited, and only processes of another user remain in its group — a command the run ran as that user (sudo), or that user's own group; ending them needs that user",
+    });
+    // Judged by its leader like any live group: the recorded one is the run's, another start a stranger's.
+    expect(
+      await classifyRunning(recorded, {
+        kill: eperm,
         readLeaderStart: startsOf({ 4242: { kind: "start", value: START } }),
       }),
-    ).toEqual({ kind: "stale", reason: "process group not ours" });
+    ).toEqual({ kind: "orphan", pgid: 4242, confirmed: true });
+    expect(
+      await classifyRunning(recorded, {
+        kill: eperm,
+        readLeaderStart: startsOf({
+          4242: { kind: "start", value: "ps:Tue Oct 13 11:40:02 2026" },
+        }),
+      }),
+    ).toEqual({ kind: "stale", reason: "leader differs" });
   });
 
   test("no process recorded is stale, without asking anything", async () => {
@@ -409,6 +430,38 @@ test.describe("checkOrphans", () => {
     expect(await readFile(path, "utf8")).toBe(before);
   });
 
+  test("refuses on a group holding only another user's processes, its leader gone, and keeps the record", async () => {
+    // As a run's `sudo rm` left working once the group's SIGKILL ended everything of ours.
+    const path = await running("bpng-12", {
+      name: "playwright",
+      pgid: 4242,
+      leaderStart: START,
+    });
+    const before = await readFile(path, "utf8");
+    const check = await checkOrphans(
+      stateDir,
+      deps({ kill: killWith([], [4242]), readLeaderStart: startsOf({}) }),
+    );
+    expect(check.stale).toEqual([]);
+    const [orphan, ...more] = check.orphans;
+    if (orphan === undefined) throw new Error("no orphan reported");
+    expect(more).toEqual([]);
+    expect(orphan).toMatchObject({
+      id: "bpng-12",
+      pgid: 4242,
+      confirmed: false,
+    });
+    expect(orphanRefusal(orphan)).toBe(
+      "Task bpng may still have run bpng-12 running, in process group 4242 — unconfirmed: its " +
+        "playwright process has exited, and only processes of another user remain in its group — a " +
+        "command the run ran as that user (sudo), or that user's own group; ending them needs that " +
+        "user. A second run would share its sites. Check the group first: ps -o " +
+        "pid,user,lstart,command -g 4242. If those are the run's processes, end them with: kill " +
+        `-KILL -4242. If not, mark the run over: in ${path}, set "state" to "lost".`,
+    );
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
   test("rewrites each stale record as lost, so the next check does not read it", async () => {
     const noProcess = await running("bpng-1");
     const ended = await running("bpng-2", {
@@ -430,7 +483,7 @@ test.describe("checkOrphans", () => {
       kill: killWith([502], [503]),
       readLeaderStart: startsOf({
         502: { kind: "start", value: "ps:Wed Oct 14 01:00:00 2026" },
-        503: { kind: "start", value: START },
+        503: { kind: "start", value: "ps:Wed Oct 14 02:00:00 2026" },
       }),
     });
     const check = await checkOrphans(stateDir, system);
@@ -440,7 +493,7 @@ test.describe("checkOrphans", () => {
         { id: "bpng-1", reason: "no process recorded", rewritten: true },
         { id: "bpng-2", reason: "process group ended", rewritten: true },
         { id: "bpng-3", reason: "leader differs", rewritten: true },
-        { id: "bpng-4", reason: "process group not ours", rewritten: true },
+        { id: "bpng-4", reason: "leader differs", rewritten: true },
       ],
       warnings: [],
     });

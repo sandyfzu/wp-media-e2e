@@ -33,8 +33,11 @@ import { safeLine, shellWord } from "../text";
  *   its runner gone (Playwright's workers outlive a killed runner by ~30 s), or a later process's
  *   group whose leader exited in turn: the two cannot be told apart, so it is an orphan,
  *   **unconfirmed**, and the refusal says how to check;
- * - members none of them ours to signal (`EPERM`) are a stranger's: the orchestrator spawns every
- *   run as itself. **Stale**.
+ * - members none of them ours to signal (`EPERM`) are judged by the leader the same way: a run's own
+ *   group may hold only another user's processes once the rest has ended — a `sudo` command the local
+ *   transport runs as root, still working after the group's SIGKILL — so `EPERM` alone never makes a
+ *   record stale, as it never makes a group empty (`waitForEmptyGroup`). Its leader gone, it is an
+ *   **unconfirmed** orphan that says so.
  *
  * Anything else that cannot be checked now — the leader's start unreadable now or at spawn, the group
  * not askable — is an unconfirmed orphan too: a refusal can be retried, a record rewritten cannot.
@@ -59,10 +62,7 @@ export interface Orphan {
 
 /** Why a running record is taken to be over. */
 export type StaleReason =
-  | "no process recorded"
-  | "process group ended"
-  | "process group not ours"
-  | "leader differs";
+  "no process recorded" | "process group ended" | "leader differs";
 
 /** A running record found over. */
 export interface StaleRun {
@@ -135,8 +135,6 @@ export async function classifyRunning(
   }
   if (group === "empty")
     return { kind: "stale", reason: "process group ended" };
-  if (group === "unsignallable")
-    return { kind: "stale", reason: "process group not ours" };
   const recorded = process.leaderStart;
   if (recorded === undefined)
     return unconfirmed(
@@ -149,10 +147,12 @@ export async function classifyRunning(
     return now.value === recorded
       ? { kind: "orphan", pgid, confirmed: true }
       : { kind: "stale", reason: "leader differs" };
+  if (now.kind === "unknown")
+    return unconfirmed(`its leader's start cannot be read now (${now.why})`);
   return unconfirmed(
-    now.kind === "gone"
-      ? `its ${process.name} process has exited, and the rest of its group still runs`
-      : `its leader's start cannot be read now (${now.why})`,
+    group === "unsignallable"
+      ? `its ${process.name} process has exited, and only processes of another user remain in its group — a command the run ran as that user (sudo), or that user's own group; ending them needs that user`
+      : `its ${process.name} process has exited, and the rest of its group still runs`,
   );
 }
 
