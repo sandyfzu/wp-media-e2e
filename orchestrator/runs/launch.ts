@@ -6,7 +6,12 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { RESULTS_FILE } from "../../src/common/reporting/results-schema";
 import { errorCode } from "../error-code";
-import { checkOwnFolder, PRIVATE_FOLDER } from "../folders";
+import {
+  checkOwnFolder,
+  describeFolderProblem,
+  PRIVATE_FOLDER,
+  type OwnFolderCheck,
+} from "../folders";
 
 import type { Command, RunCommands } from "./commands";
 import { variableNames } from "./environment";
@@ -169,12 +174,24 @@ export async function openRunLog(path: string): Promise<FileHandle> {
  */
 async function assertPrivateFolder(dir: string): Promise<void> {
   const check = await checkOwnFolder(dir, PRIVATE_FOLDER);
+  if (check.kind !== "ok") throw new Error(runFolderRefusal(dir, check));
+}
+
+/**
+ * Why a run's folder is refused, in words: what {@link checkOwnFolder} found — its owner's uid for a
+ * folder of another user's, which its mode alone would not say.
+ *
+ * @param dir - the run's folder.
+ * @param check - the failed check.
+ * @returns the message.
+ */
+export function runFolderRefusal(
+  dir: string,
+  check: Exclude<OwnFolderCheck, { kind: "ok" }>,
+): string {
   if (check.kind === "notFolder")
-    throw new Error(`The run's folder is not a folder: ${dir}.`);
-  if (check.kind !== "ok")
-    throw new Error(
-      `The run's folder must be this user's alone (mode 0700): ${dir} is mode ${check.mode.toString(8)}.`,
-    );
+    return `The run's folder is not a folder: ${dir}.`;
+  return `The run's folder must be this user's alone (mode 0700): ${dir} ${describeFolderProblem(check)}.`;
 }
 
 /** One run's processes and stop: the state {@link launchRun} hands out. */

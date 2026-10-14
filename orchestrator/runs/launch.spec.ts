@@ -26,6 +26,7 @@ import {
   launchRun,
   LOG_PREFIX,
   openRunLog,
+  runFolderRefusal,
   type LaunchedRun,
   type LaunchOptions,
 } from "./launch";
@@ -492,5 +493,27 @@ test.describe("describeCommand", () => {
         args: ["cli.js", "--grep=@smoke and more", "", 'a"b'],
       }),
     ).toBe('/usr/bin/node cli.js "--grep=@smoke and more" "" "a\\"b"');
+  });
+});
+
+test.describe("runFolderRefusal", () => {
+  test("names the owner of a folder of another user's, and the mode of one open to others", () => {
+    expect(
+      runFolderRefusal("/s/runs/bpng-1", {
+        kind: "notOwn",
+        uid: 0,
+        mode: 0o700,
+      }),
+    ).toBe(
+      "The run's folder must be this user's alone (mode 0700): /s/runs/bpng-1 is owned by uid 0, not this user.",
+    );
+    expect(
+      runFolderRefusal("/s/runs/bpng-1", { kind: "open", mode: 0o755 }),
+    ).toBe(
+      "The run's folder must be this user's alone (mode 0700): /s/runs/bpng-1 is mode 755.",
+    );
+    expect(runFolderRefusal("/s/runs/bpng-1", { kind: "notFolder" })).toBe(
+      "The run's folder is not a folder: /s/runs/bpng-1.",
+    );
   });
 });
