@@ -9,8 +9,9 @@
 > §7.15; audited and re-audited the same day, §7.16); 5E, the notification subscribers (2026-10-13, §7.17); 5F, one
 > run (2026-10-13, §7.18; audited 2026-10-14, the same section); 5G, the loop (2026-10-14, §7.19); 5H, the
 > process (2026-10-14, §7.20; audited the same day); 5I.1, the dry run's report (2026-10-14, §7.21; audited the same day); 5I.2,
-> the command (2026-10-14, §7.22; audited the same day); 5J, the live checks (2026-10-14, §7.23).
-> **Next:** step 5's 5K, the audit (§7.14). Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> the command (2026-10-14, §7.22; audited the same day); 5J, the live checks (2026-10-14, §7.23); 5K, the
+> audit, its fixes, two re-audits and the site locks' live smoke (2026-10-15, §7.24) — step 5 is done.
+> **Next:** step 6, the docs (§7). Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -58,8 +59,10 @@ warning, the cleanup chain after a kill, Allure generation, APVM cache cleaning.
   only; Phase 1 restores it by changing what the run is given, nothing else (§8).
 - **One event**, `run.finished`, with the payload the parent specifies (§2 Events), delivered to two
   subscribers: Slack and Datator.
-- **Safety kept** because it is cheap and its absence corrupts sites: never two runs of one cell, never
-  two orchestrators on one state directory, a graceful stop (Phase 0C).
+- **Safety kept** because it is cheap and its absence corrupts sites: never two runs of one cell — within
+  a config by its checks, across this user's orchestrators on one machine by a lock per site, held for a
+  task's whole loop (§7.24) —,
+  never two orchestrators on one state directory, a graceful stop (Phase 0C).
 
 ## 2. AutoE2E, the floor (V114–V116)
 
@@ -131,12 +134,17 @@ Phase 0.5 starts once Phase 0 is done; this is why each item matters here.
   lines go to `orchestrator.log`:
 
   ```text
-  10:15:30 orchestrator  started · 2 tasks · .orchestrator/ · pid 4242
-  10:15:31 bpng  bpng-12 started · backwpup pro@nginx · develop · .orchestrator/runs/bpng-12/run.log
-  11:09:41 bpng  bpng-12 ✔ passed · 52 scenarios: 51 passed, 1 flaky · 54m 10s · reports/backwpup/pro@nginx/<RUN_ID>
+  10:15:30 orchestrator  started · 2 tasks (bpng, bfng) · .orchestrator/ · pid 4242
+  10:15:31 bpng  bpng-12 started · backwpup pro@nginx · develop (default) · .orchestrator/runs/bpng-12/run.log
+  11:09:41 bpng  bpng-12 ⚠ flaky · 52 scenarios: 51 passed, 1 flaky · 54m 10s · reports/backwpup/pro@nginx/<RUN_ID>
   11:09:42 bpng  slack ✓ · datator ✓ 201
   11:09:42 bpng  next run 11:14:41 (cooldown 5m)
   ```
+
+  The started line names the tasks, and `· once` after them under `--once`. A run's ref is the one
+  built, as `--dry-run` names it: `(default)` when the product's manifest chose it (`builtRef`); the
+  task's `grep` follows it when set. (As first written, this example had no ids, `develop` alone and
+  `✔ passed` for a run with a flaky scenario — superseded, 5K.)
 
 ### 4.2 M2 — Configuration
 
@@ -229,8 +237,12 @@ committed `orchestrator/config.example.json` documents it.
   | otherwise | `passed` |
 
 - **Run record.** `run.json`: the process group, the exit codes, the status, reason and counts — the
-  `run.finished` payload and the Datator record beside it, in files never read back (§4.9). Written at
-  start (`running`, with the group) and at the end.
+  `run.finished` payload and the Datator record beside it, in files never read back (§4.9). Its states:
+  `running` — first with `starting: <process>` (written before `bddgen`, then Playwright, is spawned, so
+  a crash between the spawn and the record still leaves a trace), then with the process, its group and
+  its leader's start; `ended`, with the outcome; `lost`, set by a later start's orphan check on a run
+  that is provably over without an `ended` record. (As first written: "at start (`running`, with the
+  group) and at the end" — superseded.)
 - **Orphans.** A detached run outlives an orchestrator killed by SIGKILL or a crash, and nothing
   reports it. At start, a task whose last record still says `running` with a live group is **not
   started**: the start fails, naming the run, its group and the command that kills it — a second run
@@ -261,7 +273,8 @@ SIGINT. While `bddgen` runs, its group is killed outright: generation has nothin
 
 ### 4.6 M6 — Events
 
-- `orchestrator/events/`: `createEventBus({ timeoutMs, log })` with `on(type, handler, name)` and
+- `orchestrator/events/`: `createEventBus({ timeoutMs, log, secrets })` (a failure's line masked of
+  `secrets`) with `on(type, handler, name)` and
   `publish(event)`. Handlers run concurrently, each timed out (30 s) and caught; a failure is logged
   with the subscriber's name and never reaches the run (parent §2: a subscriber never holds up a run).
   `publish` does not block the loop; `settle()` waits for deliveries in flight, at shutdown.
@@ -341,6 +354,8 @@ SIGINT. While `bddgen` runs, its group is killed outright: generation has nothin
   orchestrator.log   the terminal's lines
   tasks/<id>.json    the run counter
   runs/<run id>/     run.log, run.json, stop; run-finished.json, datator.json (0600) once it ended
+$XDG_STATE_HOME/wp-media-e2e/site-locks/   (else ~/.local/state/…) 0700, this user's, every config's
+  <sha256 of the site's key>.lock           the loop holding the site: its orchestrator, cell and latest run.json (§7.24)
 ```
 
 - **What a run keeps.** `run.json` is the one file the orchestrator reads back (orphan check,
@@ -358,7 +373,14 @@ SIGINT. While `bddgen` runs, its group is killed outright: generation has nothin
   cycle, 20 reports cover about 18 hours; AutoE2E kept 4 days — raise it if that history is wanted.
 - **Run folders** follow the same policy at each run's end, through 0F's pure `planRetention` (group:
   the task; never the run in progress).
-- `orchestrator.log` grows by a few lines per run — no rotation.
+- `orchestrator.log` grows by a few lines per run — no rotation (the reviewer's worst case, 0.75–1.4 MB a
+  day). It is kept open, appending, for the process's life: a `logrotate` that **renames** it leaves
+  the orchestrator writing to the renamed file. Rotate it with `copytruncate` (the copy may lose the
+  lines written during it), or not at all (5K, L5).
+- **Retention's cost grows with what it keeps.** Each run's end, and each start's orphan check, reads
+  every run folder's `run.json` (8,000 folders: 2.3 s, measured by the 5K reviewer). `runs.reportsKeep`
+  bounds that count per task; `0` lifts the cap, leaving only the 30-day rule — at a 1-minute cooldown
+  and runs that fail fast, tens of thousands of folders a month. Keep a cap (5K, L7).
 - The orchestrator never reads `E2E_*` variables (parent §1); only its config and flags.
 
 ### 4.10 Not planned here, on purpose
@@ -369,17 +391,29 @@ belong with Phase 1's service.
 
 ## 5. Code layout
 
+As built (5K; the first sketch had `cli.ts` hold commander and `tasks/loop.ts` the cycle —
+superseded):
+
 ```text
 orchestrator/
-  cli.ts                  commander: start
+  cli.ts                  the entry: process.exit(await runCommand(…)), nothing else
+  command.ts              commander: start, its help, npm's taken options refused
+  start.ts, start-lines.ts  the process: lock, orphan check, cells, loops, signals, exit code
+  dry-run.ts              --dry-run's report (and the ref a run's started line names)
   config.example.json     the committed example (§4.2)
-  config/                 schema (zod), checks against the suite, loader
-  tasks/loop.ts           the cycle
-  runs/                   identity, env, launch, stop, outcome, record
+  suite-imports.json      the suite modules it may import (§5 below)
+  config/                 schema (zod), parse, json-keys, check, load, secrets, product-list, errors
+  tasks/                  cycle.ts (one run), loop.ts (cycle, cooldown, --once), run-lines.ts
+  runs/                   identity, environment, commands, launch, process-group, stream-end, stop,
+                          shutdown, end, results, facts, outcome, record, leader
   events/                 bus, run-finished (types + builder)
-  notify/                 slack, datator — pure formatters, thin senders
-  state/                  lock, counter, retention
-  log.ts                  a Logger interface; terminal + file now, pino behind it later
+  notify/                 post, slack, datator — pure formatters, thin senders; subscribe
+  state/                  atomic, read, errors, lock, lock-owner, pid-space, leftovers, cell-lock,
+                          counter, orphans, inspect, run-folders, runs-folder, run-retention
+  log.ts, terminal.ts     a Logger: terminal + file now, pino behind it later; stdout non-blocking
+  text.ts, files.ts, folders.ts, error-code.ts   masking and cuts; bounded reads; folder checks
+  __fixtures__/           fake-suite, fake-start + swap-start.mjs, http-sink, import-boundary,
+                          results, run-finished, file-handle, slow-reader
 ```
 
 - `tsconfig.json` includes `orchestrator/**/*`; `playwright.unit.config.ts` also collects
@@ -1638,7 +1672,8 @@ the audit (below):
   sites' passwords and storage keys, selected or not) **before** it is normalised — a site's address
   before the URL parser encodes or case-folds it — and every line again.
 
-**Verification.** `dry-run.spec.ts`, 23 tests, the config loaded through `prepareStart` and the real
+**Verification.** `dry-run.spec.ts`, 23 tests (22 at 5K, `siteAddress`'s test gone with it; 23 again
+with 5K's `builtRef`), the config loaded through `prepareStart` and the real
 loader, the product list's cells read by the real `loadSites`: the example, line for line; absolute
 paths; `--task` and an unknown one; a nameless task, a server two tasks share (as first written); warnings
 (the state's first, mode, an ignored version, crowded servers); nothing optional; a task's own cooldown and
@@ -1888,6 +1923,220 @@ and refuses every other host; its CA through `NODE_EXTRA_CA_CERTS`. Every check 
 - **Interruptions:** the first full run (bpng-9/bfng-9) was stopped by a pause, one Ctrl-C at 1 h 10 m: both
   drained, `stopped`, exit 130 — a further check 3; the full run was then repeated whole.
 
+### 7.24 5K — Audit (2026-10-15, V494–V505; second pass V506–V514; re-audit V515–V524; second re-audit and live smoke V525–V536)
+
+Two reviewers on step 5 as a whole, each on its own copy — security, and correctness — with mutations of
+every phase. No high. The behavioural findings are fixed here, each proved by a test that fails without
+its fix (V504); the quality and documentation findings are left to a second pass, marked so below.
+
+- **One cell under two orchestrators (medium; security) — fixed: a lock per cell** (as first built; the
+  re-audit below keys it by site and holds it for the whole loop). The state directory's
+  lock keeps one orchestrator per state directory and the config's checks one task per cell, but a second
+  config or checkout ran the same cell — its sites, its report folder, its `test-results/` folder, which
+  Playwright empties. Now `state/cell-lock.ts`: one lock per `product × cell` in
+  `$XDG_STATE_HOME/wp-media-e2e/cell-locks/<product>/<cell>.lock` (`~/.local/state/…` without it; a
+  relative `XDG_STATE_HOME` ignored; no absolute `HOME` either refuses the start), its folders made `0700`
+  and judged by `PRIVATE_FOLDER` (never a link). Not `test-results/`, which Playwright empties. It is the
+  state directory's lock in another place — `lock.ts` now takes a `LockPlace` (folder check, messages,
+  sweep, and a rule for a dead holder), so the PID space, the exclusive hard-linked create, the stale
+  take-over under a claim and the leftover sweep are the same code. One rule more: the lock names the
+  run's `run.json` (an optional `run` in the owner record, absolute, no control character), and a dead
+  holder's lock is taken over only once that run is over, missing, or stale as the orphan check judges;
+  still running, its refusal is `orphanRefusal`'s, with the `kill -KILL -<pgid>`; an unreadable record
+  refuses too. So a run left behind by an orchestrator killed with SIGKILL keeps the cell from every
+  other orchestrator, not only its own state directory's. **Held** just before the launch (after the
+  run's number, before its folder) and **given back** once its processes are over — not while they may
+  live (below). **A cell held elsewhere** ends the run `error`, nothing launched or recorded in a folder,
+  the refusal said whole (the holder's PID, its run and record, the way out) and announced like any
+  error; the loop tries again after its cooldown, so it resumes by itself once the other stops — chosen
+  over waiting, which would hold a loop silently and hide a misconfiguration Slack now shows each cycle.
+  **At start** every selected cell is judged read-only and one held by a live orchestrator, or by a dead
+  one's run still running, refuses the start (`not started: …` under the task); `--dry-run` warns the
+  same. **Limits:** this user's orchestrators on this machine only — another user, another machine, a
+  run started by hand (`npm run test:backwpup`), or an orchestrator run with another `XDG_STATE_HOME`
+  or `HOME` takes or sees no lock.
+- **A run that could not be watched to its end (low) — fixed: the loop ends.** `launched.done`
+  rejecting (a bug in the watch) ended the run `error` and the loop cooled down and ran the cell again
+  while the old processes might live; the reviewer's injection had 13 runs alive in ~1 s. The run's
+  result now says `unwatched`, its cell's lock is kept and its record left `running`, and the loop ends
+  `failed` with `no next run: <id>'s processes could not be watched to their end and may still run …` —
+  chosen over waiting on the recorded group, which would redo the watch that just failed; the next start's
+  orphan check judges them.
+- **A secret's head before a cut (low; security) — fixed.** The suite masks a stream message by shape,
+  then cuts it at 2,000 characters with `… [truncated]`: a value-only secret across the cut reached the
+  orchestrator as a prefix no value matches — in `run-finished.json`, `datator.json`, Slack and Datator.
+  The orchestrator's masking now masks, before every `…` (the stream's `… [truncated]`, the run facts'
+  and the summary's `…`, its own cut), the longest text that is the start — four characters or more,
+  never all — of any form of any secret (`maskCutTails`). The reviewer's case: `xxxSitePassw0… [truncated]`
+  → `xxx***… [truncated]`.
+- **`runs/` unchecked (low; security) — fixed.** Created `recursive` and read by three readers that only
+  refused a link; a `runs/` others may write in let another user swap a run folder for a link between
+  two looks. Reproduced on Ubuntu 24.04 (the reviewer's `swap.sh`): `run.json`, `run-finished.json`,
+  `datator.json` written into the other user's target. `state/runs-folder.ts`: `runs/` must be a real
+  folder of this user's that no one else may write in (`go-w`; others reading is harmless, each run folder
+  is `0700`), checked where it is made (`launchRun`, `0700`) and read (the counter, the orphan check's and
+  the give-up's reader, run-folder retention); after the fix the same start is refused naming `chmod go-w`,
+  nothing written.
+- **An unkillable group said only in `run.log` (low) — fixed.** When the linger expires and its SIGKILL
+  fails — or a SIGKILL leaves the group not empty — the orchestrator's own lines (terminal and
+  `orchestrator.log`) say so at once (`LaunchOptions.onStuck`, under the run's id, masked) and again every
+  5 minutes while it waits (`STUCK_REPEAT_MS`), the SIGKILL sent again each time and the line naming
+  `kill -KILL -<pgid>`.
+- **`launched` grew for ever (low) — fixed.** The give-up's set of every run id begun became a map of each
+  task's latest run (`onRunBegun(id, taskId)`): a stuck loop is stuck on its latest run, and one entry
+  per task stays.
+- **The dry run ignored orphans (low-medium; correctness) — fixed.** `inspectState` now, once the lock is
+  free, reads the running records and classifies them as the orphan check does, read only (a stale one is
+  never marked `lost`), warning `a start would be refused: …` with `orphanRefusal`'s text; then each
+  selected cell's lock. Beside a live orchestrator's lock it says that alone: its runs are its own.
+- **A linked state directory was never swept (info) — fixed.** The sweep resolves a state directory that
+  is a link and sweeps where it leads (`tasks/` inside is still never followed).
+- **The log written after the lock's release (nit; correctness) — fixed.** `exiting N` and the lock's
+  "was not removed" were written once the lock was gone, so a next orchestrator could already share the
+  log. The lock is now released after the log is closed; a line after that goes to standard error. One
+  spec changed for it: "a lock gone before it is released is said" now finds the line on standard error.
+- **`handlebars` (critical, dev only, through Allure's plugins) — fixed.** The lockfile now has 4.7.10
+  (`npm audit fix`, within the plugins' `^4.7.9`): `npm audit` finds nothing, and `report:allure`
+  generates a report from a 5J run's results.
+- **For the second pass (quality and documentation; not done here):** `orchestrator.log` never rotated —
+  document `copytruncate` for step 6 (L5); run-folder retention reading every `run.json` — document its
+  cost beside `runs.reportsKeep` (L7); the import probe's snapshot (umask, `fetch`, `Error.stackTraceLimit`,
+  `process.exit`, listener limits; graceful-fs patching `fs.close` and `process.cwd`) (L8); plan references
+  in code (cor 2); TSDoc gaps (cor 3); duplicate helpers and constants (cor 4); stale help text (cor 5);
+  the default ref's three names (cor 6); `bus.ts`'s example (cor 7); plan drift in §4.1, §4.4, §4.6, §5,
+  §7.21, §9 (cor 9); test gaps left (many cycles' listeners and handles, pruning cost). Also seen here:
+  `start.spec.ts`'s "a stuck run's record that cannot be read …" failed once in a full run (30/30 alone,
+  and the next full run passed) — it overwrites `run.json` once the runner is ready, and the runner's
+  `running` record, written after its leader's start is read, can land after it: a race in the spec.
+  _Fixed by the second pass (2026-10-15, V506–V514):_
+  - **Plan references in code (cor 2).** `start.ts`'s `§4.4's run` and "the plan's" budgets,
+    `runs/shutdown.ts`'s "The plan's budgets", a `start.spec.ts` title, a `slack.spec.ts` title and a
+    fixture's comment now state the facts (the budgets with their reasons: a BackWPup scenario's
+    timeout grows 10 min per backup; a hook, fixtures, browser close and reports in 4 min; npm's two
+    SIGINTs 1–31 ms apart). The grep over `orchestrator/` and `src/` finds none left (`planner`, the
+    retention "plan" and "plants" are other words).
+  - **TSDoc (cor 3).** Every production function and method in `orchestrator/` (fixtures included) has
+    its `@param`/`@returns`, the bus's returned `on`/`publish`/`settle` their own, `record.ts`'s
+    returned `write` a full comment; the probe's too. Comments only, checked line by line.
+  - **Duplicates and constants (cor 4).** `slack.ts`'s `shellQuote` is gone for `text.ts`'s
+    `shellWord` (its scp caveat moved to `whereIs`; its test cases to `text.spec.ts`). `log.ts`'s
+    `stamp` now builds both lines with the exported, tested `formatLine`/`formatFileLine` (each masks
+    the text once more: a few lines per run). The two `MAX_FAILURE_LENGTH`s are now
+    `MAX_DELIVERY_FAILURE_LENGTH` (500, the bus: as long as a sender's `MAX_DETAIL`) and
+    `MAX_RUN_FAILURE_LENGTH` (300, a run's line or reason: with its lead-in it stays inside the
+    reason's 500, so a record never cuts it twice) — both values kept. The repeated `1000` is
+    `MAX_QUOTED_PATH` (`text.ts`: a path copied into a command) and `MAX_FAILURE_LINE` (`start.ts`);
+    `subscribe.ts`'s three `40`s `MAX_STATUS_LENGTH`.
+  - **Help text (cor 5).** Exit 1 now also says "without --once: the loops ended unasked (a loop that
+    broke …)" and "a cell held elsewhere"; npm 11's `--once`, `--task=<id>` and `--config=<file>` are
+    named, the existing lines kept as they wrap.
+  - **The default ref (cor 6).** The started line and the dry run now name it alike, as built:
+    `develop (default)`. `dry-run.ts`'s planning is shared (`plannedBuild`, `builtRef`); `start.ts`'s
+    `plannedRef` plans each task once, at its first run, never throwing (a product the list cannot
+    give, or a refused plan, falls back to the task's ref, else `default ref`), and hands it to the
+    cycle as `refFor`. §4.1's example matches.
+  - **`bus.ts`'s example (cor 7)** uses `logger.line` and `secrets`.
+  - **Plan drift (cor 9).** §4.1's example (ids, `· once`, the ref, `⚠ flaky`), §4.4's record states
+    (`running` with `starting`, then the process; `ended`; `lost`), §4.6's `secrets`, §5's layout as
+    built, §7.21's count (22 at 5K; 23 with `builtRef`), §9's runner check deferred to D4 with V467;
+    the superseded text marked.
+  - **L5, L7.** §4.9: `orchestrator.log` is kept open and appended — rotate with `copytruncate`, never
+    a rename; retention's cost grows with the folders kept (8,000: 2.3 s) — keep `runs.reportsKeep`
+    above `0`.
+  - **L8, the import probe.** `src/common/__fixtures__/import-probe.ts` now also compares the umask,
+    `process.getMaxListeners()`, `EventEmitter.defaultMaxListeners`, `Error.stackTraceLimit`, and the
+    identity of `fetch`, `process.exit`, `process.cwd`, `process.chdir`, `fs.close` and `fs.closeSync`.
+    **graceful-fs, measured:** importing `products.ts` loads `@playwright/test` (through the products'
+    support modules), whose bundles carry graceful-fs twice (`playwright-core`'s `utilsBundle.js`,
+    `playwright`'s `expect.js`): `fs.close`, `fs.closeSync`, `process.cwd` and `process.chdir` are
+    replaced (Playwright 1.63, Node 24.21). Avoiding it would mean a product list that never loads its
+    products' support code, so it is **accepted, by name** (`GRACEFUL_FS_PATCH`) and only by its own
+    marks: all four at once, each close leading to the old one through graceful-fs's `previous`
+    symbol, `chdir` through its prototype chain, and `cwd` answering the same folder. The other globals
+    the import adds (Node's own undici dispatcher, loaded lazily; signal-exit's emitter, which hooks
+    nothing until called — listeners are compared) change nothing the orchestrator relies on.
+  - **The flaky spec.** "a stuck run's record that cannot be read …" now waits for the runner's
+    `running` record before it signals and overwrites it; after that record the stuck run writes
+    nothing until its end. The spec's only change: an explained wait, its assertions untouched.
+  - **Not done here:** many cycles' listeners and handles, and the pruning cost, still have no test
+    (5K's test gaps); they belong with step 6's soak.
+- **Re-audit of the behavioural fixes (2026-10-15, V515–V524).** No high or medium bug: 20-process races,
+  a hostile `run.json`, the dry run read-only, L1, L3, cor 8 and `handlebars` held. Decided and done:
+  - **The lock is held for the whole loop (low-medium).** Held only during a run, the cell was free
+    through each cooldown, so two orchestrators took turns on it and a start's check passed between
+    runs. Now a task's loop takes its locks as it starts (a live holder refuses the start, as before,
+    and a loop that cannot get them at its start ends `failed` before any run, said once — never once per
+    cooldown), names each run in them before its launch (`HeldLock.setRun`: the lock rewritten whole, a
+    temporary file renamed over it, its token unchanged, only while it is still this holder's), and gives
+    them back as it ends (in a `finally`), kept after an `unwatched` run. A run whose locks can no longer
+    be named (removed by hand, another's) launches nothing, ends `error`, and its loop ends `failed`: the
+    refusal is announced once, not every cooldown, so no once-per-text dedup is needed.
+  - **Keyed by site, not by cell name (low).** One lock per site, keyed by its `baseURL`'s host, written
+    port (none for the scheme's default, so `http`/`https` of one host are one site) and path without
+    trailing slashes (`siteKey`), in `site-locks/<first 32 hex of its SHA-256>.lock`; the owner record
+    carries a `label` (the holding cell) beside its `run`. A cell's sites are taken in the keys' sorted
+    order, all or nothing (a refusal gives back what was taken). Messages name the holder's cell and the
+    site; two tasks of one orchestrator on one site are refused as such. Two cell names on one site now
+    exclude each other; one name on other sites does not. New limit: one site reached by two addresses
+    (a host and its IP) is two sites to the locks.
+  - **No report or log pointed at for a run that never had a folder (low).** `run.finished`'s
+    `report.dir`/`report.log` are `null` for a run refused before its launch made a folder (the locks
+    lost, a launch refused before its folder was its own); Slack then has no `Log:` or `Report:` line and
+    the outcome line ends at the duration.
+  - **No unreadable lock is ever written (info).** `isWritableOwner` refuses an owner whose text is over
+    `MAX_OWNER_BYTES` (8,192, what a lock is read with): a 4,000-character run path of 2-byte characters
+    is refused, not written. The state lock's cap is that constant too.
+  - **Nits:** the stuck line, when no SIGKILL ever reached the group, says `… after its linger, never
+    killed`, not `after its SIGKILL`; `stuckRepeatMs` must be a whole number from 1 (`launchRun` throws
+    `RangeError` before anything is made); the site locks' folder and its parent `wp-media-e2e` are made
+    `0700`, any missing folder above (`~/.local`, `~/.local/state`) with the default mode.
+  - **Test gaps closed:** a secret written with spaces around it before a cut (the code now trims each
+    secret before its forms, so an encoded form is the trimmed value's); `ensureRunsFolder`'s re-check
+    after `EEXIST` (a `make` seam); the start's refusal masked; the lock's real path (a link to the state
+    directory still reads as this process's lock); a long run path's owner refused.
+  - **Kept:** `maskCutTails`' 4-character minimum — over-masking (`admin…` when a secret starts so) is
+    fail-safe; its TSDoc says so.
+- **Second re-audit of the site locks (2026-10-15, V525–V533).** No high or medium bug: 16 processes ×
+  200 iterations with random SIGKILLs on macOS and Linux, 0 violations; a rename over the lock under
+  concurrent readers clean; the dead-holder take-over verified. Fixed:
+  - **Two tasks of one config on one site (low)** were neither refused at start nor warned by
+    `--dry-run`: both loops raced at taking the locks, the winner by chance. `config/check.ts` now keys
+    the selected tasks' sites (`config/site-key.ts`, the keys the locks use) and refuses any key two of
+    them share, naming both tasks and the site, so the start and the dry run refuse alike, every time
+    (`--task` selecting one of them passes). A site whose `baseURL` is no http(s) URL is refused there
+    too. The `heldBySelf` refusal stays, as a backstop.
+  - **The lock file names its site:** an optional `key` in the owner record (checked: printable, at most
+    2,048 units), written in every site's lock — a stray `<hash>.lock` says which site it is.
+  - **`siteKey` normalised further:** a hostname's trailing dot dropped; ports 80 and 443 left out
+    whatever the scheme; escapes of unreserved characters decoded in the path (`%7E` is `~`), the others
+    uppercased. Each row of the reviewer's table is a spec. Still two keys for one site: a host and its
+    IP address, two names for one server, a path differing only in case — said in the docs.
+  - **A run that cannot be named says why:** `HeldLock.setRun` answers `named`, `lost` (the lock gone or
+    another's) or `failed` with the reason (`EACCES`, `ENOSPC`, a path no lock can hold); the loop still
+    ends after that run — fail-safe — and its line says which.
+  - **Mutants killed:** `HeldCell.release` releases every lock whatever one before it answered (c7); a
+    reader in another process racing `setRun` for 1.4 s never sees a partial lock (l9); the temporary file
+    is removed when the rename fails (l4); a two-site pool through `unitOf` and the start, both lock files
+    naming the run (c14).
+- **Live smoke of the site locks (2026-10-15, V534–V536)**, on `bwu2`/`bwu3` from this worktree: all five
+  checks passed (§11). Observed, not changed: after a SIGKILL, a start on the same state directory is
+  refused by its orphan check, which names the runs, before it looks at the site locks.
+- **For step 6** (the correctness reviewer's list, and the second pass's):
+  - `docs/guides/orchestrator.md` with §6 as copy-paste: `tmux`, never `nohup`; `npm ci` without
+    `--omit=dev`; Ubuntu's `0775` state directory and its `chmod go-w`; a container only with
+    `--pid=host`.
+  - Options after `--`; npm 11's and 12's taken options refused.
+  - The config's fields and bounds; the stopping budgets (15 min drain, 4 min interrupt, the kill, 60 s
+    settle), SIGTERM/SIGHUP, the parent watch and launchers that exit; the exit codes.
+  - Orphans: the refusal, `kill -KILL -<pgid>`, a false positive marked `lost`; `lost` never announced.
+  - The state layout and its sensitive files (the site locks included); retention, `runs.reportsKeep`
+    and `0`'s cost (L7); `orchestrator.log` rotated with `copytruncate` only (L5).
+  - Datator posts only `passed`, `flaky`, `failed`; Slack every status.
+  - systemd's caveats (§4.1); updating by hand (D3).
+  - README: a quick start and the guide's link. CLAUDE.md: the docs-map row and "When to update"
+    point at the guide instead of this plan. `configuration.md:180` (`E2E_REQUESTED_REF`'s Phase-1
+    wording) and `execution-model.md:64` ("the planned orchestrator").
+
 ## 8. What later phases change, and keep
 
 | Here | Later | Kept |
@@ -1917,7 +2166,9 @@ and refuses every other host; its CA through `NODE_EXTRA_CA_CERTS`. Every check 
   by side); two loop cycles at a 1-minute cooldown; one Ctrl-C mid-scenario (drained, `stopped`, site
   as found); two Ctrl-C; SIGTERM; SIGKILL of the orchestrator, then a start that refuses on the orphan.
 - **On the runner**: §6 end to end, and V122 again on Linux — one Ctrl-C under `npm run` must still
-  read as one.
+  read as one. **Deferred to the runner's setup (D4)**, not part of this phase's checks: V467 measured
+  it on Ubuntu 24.04 in Docker (with `exec`, a group SIGINT arrives as two SIGINTs, 1 s debounce makes
+  them one), not on the runner itself.
 
 ## 10. Decisions
 
@@ -2110,3 +2361,46 @@ and refuses every other host; its CA through `NODE_EXTRA_CA_CERTS`. Every check 
 | V491 | `kill -KILL <pid>`: the next start refuses (exit 1) naming each run and `kill -KILL -<pgid>`; after it, the next start marks both `lost` and runs; the killed runs' leftovers removed by that run's `@plugin` Before path | ✅ 2026-10-14 | bpng-7/8, bfng-7/8; `5j/term-check6.txt`, `5j/state-after-kill.txt`, `5j/state-after-check6.txt` |
 | V492 | The orchestrator idles: ≤ 18 % CPU in one start-up sample, else ≤ 0.5 %; RSS ≤ 180 MB; no secret in the state directory, reports, `test-results/backwpup` or terminal captures (1,096 files) | ✅ 2026-10-14 | `5j/samples.txt`, `5j/secret-scan.py` |
 | V493 | The full suite, ungrepped, both cells together under `--once`: free 53/53 in 1 h 22 m, pro 70/70 in 2 h 0 m, exit 0, Slack `200` and Datator `201` each (53 and 70 test cases); sites as found but for the suite's own removal of `bwu3`'s 2026-10-13 `uploads/backwpup` and both `debug.log`s, in the first run | ✅ 2026-10-14 | bpng-11, bfng-11; `5j/term-full2.txt`, `5j/state-before.txt`, `5j/state-after-full2.txt` |
+| V494 | Reproduced before the fixes: the reviewer's `cut.ts` — the stream ends `…SitePassw0… [truncated]`, the orchestrator kept the head; the `runs/` swap on Ubuntu 24.04 (Docker, the reviewer's `swap.sh`) — `run.json`, `run-finished.json`, `datator.json` written into the other user's target through the link; at `aa2e81e`, the release-order spec's mutant (m18) and the race test with the cell lock removed (m01) fail | ✅ 2026-10-15 | `k5-harness/cut.ts`, `fix5k/lin/`, `fix5k/mut.txt` in the scratchpad |
+| V495 | `cell-lock.spec.ts`, 16 tests: the folder from `XDG_STATE_HOME`/`HOME` (a relative one ignored, neither refused); the lock path refusing names that leave their folder; folders made `0700`, the run recorded, released and taken again; a live holder refused naming its PID, run and record; a dead holder's lock taken over when its run is over, never recorded, or stale (its record left `running`), refused when the run still runs (the orphan's text and `kill -KILL`) or its record is unreadable; an open folder and a linked product folder refused; the cell's own leftovers swept, no other cell's; `inspect` writes nothing, makes no folder; 6 real processes racing — exactly one takes it. `lock-owner.spec.ts` +2: the `run` round-trips, a bad one refused | ✅ 2026-10-15 | `orchestrator/state/cell-lock.spec.ts`, `lock-owner.spec.ts` |
+| V496 | `cycle.spec.ts` +6: the cell's lock taken before the run's folder exists, given back after `run.finished`; held elsewhere — `error`, nothing launched or recorded, the refusal said whole and masked; kept for an `unwatched` run; a release that fails said; a stuck group said under the run's id, masked. `loop.spec.ts` +2: an `unwatched` result ends the loop `failed`, no timer, no next run (with and without `--once`); a real cycle whose watch fails launches the cell once. `launch.spec.ts` +2: a group that cannot be killed said at once and again every `stuckRepeatMs`, the SIGKILL retried; one a SIGKILL did not empty said too | ✅ 2026-10-15 | `orchestrator/tasks/cycle.spec.ts`, `loop.spec.ts`, `runs/launch.spec.ts` |
+| V497 | `start.spec.ts` +6: a run holds its cell's lock naming its record, gone after; a live orchestrator of another state directory holding a cell refuses the start (only that task said), no run folder; a dead one's lock whose run still runs refuses with `kill -KILL -<pgid>`; no `HOME`/`XDG_STATE_HOME` refuses; the lock released once the log is closed (its last line `exiting 0`, nothing after); of 10,000 runs begun by one task, the give-up names only the latest | ✅ 2026-10-15 | `orchestrator/start.spec.ts` |
+| V498 | Two real orchestrators (the checkout's script, `cli.ts`, the fake suite), two state directories, one `XDG_STATE_HOME`, `--once` started together: one runs the cell, the other exits 1 naming the winner's PID, run and record — refused at its start or as its run launched, its run folder never made — 5/5 tries; the winner drains on SIGINT, 130 | ✅ 2026-10-15 | `orchestrator/cli.spec.ts` |
+| V499 | `inspect.spec.ts` +6: an earlier orchestrator's run still running warned with `orphanRefusal`'s text, its record unchanged; a stale one silent and never marked `lost`; beside a live lock only the lock's warning; an unreadable `runs/` said; a held cell warned, a free one silent, one that cannot be checked said. `command.spec.ts` +1: the selected tasks' cells handed to `inspectState` | ✅ 2026-10-15 | `orchestrator/state/inspect.spec.ts`, `command.spec.ts` |
+| V500 | `text.spec.ts` +4: the reviewer's cut case masked in a line and a block; the longest head of any form (URL-encoded included) masked before every mark; a head under 4 characters, a non-secret word and text with no mark untouched; a secret under 8 characters never | ✅ 2026-10-15 | `orchestrator/text.spec.ts` |
+| V501 | `runs-folder.spec.ts`, 7 tests: missing, made `0700`; `0755` passes, `0777`/`0775`/`0757` refused naming `chmod go-w`; a link `ELOOP` and a file `ENOTDIR`; an open `runs/` refused by `launchRun` (nothing made), the counter, the orphan check's reader and retention (nothing removed). On Ubuntu 24.04 the swap repro after the fix: the start refused, `runs/` and the target empty | ✅ 2026-10-15 | `orchestrator/state/runs-folder.spec.ts`; `fix5k/lin/` in the scratchpad |
+| V502 | `leftovers.spec.ts` +1: a state directory that is a link swept where it leads, `tasks/` included | ✅ 2026-10-15 | `orchestrator/state/leftovers.spec.ts` |
+| V503 | `handlebars` 4.7.10 in the lockfile (published 2026-10-05, within `^4.7.9`): `npm audit` 0 vulnerabilities; `report:allure` on a copy of bpng-11's report folder writes `allure/index.html` with the awesome and dashboard plugins | ✅ 2026-10-15 | `npm audit`; `fix5k/x/` in the scratchpad |
+| V504 | Each fix undone in a copy without real sites files, each failing a test — 22/22: no cell lock in the cycle, no cell check at start, a dead holder's run never judged, its refusal ignored, no run in the owner, the cell folder unchecked, the lock released though unwatched, `unwatched` never set, the loop ignoring it; no cut-tail masking, a 3-character head; `runs/`'s mode unchecked, `launchRun` not checking it; a stuck group never told, told once; every run named on give-up; the dry run without orphans, warning stale ones, without cells, the command passing none; a linked state directory unresolved; the lock released before the log closes | ✅ 2026-10-15 | `fix5k/mutate.py`, `fix5k/mut.txt` in the scratchpad |
+| V505 | The gates pass; a full unit run, twice: 3233 passed (+54 over V485), 8 skipped by their environment guards, 85 s and 83 s wall — the first with one failure, `start.spec.ts`'s "a stuck run's record that cannot be read …", a race in that spec (30/30 alone; §7.24); no child of the specs left running after either; no cell lock written under this user's `~/.local/state` | ✅ 2026-10-15 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V506 | No plan reference left in code: `grep -rnE '§\|\b5[A-K]\b\|\bV[0-9]{3}\b\|docs/plans\|the plan\|\bPhase\b\|plan.s' orchestrator src` (but `.md`) finds only `planner`, the retention plan and "plants" | ✅ 2026-10-15 | the grep |
+| V507 | The TSDoc scan over `orchestrator/**/*.ts` (specs excluded) and `import-probe.ts` reports no gap (it reported ~130); the 22 files the docs went into differ from before in comment lines only (221 lines) | ✅ 2026-10-15 | `fnlen.cjs`; `qpass/pre/` in the scratchpad |
+| V508 | `shellQuote` gone (`text.spec.ts`'s `shellWord` test carries its cases); `stamp` through `formatLine`/`formatFileLine`; no numeric length passed to a text helper but two single uses (`loop.ts`'s 40, `run-folders.ts`'s 80) | ✅ 2026-10-15 | `qpass/lits.cjs` in the scratchpad |
+| V509 | `command.spec.ts` 56/56 with the new help text: every line it pinned kept as it wraps | ✅ 2026-10-15 | `orchestrator/command.spec.ts` |
+| V510 | `run-lines.spec.ts` +1 (the ref given wins), `cycle.spec.ts` +1 (`refFor` asked once, named), `dry-run.spec.ts` +1 (`builtRef`; 23 tests), `start.spec.ts` +2 (a real start's line says `develop (default)` from the manifest; `plannedRef` never throws). Without `refFor` in `loopDeps`, the start test fails | ✅ 2026-10-15 | those specs; the removal tried by hand |
+| V511 | Measured: importing `products.ts` replaces `fs.close`, `fs.closeSync`, `process.cwd` and `process.chdir` (graceful-fs, two bundled copies: `chdir` two wrappers deep), adds `Symbol(graceful-fs.queue)`, signal-exit's emitter and Node's own undici dispatcher; nothing else of the new list. `import-probe.spec.ts` +2 (each new effect reported; Playwright's own `utilsBundle.js` accepted, a look-alike with a lying `cwd` and a wrapped `fetch` after it reported). Nine mutants — umask(0), a wrapped `fetch`, `Error.stackTraceLimit`, `process.exit`, `setMaxListeners`, `defaultMaxListeners`, `fs.close`, `process.cwd`, `process.chdir` — each appended to an admitted module (`run-id.ts`) and to orchestrator code (`text.ts`): 18/18 fail `import-boundary.spec.ts`; with the old probe, `umask(0)` in `run-id.ts` passes it | ✅ 2026-10-15 | `qpass/l8-mut.sh` in the scratchpad |
+| V512 | The flaky spec: with a leader-start reader slowed by 150 ms, the old body fails at once and the new passes; the new 30/30 under `--repeat-each 30 --workers 8` | ✅ 2026-10-15 | `orchestrator/start.spec.ts` |
+| V513 | The docs: §4.1, §4.4, §4.6, §4.9, §5, §7.21, §9 and §7.24 as above; CLAUDE.md's `orchestrator/` line names `__fixtures__/`, the boundary paragraph the probe's new checks, a docs-map row and a "When to update" subsection point at this plan until step 6's guide | ✅ 2026-10-15 | this file, `CLAUDE.md` |
+| V514 | The gates pass; a full unit run, twice: 3239 passed (+6 over V505: 7 new, `shellQuote`'s 1 moved into an existing test), 8 skipped by their environment guards, 99 s and 89 s wall, no failure, no flake; no child of the specs left running; no cell lock under this user's `~/.local/state` | ✅ 2026-10-15 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V515 | The re-audit's findings, before these fixes: the lock free through each cooldown (two orchestrators took turns), keyed by cell name, a refused run announced every cooldown with `Log:`/`Report:` paths into no folder, a 2-byte-character run path writing a lock no reader accepts (`re5k/big.mts`), five surviving mutants (t04, l04, r03, s05, l06) | ✅ 2026-10-15 | `5k-reaudit-findings.md`, `re5k/` in the scratchpad |
+| V516 | `cell-lock.spec.ts`, 23 tests: `siteKey` (host lowercase, a written port only — `http`/`https` one site —, the path without trailing slashes; no credentials, query or fragment; anything but http(s) refused); keys sorted once; a lock file named by the key's hash; `unitOf`; our two folders `0700`, the state home the default mode; every site taken in key order, labelled, released whole; `setRun` naming each run, its token kept, no temporary file left, refused once a lock is another's and for a run path too long; a live holder refused naming its cell, the site, its run — the sites already taken given back; two cell names on one site exclude each other, one name on other sites does not; the dead-holder rule as before; an open or linked folder refused; only its own sites' leftovers swept; `inspect` writing nothing; 20 real processes racing, each naming the sites in its own order — exactly one takes them | ✅ 2026-10-15 | `orchestrator/state/cell-lock.spec.ts` |
+| V517 | `loop.spec.ts` +6: the locks taken once as the loop starts, each run named in them, given back once as it ends; held elsewhere — the loop ends `failed` before any run, said once, no timer; a stop before the start takes nothing; kept after an `unwatched` run; a run that cannot be named in them ends the loop after it, said, the locks given back; a release that fails said. `cycle.spec.ts`: the run named before anything is launched; a claim that resolves `false` or rejects launches nothing, its event's `report` `null`s, its line ending at the duration | ✅ 2026-10-15 | `orchestrator/tasks/loop.spec.ts`, `cycle.spec.ts` |
+| V518 | `start.spec.ts`: a loop holds its site's lock through its cooldown, naming its last run, gone once stopped; a live holder of another state directory refuses the start naming its cell, the site and its run, the run path's secret masked; a dead holder's still-running run refuses with `kill -KILL`; no `HOME`/`XDG_STATE_HOME` refused | ✅ 2026-10-15 | `orchestrator/start.spec.ts` |
+| V519 | Two real orchestrators (`cli.ts`, the fake suite), two state directories, one `XDG_STATE_HOME`, `--once` together, 5 tries: one runs, the other exits 1 at its start naming the winner's PID, its cell and the site, and never makes a `runs/` folder; and an orchestrator in its one-minute cooldown keeps its site — a second start on another state directory is refused at its start, naming the first's last run, and never runs | ✅ 2026-10-15 | `orchestrator/cli.spec.ts` |
+| V520 | The reviewer's race, re-run on the site locks: 20 real processes per round, three sites each (half naming them in reverse), each retrying until it holds them for 100 ms — 3 rounds, every process held them in turn, 0 overlapping holds, every release `true`, the folder empty after | ✅ 2026-10-15 | `fix5k/race/` in the scratchpad |
+| V521 | `slack.spec.ts` +1 and `run-lines.spec.ts` +1: a run without a folder has no `Log:` or `Report:` line, and its outcome line ends at the duration; `run-finished.spec.ts` +1: `hadFolder: false` gives `report` `null`s | ✅ 2026-10-15 | `orchestrator/notify/slack.spec.ts`, `tasks/run-lines.spec.ts`, `events/run-finished.spec.ts` |
+| V522 | `lock-owner.spec.ts` +2: an owner over `MAX_OWNER_BYTES` (a 4,000-character path of `é`) refused, one of ASCII written; a label round-trips, one with a control character refused. `lock.spec.ts` +1: through a link to the state directory, this process's lock still reads as its own. `runs-folder.spec.ts` +1: a folder made by another between the look and the `mkdir` (EEXIST) judged and refused. `launch.spec.ts` +1: `stuckRepeatMs` 0, −1, 0.5, NaN refused before anything is made; the stuck line says `never killed` when no SIGKILL reached the group. `text.spec.ts` +1: a secret with spaces around it, its head before a cut masked, as written and encoded | ✅ 2026-10-15 | the specs named |
+| V523 | Each fix undone in a copy without real sites files — 21 of 22 failing a test: no lock taken by the loop, locks given back after each run, keys unsorted, not all-or-nothing, a key without its path, with its scheme, keyed by cell too, `setRun` ignoring the token, lost locks not ending the loop, no byte cap, Slack pointing at a `null` report, `hadFolder` ignored, `stuckRepeatMs` unvalidated, the stuck line always saying SIGKILL, secrets untrimmed, `ensureRunsFolder` without its re-check, the lock's path not resolved, the state home made `0700`, no word of the other task's site, a dead holder's run ignored, locks kept with no run alive. The one survivor, the start's refusal unmasked (s05), is equivalent: the log masks every line by the config's secrets itself, which the masked-refusal spec shows | ✅ 2026-10-15 | `fix5k/mutate2.py`, `fix5k/mut2.txt` in the scratchpad |
+| V524 | The gates pass; a full unit run, twice: 3263 passed (+24 over V514), 8 skipped by their environment guards, 84 s each, no failure, no flake; no child of the specs left running; nothing under this user's `~/.local/state` | ✅ 2026-10-15 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V525 | The second re-audit, before these fixes: two tasks of one config on one site passed the start and the dry run, the loops racing for the locks; `siteKey` keyed `x.test.`, `http://x.test:443`, `https://x.test:80` and `%7Euser` apart from their plain forms; the lock file held no key; a failed `setRun` read as a lost lock; mutants c7, c14, l4, l9 survived | ✅ 2026-10-15 | `re2/` in the scratchpad (`p/key.ts`, `p/dry2.mts`, `mutate.py`) |
+| V526 | `check.spec.ts` +3: two tasks whose cells share a site — under any names — refused, naming both tasks and the site; accepted when `--task` selects one, and for tasks on sites of their own; a site whose `baseURL` is no http(s) URL refused. `start.spec.ts` +1: the start and the dry run refuse such a config alike, exit 1, nothing run | ✅ 2026-10-15 | `orchestrator/config/check.spec.ts`, `start.spec.ts` |
+| V527 | `start.spec.ts` +1, `cell-lock.spec.ts` +1: a two-site pool — `unitOf` keeps every site; its loop holds both sites' locks, each with its key, the cell and the run, gone once stopped | ✅ 2026-10-15 | `orchestrator/start.spec.ts`, `state/cell-lock.spec.ts` |
+| V528 | `cell-lock.spec.ts`: the reviewer's table, 28 rows (`x.test.`, 80/443 on either scheme, `%7E`/`%7e`, `%2f` → `%2F`, IDN, IPv4 forms, IPv6, `\`, `.`/`..`, credentials, query); every site's lock holds its `key`. `lock-owner.spec.ts` +1: a key round-trips; one with a control character or past 2,048 refused | ✅ 2026-10-15 | `orchestrator/state/cell-lock.spec.ts`, `lock-owner.spec.ts` |
+| V529 | `setRun`: `named`; `lost` once a lock is another's; `failed` with `EACCES` in a read-only folder (the lock unchanged) and with the reason for a path no lock can hold. `loop.spec.ts`: a lost and a failed naming each end the loop after its run, said with its own words, the locks given back | ✅ 2026-10-15 | `orchestrator/state/cell-lock.spec.ts`, `tasks/loop.spec.ts` |
+| V530 | `cell-lock.spec.ts` +3: every lock released though one release answers `false`; a reader in another process, reading the lock in a tight loop for 1.5 s while `setRun` rewrites it with paths of 1–400 extra characters, never reads a part; `replaceLockFile` leaves no temporary file when its rename fails | ✅ 2026-10-15 | `orchestrator/state/cell-lock.spec.ts` |
+| V531 | The reviewer's `race.sh`, once on macOS on this code: 16 processes × 200 iterations, 2–3 of 4 sites each in random order, a 2 % chance of SIGKILL per iteration — 0 violations, 158 holds, 3,042 refusals, no other error, the folder clean | ✅ 2026-10-15 | `fix5k/race2/` in the scratchpad |
+| V532 | Each fix undone in a copy without real sites files, each failing a test — 15/15: shared sites not refused, the selection ignored for them, a non-URL `baseURL` accepted, only a pool's first site locked (c14), no key in the lock file or the owner's schema, a trailing dot kept, 80/443 default only for their own scheme, unreserved escapes kept, other escapes left as written, an I/O failure read as lost, one wording for both, `release` stopping at its first failure (c7), the lock rewritten in place (l9), the temporary file left on failure (l4) | ✅ 2026-10-15 | `fix5k/mutate3.py`, `fix5k/mut3.txt` in the scratchpad |
+| V533 | The gates pass; a full unit run, twice: 3303 passed (+40 over V524), 8 skipped by their environment guards, 85 s each, no failure, no flake; no child of the specs left running; nothing written under this user's `~/.local/state` (its `wp-media-e2e/site-locks/`, empty, is the live smoke's, untouched since). One spec changed: `dry-run.spec.ts`'s malformed address now passes the check only by its `pastCheck` seam, as the check refuses it — and the refusal is shown quoting no address | ✅ 2026-10-15 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V534 | Live smoke of the site locks on `bwu2`/`bwu3` (one server), from this worktree: the dry run warns of nothing and writes nothing; `start --once`, both cells together — 4/4 passed each, the site locks' folder `0700` and lock files `0600` holding `v`, `pid`, `token`, `start`, `host`, `label`, `run`, removed as each loop ended; Slack `200`, Datator `201` | ✅ 2026-10-15 | `5l/c1-*`, `5l/c2-term.txt`, `5l/locks.log`, `5l/sink.jsonl` in the scratchpad |
+| V535 | A second config started during the first's cooldown is refused at its start naming the holder (PID, cell, site, run), its dry run warns the same, no `runs/` made; after Ctrl-C the first exits 130, the locks gone, and the second `--once` runs 4/4. SIGKILL of the first: a start on its state directory refuses on the orphans with their `kill` lines; the other config is refused by the dead holder's site lock; after `kill -KILL -<pgid>` the runs are marked `lost`, the locks taken over, 4/4 | ✅ 2026-10-15 | `5l/c3-*`, `5l/c4-*` in the scratchpad |
+| V536 | Sites as found after every check (only `bwu3`'s 242-byte `debug.log` removed by the suite's teardown, by design); no secret in the 284 files scanned (state directory, reports, terminal captures) | ✅ 2026-10-15 | `5l/state-*.txt`, `5l/c5-secret-scan.txt` in the scratchpad |
