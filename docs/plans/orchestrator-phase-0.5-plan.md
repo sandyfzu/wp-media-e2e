@@ -9,8 +9,8 @@
 > §7.15; audited and re-audited the same day, §7.16); 5E, the notification subscribers (2026-10-13, §7.17); 5F, one
 > run (2026-10-13, §7.18; audited 2026-10-14, the same section); 5G, the loop (2026-10-14, §7.19); 5H, the
 > process (2026-10-14, §7.20; audited the same day); 5I.1, the dry run's report (2026-10-14, §7.21; audited the same day); 5I.2,
-> the command (2026-10-14, §7.22; audited the same day).
-> **Next:** step 5's 5J–5K (§7.14), with §7.22's notes for 5J. Runs after [Phase 0](orchestrator-phase-0-plan.md),
+> the command (2026-10-14, §7.22; audited the same day); 5J, the live checks (2026-10-14, §7.23).
+> **Next:** step 5's 5K, the audit (§7.14). Runs after [Phase 0](orchestrator-phase-0-plan.md),
 > before Phase 1 (not planned yet).
 > **Date:** 2026-10-05.
 > **Parent:** the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in
@@ -1854,6 +1854,40 @@ that fails without the fix (V476):
   terminal (Ctrl-C, `tmux send-keys -t orchestrator C-c`), the orchestrator's own PID, or npm's for
   SIGINT/SIGTERM; options always after `--`.
 
+### 7.23 5J — Live (2026-10-14, V486–V493)
+
+On `bwu2`/`bwu3` (`free@nginx`, `pro@nginx`, one server), from this worktree at `e9fda7a`, under
+`caffeinate -i`, the orchestrator in `tmux`. Config as §7.22's note: tasks `bpng`/`bfng`, `cooldownMinutes: 1`,
+retries 1; checks 1–6 with a four-scenario `grep` (wired up, backup on demand, delete from history, files and
+database together), the full run and check 4's repeat without. Slack and Datator only to local stand-ins (D5,
+D6): `NODE_USE_ENV_PROXY=1` and `HTTPS_PROXY` to a sink that intercepts exactly `hooks.slack.com` (answers
+`200 ok`) and `datator.e2e-local.test` (forwarded to Datator's own `e2e_tests` app, unmodified, Django + SQLite)
+and refuses every other host; its CA through `NODE_EXTRA_CA_CERTS`. Every check passed; no orchestrator bug.
+
+| # | Command | Observed |
+| --- | --- | --- |
+| 1 | `start --dry-run` | Both tasks, sites and server, `no warnings`, exit 0; the state directory untouched (grepped and full config) |
+| 2 | `start --once` | bpng-1, bfng-1 together: 4/4 passed each, exit 0; per run one Slack (`200`) and one Datator post (`201`, `test_suite` the cell and its grep); `run.json` `ended`/`passed`, `run-finished.json`, `datator.json` |
+| 3 | `start`, Ctrl-C | Two cycles each (bpng-2/3, bfng-2/3 passed; cooldown lines `next run …`); Ctrl-C mid-scenario: bpng-4 1 passed 3 skipped, bfng-4 2 passed 2 skipped, both `stopped` (`stop.level: drained`), Slack ✓, Datator not posted; exit 130, no lock |
+| 4 | `start`, Ctrl-C twice | bpng-10/bfng-10, 3 s apart, in the first scenario's `@plugin` Before hook: `interrupting every run`, both `stopped` (`interrupted`, Playwright 130), the scenario in flight counted `didNotRun` (§7.8's six counts); exit 130. First try (bpng-5/bfng-5) fell in setup, so repeated |
+| 5 | `kill -TERM <pid>` | bpng-6/bfng-6 drained (1 passed, 3 skipped each), `stopped` (SIGTERM), exit 130 |
+| 6 | `kill -KILL <pid>` | npm 137; the next start refused, exit 1, naming each run and `kill -KILL -58822` / `-58824`; done; the next start marked bfng-7/bpng-7 `lost` (`process group ended`) and ran bfng-8/bpng-8 (passed) |
+| 7 | Resources, secrets | The orchestrator at ≤ 18 % CPU (a sample at start-up), else 0.0–0.5 %; RSS 14–180 MB, ≈ 1.4 s CPU over a 2-hour run. No site password, `GITHUB_TOKEN`, webhook or Datator key in `.orchestrator/`, the 22 run reports, `test-results/backwpup` or the terminal captures (1,096 files, as written, URL- and JSON-escaped) |
+| Full | `start --once`, no grep | bfng-11 53/53 passed in 1 h 22 m, bpng-11 70/70 in 2 h 0 m, side by side; exit 0; Slack `200` and Datator `201` each (`test_suite` `free@nginx`/`pro@nginx`, 53/70 test cases, `git_commit` `cd26255…`) |
+
+- **Sites as found**, probed after every check (plugins, tables, BackWPup options, `.e2e_*`, uploads, plugin
+  folders, processes): identical after each, and after a kill restored by the next run's `@plugin` Before
+  path (Phase 0 L3) — the killed runs had left the plugin active, `wp_bwpup_backups`, 28–29 options,
+  `.e2e_temp` and a `backwpup-restore-<hex>` folder. Two differences from before 5J, both the suite's
+  teardown by design, in the first run: `bwu3`'s `wp-content/uploads/backwpup` (a 209 MB backup and its log
+  from 2026-10-13, earlier work's leftover, the declared residue) and both sites' `debug.log` (466/484 bytes)
+  are gone. No copy was taken; nothing else to restore.
+- **Surprises, none a bug:** an interrupted scenario's error reads `Test timeout of 360000ms exceeded while
+  running "beforeEach" hook` — Playwright's wording for an interrupt; the full run took 2 h for Pro beside
+  Free on one server, not the ≈ 70 min of one cell alone; the run folder keeps its `stop` file (§4.4).
+- **Interruptions:** the first full run (bpng-9/bfng-9) was stopped by a pause, one Ctrl-C at 1 h 10 m: both
+  drained, `stopped`, exit 130 — a further check 3; the full run was then repeated whole.
+
 ## 8. What later phases change, and keep
 
 | Here | Later | Kept |
@@ -2068,3 +2102,11 @@ that fails without the fix (V476):
 | V483 | Each fix undone in a copy without real sites files, each failing a test — 8/8: npm 11's three variables not refused (by the child test), a refusal although the option is there, output failures not dropped (also by the closed-pipe child test), the refusal not drained, the watch not stopped as it fires, only PID 1 as a lost parent, the temporary-folder guard without its absolute check (after a test was added) or its real path; and the old `afterEach`, by the repro | ✅ 2026-10-14 | `mutate4.py` in the scratchpad |
 | V484 | The specs in a copy without real sites files: `cli.spec.ts`, `command.spec.ts`, `start.spec.ts`, `temp-dir.spec.ts` 145/145 on macOS; on Ubuntu 24.04 (Docker, root) 144/145, the one a 5H test that relies on a read-only folder root ignores | ✅ 2026-10-14 | `x3/`; the reviewer's `sec5i2-ubuntu` image |
 | V485 | The gates pass; a full unit run, twice: 3179 passed (+20 over V478), 8 skipped by their environment guards, 102 s and 115 s wall; no child of the specs left running after either (nor after three runs stopped by `--max-failures=1`) | ✅ 2026-10-14 | `npm run typecheck`, `lint`, `format`, `test:unit` |
+| V486 | `start --dry-run` on the 5J config, grepped and not: both tasks, sites, server, `no warnings`, exit 0, the state directory unchanged | ✅ 2026-10-14 | `5j/dry.out`, `5j/dry2.out` in the scratchpad |
+| V487 | `start --once`, both cells together: 4/4 passed each, exit 0, one Slack (`200`) and one Datator `201` per run, `run.json` `ended`/`passed`, `run-finished.json`, `datator.json`, `orchestrator.log` | ✅ 2026-10-14 | bpng-1, bfng-1; `5j/term-check2.txt`, `5j/sink.jsonl`, the local Datator's log |
+| V488 | `start`: two cycles at a 1-minute cooldown, then one Ctrl-C mid-scenario — both runs drained (`stopped`, `drained`), Slack only, exit 130, no lock, sites as found | ✅ 2026-10-14 | bpng-2–4, bfng-2–4; `5j/term-check3.txt`, `5j/state-after-check3.txt` |
+| V489 | Two Ctrl-C 3 s apart in a scenario's Before hook: `interrupted`, Playwright 130, the scenario in flight `didNotRun`, exit 130, sites as found (the After hook ran) | ✅ 2026-10-14 | bpng-10, bfng-10; `5j/term-check4b.txt`, `5j/state-after-check4b.txt` |
+| V490 | `kill -TERM <pid>`: both runs drained, `stopped` (SIGTERM), exit 130 | ✅ 2026-10-14 | bpng-6, bfng-6; `5j/term-check5.txt` |
+| V491 | `kill -KILL <pid>`: the next start refuses (exit 1) naming each run and `kill -KILL -<pgid>`; after it, the next start marks both `lost` and runs; the killed runs' leftovers removed by that run's `@plugin` Before path | ✅ 2026-10-14 | bpng-7/8, bfng-7/8; `5j/term-check6.txt`, `5j/state-after-kill.txt`, `5j/state-after-check6.txt` |
+| V492 | The orchestrator idles: ≤ 18 % CPU in one start-up sample, else ≤ 0.5 %; RSS ≤ 180 MB; no secret in the state directory, reports, `test-results/backwpup` or terminal captures (1,096 files) | ✅ 2026-10-14 | `5j/samples.txt`, `5j/secret-scan.py` |
+| V493 | The full suite, ungrepped, both cells together under `--once`: free 53/53 in 1 h 22 m, pro 70/70 in 2 h 0 m, exit 0, Slack `200` and Datator `201` each (53 and 70 test cases); sites as found but for the suite's own removal of `bwu3`'s 2026-10-13 `uploads/backwpup` and both `debug.log`s, in the first run | ✅ 2026-10-14 | bpng-11, bfng-11; `5j/term-full2.txt`, `5j/state-before.txt`, `5j/state-after-full2.txt` |
