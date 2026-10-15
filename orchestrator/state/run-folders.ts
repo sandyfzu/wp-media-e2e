@@ -1,5 +1,5 @@
 import type { Dirent } from "node:fs";
-import { lstat, readdir } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 import { errorCode } from "../error-code";
@@ -11,6 +11,7 @@ import {
   type RunningRecordRead,
 } from "../runs/record";
 import { safeLine } from "../text";
+import { checkRunsFolder } from "./runs-folder";
 
 /**
  * The run folders under `<state>/runs/` whose record still says `running`: what the orphan check judges
@@ -46,7 +47,8 @@ export interface RunningFolders {
  *
  * @param stateDir - the state directory.
  * @returns the running records and the warnings.
- * @throws an error coded `ELOOP` when the runs' folder is a link, `ENOTDIR` when it is no folder, or
+ * @throws a `StateError` coded `ELOOP` when the runs' folder is a link, `ENOTDIR` when it is no
+ *   folder, uncoded when it is another user's or open to other writers (`checkRunsFolder`), or
  *   what `lstat` and `readdir` throw besides `ENOENT` — a missing one holds no run.
  */
 export async function readRunningFolders(
@@ -121,16 +123,7 @@ async function readRunning(
  */
 async function listRuns(runsDir: string): Promise<Dirent[]> {
   try {
-    const stats = await lstat(runsDir);
-    if (stats.isSymbolicLink())
-      throw Object.assign(
-        new Error("the runs' folder is a symbolic link, never followed"),
-        { code: "ELOOP" },
-      );
-    if (!stats.isDirectory())
-      throw Object.assign(new Error("the runs' folder is not a folder"), {
-        code: "ENOTDIR",
-      });
+    if (!(await checkRunsFolder(runsDir))) return [];
     const entries = await readdir(runsDir, { withFileTypes: true });
     return entries.sort((a, b) =>
       a.name < b.name ? -1 : a.name > b.name ? 1 : 0,

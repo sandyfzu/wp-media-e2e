@@ -489,6 +489,13 @@ export function createRecordWriter(
   // Settled by the first write's check; every later write waits for it in the queue.
   let fresh: boolean | undefined;
   return {
+    /**
+     * {@link RecordWriter.write}: chained on `queue`, so each write starts once the one before settled.
+     *
+     * @param record - the record, or a promise of it.
+     * @returns `written`, or `dropped` for a `running` record after the run's end.
+     * @throws `EEXIST` when the path held anything before the first write; what the write throws.
+     */
     write(record) {
       const pending = Promise.resolve(record);
       // Handled now: it may reject while earlier writes are still applying.

@@ -7,6 +7,7 @@ import { dryRunReport } from "./dry-run";
 import { SHUTDOWN_SIGNALS, type ShutdownSignal } from "./runs/shutdown";
 import { CHECKOUT, prepareStart, start, type StartOptions } from "./start";
 import type { ExitCode } from "./start-lines";
+import { unitOf, type CellUnit } from "./state/cell-lock";
 import { inspectState } from "./state/inspect";
 import { drainTerminal, MAX_WAIT_MS, type DrainableTerminal } from "./terminal";
 import { safeBlock, textOf } from "./text";
@@ -48,15 +49,18 @@ Run from the checkout as: npm run orchestrator -- start [options]
 Exit codes:
   0    --once: every run passed or was flaky; --dry-run: the report is printed,
        warnings or not
-  1    --once: a run did not pass; the start was refused (the config, --task,
-       the lock, a run still running); the dry run was refused (the config,
+  1    --once: a run did not pass; without --once: the loops ended unasked (a
+       loop that broke, such as a run whose processes could not be watched);
+       the start was refused (the config, --task, the lock, a run still
+       running, a cell held elsewhere); the dry run was refused (the config,
        --task); a usage error
   130  stopped: Ctrl-C, SIGTERM or SIGHUP to the orchestrator or its process
        group; SIGINT or SIGTERM to npm's PID; or its parent (npm) ending
 
 Under npm, everything after "--" is the orchestrator's: without it, npm takes
 --dry-run for itself (refused). A relative --config is from the directory npm
-was run in.
+was run in. npm 11 (Node 24's own) also takes --once, --task=<id> and
+--config=<file> before "--" (refused too).
 
 Examples:
   npm run orchestrator -- start --dry-run
@@ -143,8 +147,11 @@ export interface CommandDeps {
   readonly start?: (options: StartOptions) => Promise<ExitCode>;
   /** The dry run's preparation: `prepareStart` from `./start`. */
   readonly prepareStart?: typeof prepareStart;
-  /** The state directory's read-only check: `inspectState`. */
-  readonly inspectState?: (stateDir: string) => Promise<string[]>;
+  /** The state directory's and the selected cells' read-only check: `inspectState`. */
+  readonly inspectState?: (
+    stateDir: string,
+    options: { readonly units: readonly CellUnit[] },
+  ) => Promise<string[]>;
   /** The dry run's report: `dryRunReport`. */
   readonly report?: typeof dryRunReport;
   /** The checkout the dry run shows paths from; {@link CHECKOUT} by default. */
@@ -293,6 +300,7 @@ export async function dryRun(
     const prepared = await (deps.prepareStart ?? prepareStart)(options);
     const stateWarnings = await (deps.inspectState ?? inspectState)(
       prepared.loaded.stateDir,
+      { units: prepared.selected.map(unitOf) },
     );
     const lines = (deps.report ?? dryRunReport)(prepared, {
       checkout: deps.checkout ?? CHECKOUT,

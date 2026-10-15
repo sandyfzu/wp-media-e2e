@@ -148,6 +148,42 @@ export interface PluginSource {
  * @returns the text.
  */
 export function pluginText(source: PluginSource): string {
+  const planned = plannedBuild(source);
+  if ("problem" in planned) return planned.problem;
+  return `${planned.ref} · ${versionText(planned.gitRef, planned.version, source.plugin?.version)}`;
+}
+
+/**
+ * The ref a task's runs build, as {@link pluginText} shows it — `develop (default)`, `main` — for the
+ * line each run starts with, so the dry run and the runs name it alike.
+ *
+ * @param source - the manifest, the edition and the task's `plugin`.
+ * @returns the ref; `undefined` when the planner refuses the task's plugin.
+ */
+export function builtRef(source: PluginSource): string | undefined {
+  const planned = plannedBuild(source);
+  return "problem" in planned ? undefined : planned.ref;
+}
+
+/** The build the planner makes of a task's plugin, or why it makes none. */
+type PlannedBuild =
+  | {
+      /** The ref as shown: `(default)` when the product's manifest chose it. */
+      readonly ref: string;
+      /** The ref as the planner names it: `develop`, `release:latest-stable`. */
+      readonly gitRef: string;
+      /** The version the build is given; none when its source or release names it. */
+      readonly version: string | undefined;
+    }
+  | { readonly problem: string };
+
+/**
+ * Plans a task's plugin as a run would: by the suite's own planner, from what the run is given.
+ *
+ * @param source - the manifest, the edition and the task's `plugin`.
+ * @returns the build, or the problem as the dry run says it; never throws.
+ */
+function plannedBuild(source: PluginSource): PlannedBuild {
   const { ref, version } = source.plugin ?? {};
   let request;
   try {
@@ -158,13 +194,18 @@ export function pluginText(source: PluginSource): string {
       env: { pluginRef: ref, pluginVersion: version },
     }).requests.find(({ role }) => role === "plugin");
   } catch (error) {
-    return `plugin cannot be planned: ${failureLine(error, MAX_LINE)}`;
+    return {
+      problem: `plugin cannot be planned: ${failureLine(error, MAX_LINE)}`,
+    };
   }
   // Without a zip, the planner always builds the plugin.
-  if (request?.kind !== "build") return "plugin cannot be planned";
+  if (request?.kind !== "build") return { problem: "plugin cannot be planned" };
   const { gitRef, version: built } = request.params;
-  const refText = `${gitRef}${request.source === "default-ref" ? " (default)" : ""}`;
-  return `${refText} · ${versionText(gitRef, built, version)}`;
+  return {
+    ref: `${gitRef}${request.source === "default-ref" ? " (default)" : ""}`,
+    gitRef,
+    version: built,
+  };
 }
 
 /**

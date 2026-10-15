@@ -9,6 +9,7 @@ import {
 } from "./config/load";
 import { loadProductList, type ProductList } from "./config/product-list";
 import { allSecretValues } from "./config/secrets";
+import { builtRef } from "./dry-run";
 import { createEventBus, DEFAULT_DELIVERY_TIMEOUT_MS } from "./events/bus";
 import type { RunFinishedEvent } from "./events/run-finished";
 import { openLogger, type Logger } from "./log";
@@ -29,6 +30,12 @@ import {
   type ShutdownTimers,
 } from "./runs/shutdown";
 import type { StopLevel } from "./runs/stop";
+import {
+  cellLocks,
+  cellLocksFolder,
+  unitOf,
+  type CellLocks,
+} from "./state/cell-lock";
 import { acquireLock, type HeldLock, type LockDeps } from "./state/lock";
 import {
   checkOrphans,
@@ -63,17 +70,19 @@ import {
   type Terminal,
   type TerminalStream,
 } from "./terminal";
-import { failureLine, safeBlock, textOf } from "./text";
+import { failureLine, safeBlock, safeLine, textOf } from "./text";
 
 /**
  * The orchestrator's process: `start` loads the product list and the config, takes the state
- * directory's lock, refuses on a run an earlier orchestrator left running, subscribes Slack and
- * Datator, and starts every selected task's loop at once. SIGINT, SIGTERM and SIGHUP drive the
+ * directory's lock, refuses on a run an earlier orchestrator left running and on a selected cell
+ * another orchestrator holds (`state/cell-lock.ts`), subscribes Slack and Datator, and starts every
+ * selected task's loop at once. SIGINT, SIGTERM and SIGHUP drive the
  * shutdown machine (`runs/shutdown.ts`), and each escalation stops every loop — a stop ends a
  * cooldown and starts nothing, so loops, not only runs, are stopped. A parent that ends — npm killed
  * by a SIGHUP it does not relay — counts as SIGHUP ({@link ParentWatch}). It waits for every loop; once
  * the runs were killed, only for {@link KILL_SETTLE_MS} more, then names what it leaves behind. Then
- * it settles the bus, releases the lock, closes the log and waits for the terminal.
+ * it settles the bus, closes the log, releases the lock — the log is only ever written under it — and
+ * waits for the terminal.
  *
  * It **returns** the exit code rather than exiting: every step of the exit sequence but
  * `process.exit` itself is done here, so the command's only remaining act is `process.exit(code)` —
@@ -100,6 +109,15 @@ export const PARENT_WATCH_MS = 1_000;
 
 /** The scope of the orchestrator's own lines. */
 const SCOPE = "orchestrator";
+
+/** The longest refusal said in the log — a cell held elsewhere names its holder, run and way out. */
+const MAX_REFUSAL_LINE = 1_500;
+
+/**
+ * The longest failure the start's own lines quote, in code points — an unexpected error or a record
+ * that could not be read: the error's message whole, with the path it names, never a stack.
+ */
+const MAX_FAILURE_LINE = 1_000;
 
 /** The longest refusal or failure printed before the log is open, in code points. */
 const MAX_REPORT_LENGTH = 8_000;
@@ -178,13 +196,23 @@ export interface StartDeps {
   readonly checkout?: string;
   /** `loadProductList()` by default. */
   readonly loadProductList?: () => Promise<ProductList>;
-  /** The lock's stand-ins. */
+  /** The lock's stand-ins — the state directory's, and the cells'. */
   readonly lock?: LockDeps;
+  /** Takes the state directory's lock; `acquireLock` by default. */
+  readonly acquireLock?: (
+    stateDir: string,
+    deps?: LockDeps,
+  ) => Promise<HeldLock>;
+  /**
+   * The cells' locks' folder; `cellLocksFolder(process.env)` by default —
+   * `$XDG_STATE_HOME/wp-media-e2e/cell-locks`, else under `$HOME/.local/state`.
+   */
+  readonly cellLocks?: string;
   /** The orphan check's `kill` and start reader; the process's by default. */
   readonly orphans?: Partial<Pick<OrphanCheckDeps, "kill" | "readLeaderStart">>;
   /** The clock of the log, the runs and the orphan check; the system's by default. */
   readonly now?: () => Date;
-  /** The shutdown's budgets; the plan's by default. */
+  /** The shutdown's budgets; {@link DEFAULT_SHUTDOWN_BUDGETS} (15 min drain, 4 min interrupt) by default. */
   readonly budgets?: ShutdownBudgets;
   /** The shutdown's timers; Node's by default. */
   readonly shutdownTimers?: ShutdownTimers;
@@ -309,8 +337,14 @@ class Orchestrator {
   private secrets: readonly string[] = [];
   /** Every loop started: what a stop reaches. */
   private loops: readonly TaskLoop[] = [];
-  /** The ids of the runs this start's loops began: the only runs it may name as left behind. */
-  private readonly launched = new Set<string>();
+  /**
+   * Each task's latest run this start's loops began, by task id: the only runs it may name as left
+   * behind — a loop that does not end is stuck on its latest run. One entry per task, however long it
+   * runs.
+   */
+  private readonly launched = new Map<string, string>();
+  /** The state directory's lock, once taken: released once the log is closed. */
+  private lock: HeldLock | undefined;
 
   /**
    * @param options - the command line's options.
@@ -395,18 +429,36 @@ class Orchestrator {
     } catch (error) {
       // Against every contract below: said, and the exit is a failure.
       this.say(
-        `stopped on an unexpected failure: ${failureLine(error, 1000, this.secrets)}`,
+        `stopped on an unexpected failure: ${failureLine(error, MAX_FAILURE_LINE, this.secrets)}`,
       );
     }
     if (this.logger !== undefined) this.say(`exiting ${String(code)}`);
     const waitMs = this.deps.exitWaitMs ?? EXIT_WAIT_MS;
     await this.logger?.close(waitMs);
+    // From here on, lines go to standard error: the log is written only while the lock is held.
+    this.logger = undefined;
+    await this.releaseLock();
     await drainTerminal(terminal, waitMs);
     return code;
   }
 
   /**
-   * Loads the config, takes the lock, and runs under it; the lock is released whatever happens.
+   * Releases the state directory's lock, if taken — once the log is closed, so the next orchestrator
+   * on this state directory never shares the log with this one's last lines.
+   */
+  private async releaseLock(): Promise<void> {
+    const { lock } = this;
+    if (lock === undefined) return;
+    this.lock = undefined;
+    if (!(await lock.release()))
+      this.say(
+        `${lock.path} was not removed: it was gone, another's, or could not be`,
+      );
+  }
+
+  /**
+   * Loads the config, takes the lock, and runs under it; {@link run} releases the lock whatever
+   * happens.
    *
    * @returns the exit code.
    */
@@ -420,21 +472,16 @@ class Orchestrator {
     }
     const { loaded } = prepared;
     this.secrets = allSecretValues(loaded.config, loaded.tasks);
-    let lock: HeldLock;
     try {
-      lock = await acquireLock(loaded.stateDir, this.deps.lock);
+      this.lock = await (this.deps.acquireLock ?? acquireLock)(
+        loaded.stateDir,
+        this.deps.lock,
+      );
     } catch (error) {
       this.report(error);
       return 1;
     }
-    try {
-      return await this.locked(prepared, lock);
-    } finally {
-      if (!(await lock.release()))
-        this.say(
-          `${lock.path} was not removed: it was gone, another's, or could not be`,
-        );
-    }
+    return this.locked(prepared, this.lock);
   }
 
   /**
@@ -465,11 +512,14 @@ class Orchestrator {
     for (const line of [...leftoverLines(lock.leftovers), ...loaded.warnings])
       this.say(line);
     if (!(await this.noOrphans(loaded.stateDir))) return 1;
+    const cells = this.cellLocks();
+    if (cells === undefined || !(await this.cellsFree(cells, prepared)))
+      return 1;
     if (this.signalled()) {
       this.say("stopped before any run started");
       return 130;
     }
-    const ends = await this.runLoops(prepared, this.logger);
+    const ends = await this.runLoops(prepared, this.logger, cells);
     return loopsExitCode({
       signalled: this.signalled(),
       once: this.options.once === true,
@@ -492,7 +542,7 @@ class Orchestrator {
       });
     } catch (error) {
       this.say(
-        `not started: the runs' records could not be checked for a run still running: ${failureLine(error, 1000, this.secrets)}`,
+        `not started: the runs' records could not be checked for a run still running: ${failureLine(error, MAX_FAILURE_LINE, this.secrets)}`,
       );
       return false;
     }
@@ -503,16 +553,72 @@ class Orchestrator {
   }
 
   /**
+   * The cells' locks, in the configured folder or the environment's.
+   *
+   * @returns them; `undefined` when they have no folder — said.
+   */
+  private cellLocks(): CellLocks | undefined {
+    try {
+      return cellLocks(
+        this.deps.cellLocks ?? cellLocksFolder(this.process.env),
+        this.deps.lock,
+      );
+    } catch (error) {
+      this.say(
+        `not started: ${failureLine(error, MAX_REFUSAL_LINE, this.secrets)}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Whether every selected task's cell's sites are free of another orchestrator — of this user, on this
+   * machine, whatever its state directory: their locks judged as its loop would take them
+   * (`cell-lock.ts`), so a site held by a live orchestrator, or by a dead one's run still running,
+   * refuses the start. Each refusal is said; the loop still takes the locks as it starts, so an
+   * orchestrator started since is refused there.
+   *
+   * @param cells - the cells' locks.
+   * @param prepared - the tasks selected.
+   * @returns `true` when every cell is free, or held by a dead orchestrator whose run is over.
+   */
+  private async cellsFree(
+    cells: CellLocks,
+    prepared: PreparedStart,
+  ): Promise<boolean> {
+    let free = true;
+    for (const checked of prepared.selected) {
+      const { task } = checked;
+      let refusal: string | undefined;
+      try {
+        const found = await cells.inspect(unitOf(checked));
+        if (found.kind === "refused") refusal = found.message;
+      } catch (error) {
+        refusal = `its cell's site locks could not be checked: ${textOf(error)}`;
+      }
+      if (refusal === undefined) continue;
+      free = false;
+      this.say(
+        `not started: ${safeLine(refusal, MAX_REFUSAL_LINE, this.secrets)}`,
+        task.id,
+      );
+    }
+    return free;
+  }
+
+  /**
    * Starts every selected task's loop, waits for them, then settles the bus.
    *
    * @param prepared - the config and the tasks.
    * @param logger - the log.
+   * @param cells - the cells' locks each run takes.
    * @returns every loop's end; absent when they did not all end within {@link KILL_SETTLE_MS} of
    *   the kill.
    */
   private async runLoops(
     prepared: PreparedStart,
     logger: Logger,
+    cells: CellLocks,
   ): Promise<readonly TaskEnd[] | undefined> {
     const { loaded, selected } = prepared;
     const bus = createEventBus<RunFinishedEvent>({
@@ -540,16 +646,22 @@ class Orchestrator {
     const deps = this.loopDeps(prepared, checkout, logger, bus, (event) =>
       notifications.datatorPayload(event),
     );
-    // Started and made reachable in one turn: a signal is handled between turns only.
-    this.loops = selected.map(({ task }) => runTask(task, deps));
+    // Started and made reachable in one turn: a signal is handled between turns only. Each loop holds
+    // its cell's site locks from its start to its end.
+    this.loops = selected.map((checked) =>
+      runTask(checked.task, {
+        ...deps,
+        takeCell: () => cells.acquire(unitOf(checked)),
+      }),
+    );
     const ends = await this.waitForLoops(loaded.stateDir, ids);
     await bus.settle();
     return ends;
   }
 
   /**
-   * What every loop is given: §4.4's run, with the seams a spec injects; `onRunBegun` last, so this
-   * start always knows its own runs.
+   * What every loop is given: the checkout, the config, each task's commands and ref, the log and the
+   * bus, with the seams a spec injects; `onRunBegun` last, so this start always knows its own runs.
    *
    * @param prepared - the config and the product list.
    * @param checkout - the checkout the runs start in.
@@ -566,6 +678,9 @@ class Orchestrator {
     datatorPayload: NonNullable<LoopDeps["datatorPayload"]>,
   ): LoopDeps {
     const { loaded, list } = prepared;
+    // Planned once per task, at its first run, as the dry run plans it: its started line names the
+    // same ref.
+    const refs = new Map<string, string | undefined>();
     return {
       stateDir: loaded.stateDir,
       checkout,
@@ -581,14 +696,19 @@ class Orchestrator {
           ),
           ...(task.grep === undefined ? {} : { grep: task.grep }),
         }),
+      refFor: (task) => {
+        if (!refs.has(task.id))
+          refs.set(task.id, plannedRef(prepared.selected, list, task.id));
+        return refs.get(task.id);
+      },
       logger,
       bus,
       datatorPayload,
       once: this.options.once === true,
       ...(this.deps.now === undefined ? {} : { now: this.deps.now }),
       ...this.deps.loop,
-      onRunBegun: (id) => {
-        this.launched.add(id);
+      onRunBegun: (id, taskId) => {
+        this.launched.set(taskId, id);
       },
     };
   }
@@ -637,7 +757,10 @@ class Orchestrator {
     const folders = await this.runningFolders(stateDir);
     const named = new Set<string>();
     for (const { record, path } of folders.running) {
-      if (!this.launched.has(record.id) || !taskIds.includes(record.taskId))
+      if (
+        this.launched.get(record.taskId) !== record.id ||
+        !taskIds.includes(record.taskId)
+      )
         continue;
       named.add(record.taskId);
       const verdict = await classifyRunning(record, this.groupJudge());
@@ -646,10 +769,7 @@ class Orchestrator {
     }
     // Only the stuck tasks' own runs: the orphan check said the others' at the start.
     for (const warning of folders.warnings)
-      if (
-        this.launched.has(warning.name) &&
-        taskIds.some((taskId) => warning.name.startsWith(`${taskId}-`))
-      )
+      if (taskIds.some((taskId) => this.launched.get(taskId) === warning.name))
         this.say(warning.text);
     for (const taskId of taskIds)
       if (!named.has(taskId))
@@ -670,7 +790,7 @@ class Orchestrator {
       return await readRunningFolders(stateDir);
     } catch (error) {
       this.say(
-        `the runs' records could not be read: ${failureLine(error, 1000, this.secrets)}`,
+        `the runs' records could not be read: ${failureLine(error, MAX_FAILURE_LINE, this.secrets)}`,
       );
       return { running: [], warnings: [] };
     }
@@ -760,5 +880,32 @@ class Orchestrator {
     } catch {
       // Nowhere left to say it.
     }
+  }
+}
+
+/**
+ * The ref a selected task's runs build, as the dry run names it (`builtRef`): `develop (default)`.
+ *
+ * @param selected - the tasks selected, joined to their cells.
+ * @param list - the product list, for the task's artifact manifest.
+ * @param taskId - the task.
+ * @returns the ref; `undefined` when the task is not selected, its product is unknown to the list, or
+ *   the planner refuses it — the started line then names the task's own ref. Never throws.
+ */
+export function plannedRef(
+  selected: readonly CheckedTask[],
+  list: Pick<ProductList, "productByName">,
+  taskId: string,
+): string | undefined {
+  const checked = selected.find(({ task }) => task.id === taskId);
+  if (checked === undefined) return undefined;
+  try {
+    return builtRef({
+      artifacts: list.productByName(checked.task.product).artifacts,
+      edition: checked.cell.edition,
+      plugin: checked.task.plugin,
+    });
+  } catch {
+    return undefined;
   }
 }

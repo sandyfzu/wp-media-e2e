@@ -16,6 +16,7 @@ export const STREAM_END_BYTES = 8 * 1024;
  * stream's place can block or flood it. Any failure reads as "not over".
  *
  * @param path - the run's `results.jsonl`.
+ * @returns `true` only when its last {@link STREAM_END_BYTES} hold a whole `run.end` line.
  */
 export function streamHasEnded(path: string): boolean {
   let fd: number;
@@ -42,6 +43,7 @@ export function streamHasEnded(path: string): boolean {
  * Whether any whole line of `text` is a `run.end` event.
  *
  * @param text - the end of a stream.
+ * @returns `true` when a line parses as JSON of type `run.end`.
  */
 export function hasRunEnd(text: string): boolean {
   return text.split("\n").some((line) => {

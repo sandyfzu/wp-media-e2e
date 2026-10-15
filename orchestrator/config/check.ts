@@ -1,5 +1,6 @@
 import { isPlaceholderSite } from "../../src/common/config/sites";
 import { configProblems, formatPath } from "./parse";
+import { siteKey } from "./site-key";
 import type { ProductList } from "./product-list";
 import type { OrchestratorConfig, TaskConfig } from "./schema";
 
@@ -81,18 +82,52 @@ export function checkConfig<P extends CheckedProduct>(
   });
   if (problems.length > 0)
     throw configProblems(file, "names what the suite cannot run", problems);
+  const running =
+    selected === undefined || selected.length === 0
+      ? tasks
+      : tasks.filter(({ task }) => selected.includes(task.id));
+  const shared = sharedSites(running, config.tasks);
+  if (shared.length > 0)
+    throw configProblems(file, "runs two tasks on one site", shared);
   return {
     tasks,
     warnings: [
       ...tasks.flatMap(({ task }, index) => versionIgnored(task, index)),
-      ...crowdedServers(
-        selected === undefined || selected.length === 0
-          ? tasks
-          : tasks.filter(({ task }) => selected.includes(task.id)),
-        config.serverWarningThreshold,
-      ),
+      ...crowdedServers(running, config.serverWarningThreshold),
     ],
   };
+}
+
+/**
+ * One line per site two of the tasks that run would share, naming both tasks and the site: every
+ * loop holds its sites' locks from its start to its end, so the second would be refused by the first —
+ * which one, a race. Refused here instead, by start and dry run alike, every time. Sites are compared
+ * by their key ({@link siteKey}), as the locks are.
+ *
+ * @param running - the checked tasks that run: the selected ones.
+ * @param all - the config's tasks, for each one's path.
+ * @returns the lines; none when every site is one task's.
+ */
+function sharedSites(
+  running: readonly CheckedTask[],
+  all: readonly TaskConfig[],
+): string[] {
+  const owner = new Map<string, CheckedTask>();
+  const lines: string[] = [];
+  const name = (checked: CheckedTask): string =>
+    `${formatPath(["tasks", all.indexOf(checked.task)])} (${checked.task.id}, ${checked.task.product} ${checked.task.cell})`;
+  for (const checked of running)
+    for (const key of new Set(
+      checked.cell.sites.map(({ baseURL }) => siteKey(baseURL)),
+    )) {
+      const first = owner.get(key);
+      if (first === undefined) owner.set(key, checked);
+      else
+        lines.push(
+          `${name(first)} and ${name(checked)} share site ${key}: two runs on one site would collide — select one with --task, or give each cell its own sites`,
+        );
+    }
+  return lines;
 }
 
 /**
@@ -122,12 +157,33 @@ function checkTask<P extends CheckedProduct>(
     return `${at("cell")}: ${product.name} ${task.cell} has no sites: give it a pool in the product's sites file`;
   if (placeholders > 0)
     return `${at("cell")}: ${product.name} ${task.cell} has ${String(placeholders)} placeholder site${placeholders === 1 ? "" : "s"} (.example.test) of ${String(cell.sites.length)}: every site a run binds to must be real — declare the cell's real sites in the product's sites file`;
+  // A site that is no http(s) address cannot be told apart from another, nor locked.
+  const unaddressed = cell.sites.filter(
+    ({ baseURL }) => !isSiteAddress(baseURL),
+  );
+  if (unaddressed.length > 0)
+    return `${at("cell")}: ${product.name} ${task.cell} has ${String(unaddressed.length)} site${unaddressed.length === 1 ? "" : "s"} whose baseURL is no http(s) URL: fix it in the product's sites file`;
   return {
     task,
     product,
     cell,
     servers: [...new Set(cell.sites.map(serverOf))],
   };
+}
+
+/**
+ * Whether a `baseURL` is an http(s) URL — one {@link siteKey} keys.
+ *
+ * @param baseURL - the site's `baseURL`.
+ * @returns whether it is.
+ */
+function isSiteAddress(baseURL: string): boolean {
+  try {
+    siteKey(baseURL);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

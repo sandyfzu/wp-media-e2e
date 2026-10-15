@@ -50,7 +50,11 @@ export interface RunFactsRead {
 /** One field, any value: kept when it is a string, else read as unknown. */
 const optionalText = z.string().optional().catch(undefined);
 
-/** A list whose malformed items are dropped, and which reads as empty when it is not a list. */
+/**
+ * A list whose malformed items are dropped, and which reads as empty when it is not a list.
+ *
+ * @param item - one item's schema; an item it refuses is dropped, never the list.
+ */
 function lenientList<T extends z.ZodType>(item: T) {
   return z
     .array(z.unknown())

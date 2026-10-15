@@ -179,6 +179,7 @@ export async function endRun(input: RunEndInput): Promise<RunEnd> {
  * Why a file that is there was not read, in words; `undefined` when it was read or is not there.
  *
  * @param read - the read.
+ * @returns the cap it exceeds or the read's error code; `undefined` when read or absent.
  */
 function whyUnread(read: CappedRead): string | undefined {
   if (read.kind === "tooLarge")

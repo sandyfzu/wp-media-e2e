@@ -174,6 +174,7 @@ function errorReason(input: OutcomeInput): string | undefined {
  * and its stream does not.
  *
  * @param message - the run error's message.
+ * @returns `true` when the message, made one line, opens with Playwright's `No tests found`.
  */
 export function isNoTestsFound(message: string): boolean {
   return /^(?:Error: )?No tests found\b/.test(oneLine(message));
@@ -204,6 +205,7 @@ function failedSetup(input: OutcomeInput): string | undefined {
  * Whether a process exited `0`.
  *
  * @param exit - how it ended.
+ * @returns `true` only for code `0` and no signal.
  */
 function isSuccess(exit: ProcessExit): boolean {
   return exit.code === 0 && exit.signal === null;
@@ -213,6 +215,7 @@ function isSuccess(exit: ProcessExit): boolean {
  * How a process ended, as a phrase: `exited with code 1`, `was ended by SIGKILL`.
  *
  * @param exit - how it ended.
+ * @returns the phrase, the signal first when there is one.
  */
 export function describeExit(exit: ProcessExit): string {
   if (exit.signal !== null) return `was ended by ${exit.signal}`;
@@ -251,6 +254,7 @@ function fromLog(
  * @param status - the status.
  * @param reason - why.
  * @param secrets - the secret values to mask.
+ * @returns the outcome, its reason masked and cut.
  */
 function outcome(
   status: RunStatus,

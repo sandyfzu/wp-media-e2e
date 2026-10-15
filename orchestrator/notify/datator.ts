@@ -99,6 +99,9 @@ export function datatorPayload(
 /**
  * One scenario's record: its names within Datator's bounds, `flaky` as `passed`, an interrupted one
  * as `skipped` (it never finished).
+ *
+ * @param scenario - the scenario as `run.finished` carries it.
+ * @returns its test case; `error_message` `null` when it has no error.
  */
 function testCase(scenario: FinishedScenario): DatatorTestCase {
   const name = [...scenario.path, scenario.name]
@@ -137,6 +140,9 @@ function text(value: string, max: number): string {
 /**
  * Whether `commit` is a full git commit — 40 (SHA-1) or 64 (SHA-256) hex digits; anything else is not
  * posted as one.
+ *
+ * @param commit - the run facts' commit; `null` for a build with none (a `release:` ref).
+ * @returns whether it is posted as `git_commit`.
  */
 function isCommit(commit: string | null): commit is string {
   return commit !== null && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commit);

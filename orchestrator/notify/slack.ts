@@ -4,6 +4,7 @@ import type {
 } from "../events/run-finished";
 import { webhookSecrets } from "../config/secrets";
 import type { RunStatus } from "../runs/outcome";
+import { shellWord } from "../text";
 import { DEFAULT_POST_TIMEOUT_MS, postJson, type Delivery } from "./post";
 
 /**
@@ -113,25 +114,13 @@ export function formatDuration(ms: number): string {
 }
 
 /**
- * A path as a POSIX shell reads it back: as it is when every character is plainly safe, else in
- * single quotes — so the shell a `scp` command is pasted in hands `scp` that path whole. The far end
- * still reads it: in scp's default SFTP mode a `*`, `?` or `[` is a pattern, and its legacy mode
- * (`-O`) hands it to a remote shell unquoted. The paths shown here are the checkout's and the state
- * directory's, which hold none of those unless their own location does.
- *
- * @param path - the path.
- * @returns the quoted path.
- */
-export function shellQuote(path: string): string {
-  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(path)
-    ? path
-    : `'${path.replaceAll("'", `'\\''`)}'`;
-}
-
-/**
  * Where to find a file or folder, escaped and bounded: an `scp` command from `sshHost` when there is
  * one, else the path — as code, which Slack shows as written (an `_` in it is not italics), unless it
- * holds a backtick, which would end the code early.
+ * holds a backtick, which would end the code early. The path is quoted for the shell the command is
+ * pasted in ({@link shellWord}); the far end still reads it: in scp's default SFTP mode a `*`, `?` or
+ * `[` is a pattern, and its legacy mode (`-O`) hands it to a remote shell unquoted. The paths shown
+ * here are the checkout's and the state directory's, which hold none of those unless their own
+ * location does.
  *
  * @param path - the absolute path on this machine.
  * @param folder - whether it is a folder (`scp -r`).
@@ -142,7 +131,7 @@ function whereIs(path: string, folder: boolean, sshHost?: string): string {
   const text =
     sshHost === undefined
       ? path
-      : `scp ${folder ? "-r " : ""}${sshHost}:${shellQuote(path)} .`;
+      : `scp ${folder ? "-r " : ""}${sshHost}:${shellWord(path)} .`;
   const shown = escapeCut(text, MAX_SHOWN);
   return shown.includes("`") ? shown : `\`${shown}\``;
 }
@@ -176,19 +165,24 @@ export function slackMessage(
     pluginLine(event),
     ...siteLines(event.sites),
     ...(tested ? scenarioLists(event.scenarios) : []),
-    ...(tested
+    ...(tested ? [] : [`Took: ${formatDuration(event.durationMs)}`]),
+    // A run refused before it had a folder wrote neither: no path to point at.
+    ...(tested || event.report.log === null
       ? []
-      : [
-          `Took: ${formatDuration(event.durationMs)}`,
-          `Log: ${whereIs(event.report.log, false, options.sshHost)}`,
-        ]),
-    `Report: ${whereIs(event.report.dir, true, options.sshHost)}`,
+      : [`Log: ${whereIs(event.report.log, false, options.sshHost)}`]),
+    ...(event.report.dir === null
+      ? []
+      : [`Report: ${whereIs(event.report.dir, true, options.sshHost)}`]),
   ].join("\n");
 }
 
 /**
  * `*[instance]* ❌ FAILED — BackWPup Pro · pro@nginx`: the plugin's name when the run read it, else
  * the product's.
+ *
+ * @param event - the run.
+ * @param instance - the config's `instance`, shown in brackets first; none when absent.
+ * @returns the message's first line, escaped for Slack.
  */
 function headline(event: RunFinishedEvent, instance?: string): string {
   const prefix =
@@ -197,7 +191,12 @@ function headline(event: RunFinishedEvent, instance?: string): string {
   return `${prefix}${HEADLINES[event.status]} — ${escapeCut(what, MAX_SHOWN)} · ${escapeCut(event.unit.cell, MAX_SHOWN)}`;
 }
 
-/** `52 scenarios: 49 passed · 1 flaky · 2 failed, in 54m 10s` — a count only when not 0. */
+/**
+ * `52 scenarios: 49 passed · 1 flaky · 2 failed, in 54m 10s` — a count only when not 0.
+ *
+ * @param event - the run.
+ * @returns the line; nothing in it needs escaping.
+ */
 function countsLine(event: RunFinishedEvent): string {
   const { counts } = event;
   const parts = (
@@ -218,6 +217,9 @@ function countsLine(event: RunFinishedEvent): string {
 /**
  * `Plugin: BackWPup Pro 9.99.99 · develop @ f1ebfd0` — what the run built; the ref the task asked for
  * when the run never said, and nothing it does not know.
+ *
+ * @param event - the run.
+ * @returns the line, escaped for Slack.
  */
 function pluginLine(event: RunFinishedEvent): string {
   const { plugin } = event;
@@ -236,7 +238,12 @@ function pluginLine(event: RunFinishedEvent): string {
   return `Plugin: ${escapeCut(built === "" ? name : `${name} · ${built}`, MAX_SHOWN)}`;
 }
 
-/** The pool's first {@link MAX_LISTED_SITES} sites, a line each, then how many more. */
+/**
+ * The pool's first {@link MAX_LISTED_SITES} sites, a line each, then how many more.
+ *
+ * @param sites - the pool, in its order.
+ * @returns the lines; none when the event lists no site.
+ */
 function siteLines(sites: RunFinishedEvent["sites"]): string[] {
   const more = sites.length - MAX_LISTED_SITES;
   return [
@@ -245,7 +252,12 @@ function siteLines(sites: RunFinishedEvent["sites"]): string[] {
   ];
 }
 
-/** `Site: https://… · WordPress 7.1.2 · PHP 8.5.10` — a version only when the run read it. */
+/**
+ * `Site: https://… · WordPress 7.1.2 · PHP 8.5.10` — a version only when the run read it.
+ *
+ * @param site - one site of the pool.
+ * @returns the line, escaped for Slack.
+ */
 function siteLine(site: RunFinishedEvent["sites"][number]): string {
   const parts = [
     site.baseURL,
@@ -280,7 +292,13 @@ function scenarioLists(scenarios: readonly FinishedScenario[]): string[] {
   return lines;
 }
 
-/** `• Backups › A backup runs on demand — Expected "Done", received "Error"`. */
+/**
+ * `• Backups › A backup runs on demand — Expected "Done", received "Error"`: the scenario's titles,
+ * then its error's first non-blank line, each cut.
+ *
+ * @param scenario - a failed or flaky scenario.
+ * @returns the line, escaped for Slack.
+ */
 function scenarioLine(scenario: FinishedScenario): string {
   const title =
     [scenario.feature, ...scenario.path, scenario.name]

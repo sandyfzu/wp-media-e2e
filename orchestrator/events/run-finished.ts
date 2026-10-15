@@ -109,11 +109,15 @@ export interface RunFinishedEvent {
   };
   /** Each scenario that finished, in the order they first ended. */
   readonly scenarios: readonly FinishedScenario[];
+  /**
+   * Where the run's report and log are; both `null` for a run that never had a folder of its own —
+   * refused before its launch made one — where neither was ever written.
+   */
   readonly report: {
     /** The run's report folder, absolute. */
-    readonly dir: string;
+    readonly dir: string | null;
     /** The run's log, absolute. */
-    readonly log: string;
+    readonly log: string | null;
   };
 }
 
@@ -141,6 +145,8 @@ export interface RunFinishedInput {
   readonly facts?: RunFactsRead;
   readonly reportDir: string;
   readonly log: string;
+  /** `false` for a run that never had a folder: its report and log are then `null`. */
+  readonly hadFolder?: boolean;
   /** The secret values the orchestrator holds, masked in every text the run's files gave. */
   readonly secrets: readonly string[];
 }
@@ -205,7 +211,10 @@ export function buildRunFinished(input: RunFinishedInput): RunFinishedEvent {
     scenarios: (results?.scenarios ?? []).map((scenario) =>
       finishedScenario(scenario, secrets),
     ),
-    report: { dir: input.reportDir, log: input.log },
+    report:
+      input.hadFolder === false
+        ? { dir: null, log: null }
+        : { dir: input.reportDir, log: input.log },
   };
 }
 
@@ -215,6 +224,7 @@ export function buildRunFinished(input: RunFinishedInput): RunFinishedEvent {
  *
  * @param end - its last `scenario.end`.
  * @param secrets - the secret values to mask.
+ * @returns the scenario, masked and bounded; `error` only when it had one.
  */
 function finishedScenario(
   end: ScenarioResult,

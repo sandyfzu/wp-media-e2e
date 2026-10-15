@@ -64,7 +64,12 @@ const REFUSED_NAMES: ReadonlyMap<string, string> = new Map([
   ["getBuiltinModule", "loads a builtin by a string"],
 ]);
 
-/** Whether `specifier` names one of {@link REFUSED_BUILTINS}. */
+/**
+ * Whether `specifier` names one of {@link REFUSED_BUILTINS}.
+ *
+ * @param specifier - an import's specifier, with or without `node:`.
+ * @returns `true` for a refused builtin.
+ */
 function isRefusedBuiltin(specifier: string): boolean {
   return REFUSED_BUILTINS.includes(specifier.replace(/^node:/, ""));
 }
@@ -74,6 +79,9 @@ function isRefusedBuiltin(specifier: string): boolean {
  * identifier — a variable, a property after a dot, a key destructured — or a string literal used
  * as a property name (`process["getBuiltinModule"]`, `{ "eval": e } = globalThis`,
  * `{ ["eval"]: e } = globalThis`).
+ *
+ * @param node - any node of a tree built with parents.
+ * @returns the name, or `undefined` when `node` spells none.
  */
 function spelledName(node: ts.Node): string | undefined {
   if (ts.isIdentifier(node)) return node.text;
@@ -91,6 +99,10 @@ function spelledName(node: ts.Node): string | undefined {
  * source order: `eval`, `Function`, and `getBuiltinModule` on any object. Judged by spelling, so a
  * name reached through a string (`Reflect.get(process, "getBuiltinModule")`) or built at run time
  * (`process["get" + "BuiltinModule"]`) is not seen.
+ *
+ * @param file - the file's name, for the parser.
+ * @param source - its text.
+ * @returns one entry per use; empty when there is none.
  */
 export function forbiddenNames(file: string, source: string): string[] {
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
@@ -113,6 +125,10 @@ export function forbiddenNames(file: string, source: string): string[] {
  * can. An entry is a repository path to an existing `.ts` module under `src/`, written once and in its
  * one normal form (no `.` or `..` segment, which would let a detour leave `src/`), and never test code
  * or a declaration file.
+ *
+ * @param value - the parsed JSON.
+ * @param repoRoot - the checkout the paths are relative to.
+ * @returns `<entry>: <problem>` per problem, or one line when `value` is no array.
  */
 export function allowlistProblems(
   value: unknown,
@@ -148,6 +164,9 @@ export function allowlistProblems(
 /**
  * The orchestrator's own code in `dir`, relative to it, sorted: every file Node or tsx can load —
  * `.mts`, `.js`, `.d.ts` and the rest, so no dialect slips past the scan — but test code.
+ *
+ * @param dir - the orchestrator's folder.
+ * @returns `/`-separated paths on POSIX, the platform's separator elsewhere.
  */
 export function orchestratorCode(dir: string = ORCHESTRATOR_DIR): string[] {
   return readdirSync(dir, { recursive: true, encoding: "utf8" })
@@ -161,6 +180,9 @@ export function orchestratorCode(dir: string = ORCHESTRATOR_DIR): string[] {
  * module `require` and `module.require`, which load whatever a computed name says, and neither guard
  * follows a `require` once it is renamed. The orchestrator is ES modules only. Test code and
  * declaration files are exempt.
+ *
+ * @param dir - the orchestrator's folder.
+ * @returns the offending files; empty when the code is ES modules only.
  */
 export function commonJsFiles(dir: string = ORCHESTRATOR_DIR): string[] {
   return readdirSync(dir, { recursive: true, encoding: "utf8" })
@@ -177,6 +199,9 @@ export function commonJsFiles(dir: string = ORCHESTRATOR_DIR): string[] {
  * Whether a file of {@link orchestratorCode} is imported by the spec's probe: not the root
  * {@link COMMAND_ENTRY}, which starts the orchestrator, nor a declaration file, which has nothing to
  * run.
+ *
+ * @param path - a path {@link orchestratorCode} returned.
+ * @returns `true` when the probe imports it.
  */
 export function isProbed(path: string): boolean {
   return path !== COMMAND_ENTRY && !isDeclarationFile(path);
@@ -185,6 +210,11 @@ export function isProbed(path: string): boolean {
 /**
  * Why an import leading to `target` is refused — or `undefined` when it is allowed: inside
  * `orchestrator/` but test code, or outside it and not admitted.
+ *
+ * @param target - the absolute path the import leads to.
+ * @param admitted - the admitted suite modules, absolute.
+ * @param orchestratorDir - the orchestrator's folder, absolute.
+ * @returns the reason, `test code` or `not in suite-imports.json`.
  */
 function refusal(
   target: string,
@@ -206,6 +236,13 @@ function refusal(
  * code; anything outside `orchestrator/` but an `admitted` module (absolute paths). Each import is
  * judged where it really leads — `.js` to `.ts`, a detour, a `#` import — and lexically when it leads
  * nowhere.
+ *
+ * @param file - the importing file, absolute: relative specifiers resolve from it.
+ * @param source - its text.
+ * @param admitted - the admitted suite modules, absolute.
+ * @param resolveImport - how a specifier resolves, as Node and tsx would.
+ * @param orchestratorDir - the orchestrator's folder, absolute.
+ * @returns one entry per refused import; empty when every one is allowed.
  */
 export function forbiddenImports(
   file: string,
@@ -240,6 +277,13 @@ export function forbiddenImports(
 /**
  * Everything in `source`, read as the file `file`, that the boundary refuses: its
  * {@link forbiddenImports}, then its {@link forbiddenNames}.
+ *
+ * @param file - the file, absolute.
+ * @param source - its text.
+ * @param admitted - the admitted suite modules, absolute.
+ * @param resolveImport - how a specifier resolves.
+ * @param orchestratorDir - the orchestrator's folder, absolute.
+ * @returns every refusal, `<what> — <reason>`; empty when the file is within the boundary.
  */
 export function boundaryViolations(
   file: string,

@@ -7,6 +7,7 @@ import { clockTime } from "../log";
 import { MAX_REASON_LENGTH } from "../runs/outcome";
 import type { StopLevel } from "../runs/stop";
 import { failureLine, safeLine } from "../text";
+import type { HeldCell } from "../state/cell-lock";
 import {
   runOnce,
   type CycleDeps,
@@ -14,7 +15,11 @@ import {
   type RunHandle,
   type RunResult,
 } from "./cycle";
-import { furtherStop, MAX_FAILURE_LENGTH, type StopAsked } from "./run-lines";
+import {
+  furtherStop,
+  MAX_RUN_FAILURE_LENGTH,
+  type StopAsked,
+} from "./run-lines";
 
 /** The longest wait a Node timer takes as asked: past it, Node fires after 1 ms instead. */
 export const MAX_TIMER_MS = 2 ** 31 - 1;
@@ -27,7 +32,8 @@ export const MAX_TIMER_MS = 2 ** 31 - 1;
  * which a stop clears and ends at once), **ended**. A stop is remembered (the furthest wins), handed to
  * the run in flight — or to one just created, should it arrive while `runOnce` is called —, ends a
  * cooldown, and keeps every later run from starting; the loop then ends once the run in flight has.
- * Nothing it calls escapes: a failure is a masked line, and `done` never rejects.
+ * Nothing it calls escapes: a failure is a masked line, and `done` never rejects. With `takeCell`, it
+ * holds its cell's site locks from before its first run to its end, naming each run in them.
  */
 
 /** A task, as its loop needs it: one run's fields and the cooldown. */
@@ -58,7 +64,17 @@ export interface LoopDeps extends CycleDeps {
   readonly runOnce?: (task: CycleTask, deps: CycleDeps) => RunHandle;
   /** The cooldown's timers; {@link NODE_COOLDOWN_TIMERS} by default. */
   readonly timers?: CooldownTimers;
+  /**
+   * Takes the task's cell's site locks (`CellLocks.acquire` for its cell), held from the loop's start
+   * to its end: two orchestrators never take turns on a site through each other's cooldowns. A refusal
+   * ends the loop `failed` before any run, said once. Without it the loop holds no lock — for specs of
+   * the loop alone.
+   */
+  readonly takeCell?: () => Promise<HeldCell>;
 }
+
+/** The longest refusal of a cell's site locks said, in code points: it names the holder and the way out. */
+const MAX_CELL_REFUSAL_LENGTH = 1_500;
 
 /**
  * A task's loop, for `--once`'s exit code: `passed` when its run passed or was flaky, `stopped` when
@@ -72,7 +88,8 @@ export interface TaskEnd {
   /**
    * `stopped`: a stop ended it; `once`: its one run is over; `failed`: the loop itself broke — a
    * cooldown that is not whole minutes within the config's bounds (before any run), timers that
-   * cannot arm, a clock that throws —, never expected, said in the log.
+   * cannot arm, a clock that throws, a run whose processes could not be watched to their end (they
+   * may still run, so the cell is not run again) —, never expected, said in the log.
    */
   readonly ended: "stopped" | "once" | "failed";
   /** Its last run's result; absent when it ended before any run was asked for. */
@@ -217,6 +234,10 @@ class Loop {
   private wake: (() => void) | undefined;
   /** The clock: `deps.now`, else the system's. */
   private readonly now: () => Date;
+  /** Set once a run's processes may outlive the loop: its site locks are then kept. */
+  private keepCell = false;
+  /** Why a run could not be named in the site locks, once one could not: the loop then ends. */
+  private cellLost: string | undefined;
 
   /**
    * @param task - the task.
@@ -252,7 +273,6 @@ class Loop {
    * @returns how it ended.
    */
   async run(): Promise<TaskEnd> {
-    let last: RunResult | undefined;
     const problem = cooldownProblem(this.task.cooldownMinutes);
     if (problem !== undefined) {
       const value = safeLine(
@@ -261,13 +281,105 @@ class Loop {
         this.deps.secrets,
       );
       this.say(`no run: the task's cooldown (${value}) ${problem}`);
-      return this.end("failed", last);
+      return this.end("failed", undefined);
     }
+    if (this.stopAsked()) return this.end("stopped", undefined);
+    const cell = await this.takeCell();
+    if (cell === "refused") return this.end("failed", undefined);
+    try {
+      return await this.cycles(cell);
+    } finally {
+      await this.giveBack(cell);
+    }
+  }
+
+  /**
+   * The task's cell's site locks, taken; a refusal is said once.
+   *
+   * @returns the locks; `undefined` with none to take; `refused` when they could not be had.
+   */
+  private async takeCell(): Promise<HeldCell | undefined | "refused"> {
+    const { takeCell } = this.deps;
+    if (takeCell === undefined) return undefined;
+    try {
+      return await takeCell();
+    } catch (error) {
+      this.say(
+        `not started: ${failureLine(error, MAX_CELL_REFUSAL_LENGTH, this.deps.secrets)}`,
+      );
+      return "refused";
+    }
+  }
+
+  /**
+   * Gives the cell's site locks back as the loop ends — unless a run's processes may still live; one
+   * that could not be is said.
+   *
+   * @param cell - the locks, if any.
+   */
+  private async giveBack(cell: HeldCell | undefined): Promise<void> {
+    if (cell === undefined || this.keepCell) return;
+    try {
+      if (await cell.release()) return;
+    } catch {
+      // Said below: release is not to throw.
+    }
+    this.say(
+      "its cell's site locks were not all removed: gone, another's, or could not be",
+    );
+  }
+
+  /**
+   * Names a run in the cell's site locks before its launch. A lock lost, or one that could not be
+   * rewritten, ends the loop after that run — fail-safe: no run starts unnamed in its sites' locks —
+   * and the words say which.
+   *
+   * @param cell - the locks.
+   * @param record - the run's `run.json`.
+   * @returns `undefined` once named; else why not.
+   */
+  private async claim(
+    cell: HeldCell,
+    record: string,
+  ): Promise<string | undefined> {
+    const naming = await cell.setRun(record);
+    if (naming.kind === "named") return undefined;
+    this.cellLost =
+      naming.kind === "lost"
+        ? "its cell's site locks are no longer this orchestrator's — removed, or another's"
+        : `its cell's site locks could not be rewritten to name the run (${naming.why}): they are still this orchestrator's, but no run starts unnamed in them`;
+    return this.cellLost;
+  }
+
+  /**
+   * The runs, one after another with the cooldown between, holding the cell's site locks.
+   *
+   * @param cell - the locks, if any.
+   * @returns how the loop ended.
+   */
+  private async cycles(cell: HeldCell | undefined): Promise<TaskEnd> {
+    let last: RunResult | undefined;
+    const deps: CycleDeps =
+      cell === undefined
+        ? this.deps
+        : { ...this.deps, claimCell: (record) => this.claim(cell, record) };
     try {
       for (;;) {
         if (this.stopAsked()) return this.end("stopped", last);
-        const settled = await this.cycle();
+        const settled = await this.cycle(deps);
         last = settled.result;
+        if (last.kind === "ended" && last.unwatched === true) {
+          // Its processes may still run on the cell: no run of it may start beside them.
+          this.keepCell = true;
+          this.say(
+            `no next run: ${last.id}'s processes could not be watched to their end and may still run — its cell stays locked, and the next start's orphan check judges them`,
+          );
+          return this.end("failed", last);
+        }
+        if (this.cellLost !== undefined) {
+          this.say(`no next run: ${this.cellLost}`);
+          return this.end("failed", last);
+        }
         if (this.stopAsked()) return this.end("stopped", last);
         if (this.deps.once === true) return this.end("once", last);
         await this.cooldown(settled);
@@ -284,10 +396,10 @@ class Loop {
    *
    * @returns its result, and when it settled.
    */
-  private async cycle(): Promise<Settled> {
+  private async cycle(deps: CycleDeps): Promise<Settled> {
     let result: RunResult;
     try {
-      const handle = (this.deps.runOnce ?? runOnce)(this.task, this.deps);
+      const handle = (this.deps.runOnce ?? runOnce)(this.task, deps);
       this.current = handle;
       // Asked while the run was being created: it has not seen it yet.
       if (this.asked !== undefined) this.forward(this.asked);
@@ -419,6 +531,6 @@ class Loop {
    * @returns the line.
    */
   private failure(error: unknown): string {
-    return failureLine(error, MAX_FAILURE_LENGTH, this.deps.secrets);
+    return failureLine(error, MAX_RUN_FAILURE_LENGTH, this.deps.secrets);
   }
 }

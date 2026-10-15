@@ -58,17 +58,85 @@ const FORMAT = /\p{Cf}/gu;
  * of the secret in clear, which no value then matches. A secret under {@link MIN_MASKED_LENGTH} (8)
  * characters, spaces around it aside, is masked in no form: it would mask ordinary words. The longest
  * form first: a value inside a longer one, masked first, would leave the longer one's rest in clear.
+ * Last, the head of a secret a cut left before its marker ({@link maskCutTails}).
  *
  * @param text - the text.
  * @param secrets - the secret values to mask wherever they appear, in any order.
  * @returns the masked text.
  */
 function mask(text: string, secrets: readonly string[]): string {
+  // Trimmed first, as a value is masked: a secret written with spaces around it is the same secret,
+  // and its encoded forms must be the trimmed value's.
   const forms = secrets
-    .filter((secret) => secret.trim().length >= MIN_MASKED_LENGTH)
+    .map((secret) => secret.trim())
+    .filter((secret) => secret.length >= MIN_MASKED_LENGTH)
     .flatMap(secretForms);
   const longestFirst = [...new Set(forms)].sort((a, b) => b.length - a.length);
-  return redactSecrets(maskValues(text, longestFirst));
+  return redactSecrets(
+    maskCutTails(maskValues(text, longestFirst), longestFirst),
+  );
+}
+
+/**
+ * The mark every cut in the suite and here ends with: the results stream's `… [truncated]`, the run
+ * facts' and the summary's `…`, this module's {@link cut}.
+ */
+export const CUT_MARK = "…";
+
+/**
+ * The shortest head of a secret masked before a cut: shorter ones are ordinary text too often. Four is
+ * kept on purpose though it over-masks — `admin…` becomes `***…` when a secret starts `admin` —: a
+ * word lost from a cut message costs nothing, a secret's head shown costs its strength. Fail-safe.
+ */
+export const MIN_CUT_TAIL = 4;
+
+/**
+ * `text` with the head of a secret that a cut left just before its mark masked: a message cut in the
+ * middle of a password (the suite cuts a stream's message, masked only by shape, at 2,000 characters)
+ * holds a part of it no value matches. Before each {@link CUT_MARK}, the longest text that is the
+ * start — {@link MIN_CUT_TAIL} characters or more, never all — of any of `forms` becomes `***`.
+ *
+ * @param text - the text, its whole secrets already masked.
+ * @param forms - every secret's forms, as {@link mask} matches them.
+ * @returns the text, those heads masked.
+ */
+export function maskCutTails(text: string, forms: readonly string[]): string {
+  let masked = "";
+  let from = 0;
+  for (let at = text.indexOf(CUT_MARK); at !== -1;) {
+    const head = longestSecretHead(text, at, forms);
+    masked += `${text.slice(from, at - head)}${head > 0 ? "***" : ""}`;
+    from = at;
+    at = text.indexOf(CUT_MARK, at + CUT_MARK.length);
+  }
+  return masked + text.slice(from);
+}
+
+/**
+ * How long the start of a secret's form is that ends at `end` in `text`.
+ *
+ * @param text - the text.
+ * @param end - where a cut mark starts.
+ * @param forms - the secrets' forms.
+ * @returns its length: from {@link MIN_CUT_TAIL}, shorter than the form; `0` for none.
+ */
+function longestSecretHead(
+  text: string,
+  end: number,
+  forms: readonly string[],
+): number {
+  let longest = 0;
+  for (const form of forms)
+    for (
+      let length = Math.min(form.length - 1, end);
+      length >= Math.max(longest + 1, MIN_CUT_TAIL);
+      length--
+    )
+      if (text.startsWith(form.slice(0, length), end - length)) {
+        longest = length;
+        break;
+      }
+  return longest;
 }
 
 /**
@@ -241,6 +309,13 @@ export function failureLine(
 ): string {
   return safeLine(textOf(error), max, secrets) || "failed";
 }
+
+/**
+ * The longest path a line quotes, in code points. The reader copies it into a command (`rm`, `lsof`,
+ * the record to mark `lost`), so the bound is generous — a cut path is no use in a command — and only
+ * keeps a pathological one from flooding the log.
+ */
+export const MAX_QUOTED_PATH = 1_000;
 
 /**
  * `path` as one word of a POSIX shell command: as it is when it holds only characters no shell

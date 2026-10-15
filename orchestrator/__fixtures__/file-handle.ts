@@ -46,7 +46,11 @@ export async function withHandleMethod<T>(
   }
 }
 
-/** The prototype every `FileHandle` shares, from a handle opened on this module's own file. */
+/**
+ * The prototype every `FileHandle` shares, from a handle opened on this module's own file.
+ *
+ * @returns that prototype, its methods addressable by name so a spec can swap one.
+ */
 async function handlePrototype(): Promise<Record<HandleMethod, unknown>> {
   const handle = await open(new URL(import.meta.url), "r");
   try {

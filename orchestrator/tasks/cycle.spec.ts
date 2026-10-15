@@ -254,6 +254,22 @@ async function runnerReady(seen: Seen): Promise<void> {
 }
 
 test.describe("runOnce — runs to their end", () => {
+  test("names the ref `refFor` plans in the started line", async () => {
+    const asked: string[] = [];
+    const { deps, seen } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      refFor: (task) => {
+        asked.push(task.id);
+        return "develop (default)";
+      },
+    });
+    ended(await runOnce(TASK, deps).done);
+    expect(asked).toEqual(["bpng"]);
+    expect(seen.lines[0]).toBe(
+      "bpng bpng-1 started · backwpup pro@nginx · develop (default) · " +
+        identityOf().log.slice(checkout.length + 1),
+    );
+  });
+
   test("records, tells, publishes and prunes a run that passed, keeping its Datator record", async () => {
     const { deps, seen } = harness({ exitCode: 0 }, runnerWith("passed"));
     const result = ended(await runOnce(TASK, deps).done);
@@ -1238,5 +1254,133 @@ test.describe("runOnce — a dependency that fails is said, and the run still re
     finish(launched);
     await run.done;
     expect(seen.lines).toContain("bpng stopping the run failed: ESRCH");
+  });
+});
+
+test.describe("runOnce — the cell's site locks, which its loop holds", () => {
+  /**
+   * A stand-in `claimCell`: each claim said with whether the run's folder existed yet.
+   *
+   * @param events - where the claims go.
+   * @param answer - what it resolves to — `undefined` once named, else why not — or an error to
+   *   reject with.
+   * @returns it.
+   */
+  function claimCell(
+    events: string[],
+    answer?: string | Error,
+  ): NonNullable<CycleDeps["claimCell"]> {
+    return (record) => {
+      events.push(
+        `claim ${basename(join(record, ".."))} folder:${String(existsSync(join(record, "..")))}`,
+      );
+      return answer instanceof Error
+        ? Promise.reject(answer)
+        : Promise.resolve(answer);
+    };
+  }
+
+  test("names the run's record in them before anything is launched", async () => {
+    const events: string[] = [];
+    const { deps, seen } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      claimCell: claimCell(events),
+      bus: {
+        publish: (event) => {
+          seen.published.push(event);
+          events.push(`published ${event.status}`);
+        },
+      },
+    });
+    expect(ended(await runOnce(TASK, deps).done).status).toBe("passed");
+    expect(events).toEqual(["claim bpng-1 folder:false", "published passed"]);
+  });
+
+  for (const [how, answer] of [
+    ["resolves a reason", `the locks are gone ${SECRET}`],
+    ["rejects", new Error(`the lock is gone ${SECRET}`)],
+  ] as const)
+    test(`a claim that ${how} launches nothing, and the run ends an error pointing at no report or log`, async () => {
+      const events: string[] = [];
+      const { deps, seen } = harness({ exitCode: 0 }, runnerWith("passed"), {
+        claimCell: claimCell(events, answer),
+      });
+      const result = ended(await runOnce(TASK, deps).done);
+      expect(result.status).toBe("error");
+      expect(existsSync(identityOf().dir)).toBe(false);
+      expect(seen.records).toEqual([]);
+      expect(seen.published).toHaveLength(1);
+      const event = seen.published[0];
+      expect(event?.reason).toMatch(/^the run could not start: /);
+      // No folder: no report, no log, and the outcome line ends at the duration.
+      expect(event?.report).toEqual({ dir: null, log: null });
+      expect(
+        seen.lines.find((line) => line.startsWith("bpng bpng-1 ✘ error")),
+      ).toMatch(/ · 0s$/);
+      expect(
+        seen.lines.some((line) => line.startsWith("bpng bpng-1 not started: ")),
+      ).toBe(true);
+      expect(everything(seen)).not.toContain(SECRET);
+    });
+
+  test("a launch refused before the run's folder was its own points at no report or log either", async () => {
+    const { deps, seen } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      commandsFor: () => {
+        throw new Error("no commands");
+      },
+    });
+    expect(ended(await runOnce(TASK, deps).done).status).toBe("error");
+    expect(seen.published[0]?.report).toEqual({ dir: null, log: null });
+  });
+
+  test("a run that could not be watched to its end says so in its result", async () => {
+    const { deps } = harness(
+      {},
+      {},
+      {
+        launch: async (options) => {
+          await mkdir(options.identity.dir, { recursive: true });
+          await options.onSpawning?.("bddgen");
+          return {
+            stop: () => undefined,
+            done: Promise.reject(new Error("watch failed")),
+          };
+        },
+        readLeaderStart: () => Promise.resolve({ kind: "gone" }),
+      },
+    );
+    expect(ended(await runOnce(TASK, deps).done).unwatched).toBe(true);
+  });
+
+  test("a run watched to its end is never unwatched", async () => {
+    const { deps } = harness({ exitCode: 0 }, runnerWith("passed"));
+    expect(ended(await runOnce(TASK, deps).done).unwatched).toBeUndefined();
+  });
+
+  test("a process group that will not empty is said in the orchestrator's lines, under the run's id", async () => {
+    const { deps, seen } = harness(
+      {},
+      {},
+      {
+        launch: async (options) => {
+          await mkdir(options.identity.dir, { recursive: true });
+          await options.onSpawning?.("bddgen");
+          options.onStuck?.(
+            `playwright's process group (4242) is still not empty ${SECRET}`,
+          );
+          return {
+            stop: () => undefined,
+            done: Promise.resolve({
+              bddgen: { code: 0, signal: null },
+              stop: { level: "none" },
+            }),
+          };
+        },
+        end: () => Promise.reject(new Error("unread")),
+      },
+    );
+    await runOnce(TASK, deps).done;
+    expect(seen.lines).toContain(
+      "bpng bpng-1: playwright's process group (4242) is still not empty ***",
+    );
   });
 });

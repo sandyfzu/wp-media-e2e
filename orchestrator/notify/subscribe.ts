@@ -19,6 +19,9 @@ import { sendSlack, slackMessage } from "./slack";
 /** The name the bus logs a failed delivery under (its own time limit). */
 export const NOTIFICATIONS_SUBSCRIBER = "notifications";
 
+/** The longest status or reason a delivery's line quotes, in code points: `201`, `timed out`. */
+const MAX_STATUS_LENGTH = 40;
+
 /** The senders, in the order the line names them. */
 export const SENDERS = ["slack", "datator"] as const;
 
@@ -273,15 +276,15 @@ function outcomeText(
   secrets: readonly string[],
 ): string {
   if ("notPosted" in outcome)
-    return `not posted (${safeLine(textOf(outcome.notPosted), 40, secrets)})`;
+    return `not posted (${safeLine(textOf(outcome.notPosted), MAX_STATUS_LENGTH, secrets)})`;
   const { delivery } = outcome;
   if (delivery.ok)
     return outcome.name === "slack"
       ? "✓"
-      : `✓ ${safeLine(textOf(delivery.status), 40, secrets)}`;
+      : `✓ ${safeLine(textOf(delivery.status), MAX_STATUS_LENGTH, secrets)}`;
   const detail = failureLine(delivery.detail, MAX_DETAIL, secrets);
   if (delivery.status === undefined) return `✗ ${detail}`;
-  const status = safeLine(textOf(delivery.status), 40, secrets);
+  const status = safeLine(textOf(delivery.status), MAX_STATUS_LENGTH, secrets);
   // `HTTP 500`, or `HTTP 500 (its answer is withheld…)`, already names it.
   const named =
     detail === `HTTP ${status}` || detail.startsWith(`HTTP ${status} `);

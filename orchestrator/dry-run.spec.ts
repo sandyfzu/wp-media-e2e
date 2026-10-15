@@ -8,11 +8,17 @@ import { loadSites } from "../src/common/config/sites";
 import { NOT_A_SITE_URL } from "../src/common/text";
 import type { ProductArtifacts } from "../src/common/artifacts/types";
 import type { ProductConfig, SiteInput } from "../src/common/config/types";
+import type { CheckedTask } from "./config/check";
 import { ConfigError } from "./config/errors";
 import type { ProductList } from "./config/product-list";
 import { allSecretValues } from "./config/secrets";
-import { dryRunReport, pluginText, type DryRunOptions } from "./dry-run";
-import { prepareStart } from "./start";
+import {
+  builtRef,
+  dryRunReport,
+  pluginText,
+  type DryRunOptions,
+} from "./dry-run";
+import { prepareStart, type PreparedStart } from "./start";
 
 /**
  * The dry run's report over the committed example config, loaded through `prepareStart` and the real
@@ -196,6 +202,8 @@ async function report(
     folder?: string;
     stateWarnings?: readonly string[];
     absolute?: boolean;
+    /** Sites put in a selected cell's place after the check, which would refuse them. */
+    pastCheck?: Readonly<Record<string, CheckedTask["cell"]["sites"]>>;
   } = {},
 ): Promise<string[]> {
   const dir = join(checkout, options.folder ?? ".orchestrator");
@@ -211,13 +219,23 @@ async function report(
     },
     { loadProductList: () => Promise.resolve(list) },
   );
+  const pastCheck = options.pastCheck ?? {};
+  const shown: PreparedStart = {
+    ...prepared,
+    selected: prepared.selected.map((checked) => {
+      const sites = pastCheck[checked.task.cell];
+      return sites === undefined
+        ? checked
+        : { ...checked, cell: { ...checked.cell, sites } };
+    }),
+  };
   const reportOptions: DryRunOptions = {
     ...(options.absolute === true ? {} : { checkout }),
     ...(options.stateWarnings === undefined
       ? {}
       : { stateWarnings: options.stateWarnings }),
   };
-  return dryRunReport(prepared, reportOptions);
+  return dryRunReport(shown, reportOptions);
 }
 
 test.describe("dryRunReport", () => {
@@ -626,15 +644,25 @@ test.describe("dryRunReport", () => {
   });
 
   test("a site's malformed address is masked, or a stand-in, never its text", async () => {
-    const lines = await report(example(), {
-      list: await productList({
-        "pro@nginx": [
-          sshSite("https://admin:pa/ss-word9@bwu2.qa.test/", "qa-lnmp"),
-          sshSite("foo:admin:s3cr3tpw@host", "qa-lnmp"),
-        ],
-        "free@apache": [sshSite("not a url at all", "qa-apache")],
-      }),
-    });
+    // The config's check refuses a site that is no http(s) URL, without quoting it: the report itself
+    // still never prints one, should one reach it.
+    const malformed = {
+      "pro@nginx": [
+        sshSite("https://admin:pa/ss-word9@bwu2.qa.test/", "qa-lnmp"),
+        sshSite("foo:admin:s3cr3tpw@host", "qa-lnmp"),
+      ],
+      "free@apache": [sshSite("not a url at all", "qa-apache")],
+    };
+    const refusal = await report(example(), {
+      list: await productList(malformed),
+    }).then(
+      () => "",
+      (error: unknown) => (error as Error).message,
+    );
+    expect(refusal).toContain("whose baseURL is no http(s) URL");
+    for (const value of ["s3cr3tpw", "not a url"])
+      expect(refusal).not.toContain(value);
+    const lines = await report(example(), { pastCheck: malformed });
     // A password a parser would refuse is masked by its shape first: the address is then whole.
     expect(lines.slice(4, 6)).toEqual([
       "  site https://***@bwu2.qa.test/ · qa-lnmp",
@@ -704,5 +732,26 @@ test.describe("pluginText", () => {
         plugin: undefined,
       }),
     ).toMatch(/^plugin cannot be planned: \S/);
+  });
+});
+
+test.describe("builtRef", () => {
+  test("the ref as pluginText names it, for the started line; nothing when the planner refuses", () => {
+    const of = (plugin?: {
+      ref?: string;
+      version?: string;
+    }): string | undefined =>
+      builtRef({ artifacts: BACKWPUP_ARTIFACTS, edition: "pro", plugin });
+    expect(of()).toBe("develop (default)");
+    expect(of({ ref: "main", version: "5.0.0" })).toBe("main");
+    expect(of({ ref: "release:latest-stable" })).toBe("release:latest-stable");
+    // An editioned product without an edition: the planner refuses.
+    expect(
+      builtRef({
+        artifacts: BACKWPUP_ARTIFACTS,
+        edition: undefined,
+        plugin: undefined,
+      }),
+    ).toBeUndefined();
   });
 });

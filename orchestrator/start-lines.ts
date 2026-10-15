@@ -4,7 +4,7 @@ import type { StopLevel } from "./runs/stop";
 import type { LeftoverSweep } from "./state/leftovers";
 import type { Classification, StaleRun } from "./state/orphans";
 import { onceExitCode, type TaskEnd } from "./tasks/loop";
-import { safeLine, shellWord } from "./text";
+import { MAX_QUOTED_PATH, safeLine, shellWord } from "./text";
 
 /**
  * The orchestrator's start, its pure parts: which tasks run, the lines it says about itself, and the
@@ -137,7 +137,7 @@ export function leftBehindLine(
     return `${id} left behind, still running in process group ${pgid}: end it with kill -KILL -${pgid}`;
   }
   if (verdict.pgid === undefined)
-    return `${id} may be left behind — unconfirmed: ${verdict.why}. lsof -- ${safeLine(shellWord(log), 1000)} lists its processes`;
+    return `${id} may be left behind — unconfirmed: ${verdict.why}. lsof -- ${safeLine(shellWord(log), MAX_QUOTED_PATH)} lists its processes`;
   const pgid = String(verdict.pgid);
   return `${id} may be left behind in process group ${pgid} — unconfirmed: ${verdict.why}. Check it first: ps -o pid,user,lstart,command -g ${pgid}`;
 }
@@ -157,7 +157,7 @@ export function leftoverLines(sweep: LeftoverSweep): string[] {
         ]),
     ...sweep.failed.map(
       ({ path, code }) =>
-        `could not remove ${safeLine(path, 1000)}, an earlier crash's (${code})`,
+        `could not remove ${safeLine(path, MAX_QUOTED_PATH)}, an earlier crash's (${code})`,
     ),
   ];
 }

@@ -17,6 +17,8 @@ import { runIdentity } from "../runs/identity";
 import type { RunStatus } from "../runs/outcome";
 import { parseRunRecord } from "../runs/record";
 import type { StopLevel } from "../runs/stop";
+import type { HeldCell } from "../state/cell-lock";
+import type { RunNaming } from "../state/lock";
 import type { CycleDeps, RunHandle, RunResult } from "./cycle";
 import {
   cooldownDelay,
@@ -396,6 +398,54 @@ test.describe("runTask — the cooldown", () => {
     expect((await r.loop.done).ended).toBe("stopped");
   });
 
+  test("a run whose processes could not be watched to their end ends the loop failed: no cooldown, no next run", async () => {
+    for (const once of [false, true]) {
+      const r = rig({ once });
+      (await runAt(r, 0)).settle({
+        kind: "ended",
+        id: "bpng-1",
+        status: "error",
+        endedAt: new Date(T0),
+        unwatched: true,
+      });
+      const end = await r.loop.done;
+      expect(end).toMatchObject({ ended: "failed", verdict: "failed" });
+      expect(r.lines).toEqual([
+        "bpng no next run: bpng-1's processes could not be watched to their end and may still run — its cell stays locked, and the next start's orphan check judges them",
+      ]);
+      expect(r.timers.live).toEqual([]);
+      await turns();
+      expect(r.runs).toHaveLength(1);
+    }
+  });
+
+  test("a real cycle whose launch cannot be watched launches the cell once, and never again", async () => {
+    let launches = 0;
+    const r = rig({
+      runOnce: undefined,
+      commandsFor: () => ({
+        bddgen: fakeCommand({ exitCode: 0 }),
+        playwright: fakeCommand({ exitCode: 0 }),
+      }),
+      nextNumber: () => Promise.resolve(launches + 1),
+      prune: () => Promise.reject(new Error("no pruning here")),
+      launch: () => {
+        launches += 1;
+        return Promise.resolve({
+          stop: () => undefined,
+          done: Promise.reject(new Error("the watch failed")),
+        });
+      },
+    });
+    const end = await r.loop.done;
+    expect(end.ended).toBe("failed");
+    expect(launches).toBe(1);
+    expect(r.timers.timers).toEqual([]);
+    expect(r.lines.at(-1)).toMatch(
+      /^bpng no next run: bpng-1's processes could not be watched/,
+    );
+  });
+
   test("a run stopped or killed by anything but the loop, or that failed, does not end it", async () => {
     const r = rig();
     const results: RunResult[] = [
@@ -427,6 +477,175 @@ test.describe("runTask — the cooldown", () => {
     expect(Date.now() - started).toBeLessThan(1_000);
     // Not kept: a stopped process must not stay alive for the rest of the cooldown.
     expect(activeTimeouts()).toBe(before);
+  });
+});
+
+test.describe("runTask — the cell's site locks, held for the whole loop", () => {
+  /** What a stand-in `HeldCell` saw. */
+  interface CellSeen {
+    readonly events: string[];
+  }
+
+  /**
+   * A stand-in for the cell's site locks.
+   *
+   * @param seen - where its calls go.
+   * @param naming - what `setRun` resolves to.
+   * @param released - what `release` resolves to.
+   * @returns it.
+   */
+  function heldCell(
+    seen: CellSeen,
+    naming: RunNaming = { kind: "named" },
+    released = true,
+  ): HeldCell {
+    return {
+      locks: [],
+      setRun: (run) => {
+        seen.events.push(`setRun ${run}`);
+        return Promise.resolve(naming);
+      },
+      release: () => {
+        seen.events.push("release");
+        return Promise.resolve(released);
+      },
+    };
+  }
+
+  /**
+   * A `runOnce` that names each run in the locks as the real cycle does, then ends it at once.
+   *
+   * @param seen - where it says each run.
+   * @param result - how each run ends.
+   * @returns it.
+   */
+  function claimingRunOnce(
+    seen: CellSeen,
+    result: (n: number) => RunResult = () => endedRun("passed"),
+  ): NonNullable<LoopDeps["runOnce"]> {
+    let n = 0;
+    return (_task, deps) => {
+      n += 1;
+      const number = n;
+      seen.events.push(`run ${String(number)}`);
+      return {
+        stop: () => undefined,
+        done: (async () => {
+          if (deps.claimCell !== undefined)
+            await deps.claimCell(`/s/runs/bpng-${String(number)}/run.json`);
+          return result(number);
+        })(),
+      };
+    };
+  }
+
+  test("takes them once as the loop starts, names each run, and gives them back once as it ends", async () => {
+    const cell: CellSeen = { events: [] };
+    const r = rig({
+      takeCell: () => {
+        cell.events.push("take");
+        return Promise.resolve(heldCell(cell));
+      },
+      runOnce: claimingRunOnce(cell),
+    });
+    await turns();
+    r.timers.fireOnly();
+    await turns();
+    r.loop.stop("drained", "stop");
+    expect((await r.loop.done).ended).toBe("stopped");
+    expect(cell.events).toEqual([
+      "take",
+      "run 1",
+      "setRun /s/runs/bpng-1/run.json",
+      "run 2",
+      "setRun /s/runs/bpng-2/run.json",
+      "release",
+    ]);
+  });
+
+  test("held elsewhere: the loop ends failed before any run, said once — never once per cooldown", async () => {
+    const cell: CellSeen = { events: [] };
+    const r = rig({
+      takeCell: () =>
+        Promise.reject(new Error(`Another orchestrator holds it ${SECRET}`)),
+      runOnce: claimingRunOnce(cell),
+    });
+    expect(await r.loop.done).toMatchObject({
+      ended: "failed",
+      verdict: "failed",
+    });
+    expect(r.lines).toEqual([
+      "bpng not started: Another orchestrator holds it ***",
+    ]);
+    expect(cell.events).toEqual([]);
+    expect(r.timers.timers).toEqual([]);
+  });
+
+  test("a stop before the loop starts takes nothing", async () => {
+    let taken = 0;
+    const r = rig({
+      takeCell: () => {
+        taken += 1;
+        return Promise.resolve(heldCell({ events: [] }));
+      },
+    });
+    r.loop.stop("drained", "stop");
+    expect((await r.loop.done).ended).toBe("stopped");
+    expect(taken).toBe(0);
+  });
+
+  test("kept, not given back, when a run's processes may still live", async () => {
+    const cell: CellSeen = { events: [] };
+    const r = rig({
+      takeCell: () => Promise.resolve(heldCell(cell)),
+      runOnce: claimingRunOnce(cell, () => ({
+        kind: "ended",
+        id: "bpng-1",
+        status: "error",
+        endedAt: new Date(T0),
+        unwatched: true,
+      })),
+    });
+    expect((await r.loop.done).ended).toBe("failed");
+    expect(cell.events).not.toContain("release");
+  });
+
+  for (const [naming, said] of [
+    [
+      { kind: "lost" },
+      "its cell's site locks are no longer this orchestrator's — removed, or another's",
+    ],
+    [
+      { kind: "failed", why: "ENOSPC" },
+      "its cell's site locks could not be rewritten to name the run (ENOSPC): they are still this orchestrator's, but no run starts unnamed in them",
+    ],
+  ] as const)
+    test(`a run that cannot be named in them (${naming.kind}) ends the loop after it: no next run, said why, and the locks given back`, async () => {
+      const cell: CellSeen = { events: [] };
+      const r = rig({
+        takeCell: () => Promise.resolve(heldCell(cell, naming)),
+        runOnce: claimingRunOnce(cell, () => endedRun("error")),
+      });
+      expect((await r.loop.done).ended).toBe("failed");
+      expect(r.lines).toContain(`bpng no next run: ${said}`);
+      expect(cell.events.filter((event) => event.startsWith("run "))).toEqual([
+        "run 1",
+      ]);
+      expect(cell.events.at(-1)).toBe("release");
+      expect(r.timers.timers).toEqual([]);
+    });
+
+  test("locks that cannot all be given back are said", async () => {
+    const r = rig({
+      once: true,
+      takeCell: () =>
+        Promise.resolve(heldCell({ events: [] }, { kind: "named" }, false)),
+      runOnce: claimingRunOnce({ events: [] }),
+    });
+    expect((await r.loop.done).ended).toBe("once");
+    expect(r.lines).toContain(
+      "bpng its cell's site locks were not all removed: gone, another's, or could not be",
+    );
   });
 });
 

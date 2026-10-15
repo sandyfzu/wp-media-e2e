@@ -3,7 +3,9 @@ import { test, expect } from "@playwright/test";
 import {
   formatOwner,
   isWritableOwner,
+  MAX_OWNER_BYTES,
   MAX_PID,
+  MAX_RUN_PATH,
   parseOwner,
   type LockOwner,
 } from "./lock-owner";
@@ -91,6 +93,53 @@ test.describe("formatOwner / parseOwner", () => {
       kind: "owner",
       owner: { pid: MAX_PID },
     });
+  });
+});
+
+test.describe("formatOwner / parseOwner — a cell's lock's run", () => {
+  test("round-trips the run's record, and writes no run for an owner without one", () => {
+    const owner: LockOwner = { ...OWNER, run: "/s/runs/bpng-3/run.json" };
+    expect(parseOwner(formatOwner(owner))).toEqual({ kind: "owner", owner });
+    expect(formatOwner(OWNER)).not.toContain('"run"');
+  });
+
+  test("refuses a run that is relative, holds a control character, or is past its length", () => {
+    for (const run of [
+      "runs/bpng-3/run.json",
+      "/s/runs/bpng-3\n/run.json",
+      "/s/\u001b[31m/run.json",
+      `/${"a".repeat(4096)}`,
+      "",
+      7,
+    ])
+      expect(parseOwner(recordWith({ run }))).toEqual({ kind: "invalid" });
+    expect(isWritableOwner({ ...OWNER, run: "relative/run.json" })).toBe(false);
+  });
+
+  test("refuses an owner whose text would pass the lock's byte cap, so no unreadable lock is written", () => {
+    // 4,000 UTF-16 units — within MAX_RUN_PATH — but two bytes each in UTF-8.
+    const run = `/${"é".repeat(4000)}/run.json`;
+    expect(run.length).toBeLessThanOrEqual(MAX_RUN_PATH);
+    expect(Buffer.byteLength(formatOwner({ ...OWNER, run }))).toBeGreaterThan(
+      MAX_OWNER_BYTES,
+    );
+    expect(isWritableOwner({ ...OWNER, run })).toBe(false);
+    const fits = `/${"a".repeat(4000)}/run.json`;
+    expect(isWritableOwner({ ...OWNER, run: fits })).toBe(true);
+  });
+
+  test("round-trips a site's key, and refuses one with a control character or past its length", () => {
+    const owner: LockOwner = { ...OWNER, key: "a.qa.test:8100/wp" };
+    expect(parseOwner(formatOwner(owner))).toEqual({ kind: "owner", owner });
+    expect(isWritableOwner({ ...OWNER, key: "a\u0007b" })).toBe(false);
+    expect(isWritableOwner({ ...OWNER, key: "k".repeat(2049) })).toBe(false);
+    expect(formatOwner(OWNER)).not.toContain('"key"');
+  });
+
+  test("round-trips a label, and refuses one with a control character", () => {
+    const owner: LockOwner = { ...OWNER, label: "backwpup pro@nginx" };
+    expect(parseOwner(formatOwner(owner))).toEqual({ kind: "owner", owner });
+    expect(isWritableOwner({ ...OWNER, label: "a\nb" })).toBe(false);
   });
 });
 

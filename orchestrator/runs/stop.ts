@@ -105,6 +105,7 @@ export function stepRunStop(
  * Whether the runner may start once `bddgen` has ended: only while nothing has asked the run to stop.
  *
  * @param state - the machine's state.
+ * @returns `true` between the two processes with no stop taken.
  */
 export function mayStartPlaywright(state: RunStopState): boolean {
   return state.phase.name === "between" && state.taken.level === "none";
@@ -116,6 +117,8 @@ export function mayStartPlaywright(state: RunStopState): boolean {
  * @param state - the state.
  * @param level - how far.
  * @param why - why, for the run's reason.
+ * @returns the new state and its actions; unchanged, with none, for a stop no further than one
+ *   taken or a run already ended.
  */
 function stop(state: RunStopState, level: StopLevel, why: string): RunStopStep {
   const { phase, taken } = state;
@@ -146,6 +149,7 @@ function stop(state: RunStopState, level: StopLevel, why: string): RunStopStep {
  * @param from - how far it was stopped.
  * @param to - how far it must be.
  * @param pid - the runner's PID, its group's id.
+ * @returns the actions, in the order they must happen.
  */
 function escalation(
   from: StopTaken["level"],
@@ -166,6 +170,8 @@ function escalation(
  * @param state - the state.
  * @param process - which.
  * @param pid - its PID, its group's id.
+ * @returns the new phase, and a kill of its group when a stop was already taken.
+ * @throws {@link Error} when that process cannot start in the current phase — a driver bug.
  */
 function started(
   state: RunStopState,
@@ -193,6 +199,8 @@ function started(
  * the runner, it has ended.
  *
  * @param state - the state.
+ * @returns the next phase, with no action.
+ * @throws {@link Error} when no process was running — a driver bug.
  */
 function exited(state: RunStopState): RunStopStep {
   const { phase } = state;

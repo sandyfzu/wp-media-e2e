@@ -22,8 +22,12 @@ export type CycleTask = Pick<
   "id" | "name" | "product" | "cell" | "plugin" | "grep"
 >;
 
-/** The longest failure a line or a reason quotes, in code points. */
-export const MAX_FAILURE_LENGTH = 300;
+/**
+ * The longest failure a run's line or reason quotes, in code points: with its lead-in
+ * (`the run could not start: `) it stays inside a reason's own cap (`MAX_REASON_LENGTH`, 500), so a
+ * record never cuts it a second time.
+ */
+export const MAX_RUN_FAILURE_LENGTH = 300;
 
 /** Each status's mark in the outcome line. */
 const MARKS: Readonly<Record<RunStatus, string>> = {
@@ -72,19 +76,27 @@ export function eventTask(task: CycleTask): RunFinishedInput["task"] {
 }
 
 /**
- * The line a run starts with: `bpng-12 started · backwpup pro@nginx · develop · .orchestrator/runs/bpng-12/run.log`
- * — the product's default ref when the task names none, its filter when it has one.
+ * The line a run starts with:
+ * `bpng-12 started · backwpup pro@nginx · develop (default) · .orchestrator/runs/bpng-12/run.log` —
+ * the ref built, as the dry run shows it, and the task's filter when it has one.
  *
  * @param id - the run's id.
  * @param task - its task.
  * @param log - its log, as shown.
+ * @param ref - the ref its runs build, as shown (`builtRef`); without it, the task's own ref, else
+ *   `default ref`.
  * @returns the line.
  */
-export function startedLine(id: string, task: CycleTask, log: string): string {
+export function startedLine(
+  id: string,
+  task: CycleTask,
+  log: string,
+  ref?: string,
+): string {
   return [
     `${id} started`,
     `${task.product} ${task.cell}`,
-    task.plugin?.ref ?? "default ref",
+    ref ?? task.plugin?.ref ?? "default ref",
     ...(task.grep === undefined ? [] : [task.grep]),
     log,
   ].join(" · ");
@@ -108,8 +120,22 @@ export function outcomeLine(
     ...(event.counts.total === 0 ? [] : [countsText(event.counts)]),
     ...(event.reason === null ? [] : [event.reason]),
     formatDuration(event.durationMs),
-    show(tested ? event.report.dir : event.report.log),
+    ...pathShown(tested ? event.report.dir : event.report.log, show),
   ].join(" · ");
+}
+
+/**
+ * The path a run's line ends with, shown; none for a run that never had a folder.
+ *
+ * @param path - its report folder or log, or `null`.
+ * @param show - how a path is shown.
+ * @returns the path shown, alone, or nothing.
+ */
+function pathShown(
+  path: string | null,
+  show: (path: string) => string,
+): string[] {
+  return path === null ? [] : [show(path)];
 }
 
 /**
@@ -174,7 +200,7 @@ export function unreadOutcome(
   if (stop.level !== "none") return { status: "stopped", reason: stop.why };
   return {
     status: "error",
-    reason: `its end could not be read: ${failureLine(failure, MAX_FAILURE_LENGTH, secrets)}`,
+    reason: `its end could not be read: ${failureLine(failure, MAX_RUN_FAILURE_LENGTH, secrets)}`,
   };
 }
 
@@ -191,6 +217,6 @@ export function notStartedOutcome(
 ): RunOutcome {
   return {
     status: "error",
-    reason: `the run could not start: ${failureLine(failure, MAX_FAILURE_LENGTH, secrets)}`,
+    reason: `the run could not start: ${failureLine(failure, MAX_RUN_FAILURE_LENGTH, secrets)}`,
   };
 }

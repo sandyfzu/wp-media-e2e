@@ -73,6 +73,7 @@ say("fake " + "ready");
  * A command running the fake.
  *
  * @param behaviour - how it behaves.
+ * @returns Node running the fake's script, the behaviour as its one argument.
  */
 export function fakeCommand(behaviour: FakeBehaviour = {}): Command {
   return {
@@ -87,6 +88,7 @@ export function fakeCommand(behaviour: FakeBehaviour = {}): Command {
  * @param path - the file.
  * @param text - what it must hold.
  * @param timeoutMs - how long at most.
+ * @returns the file's whole content once it holds `text`.
  * @throws {@link Error} when it never does.
  */
 export async function waitForText(

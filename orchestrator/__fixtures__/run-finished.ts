@@ -5,10 +5,15 @@ import type {
 
 /**
  * `run.finished` events for the notifiers' specs: a failed `pro@nginx` run with every fact known —
- * the plan's Slack example — that each test changes only where it matters.
+ * the Slack message's reference case — that each test changes only where it matters.
  */
 
-/** A scenario that passed; fields given replace its own. */
+/**
+ * A scenario that passed.
+ *
+ * @param given - fields that replace its own.
+ * @returns a `run.finished` scenario.
+ */
 export function scenario(
   given: Partial<FinishedScenario> = {},
 ): FinishedScenario {

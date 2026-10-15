@@ -59,6 +59,7 @@ export async function readStateFile(
  *
  * @param text - what the file is and its remedy.
  * @param problem - the path and what is wrong, one sentence.
+ * @returns the refusal, its three parts in one message.
  */
 function refused(text: StateFileText, problem: string): StateError {
   return new StateError(`${text.what} ${problem} ${text.remedy}`);

@@ -28,7 +28,12 @@ export interface ShutdownBudgets {
   readonly debounceMs: number;
 }
 
-/** The plan's budgets. */
+/**
+ * The budgets every start uses: 15 min for the drain, since a BackWPup scenario's timeout grows by
+ * 10 min per backup; 4 min from the interrupt to the kill — a 120 s hook, 30 s of fixtures, 30 s of
+ * browser close, then the reports; 1 s of debounce, since one Ctrl-C under npm arrives as two SIGINTs
+ * 1–31 ms apart.
+ */
 export const DEFAULT_SHUTDOWN_BUDGETS: ShutdownBudgets = {
   drainMs: 15 * 60_000,
   interruptMs: 4 * 60_000,
@@ -121,6 +126,7 @@ export function stepShutdown(
  * @param state - the state.
  * @param at - now.
  * @param budgets - the budgets.
+ * @returns the escalated step, or the state unchanged when a signal already passed that step.
  */
 function budgetRanOut(
   state: ShutdownState,
@@ -158,6 +164,7 @@ function budgetRanOut(
  * @param at - now.
  * @param budgets - the budgets.
  * @param bySignal - whether a signal escalated it, which the debounce then counts from.
+ * @returns the new state, the escalation to act on, and the next budget (`null` once killed).
  */
 function escalate(
   state: Exclude<ShutdownState, { level: "running" }>,
@@ -184,6 +191,7 @@ function escalate(
  * A budget in words: `15 min`, `90 s`.
  *
  * @param ms - milliseconds.
+ * @returns whole minutes in minutes, anything else in rounded seconds.
  */
 export function describeBudget(ms: number): string {
   return ms % 60_000 === 0

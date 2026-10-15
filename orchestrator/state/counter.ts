@@ -16,6 +16,7 @@ import { shellWord } from "../text";
 import { writeJsonAtomic } from "./atomic";
 import { StateError } from "./errors";
 import { readStateFile } from "./read";
+import { checkRunsFolder } from "./runs-folder";
 import { runNumberOf } from "./run-retention";
 
 /**
@@ -154,22 +155,16 @@ export async function nextRunNumber(
  * @param runsDir - `<stateDir>/runs`.
  * @param taskId - the task, a valid task id.
  * @returns the number, or 0 when there is none, or no `runs/`.
- * @throws {@link StateError} when `runs` is a link or not a folder.
+ * @throws {@link StateError} when `runs` is a link, not a folder, or open to others ({@link checkRunsFolder}).
  * @throws what listing it throws.
  */
 export async function highestRunFolder(
   runsDir: string,
   taskId: string,
 ): Promise<number> {
-  const stats = await lstat(runsDir).catch((error: unknown) => {
-    if (errorCode(error) === "ENOENT") return undefined;
-    throw error;
-  });
-  if (stats === undefined) return 0;
-  if (!stats.isDirectory())
-    throw new StateError(
-      `The run folders' folder ${runsDir} is not a folder (a symbolic link is refused), so the run counter cannot see which numbers were used. Move it away: mv ${shellWord(runsDir)} ${shellWord(`${runsDir}.moved`)}`,
-    );
+  // Refused rather than read through a link, or while others may change it: the counter could not see
+  // which numbers were used.
+  if (!(await checkRunsFolder(runsDir))) return 0;
   let highest = 0;
   for (const name of await readdir(runsDir))
     highest = Math.max(highest, runNumberOf(name, taskId) ?? 0);
@@ -181,6 +176,7 @@ export async function highestRunFolder(
  *
  * @param text - the counter file's text.
  * @param place - the counter, for the messages.
+ * @returns the counter's `lastRun`, 0 or more.
  * @throws {@link StateError} when it is not JSON or not a counter.
  */
 function lastRunOf(text: string, place: CounterPlace): number {
@@ -232,6 +228,7 @@ async function ensureTasksDir(dir: string): Promise<void> {
  * @param dir - `<stateDir>/tasks`.
  * @param check - what was wrong with it.
  * @param user - who must own it: this process's user by default.
+ * @returns the refusal, naming the command that fixes it.
  */
 export function tasksFolderRefusal(
   dir: string,
@@ -254,6 +251,7 @@ export function tasksFolderRefusal(
  * @param place - the counter.
  * @param number - the folder's number.
  * @param counterToo - whether the counter holds that number as well, so it must be set lower too.
+ * @returns the refusal, naming the `mv` that frees numbers again.
  */
 function folderExhausted(
   place: CounterPlace,
@@ -275,6 +273,8 @@ function folderExhausted(
  * What to do about a counter that cannot be trusted.
  *
  * @param place - the counter.
+ * @returns sentences ending a refusal: why it is not reset, the `rm` or the content that repairs
+ *   it.
  */
 function repair(place: CounterPlace): string {
   const folders = join(place.runsDir, `${place.taskId}-<n>`);
@@ -286,6 +286,7 @@ function repair(place: CounterPlace): string {
  *
  * @param place - the counter.
  * @param why - what is wrong with it.
+ * @returns the refusal: the counter's path, `why`, then its {@link repair}.
  */
 function counterRefused(place: CounterPlace, why: string): StateError {
   return new StateError(

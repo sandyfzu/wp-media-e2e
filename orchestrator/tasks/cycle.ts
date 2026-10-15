@@ -45,11 +45,11 @@ import {
   type RunRetentionInput,
   type RunRetentionReport,
 } from "../state/run-retention";
-import { failureLine, safeLine } from "../text";
+import { failureLine, safeLine, textOf } from "../text";
 import {
   eventTask,
   furtherStop,
-  MAX_FAILURE_LENGTH,
+  MAX_RUN_FAILURE_LENGTH,
   notStartedOutcome,
   outcomeLine,
   showPath,
@@ -85,6 +85,12 @@ export type RunResult =
       readonly endedAt: Date;
       /** Its `run.finished`; absent only when not even that could be built. */
       readonly event?: RunFinishedEvent;
+      /**
+       * Its processes could not be watched to their end, so they may still run: its record is left
+       * `running` for the next start's orphan check — and its loop must neither start the cell again
+       * nor give back its site locks.
+       */
+      readonly unwatched?: true;
     }
   /** No run: stopped before its launch, or no number or identity could be had. */
   | { readonly kind: "notStarted"; readonly why: "stopped" | "failed" };
@@ -121,6 +127,11 @@ export interface CycleDeps {
   readonly inherited: Readonly<Record<string, string | undefined>>;
   /** The task's two commands (`suiteCommands` with its product's config). */
   readonly commandsFor: (task: CycleTask) => RunCommands;
+  /**
+   * The ref the task's runs build, as its started line shows it (`develop (default)`, by the product's
+   * manifest, as the dry run says it); without it, or when it gives none, the task's own ref.
+   */
+  readonly refFor?: (task: CycleTask) => string | undefined;
   readonly logger: Pick<Logger, "line">;
   readonly bus: Pick<EventBus<RunFinishedEvent>, "publish">;
   /** The Datator record of a run, kept in its `datator.json` (`Notifications.datatorPayload`). */
@@ -133,10 +144,10 @@ export interface CycleDeps {
   readonly nextNumber?: (stateDir: string, taskId: string) => Promise<number>;
   /** Launches the run; `launchRun` by default. */
   readonly launch?: (options: LaunchOptions) => Promise<LaunchedRun>;
-  /** What the launch is given besides the run: `kill`, `sleep`, the poll and the linger. */
+  /** What the launch is given besides the run: `kill`, `sleep`, the poll, the linger and its repeat. */
   readonly launchOptions?: Pick<
     LaunchOptions,
-    "kill" | "sleep" | "pollMs" | "lingerMs"
+    "kill" | "sleep" | "pollMs" | "lingerMs" | "stuckRepeatMs"
   >;
   /** Reads a process's start; `readLeaderStart` by default. */
   readonly readLeaderStart?: LeaderStartReader;
@@ -151,10 +162,16 @@ export interface CycleDeps {
   /** Writes a file kept beside the record, atomically and `0600`; `writeJsonAtomic` by default. */
   readonly writeJson?: (path: string, value: unknown) => Promise<void>;
   /**
-   * Told each run's id as it begins — numbered, not stopped, about to launch: so the process knows
-   * which runs are its own. A throw is a line, never the run's.
+   * Told each run's id, and its task's, as it begins — numbered, not stopped, about to launch: so the
+   * process knows which runs are its own. A throw is a line, never the run's.
    */
-  readonly onRunBegun?: (id: string) => void;
+  readonly onRunBegun?: (id: string, taskId: string) => void;
+  /**
+   * Names the run in its cell's site locks (`HeldCell.setRun`), which its loop holds, just before its
+   * launch: `undefined` once named; otherwise why not, in words — or a throw — which ends the run
+   * `error`, nothing launched. Without it no lock is named: for specs of the cycle alone.
+   */
+  readonly claimCell?: (record: string) => Promise<string | undefined>;
 }
 
 /** What a run that ended may record: its writer, and how its processes ended. */
@@ -187,6 +204,9 @@ export function runOnce(task: CycleTask, deps: CycleDeps): RunHandle {
     done: Promise.resolve().then(() => cycle.run()),
   };
 }
+
+/** The longest cell lock refusal or stuck group's line said, in code points: each names the way out. */
+const MAX_CELL_REFUSAL_LENGTH = 1_500;
 
 /** How `bddgen` ended when it was never spawned. */
 const NOTHING_RAN: LaunchResult["bddgen"] = { code: null, signal: null };
@@ -256,6 +276,35 @@ class Cycle {
       return { kind: "notStarted", why: "stopped" };
     }
     this.begun(identity.id);
+    const refusal = await this.claimCell(identity);
+    if (refusal !== undefined) return this.cellRefused(identity, refusal);
+    return this.launchAndEnd(identity);
+  }
+
+  /**
+   * Names the run in its cell's site locks, which its loop holds, before anything is launched.
+   *
+   * @param identity - the run.
+   * @returns `undefined` once named (or with no locks to name it in); else why not.
+   */
+  private async claimCell(identity: RunIdentity): Promise<unknown> {
+    const { claimCell } = this.deps;
+    if (claimCell === undefined) return undefined;
+    try {
+      const refusal = await claimCell(identity.record);
+      return refusal === undefined ? undefined : new Error(refusal);
+    } catch (error) {
+      return error;
+    }
+  }
+
+  /**
+   * Launches the run and waits for its end.
+   *
+   * @param identity - the run.
+   * @returns how it ended.
+   */
+  private async launchAndEnd(identity: RunIdentity): Promise<RunResult> {
     const writer = (this.deps.recordWriter ?? createRecordWriter)(
       identity.record,
     );
@@ -285,6 +334,12 @@ class Cycle {
         },
         onProcess: (name, pgid) =>
           this.recordProcess(identity, writer, name, pgid),
+        // A group that will not empty holds the run and its cell: said where the operator looks.
+        onStuck: (text) => {
+          this.say(
+            `${identity.id}: ${safeLine(text, MAX_CELL_REFUSAL_LENGTH, this.deps.secrets)}`,
+          );
+        },
         now: this.now,
         ...this.deps.launchOptions,
       });
@@ -299,8 +354,47 @@ class Cycle {
       );
     }
     this.forward();
-    this.say(startedLine(identity.id, this.task, this.show(identity.log)));
+    this.say(
+      startedLine(
+        identity.id,
+        this.task,
+        this.show(identity.log),
+        this.deps.refFor?.(this.task),
+      ),
+    );
     return this.ended(identity, writer, this.launched);
+  }
+
+  /**
+   * A run its cell's site locks could not be made to name — they are no longer this orchestrator's:
+   * nothing was launched and the run has no folder; the refusal is said whole, and the run ends `error`
+   * with it as its reason, its event pointing at no report or log.
+   *
+   * @param identity - the run.
+   * @param error - the refusal.
+   * @returns how it ended: `error`.
+   */
+  private cellRefused(
+    identity: RunIdentity,
+    error: unknown,
+  ): Promise<RunResult> {
+    this.say(
+      `${identity.id} not started: ${failureLine(error, MAX_CELL_REFUSAL_LENGTH, this.deps.secrets)}`,
+    );
+    return this.conclude(
+      identity,
+      undefined,
+      this.now(),
+      {
+        status: "error",
+        reason: safeLine(
+          `the run could not start: ${textOf(error)}`,
+          MAX_REASON_LENGTH,
+          this.deps.secrets,
+        ),
+      },
+      false,
+    );
   }
 
   /**
@@ -353,10 +447,11 @@ class Cycle {
       const failure = this.failure(error);
       this.say(`${identity.id} could not be watched to its end: ${failure}`);
       const endedAt = this.now();
-      return this.conclude(identity, undefined, endedAt, {
+      const result = await this.conclude(identity, undefined, endedAt, {
         status: "error",
         reason: `the run could not be watched to its end: ${failure}`,
       });
+      return result.kind === "ended" ? { ...result, unwatched: true } : result;
     }
     const endedAt = this.now();
     let end: RunEnd | undefined;
@@ -406,6 +501,8 @@ class Cycle {
       writer === undefined ? undefined : { writer, launch },
       this.now(),
       outcome,
+      // A launch refused before the folder was the run's leaves none (it removes what it made).
+      writer !== undefined,
     );
   }
 
@@ -444,6 +541,8 @@ class Cycle {
    *   in its folder — not its own, or its processes not known to be over.
    * @param endedAt - when it ended.
    * @param ending - its `run.finished`, or the outcome to build one from.
+   * @param hadFolder - `false` for a run refused before its launch made its folder: its event then
+   *   points at no report or log.
    * @returns how it ended.
    */
   private async conclude(
@@ -451,9 +550,12 @@ class Cycle {
     record: EndToRecord | undefined,
     endedAt: Date,
     ending: RunFinishedEvent | RunOutcome,
+    hadFolder = true,
   ): Promise<RunResult> {
     const event =
-      "type" in ending ? ending : this.event(identity, endedAt, ending);
+      "type" in ending
+        ? ending
+        : this.event(identity, endedAt, ending, hadFolder);
     if (event === undefined) {
       await this.prune(identity);
       return { kind: "ended", id: identity.id, status: "error", endedAt };
@@ -484,12 +586,14 @@ class Cycle {
    * @param identity - the run.
    * @param endedAt - when it ended.
    * @param outcome - its outcome.
+   * @param hadFolder - whether the run had a folder of its own.
    * @returns the event, or `undefined`.
    */
   private event(
     identity: RunIdentity,
     endedAt: Date,
     outcome: RunOutcome,
+    hadFolder: boolean,
   ): RunFinishedEvent | undefined {
     try {
       return (this.deps.buildEvent ?? buildRunFinished)({
@@ -501,6 +605,7 @@ class Cycle {
         outcome,
         reportDir: identity.reportDir,
         log: identity.log,
+        hadFolder,
         secrets: this.deps.secrets,
       });
     } catch (error) {
@@ -699,7 +804,7 @@ class Cycle {
    */
   private begun(id: string): void {
     try {
-      this.deps.onRunBegun?.(id);
+      this.deps.onRunBegun?.(id, this.task.id);
     } catch (error) {
       this.say(`${id}: telling that it began failed: ${this.failure(error)}`);
     }
@@ -725,7 +830,7 @@ class Cycle {
    * @returns the line.
    */
   private failure(error: unknown): string {
-    return failureLine(error, MAX_FAILURE_LENGTH, this.deps.secrets);
+    return failureLine(error, MAX_RUN_FAILURE_LENGTH, this.deps.secrets);
   }
 
   /**

@@ -30,6 +30,8 @@ import {
   type RunState,
 } from "../runs/record";
 import { textOf } from "../text";
+import { StateError } from "./errors";
+import { checkRunsFolder } from "./runs-folder";
 
 /**
  * Run-folder retention: a task's `runs/<task>-<n>/` folders pruned by the suite's own report policy
@@ -174,6 +176,7 @@ export function recordDating(
  * An undated folder's dating.
  *
  * @param why - why its record does not date it.
+ * @returns the fields that mark it undated: never pruned, with `why` kept for the report.
  */
 function undated(
   why: string,
@@ -196,13 +199,7 @@ export async function listTaskRuns(
   runsDir: string,
   taskId: string,
 ): Promise<{ runs: RunFolder[]; skipped: SkippedEntry[] }> {
-  const stats = await lstat(runsDir).catch((error: unknown) => {
-    if (errorCode(error) === "ENOENT") return undefined;
-    throw error;
-  });
-  if (stats === undefined) return { runs: [], skipped: [] };
-  if (!stats.isDirectory())
-    throw new Error(`${runsDir} is not a folder (a link is never followed)`);
+  if (!(await checkRunsFolder(runsDir))) return { runs: [], skipped: [] };
   const runs: RunFolder[] = [];
   const skipped: SkippedEntry[] = [];
   for (const name of (await readdir(runsDir)).sort()) {
@@ -323,6 +320,7 @@ function removeLeftoversIn(
  * The leftovers in `runs/`, laid out as a report group is, so the suite's own listing finds them.
  *
  * @param runsDir - `<state>/runs`.
+ * @returns what interrupted removals left there, as the suite's report listing names it.
  * @throws what the listing throws: `runs/` a link, or unreadable.
  */
 function listLeftovers(runsDir: string): readonly RemovalLeftover[] {
@@ -333,6 +331,7 @@ function listLeftovers(runsDir: string): readonly RemovalLeftover[] {
  * A report of a pruning that did nothing.
  *
  * @param policy - the policy it would have applied.
+ * @returns a report with every list empty.
  */
 function nothingDone(policy: RetentionPolicy): RunRetentionReport {
   return {
@@ -347,7 +346,8 @@ function nothingDone(policy: RetentionPolicy): RunRetentionReport {
 }
 
 /**
- * A failure on `path`, in words: the error's system code, else its message.
+ * A failure on `path`, in words: a refusal's own message (a {@link StateError}, which names its
+ * repair), else the error's system code, else its message.
  *
  * @param path - what it was about.
  * @param error - what was thrown.
@@ -356,7 +356,10 @@ function nothingDone(policy: RetentionPolicy): RunRetentionReport {
 function failure(path: string, error: unknown): RemovalFailure {
   return {
     path,
-    error: errorCode(error) ?? textOf(error),
+    error:
+      error instanceof StateError
+        ? textOf(error)
+        : (errorCode(error) ?? textOf(error)),
   };
 }
 
@@ -374,6 +377,7 @@ export interface RunRetentionLine {
  * @param report - the pruning's report.
  * @param show - how a path is shown (relative to the state directory, say); applied to the paths a
  *   failure's system error quotes too.
+ * @returns the lines, in that order; empty when there is nothing to say.
  * @example
  * ```ts
  * describeRunRetention(report, show);
@@ -415,6 +419,7 @@ export function describeRunRetention(
  * The line saying what went, or `undefined` when nothing did.
  *
  * @param report - the pruning's report.
+ * @returns `pruned N run folders, <size> — <counts by reason>`, or `undefined`.
  */
 function prunedLine(report: RunRetentionReport): string | undefined {
   const runs = report.removed.length;
@@ -448,6 +453,7 @@ const LATER_PRUNE = ", which a later prune removes";
  *
  * @param failure - the failure.
  * @param show - how a path is shown.
+ * @returns the failure's error, so rewritten.
  */
 function failureWords(
   failure: RemovalFailure,

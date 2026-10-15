@@ -888,6 +888,21 @@ test.describe("acquireLock", () => {
   });
 });
 
+test.describe("acquireLock — the lock's real path", () => {
+  test("a lock this process holds is its own through any path to its folder: a link to the state directory too", async () => {
+    await take(deps(100, 1));
+    const link = `${dir}-link`;
+    await symlink(dir, link);
+    try {
+      // Another PID, alive: only the real path tells this lock is this process's own.
+      const error = await rejectionOf(acquireLock(link, deps(101, 2)));
+      expect(error.message).toMatch(/^This process already holds /);
+    } finally {
+      await rm(link);
+    }
+  });
+});
+
 test.describe("HeldLock.release", () => {
   test("removes its own lock once, then reports nothing to remove", async () => {
     const lock = await acquireLock(dir, deps(77, 1));

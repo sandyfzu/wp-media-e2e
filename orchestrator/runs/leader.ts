@@ -91,6 +91,8 @@ export async function readLeaderStart(
  *
  * @param pid - the process.
  * @param deps - the system.
+ * @returns `linux:<boot id>:<ticks>`; `gone` when procfs has no such process; `unknown`, with why,
+ *   when it cannot be read.
  */
 async function readProcStart(
   pid: number,
@@ -124,6 +126,8 @@ async function readProcStart(
  *
  * @param pid - the process.
  * @param deps - the system.
+ * @returns `ps:<lstart>`; `gone` when `ps` exits 1 with nothing listed; `unknown`, with why,
+ *   otherwise.
  */
 async function readPsStart(
   pid: number,

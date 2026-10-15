@@ -371,6 +371,82 @@ test.describe("launchRun", () => {
     );
   });
 
+  test("says a group it cannot kill beyond the run's log, at once and again while it waits", async () => {
+    const childFile = join(root, "child-done");
+    const said: string[] = [];
+    const kill: KillFn = (pid, signal) => {
+      if (signal === "SIGKILL")
+        throw Object.assign(new Error("not permitted"), { code: "EPERM" });
+      process.kill(pid, signal);
+    };
+    const opts = options(
+      { exitCode: 0 },
+      { runMs: 20, childMs: 900, childFile },
+      {
+        lingerMs: 100,
+        stuckRepeatMs: 200,
+        kill,
+        onStuck: (text) => {
+          said.push(text);
+          throw new Error("a teller that throws is dropped");
+        },
+      },
+    );
+    const run = await launchRun(opts);
+    await run.done;
+    expect(existsSync(childFile)).toBe(true);
+    expect(said[0]).toMatch(
+      /^playwright's process group \(\d+\) outlived it by 100 ms and could not be killed \(EPERM\): waiting for it$/,
+    );
+    // Said again while the child lives on — each time with the command that ends the group.
+    expect(said.length).toBeGreaterThanOrEqual(3);
+    for (const text of said.slice(1))
+      expect(text).toMatch(
+        /^playwright's process group \((\d+)\) is still not empty \d+ ms after its linger, never killed \(killing it again failed: EPERM\): still waiting — the run and its cell stay held; end it as this user or root: kill -KILL -\1$/,
+      );
+    const log = await readFile(opts.identity.log, "utf8");
+    // No SIGKILL ever reached it: the line never says it outlived one.
+    expect(log).toContain(
+      "is still not empty 200 ms after its linger, never killed",
+    );
+    expect(log).not.toContain("after its SIGKILL");
+  });
+
+  test("refuses a stuck line's repeat that is not a whole number of milliseconds from 1: it would spin", async () => {
+    for (const stuckRepeatMs of [0, -1, 0.5, Number.NaN])
+      await expect(
+        launchRun(options({ exitCode: 0 }, { runMs: 20 }, { stuckRepeatMs })),
+      ).rejects.toThrow(RangeError);
+    // Refused before anything was made.
+    expect(existsSync(join(root, "runs"))).toBe(false);
+  });
+
+  test("says a group that a SIGKILL did not empty, without a kill failure", async () => {
+    const said: string[] = [];
+    const childFile = join(root, "child-done");
+    // SIGKILL "sent", but nothing dies: a member stuck in the kernel looks so.
+    const kill: KillFn = (pid, signal) => {
+      if (signal !== "SIGKILL") process.kill(pid, signal);
+    };
+    const opts = options(
+      { exitCode: 0 },
+      { runMs: 20, childMs: 700, childFile },
+      {
+        lingerMs: 100,
+        stuckRepeatMs: 200,
+        kill,
+        onStuck: (text) => said.push(text),
+      },
+    );
+    await (
+      await launchRun(opts)
+    ).done;
+    expect(said.length).toBeGreaterThanOrEqual(1);
+    expect(said[0]).toMatch(
+      /^playwright's process group \(\d+\) is still not empty 200 ms after its SIGKILL: still waiting/,
+    );
+  });
+
   test("watches a run whose onProcess throws or rejects, and notes it", async () => {
     const failures = [
       (): void => {

@@ -21,6 +21,7 @@ import { basename, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { removeTempDir } from "../src/common/__fixtures__/temp-dir";
+import { escapeRegExp } from "../src/common/text";
 import { FAKE_LINES, waitForText } from "./__fixtures__/fake-suite";
 
 /**
@@ -75,7 +76,8 @@ interface Exited {
 
 /**
  * The environment a child gets: `PATH` and `HOME` only, so no variable of this process — `.env`'s,
- * npm's own — leaks into it.
+ * npm's own — leaks into it; and, inside a test, `XDG_STATE_HOME` in the test's own folder, so a
+ * start's cell locks are the test's, never this user's nor another test's.
  *
  * @param extra - variables to add.
  * @returns the environment.
@@ -85,6 +87,7 @@ function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
     npm_config_update_notifier: "false",
+    ...(root === "" ? {} : { XDG_STATE_HOME: join(root, "state-home") }),
     ...extra,
   };
 }
@@ -612,7 +615,7 @@ test("the dry run's output reaches a reader slower than 5 s, whole, however long
     process.exit(await runCommand(["start", "--dry-run", "--config", ${JSON.stringify("CONFIG")}], {
       env: {},
       start: () => { throw new Error("no start here"); },
-      prepareStart: async () => ({ loaded: { stateDir: "/s" } }),
+      prepareStart: async () => ({ loaded: { stateDir: "/s" }, selected: [] }),
       inspectState: async () => [],
       report: () => lines,
     }));
@@ -963,6 +966,129 @@ test.describe("the command, stopped by real signals", () => {
     child.kill("SIGINT");
     expect(await exit).toBe("SIGINT");
     expect(performance.now() - t0).toBeLessThan(2_000);
+  });
+
+  test("two orchestrators on two state directories racing for one cell: one runs it, the other is refused at its start, naming it, and never runs", async () => {
+    // Both under this test's XDG_STATE_HOME (childEnv): one user's cell locks.
+    const second = join(root, "second");
+    await mkdir(second, { mode: 0o700 });
+    const configs = [config, join(second, "config.json")];
+    await copyFile(config, configs[1] ?? "");
+    const [program = "", ...words] = realScript()
+      .replace(/^exec /, "")
+      .split(" ");
+    expect(program).toBe("node");
+    for (let i = 0; i < 5; i++) {
+      for (const dir of [stateDir, second]) {
+        removeTempDir(join(dir, "runs"));
+        removeTempDir(join(dir, "tasks"));
+        await rm(join(dir, "orchestrator.log"), { force: true });
+      }
+      const started = configs.map((file) => {
+        const child = spawnOwned(
+          process.execPath,
+          [...words, "start", "--once", "--config", file],
+          { cwd: pkg, env: childEnv(swapEnv()), stdio: "ignore" },
+        );
+        return {
+          child,
+          exit: new Promise<number | null>((resolve) =>
+            child.on("exit", (code) => {
+              resolve(code);
+            }),
+          ),
+        };
+      });
+      try {
+        // The loser exits at once with --once: refused at its start — by the check, or as its loop took the site.
+        const loser = await Promise.race(
+          started.map(({ exit }, index) =>
+            exit.then((code) => ({ index, code })),
+          ),
+        );
+        expect(loser.code).toBe(1);
+        const winner = 1 - loser.index;
+        const dirs = [stateDir, second];
+        const winnerDir = dirs[winner] ?? "";
+        await waitForText(
+          join(winnerDir, "runs", "bpng-1", "run.log"),
+          FAKE_LINES.ready,
+          30_000,
+        );
+        const winnerLog = readFileSync(
+          join(winnerDir, "orchestrator.log"),
+          "utf8",
+        );
+        const winnerPid = / · pid (\d+)/.exec(winnerLog)?.[1] ?? "?";
+        const loserLog = readFileSync(
+          join(dirs[loser.index] ?? "", "orchestrator.log"),
+          "utf8",
+        );
+        // The winner's run named once it had one; taken at its loop's start, the site names none yet.
+        expect(loserLog).toMatch(
+          new RegExp(
+            `bpng {2}not started: Another orchestrator \\(pid ${winnerPid}[^)]* — running backwpup fake@cell on site a\\.qa\\.test(, run bpng-1 \\(${escapeRegExp(join(winnerDir, "runs", "bpng-1", "run.json"))}\\))?\\)`,
+          ),
+        );
+        // Never a run of the loser: no number taken, no run folder.
+        expect(existsSync(join(dirs[loser.index] ?? "", "runs"))).toBe(false);
+        const winnerChild = started[winner]?.child;
+        winnerChild?.kill("SIGINT");
+        expect(await started[winner]?.exit).toBe(130);
+      } finally {
+        for (const { child } of started)
+          if (child.pid !== undefined) {
+            killHard(-child.pid);
+            killHard(child.pid);
+          }
+      }
+    }
+  });
+
+  test("an orchestrator cooling down keeps its cell: a second, on another state directory, is refused at its start and never runs", async () => {
+    const second = join(root, "second");
+    await mkdir(second, { mode: 0o700 });
+    const secondConfig = join(second, "config.json");
+    await copyFile(config, secondConfig);
+    const [, ...words] = realScript()
+      .replace(/^exec /, "")
+      .split(" ");
+    // Runs that end at once: the first orchestrator is soon in its one-minute cooldown.
+    const env = childEnv(swapEnv({ FAKE_RUN_MS: "0" }));
+    const first = spawnOwned(
+      process.execPath,
+      [...words, "start", "--config", config],
+      { cwd: pkg, env, stdio: "ignore" },
+    );
+    const firstExit = new Promise<number | null>((resolve) =>
+      first.on("exit", (code) => {
+        resolve(code);
+      }),
+    );
+    try {
+      await waitForText(join(stateDir, "orchestrator.log"), "next run", 30_000);
+      const secondRun = await run(
+        process.execPath,
+        [...words, "start", "--once", "--config", secondConfig],
+        pkg,
+        swapEnv({ FAKE_RUN_MS: "0" }),
+      );
+      expect(secondRun.code).toBe(1);
+      const log = readFileSync(join(second, "orchestrator.log"), "utf8");
+      expect(log).toMatch(
+        new RegExp(
+          `bpng {2}not started: Another orchestrator \\(pid \\d+[^)]* — running backwpup fake@cell on site a\\.qa\\.test, run bpng-1 \\(${escapeRegExp(join(stateDir, "runs", "bpng-1", "run.json"))}\\)\\)`,
+        ),
+      );
+      expect(existsSync(join(second, "runs"))).toBe(false);
+      first.kill("SIGINT");
+      expect(await firstExit).toBe(130);
+    } finally {
+      if (first.pid !== undefined) {
+        killHard(-first.pid);
+        killHard(first.pid);
+      }
+    }
   });
 
   test("a signal after start returned, before process.exit, cannot kill the process: exit 130", async () => {

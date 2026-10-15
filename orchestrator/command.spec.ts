@@ -64,9 +64,15 @@ interface Rig {
   readonly deps: CommandDeps;
 }
 
-/** What the stand-in `prepareStart` returns: only the state directory is read by the command. */
+/** What the stand-in `prepareStart` returns: only the state directory and the selected cells are read by the command. */
 const PREPARED = {
   loaded: { stateDir: "/state" },
+  selected: [
+    {
+      task: { id: "a", product: "backwpup", cell: "pro@nginx" },
+      cell: { sites: [{ baseURL: "https://a.qa.test" }] },
+    },
+  ],
 } as unknown as PreparedStart;
 
 /**
@@ -410,6 +416,20 @@ test.describe("runCommand — the dry run", () => {
       "report\ncheckout /checkout\nwarning: the state is open\n",
     );
     expect(r.stderr.text).toBe("");
+  });
+
+  test("judges the selected tasks' cells with the state directory", async () => {
+    const units: unknown[] = [];
+    const r = rig({
+      inspectState: (_stateDir, options) => {
+        units.push(...options.units);
+        return Promise.resolve([]);
+      },
+    });
+    expect(await runCommand(["start", "--dry-run"], r.deps)).toBe(0);
+    expect(units).toEqual([
+      { product: "backwpup", cell: "pro@nginx", sites: ["https://a.qa.test"] },
+    ]);
   });
 
   test("with --once, is the same dry run: --once changes nothing", async () => {

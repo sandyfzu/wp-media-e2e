@@ -13,8 +13,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { formatRunId } from "../../src/common/config/run-id";
 import { readLeaderStart, type LeaderStartReader } from "../runs/leader";
 import type { KillFn } from "../runs/process-group";
+import { runningRecord, writeRunRecord } from "../runs/record";
 import { inspectState } from "./inspect";
 import { inspectLock, LOCK_FILE, stateFolderProblem } from "./lock";
 import { formatOwner, type LockOwner } from "./lock-owner";
@@ -214,5 +216,130 @@ test.describe("inspectLock", () => {
       kind: "dead",
       owner: { pid: DEAD_PID },
     });
+  });
+});
+
+test.describe("inspectState — runs left running, and the selected cells", () => {
+  /** The group of the run a test leaves running. */
+  const PGID = 5151;
+
+  /**
+   * Writes a run's record, still running in group {@link PGID}.
+   *
+   * @param id - the run's id.
+   * @returns its path.
+   */
+  async function leftRunning(id: string): Promise<string> {
+    const started = new Date("2026-10-13T10:15:31.042Z");
+    await mkdir(join(dir, "runs", id), { recursive: true, mode: 0o700 });
+    const path = join(dir, "runs", id, "run.json");
+    await writeRunRecord(
+      path,
+      runningRecord(
+        { id, runId: formatRunId(started, id), startedAt: started },
+        "bpng",
+        { name: "playwright", pgid: PGID, leaderStart: startOf(PGID) },
+      ),
+    );
+    return path;
+  }
+
+  test("a run an earlier orchestrator left running is the start's refusal; its record is left running", async () => {
+    const path = await leftRunning("bpng-3");
+    const before = await readFile(path, "utf8");
+    expect(await inspectState(dir, DEPS)).toEqual([
+      `a start would be refused: Task bpng still has run bpng-3 running, in process group ${String(PGID)}: an orchestrator stopped without ending it, and a second run would share its sites. End it with: kill -KILL -${String(PGID)}`,
+    ]);
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  test("a stale running record is no warning, and is never marked lost by a dry run", async () => {
+    const path = await leftRunning("bpng-4");
+    const before = await readFile(path, "utf8");
+    const groupGone: KillFn = (pid) => {
+      if (pid === -PGID)
+        throw Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
+    };
+    expect(await inspectState(dir, { ...DEPS, kill: groupGone })).toEqual([]);
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  test("beside a live orchestrator's lock, its own runs and cells are not judged: the lock's refusal alone", async () => {
+    await leftRunning("bpng-5");
+    await plantLock({ pid: 2000 });
+    const warnings = await inspectState(dir, {
+      ...DEPS,
+      units: [
+        {
+          product: "backwpup",
+          cell: "pro@nginx",
+          sites: ["https://a.qa.test"],
+        },
+      ],
+      cells: {
+        inspect: () => Promise.reject(new Error("never asked")),
+      },
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("Another orchestrator (pid 2000");
+  });
+
+  test("a runs' folder that cannot be read is said as the start would refuse it", async () => {
+    await writeFile(join(dir, "runs"), "");
+    expect(await inspectState(dir, DEPS)).toEqual([
+      expect.stringMatching(
+        /^a start would be refused: the runs' records could not be checked for a run still running: The run folders' folder .* is not a folder/,
+      ),
+    ]);
+  });
+
+  test("each selected cell another orchestrator holds is the start's refusal; a free one says nothing", async () => {
+    const asked: string[] = [];
+    const warnings = await inspectState(dir, {
+      ...DEPS,
+      units: [
+        {
+          product: "backwpup",
+          cell: "pro@nginx",
+          sites: ["https://a.qa.test"],
+        },
+        {
+          product: "backwpup",
+          cell: "free@nginx",
+          sites: ["https://b.qa.test"],
+        },
+      ],
+      cells: {
+        inspect: (unit) => {
+          asked.push(unit.cell);
+          if (unit.cell === "free@nginx")
+            return Promise.resolve({ kind: "free" });
+          return Promise.resolve({
+            kind: "refused",
+            message: "held by pid 77",
+          });
+        },
+      },
+    });
+    expect(asked).toEqual(["pro@nginx", "free@nginx"]);
+    expect(warnings).toEqual(["a start would be refused: held by pid 77"]);
+  });
+
+  test("a cell's lock that cannot be checked is said, never thrown", async () => {
+    expect(
+      await inspectState(dir, {
+        ...DEPS,
+        units: [
+          {
+            product: "backwpup",
+            cell: "pro@nginx",
+            sites: ["https://a.qa.test"],
+          },
+        ],
+        cells: { inspect: () => Promise.reject(new Error("EACCES")) },
+      }),
+    ).toEqual([
+      "a start would be refused: the site locks of cell backwpup pro@nginx could not be checked: EACCES",
+    ]);
   });
 });

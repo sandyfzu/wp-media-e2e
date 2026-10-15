@@ -99,6 +99,7 @@ export async function readPidSpace(
  *
  * @param a - one space.
  * @param b - the other.
+ * @returns `false` whenever a part needed is unknown.
  */
 export function sameSpace(a: PidSpace, b: PidSpace): boolean {
   if (a.platform !== b.platform) return false;
@@ -119,6 +120,7 @@ export function sameSpace(a: PidSpace, b: PidSpace): boolean {
  *
  * @param earlier - the space a lock was written in.
  * @param now - this process's.
+ * @returns `true` only when every condition above is known to hold.
  */
 export function earlierBoot(earlier: PidSpace, now: PidSpace): boolean {
   return (
@@ -140,6 +142,7 @@ export function earlierBoot(earlier: PidSpace, now: PidSpace): boolean {
  * A space in a few words, for a message: `linux boot 1b2c…, pid:[4026532829]` or `darwin host mac`.
  *
  * @param space - the space.
+ * @returns the words, `unknown` for each part not read.
  */
 export function describeSpace(space: PidSpace): string {
   return space.platform === "linux"
@@ -152,6 +155,7 @@ export function describeSpace(space: PidSpace): string {
  *
  * @param get - reads it.
  * @param shape - what it must be.
+ * @returns the trimmed value, or `null`.
  */
 async function read(
   get: () => Promise<string>,
@@ -170,6 +174,7 @@ async function read(
  *
  * @param get - reads it.
  * @param shape - what it must be.
+ * @returns the trimmed value, or `null`.
  */
 function safely(get: () => string, shape: RegExp): string | null {
   try {

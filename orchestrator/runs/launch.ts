@@ -6,6 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { RESULTS_FILE } from "../../src/common/reporting/results-schema";
 import { errorCode } from "../error-code";
+import { ensureRunsFolder } from "../state/runs-folder";
 import {
   checkOwnFolder,
   describeFolderProblem,
@@ -87,6 +88,15 @@ export interface LaunchOptions {
   readonly pollMs?: number;
   /** How long a group may outlive its process before it is killed; {@link LINGER_MS} by default. */
   readonly lingerMs?: number;
+  /**
+   * Told, beyond the run's log, that a group outlived its process past the linger and is still not
+   * empty after its SIGKILL — a member this user may not signal, or one stuck in the kernel — and again
+   * every {@link LaunchOptions.stuckRepeatMs} while the wait goes on: the run, and its cell, never end
+   * until then. A throw is dropped.
+   */
+  readonly onStuck?: (text: string) => void;
+  /** How often {@link LaunchOptions.onStuck} is told again; {@link STUCK_REPEAT_MS} by default. */
+  readonly stuckRepeatMs?: number;
 }
 
 /** How a run's processes ended, and how far it was stopped. */
@@ -113,6 +123,9 @@ export interface LaunchedRun {
  * interrupt budget, so a worker's teardown is never cut short by this, only a process that hangs.
  */
 export const LINGER_MS = 5 * 60_000;
+
+/** How often a group still not empty after its SIGKILL is said again, beyond the run's log. */
+export const STUCK_REPEAT_MS = 5 * 60_000;
 
 /** The prefix of the lines the orchestrator writes into a run's log, which a reason never quotes. */
 export const LOG_PREFIX = "[orchestrator]";
@@ -142,6 +155,8 @@ const NOT_STARTED: ProcessExit = { code: null, signal: null };
  *
  * @param options - the run, its commands, where and with what it runs.
  * @returns the run, once `bddgen` was spawned.
+ * @throws {@link RangeError} for a `stuckRepeatMs` that is not a whole number from 1.
+ * @throws {@link StateError} when the run folders' folder is a link, no folder, or open to others.
  * @throws {@link Error} when anything is already at the run's folder — a run of that id ran before,
  *   and sharing its folder would mix two runs' logs, records and stop files — when the folder is not
  *   a private folder of this user's, when its stop file or log is already there, or when any of them
@@ -150,8 +165,16 @@ const NOT_STARTED: ProcessExit = { code: null, signal: null };
  *   {@link prepareFolder}).
  */
 export async function launchRun(options: LaunchOptions): Promise<LaunchedRun> {
-  const { identity } = options;
-  await mkdir(dirname(identity.dir), { recursive: true, mode: 0o700 });
+  const { identity, stuckRepeatMs } = options;
+  // A repeat of no time would spin: refused before anything is made.
+  if (
+    stuckRepeatMs !== undefined &&
+    !(Number.isSafeInteger(stuckRepeatMs) && stuckRepeatMs > 0)
+  )
+    throw new RangeError(
+      `A stuck group's repeat must be a whole number of milliseconds from 1, got ${String(stuckRepeatMs)}.`,
+    );
+  await ensureRunsFolder(dirname(identity.dir));
   // Created here, never reused: a run number handed out twice fails now, before anything runs.
   await mkdir(identity.dir, { mode: 0o700 }).catch((error: unknown) => {
     if (errorCode(error) !== "EEXIST") throw error;
@@ -265,7 +288,11 @@ class Launch {
     this.now = options.now ?? (() => new Date());
   }
 
-  /** Spawns `bddgen` and hands out the run. */
+  /**
+   * Spawns `bddgen` and hands out the run.
+   *
+   * @returns the run: its `stop`, and `done`, which settles once every process of it is over.
+   */
   start(): LaunchedRun {
     this.note(`variables: ${variableNames(this.options.env).join(", ")}`);
     const bddgen = this.spawn("bddgen", this.options.commands.bddgen);
@@ -281,6 +308,7 @@ class Launch {
    * Waits for `bddgen`, runs Playwright when it may, and closes the log.
    *
    * @param bddgen - `bddgen`'s process.
+   * @returns how each process ended (Playwright's only when it started) and the stop taken.
    */
   private async finish(
     bddgen: ChildProcess | NotStarted,
@@ -326,6 +354,7 @@ class Launch {
    *
    * @param name - which.
    * @param command - what.
+   * @returns its process, or why Node refused to start it.
    */
   private spawn(
     name: "bddgen" | "playwright",
@@ -412,7 +441,8 @@ class Launch {
   /**
    * Kills a group that outlived its process past the linger, and waits until it is empty. A kill that
    * fails (a member we may not signal) does not end the run: its group still holds the cell, so the
-   * wait goes on, and the log says why.
+   * wait goes on — said in the run's log, and through `onStuck` at once and every
+   * {@link STUCK_REPEAT_MS} while the group is not empty, with the SIGKILL sent again each time.
    *
    * @param name - which process led it.
    * @param pid - the group's id.
@@ -424,15 +454,60 @@ class Launch {
     wait: { kill: KillFn; sleep: SleepFn; pollMs: number | undefined },
   ): Promise<void> {
     const linger = describeMs(this.options.lingerMs ?? LINGER_MS);
+    const failed = this.killGroup(pid);
+    if (failed === undefined)
+      this.note(`${name}'s process group outlived it by ${linger}: killed`);
+    else {
+      const text = `${name}'s process group (${String(pid)}) outlived it by ${linger} and could not be killed (${failed}): waiting for it`;
+      this.note(text);
+      this.stuck(text);
+    }
+    const repeatMs = this.options.stuckRepeatMs ?? STUCK_REPEAT_MS;
+    // Whether a SIGKILL ever reached the group: the line then says it outlived it.
+    let killed = failed === undefined;
+    for (let waited = repeatMs; ; waited += repeatMs) {
+      const emptied = await this.guard(() =>
+        waitForEmptyGroup(pid, { ...wait, timeoutMs: repeatMs }),
+      );
+      // Empty, or no longer askable: the wait is over either way, as before.
+      if (emptied !== false) return;
+      const again = this.killGroup(pid);
+      const since = killed
+        ? `${describeMs(waited)} after its SIGKILL`
+        : `${describeMs(waited)} after its linger, never killed`;
+      killed ||= again === undefined;
+      const text = `${name}'s process group (${String(pid)}) is still not empty ${since}${again === undefined ? "" : ` (killing it again failed: ${again})`}: still waiting — the run and its cell stay held; end it as this user or root: kill -KILL -${String(pid)}`;
+      this.note(text);
+      this.stuck(text);
+    }
+  }
+
+  /**
+   * Sends SIGKILL to a group.
+   *
+   * @param pid - the group's id.
+   * @returns `undefined` once sent (or the group empty); else the failure's code.
+   */
+  private killGroup(pid: number): string | undefined {
     try {
       signalGroup(pid, "SIGKILL", this.kill);
-      this.note(`${name}'s process group outlived it by ${linger}: killed`);
+      return undefined;
     } catch (error) {
-      this.note(
-        `${name}'s process group outlived it by ${linger} and could not be killed (${errorCode(error) ?? "unknown error"}): waiting for it`,
-      );
+      return errorCode(error) ?? "unknown error";
     }
-    await this.guard(() => waitForEmptyGroup(pid, wait));
+  }
+
+  /**
+   * Tells `onStuck`; a throw is dropped.
+   *
+   * @param text - the line.
+   */
+  private stuck(text: string): void {
+    try {
+      this.options.onStuck?.(text);
+    } catch {
+      // Dropped: the run's log has it.
+    }
   }
 
   /**
@@ -485,7 +560,11 @@ class Launch {
     }
   }
 
-  /** The run's results stream. */
+  /**
+   * The run's results stream.
+   *
+   * @returns `results.jsonl` in the run's report folder.
+   */
   private resultsFile(): string {
     return join(this.options.identity.reportDir, RESULTS_FILE);
   }
@@ -535,7 +614,11 @@ class Launch {
     }
   }
 
-  /** Whether the log's last byte is not a line end: a process's output without its newline. */
+  /**
+   * Whether the log's last byte is not a line end: a process's output without its newline.
+   *
+   * @returns `true` when the log is not empty and its last byte is no `\n`.
+   */
   private async endsMidLine(): Promise<boolean> {
     const { size } = await this.log.stat();
     if (size === 0) return false;
@@ -558,6 +641,8 @@ class Launch {
  * How a child ended: its `exit`, or the `error` that kept it from starting.
  *
  * @param child - the child.
+ * @returns its exit code and signal; {@link NOT_STARTED} and the error's code when it never
+ *   started.
  */
 function exitOf(
   child: ChildProcess,
@@ -579,6 +664,7 @@ function exitOf(
  * backslash, so the line reads back as the arguments it was.
  *
  * @param command - the command.
+ * @returns the file then its arguments, space-separated.
  */
 export function describeCommand(command: Command): string {
   return [command.file, ...command.args]
@@ -592,6 +678,7 @@ export function describeCommand(command: Command): string {
  * A duration in words: `5 min`, `100 ms`.
  *
  * @param ms - milliseconds.
+ * @returns whole minutes in minutes, anything else in milliseconds.
  */
 function describeMs(ms: number): string {
   return ms % 60_000 === 0 ? `${String(ms / 60_000)} min` : `${String(ms)} ms`;
@@ -601,6 +688,7 @@ function describeMs(ms: number): string {
  * Whether a process exited `0`.
  *
  * @param exit - how it ended.
+ * @returns `true` only for code `0` and no signal.
  */
 function isSuccess(exit: ProcessExit): boolean {
   return exit.code === 0 && exit.signal === null;
@@ -611,6 +699,8 @@ function isSuccess(exit: ProcessExit): boolean {
  * a path that cannot be checked is not taken to be free.
  *
  * @param path - the path.
+ * @returns `false` only on `ENOENT`.
+ * @throws what `lstat` throws besides `ENOENT`.
  */
 async function exists(path: string): Promise<boolean> {
   try {

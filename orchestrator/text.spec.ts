@@ -3,9 +3,12 @@ import { execFileSync } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { cleanMessage } from "../src/common/reporting/results";
 import {
   cut,
+  CUT_MARK,
   failureLine,
+  maskCutTails,
   oneLine,
   safeBlock,
   safeLine,
@@ -163,6 +166,61 @@ test.describe("safeBlock", () => {
   });
 });
 
+test.describe("a secret's head before a cut", () => {
+  /** A password with no shape: masked only by its value. */
+  const PASSWORD = "SitePassw0rd#Q:@/x";
+
+  test("the suite's stream cut in the middle of a password: its head masked in a line and a block", () => {
+    const lead = "Error: login as admin with ";
+    // The stream keeps 1,987 characters, then "… [truncated]": the password straddles that cut.
+    const message =
+      lead + "x".repeat(1987 - lead.length - 10) + PASSWORD + " refused";
+    const stream = cleanMessage(message);
+    expect(stream.endsWith(`SitePassw0${CUT_MARK} [truncated]`)).toBe(true);
+    for (const shown of [
+      safeLine(stream, 4000, [PASSWORD]),
+      safeBlock(stream, 4000, [PASSWORD]),
+    ]) {
+      expect(shown.endsWith(`x***${CUT_MARK} [truncated]`)).toBe(true);
+      expect(shown).not.toContain("SitePass");
+    }
+  });
+
+  test("masks the longest head of any form, before each mark — the run facts' and our own cuts included", () => {
+    const forms = secretForms(PASSWORD);
+    const encoded = encodeURIComponent(PASSWORD);
+    expect(maskCutTails(`a SitePassw0rd#…`, forms)).toBe("a ***…");
+    expect(maskCutTails(`u=${encoded.slice(0, 12)}…`, forms)).toBe("u=***…");
+    expect(maskCutTails(`one Site… two SitePa… three`, forms)).toBe(
+      "one ***… two ***… three",
+    );
+  });
+
+  test("leaves a head shorter than four characters, text that is no secret's head, and text with no mark", () => {
+    const forms = secretForms(PASSWORD);
+    for (const text of ["a Sit…", "a Situation…", "SitePassw0", "…", ""])
+      expect(maskCutTails(text, forms)).toBe(text);
+  });
+
+  test("a secret written with spaces around it: its head before a cut masked, as written and encoded", () => {
+    const spaced = ["  Sup3rS3cretPassw0rd  ", "\tAnother1234Secret\n"];
+    expect(
+      safeLine(
+        "head Sup3rS3cr… [truncated]; u=Sup3rS3cretPassw0rd%21… Another12…",
+        500,
+        spaced,
+      ),
+    ).toBe("head ***… [truncated]; u=***%21… ***…");
+    expect(
+      safeLine(`x ${encodeURIComponent("Sup3rS3cretPassw0rd")}…`, 500, spaced),
+    ).toBe("x ***…");
+  });
+
+  test("a secret shorter than eight characters is no secret's head either", () => {
+    expect(safeLine("pass…", 100, ["pass1"])).toBe("pass…");
+  });
+});
+
 test.describe("secretForms", () => {
   test("gives a secret as written, URL-encoded with either case of hex, and JSON-escaped as JavaScript and PHP write it", () => {
     expect(secretForms('a"b\\c/d+e')).toEqual([
@@ -310,6 +368,9 @@ test.describe("shellWord", () => {
       "'/srv/my e2e/config.json'",
     );
     expect(shellWord("/srv/it's/$HOME;x")).toBe("'/srv/it'\\''s/$HOME;x'");
+    // Moved from Slack's own copy of this function: a report folder's path, bare.
+    expect(shellWord("/a/pro@nginx/b-1.2_3")).toBe("/a/pro@nginx/b-1.2_3");
+    expect(shellWord("/it's $(x)")).toBe(`'/it'\\''s $(x)'`);
   });
 
   test("gives back the path when a shell reads it", () => {

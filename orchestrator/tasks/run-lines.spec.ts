@@ -5,7 +5,7 @@ import type { StopLevel } from "../runs/stop";
 import {
   eventTask,
   furtherStop,
-  MAX_FAILURE_LENGTH,
+  MAX_RUN_FAILURE_LENGTH,
   notStartedOutcome,
   outcomeLine,
   showPath,
@@ -90,6 +90,20 @@ test.describe("startedLine", () => {
       "bpng-1 started · backwpup pro@nginx · default ref · run.log",
     );
   });
+
+  test("names the ref as planned when it is given, over the task's own", () => {
+    expect(startedLine("bpng-1", TASK, "run.log", "develop (default)")).toBe(
+      "bpng-1 started · backwpup pro@nginx · develop (default) · run.log",
+    );
+    expect(
+      startedLine(
+        "bpng-1",
+        { ...TASK, plugin: { ref: "main" } },
+        "run.log",
+        "main",
+      ),
+    ).toBe("bpng-1 started · backwpup pro@nginx · main · run.log");
+  });
 });
 
 test.describe("outcomeLine", () => {
@@ -108,7 +122,27 @@ test.describe("outcomeLine", () => {
       },
     });
     expect(outcomeLine(event, AS_IS)).toBe(
-      `bpng-12 ⚠ flaky · 52 scenarios: 51 passed, 1 flaky · 54m 10s · ${event.report.dir}`,
+      `bpng-12 ⚠ flaky · 52 scenarios: 51 passed, 1 flaky · 54m 10s · ${String(event.report.dir)}`,
+    );
+  });
+
+  test("ends a run that never had a folder at its duration: no path to point at", () => {
+    const event = finishedEvent({
+      status: "error",
+      reason: "the run could not start: gone",
+      durationMs: 0,
+      counts: {
+        total: 0,
+        passed: 0,
+        failed: 0,
+        flaky: 0,
+        skipped: 0,
+        didNotRun: 0,
+      },
+      report: { dir: null, log: null },
+    });
+    expect(outcomeLine(event, AS_IS)).toBe(
+      "bpng-12 ✘ error · the run could not start: gone · 0s",
     );
   });
 
@@ -127,7 +161,7 @@ test.describe("outcomeLine", () => {
       },
     });
     expect(outcomeLine(event, AS_IS)).toBe(
-      `bpng-12 ✘ error · bddgen exited 1 · 3s · ${event.report.log}`,
+      `bpng-12 ✘ error · bddgen exited 1 · 3s · ${String(event.report.log)}`,
     );
   });
 
@@ -146,7 +180,9 @@ test.describe("outcomeLine", () => {
       expect(line.startsWith(`bpng-12 ${mark} ${status} · `)).toBe(true);
       const tested = ["passed", "flaky", "failed"].includes(status);
       expect(
-        line.endsWith(`<${tested ? event.report.dir : event.report.log}>`),
+        line.endsWith(
+          `<${String(tested ? event.report.dir : event.report.log)}>`,
+        ),
       ).toBe(true);
     }
   });
@@ -245,7 +281,7 @@ test.describe("notStartedOutcome", () => {
     expect(outcome.reason).not.toContain(SECRET);
     expect(outcome.reason).not.toContain("\n");
     expect(Array.from(outcome.reason ?? "").length).toBeLessThanOrEqual(
-      "the run could not start: ".length + MAX_FAILURE_LENGTH,
+      "the run could not start: ".length + MAX_RUN_FAILURE_LENGTH,
     );
   });
 

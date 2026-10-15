@@ -9,12 +9,11 @@ import {
   formatDuration,
   MAX_LISTED_SCENARIOS,
   sendSlack,
-  shellQuote,
   slackMessage,
 } from "./slack";
 
 test.describe("slackMessage", () => {
-  test("tells a failed run as the plan's example: headline, counts, plugin, site, lists, scp", () => {
+  test("tells a failed run in full: headline, counts, plugin, site, lists, scp", () => {
     expect(
       slackMessage(finishedEvent(), {
         instance: "AutoE2E nginx",
@@ -73,6 +72,21 @@ test.describe("slackMessage", () => {
         "Report: `scp -r auto-e2e:/home/e2e/reports/backwpup/pro@nginx/2026-10-13T10-15-31-042Z-bpng-12 .`",
       ].join("\n"),
     );
+  });
+
+  test("points at no log or report for a run that never had a folder of its own", () => {
+    const text = slackMessage(
+      finishedEvent({
+        status: "error",
+        reason:
+          "the run could not start: its cell's site locks are no longer this orchestrator's",
+        durationMs: 0,
+        report: { dir: null, log: null },
+      }),
+      { sshHost: "auto-e2e" },
+    );
+    expect(text).not.toMatch(/^(Log|Report):/m);
+    expect(text.split("\n").at(-1)).toBe("Took: 0s");
   });
 
   test("says why a run was stopped, beside what it tested", () => {
@@ -362,14 +376,6 @@ test.describe("formatDuration", () => {
     expect(formatDuration(3_723_000)).toBe("1h 2m 3s");
     expect(formatDuration(-5)).toBe("0s");
     expect(formatDuration(Number.NaN)).toBe("0s");
-  });
-});
-
-test.describe("shellQuote", () => {
-  test("leaves a plain path alone and single-quotes any other", () => {
-    expect(shellQuote("/a/pro@nginx/b-1.2_3")).toBe("/a/pro@nginx/b-1.2_3");
-    expect(shellQuote("/a b")).toBe("'/a b'");
-    expect(shellQuote("/it's $(x)")).toBe(`'/it'\\''s $(x)'`);
   });
 });
 

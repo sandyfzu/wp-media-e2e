@@ -287,3 +287,82 @@ test.describe("serverOf", () => {
     ).toBe("this machine");
   });
 });
+
+test.describe("checkConfig — two tasks on one site", () => {
+  /** BackWPup with cells that share sites under other names, and one with no http(s) address. */
+  const SHARING: readonly CheckedProduct[] = [
+    {
+      name: "backwpup",
+      sites: {
+        "pro@nginx": {
+          sites: [
+            sshSite("https://a.qa.test", "qa-lnmp"),
+            sshSite("https://b.qa.test", "qa-lnmp"),
+          ],
+        },
+        renamed: { sites: [sshSite("http://A.QA.test:443/", "qa-lnmp")] },
+        other: { sites: [sshSite("https://c.qa.test", "qa-lnmp")] },
+        unaddressed: { sites: [sshSite("not a url", "qa-lnmp")] },
+      },
+    },
+  ];
+
+  /**
+   * `checkConfig`'s message for these tasks, selected or all.
+   *
+   * @param tasks - the tasks, `[id, cell]`.
+   * @param selected - `--task`'s ids.
+   * @returns the message.
+   */
+  function refusal(
+    tasks: readonly (readonly [string, string])[],
+    selected?: readonly string[],
+  ): string {
+    try {
+      checkConfig(
+        configOf(tasks.map(([id, cell]) => [id, "backwpup", cell] as const)),
+        SHARING,
+        "/x/config.json",
+        selected,
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConfigError);
+      return (error as ConfigError).message;
+    }
+    throw new Error("expected a ConfigError");
+  }
+
+  test("refuses two tasks whose cells share a site, naming both tasks and the site — whatever the cells are called", () => {
+    expect(
+      refusal([
+        ["bpng", "pro@nginx"],
+        ["brnm", "renamed"],
+      ]).split("\n"),
+    ).toEqual([
+      "The orchestrator config /x/config.json runs two tasks on one site:",
+      "  tasks[0] (bpng, backwpup pro@nginx) and tasks[1] (brnm, backwpup renamed) share site a.qa.test: two runs on one site would collide — select one with --task, or give each cell its own sites",
+    ]);
+  });
+
+  test("accepts them when --task selects only one, and tasks on sites of their own", () => {
+    const tasks = [
+      ["bpng", "backwpup", "pro@nginx"],
+      ["brnm", "backwpup", "renamed"],
+      ["bthr", "backwpup", "other"],
+    ] as const;
+    expect(
+      checkConfig(configOf(tasks), SHARING, "/x/config.json", ["bpng", "bthr"])
+        .tasks,
+    ).toHaveLength(3);
+    expect(
+      checkConfig(configOf([tasks[0], tasks[2]]), SHARING, "/x/config.json")
+        .tasks,
+    ).toHaveLength(2);
+  });
+
+  test("refuses a cell with a site whose baseURL is no http(s) URL: it cannot be told apart, nor locked", () => {
+    expect(refusal([["bxun", "unaddressed"]])).toContain(
+      "tasks[0].cell: backwpup unaddressed has 1 site whose baseURL is no http(s) URL",
+    );
+  });
+});

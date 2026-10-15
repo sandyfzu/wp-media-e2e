@@ -540,7 +540,12 @@ class TwoWayLogger implements Logger {
     });
   }
 
-  /** {@inheritDoc Logger.line} */
+  /**
+   * {@inheritDoc Logger.line}
+   *
+   * @param scope - who speaks: `orchestrator`, or a task's id.
+   * @param text - what happened.
+   */
   line(scope: string, text: string): void {
     if (this.closing !== undefined) return;
     const line = this.stamp(scope, text);
@@ -549,7 +554,12 @@ class TwoWayLogger implements Logger {
     this.toTerminal(line.terminal);
   }
 
-  /** {@inheritDoc Logger.flush} */
+  /**
+   * {@inheritDoc Logger.flush}
+   *
+   * @param maxWaitMs - the longest wait.
+   * @returns once flushed, or the wait is over; never rejects.
+   */
   flush(maxWaitMs: number = DEFAULT_WAIT_MS): Promise<void> {
     assertWaitMs(maxWaitMs);
     const deadline = performance.now() + maxWaitMs;
@@ -560,7 +570,12 @@ class TwoWayLogger implements Logger {
     );
   }
 
-  /** {@inheritDoc Logger.close} */
+  /**
+   * {@inheritDoc Logger.close}
+   *
+   * @param maxWaitMs - the longest wait; the first call's applies.
+   * @returns once closed, or the wait is over; never rejects.
+   */
   close(maxWaitMs: number = DEFAULT_WAIT_MS): Promise<void> {
     if (this.closing !== undefined) return this.closing;
     assertWaitMs(maxWaitMs);
@@ -591,18 +606,18 @@ class TwoWayLogger implements Logger {
   }
 
   /**
-   * A line, read off the clock now, in both forms.
+   * A line, read off the clock now, in both forms — through {@link formatLine} and
+   * {@link formatFileLine}, so the formatters the specs pin are the ones that run.
    *
    * @param scope - who speaks.
    * @param text - what happened.
-   * @returns the terminal's and the file's line.
+   * @returns the terminal's and the file's line, each with its line end.
    */
   private stamp(scope: string, text: string): StampedLine {
     const at = this.now();
-    const body = formatBody(scope, text, this.secrets);
     return {
-      terminal: `${clockTime(at)} ${body}\n`,
-      file: `${localIsoTime(at)} ${body}\n`,
+      terminal: `${formatLine(at, scope, text, this.secrets)}\n`,
+      file: `${formatFileLine(at, scope, text, this.secrets)}\n`,
     };
   }
 

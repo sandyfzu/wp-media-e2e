@@ -10,7 +10,7 @@ import {
   type RunningRecordRead,
   type RunRecord,
 } from "../runs/record";
-import { safeLine, shellWord } from "../text";
+import { MAX_QUOTED_PATH, safeLine, shellWord } from "../text";
 import { readRunningFolders } from "./run-folders";
 
 /**
@@ -220,7 +220,7 @@ export async function checkOrphans(
  * @returns one line for the terminal and the log.
  */
 export function orphanRefusal(orphan: Orphan): string {
-  const markLost = `mark the run over: in ${safeLine(shellWord(orphan.record), 1000)}, set "state" to "lost".`;
+  const markLost = `mark the run over: in ${safeLine(shellWord(orphan.record), MAX_QUOTED_PATH)}, set "state" to "lost".`;
   if (orphan.pgid === undefined) return groupUnknownRefusal(orphan, markLost);
   const pgid = String(orphan.pgid);
   const end = `kill -KILL -${pgid}`;
@@ -248,7 +248,7 @@ export function orphanRefusal(orphan: Orphan): string {
 function groupUnknownRefusal(orphan: Orphan, markLost: string): string {
   const log = safeLine(
     shellWord(join(dirname(orphan.record), RUN_FILES.log)),
-    1000,
+    MAX_QUOTED_PATH,
   );
   return (
     `Task ${orphan.taskId} may still have run ${orphan.id} running — unconfirmed: ` +

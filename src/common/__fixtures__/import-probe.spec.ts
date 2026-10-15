@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { PROBE_SENTINEL, probeImports, SETTLED } from "./import-probe";
+import {
+  GRACEFUL_FS_PATCH,
+  PROBE_SENTINEL,
+  probeImports,
+  SETTLED,
+  WATCHED_FUNCTIONS,
+} from "./import-probe";
 
 /**
  * The probe that proves a module leaves the process as it was must itself see every change it
@@ -33,6 +39,32 @@ const MODULES: Readonly<Record<string, string>> = {
   forges:
     'process.env.E2E_PROBE_FORGED = "1"; process.on("exit", () => console.log("[]"));',
   exits: "process.exit(0);",
+  "sets-umask": "process.umask(0);",
+  "wraps-fetch":
+    "const f = globalThis.fetch; globalThis.fetch = (...a) => f(...a);",
+  "replaces-exit": "process.exit = () => undefined;",
+  "sets-stack-trace-limit": "Error.stackTraceLimit = 0;",
+  "sets-max-listeners": "process.setMaxListeners(0);",
+  "sets-default-max-listeners":
+    "import { EventEmitter } from 'node:events'; EventEmitter.defaultMaxListeners = 100;",
+  "wraps-close":
+    "import fs from 'node:fs'; const c = fs.close; fs.close = (...a) => c(...a);",
+  "wraps-cwd": "const c = process.cwd; process.cwd = () => c.call(process);",
+  // graceful-fs's marks on the closes and chdir, but a cwd that lies: not its patch.
+  "mimics-graceful-fs": [
+    "import fs from 'node:fs';",
+    "const previous = Symbol.for('graceful-fs.previous');",
+    "for (const name of ['close', 'closeSync']) {",
+    "  const old = fs[name]; fs[name] = (...a) => old(...a); fs[name][previous] = old;",
+    "}",
+    "const chdir = process.chdir; process.chdir = (d) => chdir.call(process, d);",
+    "Object.setPrototypeOf(process.chdir, chdir);",
+    "process.cwd = () => '/elsewhere';",
+  ].join("\n"),
+  // Playwright's own bundle, which carries graceful-fs: its patch is the one accepted.
+  "loads-graceful-fs": `import ${JSON.stringify(
+    import.meta.resolve("playwright-core/lib/utilsBundle"),
+  )};`,
 };
 
 /** Where {@link MODULES} are written, for the suite's lifetime. */
@@ -97,6 +129,72 @@ test.describe("probeImports", () => {
       { file: testModule("moves"), effects: ["cwd"] },
       { file: testModule("sets-exit-code"), effects: ["exitCode"] },
       { file: testModule("inert"), effects: [] },
+      { file: SETTLED, effects: [] },
+    ]);
+  });
+
+  test("reports the umask, listener limits, the stack trace limit and each watched function replaced", async () => {
+    const names = [
+      "sets-umask",
+      "wraps-fetch",
+      "replaces-exit",
+      "sets-stack-trace-limit",
+      "sets-max-listeners",
+      "sets-default-max-listeners",
+      "wraps-close",
+      "wraps-cwd",
+    ];
+    expect(await probeImports(names.map(testModule))).toEqual([
+      { file: testModule("sets-umask"), effects: ["umask"] },
+      { file: testModule("wraps-fetch"), effects: ["function fetch"] },
+      { file: testModule("replaces-exit"), effects: ["function process.exit"] },
+      {
+        file: testModule("sets-stack-trace-limit"),
+        effects: ["Error.stackTraceLimit"],
+      },
+      { file: testModule("sets-max-listeners"), effects: ["maxListeners"] },
+      {
+        file: testModule("sets-default-max-listeners"),
+        effects: ["defaultMaxListeners"],
+      },
+      { file: testModule("wraps-close"), effects: ["function fs.close"] },
+      { file: testModule("wraps-cwd"), effects: ["function process.cwd"] },
+      { file: SETTLED, effects: [] },
+    ]);
+  });
+
+  test("accepts graceful-fs's patch, as Playwright's bundle applies it, and nothing that only resembles it", async () => {
+    const watched: readonly string[] = WATCHED_FUNCTIONS;
+    expect(GRACEFUL_FS_PATCH.every((name) => watched.includes(name))).toBe(
+      true,
+    );
+    expect(await probeImports([testModule("loads-graceful-fs")])).toEqual([
+      { file: testModule("loads-graceful-fs"), effects: [] },
+      { file: SETTLED, effects: [] },
+    ]);
+    // Its marks on three of the four, but a cwd answering another folder: each is reported.
+    expect(await probeImports([testModule("mimics-graceful-fs")])).toEqual([
+      {
+        file: testModule("mimics-graceful-fs"),
+        effects: [
+          "cwd",
+          "function fs.close",
+          "function fs.closeSync",
+          "function process.chdir",
+          "function process.cwd",
+        ],
+      },
+      { file: SETTLED, effects: [] },
+    ]);
+    // The patch, then a wrapped fetch: only the fetch.
+    expect(
+      await probeImports([
+        testModule("loads-graceful-fs"),
+        testModule("wraps-fetch"),
+      ]),
+    ).toEqual([
+      { file: testModule("loads-graceful-fs"), effects: [] },
+      { file: testModule("wraps-fetch"), effects: ["function fetch"] },
       { file: SETTLED, effects: [] },
     ]);
   });

@@ -66,8 +66,11 @@ export interface EventBusOptions {
 /** The default time limit for one delivery: 30 s. */
 export const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000;
 
-/** The longest failure a log line quotes, in code points. */
-const MAX_FAILURE_LENGTH = 500;
+/**
+ * The longest failure a delivery's log line quotes, in code points: a handler's thrown error or its
+ * timeout, as long as the detail a sender keeps of an answer (`MAX_DETAIL`, `notify/post.ts`).
+ */
+const MAX_DELIVERY_FAILURE_LENGTH = 500;
 
 /** The longest subscriber name or event type a log line quotes, in code points. */
 const MAX_NAME_LENGTH = 100;
@@ -81,13 +84,17 @@ interface Subscription<E extends BusEvent> {
 /**
  * Makes an event bus.
  *
- * @param options - the time limit per delivery, and the log for failures.
+ * @param options - the time limit per delivery, the log for failures and the secrets they mask.
  * @returns the bus.
  * @throws {@link RangeError} for a time limit that is not a positive whole number of milliseconds.
  *
  * @example
  * ```ts
- * const bus = createEventBus<RunFinishedEvent>({ timeoutMs: 30_000, log: logger.warn });
+ * const bus = createEventBus<RunFinishedEvent>({
+ *   timeoutMs: DEFAULT_DELIVERY_TIMEOUT_MS,
+ *   log: (line) => logger.line("orchestrator", line),
+ *   secrets,
+ * });
  * bus.on("run.finished", (event, signal) => sendToSlack(event, signal), "slack");
  * bus.publish(event);
  * await bus.settle(); // at shutdown
@@ -106,6 +113,8 @@ export function createEventBus<E extends BusEvent>(
   /**
    * Tells a failed delivery. A log that fails — a full disk, a closed terminal — has nowhere left to
    * report to, and must not crash the process: the line is dropped.
+   *
+   * @param line - the failure, already masked and on one line.
    */
   function tell(line: string): void {
     try {
@@ -115,7 +124,12 @@ export function createEventBus<E extends BusEvent>(
     }
   }
 
-  /** Runs one handler, bounded and caught; removes itself from {@link inFlight} as it ends. */
+  /**
+   * Runs one handler, bounded and caught; removes itself from {@link inFlight} as it ends.
+   *
+   * @param subscription - the handler, under the name a failure is told by.
+   * @param event - what it is handed.
+   */
   function deliver(subscription: Subscription<E>, event: E): void {
     const delivery = runBounded(subscription, event, options).then(
       (failure) => {
@@ -130,15 +144,33 @@ export function createEventBus<E extends BusEvent>(
   }
 
   return {
+    /**
+     * Adds a subscriber; each event of `type` published later reaches it, after those added earlier.
+     *
+     * @param type - the event type it receives.
+     * @param handler - what it does with each event.
+     * @param name - the name its failures are told by.
+     */
     on(type, handler, name) {
       const list = subscriptions.get(type) ?? [];
       list.push({ name, handler: handler as EventHandler<E> });
       subscriptions.set(type, list);
     },
+    /**
+     * Starts one delivery per subscriber of the event's type — those subscribed at this moment — and
+     * returns before any handler runs.
+     *
+     * @param event - the event to hand out.
+     */
     publish(event) {
       for (const subscription of [...(subscriptions.get(event.type) ?? [])])
         deliver(subscription, event);
     },
+    /**
+     * Waits for every delivery in flight, including those a handler publishes meanwhile.
+     *
+     * @returns once none is left; never rejects.
+     */
     async settle() {
       // A delivery may publish another: wait until none is left.
       while (inFlight.size > 0) await Promise.all([...inFlight]);
@@ -175,7 +207,7 @@ async function runBounded<E extends BusEvent>(
     await subscription.handler(event, controller.signal);
     return undefined;
   })().catch((error: unknown) =>
-    failureLine(error, MAX_FAILURE_LENGTH, options.secrets ?? []),
+    failureLine(error, MAX_DELIVERY_FAILURE_LENGTH, options.secrets ?? []),
   );
   try {
     return await Promise.race([run, timeout]);

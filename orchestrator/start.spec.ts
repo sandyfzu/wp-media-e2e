@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -38,13 +38,20 @@ import type { KillFn } from "./runs/process-group";
 import { runningRecord, writeRunRecord } from "./runs/record";
 import type { ShutdownSignal, ShutdownTimers } from "./runs/shutdown";
 import { acquireLock } from "./state/lock";
+import { siteLockPath } from "./state/cell-lock";
+import { formatOwner, parseOwner } from "./state/lock-owner";
+import { readPidSpace } from "./state/pid-space";
+import { dryRun, type CommandDeps } from "./command";
 import { runOnce } from "./tasks/cycle";
 import {
   CHECKOUT,
   EXIT_WAIT_MS,
   KILL_SETTLE_MS,
+  plannedRef,
+  prepareStart,
   start,
   type StartDeps,
+  type StartOptions,
   type StartProcess,
 } from "./start";
 
@@ -293,6 +300,8 @@ function rig(
       now: () => T0,
       shutdownTimers: clock,
       exitWaitMs: 1_000,
+      // The spec's own cell locks: never this user's, which another spec's start would share.
+      cellLocks: join(checkout, "cell-locks"),
       ...more,
       loop: {
         commandsFor: (task) => ({
@@ -1055,6 +1064,16 @@ test.describe("start — stopping", () => {
       loop: { launchOptions: { pollMs: 20, kill } },
     });
     const started = start({ config }, r.deps);
+    // The runner's `running` record is written once its leader's start is read, which can come after
+    // its ready line: overwritten before it, the record would be readable again. After it, the stuck
+    // run writes nothing more until it ends.
+    await expect
+      .poll(async () => {
+        const running = await record("bpng-1").catch(() => undefined);
+        const process = running?.process as { name?: unknown } | undefined;
+        return `${String(running?.state)}/${String(process?.name)}`;
+      })
+      .toBe("running/playwright");
     await signalWhenReady(r.proc, r.clock, ["SIGINT", "SIGINT", "SIGINT"]);
     await writeFile(join(stateDir, "runs", "bpng-1", "run.json"), "{");
     expect(await started).toBe(130);
@@ -1200,6 +1219,66 @@ test.describe("start — what it hands on and leaves", () => {
       await held.release();
     }
     await expectCleanEnd(r.proc);
+  });
+
+  test("a run's started line names the ref its product's manifest builds, as the dry run does", async () => {
+    // The product's artifact manifest, as the planner reads it: `develop` by default, for pro.
+    const artifacts = {
+      project: "backwpup",
+      defaultRef: { plugin: "develop" },
+      version: { kind: "required", defaultVersion: { plugin: "9.99.99" } },
+      edition: {
+        kind: "editionful",
+        byEdition: {
+          pro: {
+            variant: "pro-en",
+            identity: {
+              slug: "backwpup-pro",
+              mainFile: "backwpup.php",
+              pluginName: "BackWPup Pro",
+            },
+          },
+        },
+      },
+    };
+    const list = {
+      ...PRODUCT_LIST,
+      productByName: (name: string) => ({ name, artifacts }),
+    } as unknown as ProductList;
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const r = rig((id) => runner(id, 1, "passed"), {
+      loadProductList: () => Promise.resolve(list),
+    });
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    expect(await logText()).toContain(
+      "bpng-1 started · backwpup pro@nginx · develop (default) · ",
+    );
+    await expectCleanEnd(r.proc);
+  });
+
+  test("plannedRef: a selected task's ref as planned; nothing, never a throw, otherwise", () => {
+    const artifacts = {
+      project: "backwpup",
+      defaultRef: { plugin: "develop" },
+      version: { kind: "embedded" },
+      edition: { kind: "editionless", identity: {} },
+    };
+    const selected = [
+      { task: { ...TASKS[0], plugin: { ref: "main" } }, cell: {} },
+      { task: TASKS[1], cell: {} },
+    ] as unknown as Parameters<typeof plannedRef>[0];
+    const list = {
+      productByName: () => ({ artifacts }),
+    } as unknown as Parameters<typeof plannedRef>[1];
+    expect(plannedRef(selected, list, "bpng")).toBe("main");
+    expect(plannedRef(selected, list, "bfng")).toBe("develop (default)");
+    expect(plannedRef(selected, list, "nope")).toBeUndefined();
+    const throwing = {
+      productByName: () => {
+        throw new Error("unknown product");
+      },
+    } as unknown as Parameters<typeof plannedRef>[1];
+    expect(plannedRef(selected, throwing, "bpng")).toBeUndefined();
   });
 
   test("a run's Datator record is kept beside it, the very one posted", async () => {
@@ -1366,7 +1445,8 @@ test.describe("start — what it says about itself", () => {
     await waitForText(runLog("bpng-1"), FAKE_LINES.ready);
     await rm(join(stateDir, "orchestrator.lock"));
     expect(await started).toBe(0);
-    expect(await logText()).toContain(
+    // Said once the log is closed — never written to it without the lock — so on standard error.
+    expect(r.proc.stderrText).toContain(
       `${join(stateDir, "orchestrator.lock")} was not removed: it was gone, another's, or could not be`,
     );
   });
@@ -1411,7 +1491,7 @@ test.describe("start — what it says about itself", () => {
     expect(await logText()).not.toContain("carries");
   });
 
-  test("the checkout is this module's folder's parent, and the waits are the plan's", () => {
+  test("the checkout is this module's folder's parent, and the waits are 60 s after a kill, 5 s for the exit", () => {
     expect(CHECKOUT).toBe(resolve(import.meta.dirname, ".."));
     expect(existsSync(join(CHECKOUT, "orchestrator", "start.ts"))).toBe(true);
     expect(KILL_SETTLE_MS).toBe(60_000);
@@ -1457,7 +1537,12 @@ test.describe("start — in a real process, real signals", () => {
       ],
       {
         cwd: checkout,
-        env: { PATH: process.env.PATH, HOME: process.env.HOME },
+        env: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          // The cells' locks under the spec's checkout, never this user's.
+          XDG_STATE_HOME: join(checkout, "state-home"),
+        },
         stdio: "ignore",
       },
     );
@@ -1495,4 +1580,331 @@ test.describe("start — in a real process, real signals", () => {
       expect(existsSync(join(stateDir, "orchestrator.lock"))).toBe(false);
       expect(await logText()).toContain("exiting 130");
     });
+});
+
+test.describe("start — the cells' site locks", () => {
+  /** `pro@nginx`'s one site's lock, in the rig's site locks' folder. */
+  function proLock(): string {
+    return siteLockPath(join(checkout, "cell-locks"), "a.qa.test");
+  }
+
+  /** Processes a test started, killed with their groups after it. */
+  const alive: number[] = [];
+  test.afterEach(() => {
+    for (const pid of alive.splice(0))
+      for (const target of [-pid, pid])
+        try {
+          process.kill(target, "SIGKILL");
+        } catch {
+          // Gone already.
+        }
+  });
+
+  /**
+   * Starts a process that waits, the leader of a group of its own, and reads its start.
+   *
+   * @returns its PID and start.
+   */
+  async function liveProcess(): Promise<{ pid: number; start: string }> {
+    const child = spawn(
+      process.execPath,
+      ["-e", "setTimeout(() => {}, 60000)"],
+      {
+        detached: true,
+        stdio: "ignore",
+      },
+    );
+    const pid = child.pid ?? 0;
+    alive.push(pid);
+    const read = await readLeaderStart(pid);
+    if (read.kind !== "start") throw new Error("no start");
+    return { pid, start: read.value };
+  }
+
+  /**
+   * Plants `pro@nginx`'s site's lock as another orchestrator wrote it.
+   *
+   * @param pid - its holder's PID.
+   * @param start - its holder's start.
+   * @param run - the run it names.
+   */
+  async function plantSiteLock(
+    pid: number,
+    start: string | null,
+    run: string,
+  ): Promise<void> {
+    await mkdir(join(checkout, "cell-locks"), { recursive: true, mode: 0o700 });
+    await writeFile(
+      proLock(),
+      formatOwner({
+        pid,
+        token: "c".repeat(32),
+        start,
+        space: await readPidSpace(),
+        label: "backwpup other@cell",
+        run,
+      }),
+      { mode: 0o600 },
+    );
+  }
+
+  test("a loop holds its cell's site lock from its start to its end — through its cooldown — naming each run", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const r = rig((id) => runner(id, 1, "passed"));
+    const started = start({ config }, r.deps);
+    await expect.poll(logText, { timeout: 10_000 }).toContain("next run");
+    // Cooling down: the site is still this orchestrator's, naming its last run.
+    expect(parseOwner(await readFile(proLock(), "utf8"))).toMatchObject({
+      kind: "owner",
+      owner: {
+        label: "backwpup pro@nginx",
+        run: join(stateDir, "runs", "bpng-1", "run.json"),
+      },
+    });
+    r.proc.emit("SIGINT");
+    expect(await started).toBe(130);
+    expect(existsSync(proLock())).toBe(false);
+    await expectCleanEnd(r.proc);
+  });
+
+  test("a site a live orchestrator of another state directory holds refuses the start, naming its cell, the site and its run — masked: nothing runs", async () => {
+    const config = await writeConfig();
+    const holder = await liveProcess();
+    const elsewhere = join(
+      checkout,
+      `elsewhere-${SECRET}`,
+      "runs",
+      "bpng-7",
+      "run.json",
+    );
+    await plantSiteLock(holder.pid, holder.start, elsewhere);
+    const r = rig();
+    expect(await start({ config }, r.deps)).toBe(1);
+    const log = await logText();
+    expect(log).toContain(
+      `bpng  not started: Another orchestrator (pid ${String(holder.pid)}`,
+    );
+    expect(log).toContain(
+      `— running backwpup other@cell on site a.qa.test, run bpng-7 (${elsewhere.replace(SECRET, "***")})`,
+    );
+    expect(log).not.toContain("bfng  not started");
+    expect(existsSync(join(stateDir, "runs"))).toBe(false);
+    await expectCleanEnd(r.proc);
+  });
+
+  test("a dead orchestrator's site lock whose run still runs refuses the start with the command that ends it", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const group = await liveProcess();
+    const otherState = join(checkout, "other");
+    const id = "bpng-3";
+    await mkdir(join(otherState, "runs", id), { recursive: true, mode: 0o700 });
+    const run = join(otherState, "runs", id, "run.json");
+    await writeRunRecord(
+      run,
+      runningRecord(
+        runIdentity({
+          taskId: "bpng",
+          product: "backwpup",
+          cell: "pro@nginx",
+          number: 3,
+          startedAt: T0,
+          stateDir: otherState,
+          checkout,
+        }),
+        "bpng",
+        {
+          name: "playwright",
+          pgid: group.pid,
+          leaderStart: group.start,
+        },
+      ),
+    );
+    // A holder that has ended: a PID whose process started at another time.
+    await plantSiteLock(group.pid, "test:not-its-start", run);
+    const r = rig();
+    expect(await start({ config }, r.deps)).toBe(1);
+    const log = await logText();
+    expect(log).toContain(
+      `bpng  not started: The lock of site a.qa.test (${proLock()}) was left by an orchestrator that has ended`,
+    );
+    expect(log).toContain(`End it with: kill -KILL -${String(group.pid)}`);
+    await expectCleanEnd(r.proc);
+  });
+
+  test("with no HOME nor XDG_STATE_HOME for the site locks, the start is refused before any run", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const r = rig(undefined, { cellLocks: undefined });
+    expect(await start({ config }, r.deps)).toBe(1);
+    expect(await logText()).toContain(
+      "orchestrator  not started: The site locks have no folder: neither XDG_STATE_HOME nor HOME is an absolute path",
+    );
+    expect(existsSync(join(stateDir, "runs"))).toBe(false);
+    await expectCleanEnd(r.proc);
+  });
+});
+
+test.describe("start — the sites a config's tasks share, and a pool of several", () => {
+  /** BackWPup with a two-site pool, and a cell naming `pro@nginx`'s site again. */
+  const SITES_LIST = {
+    ...PRODUCT_LIST,
+    PRODUCTS: [
+      {
+        name: "backwpup",
+        sites: {
+          "pro@nginx": {
+            edition: "pro",
+            sites: [sshSite("https://a.qa.test")],
+          },
+          renamed: {
+            edition: "pro",
+            sites: [sshSite("http://A.qa.test:443/")],
+          },
+          "two@nginx": {
+            edition: "pro",
+            sites: [
+              sshSite("https://d.qa.test"),
+              sshSite("https://c.qa.test/wp"),
+            ],
+          },
+        },
+      },
+    ],
+  } as unknown as ProductList;
+
+  test("two tasks on one site are refused by the start and the dry run alike, naming both and the site; nothing runs", async () => {
+    const config = await writeConfig({
+      tasks: [
+        TASKS[0],
+        {
+          id: "brnm",
+          type: "loop",
+          product: "backwpup",
+          cell: "renamed",
+          cooldownMinutes: 1,
+        },
+      ],
+    });
+    const r = rig(undefined, {
+      loadProductList: () => Promise.resolve(SITES_LIST),
+    });
+    expect(await start({ config }, r.deps)).toBe(1);
+    const said =
+      "tasks[0] (bpng, backwpup pro@nginx) and tasks[1] (brnm, backwpup renamed) share site a.qa.test";
+    expect(r.proc.stderrText).toContain(said);
+    expect(existsSync(join(stateDir, "runs"))).toBe(false);
+    let dryErr = "";
+    const code = await dryRun({ config }, {
+      prepareStart: (options: StartOptions) =>
+        prepareStart(options, {
+          loadProductList: () => Promise.resolve(SITES_LIST),
+        }),
+      stderr: { write: (text: string) => ((dryErr += text), true) },
+      stdout: { write: () => true },
+    } as unknown as CommandDeps);
+    expect(code).toBe(1);
+    expect(dryErr).toContain(said);
+  });
+
+  test("a pool of two sites: its loop holds both sites' locks, each naming the run, and gives both back", async () => {
+    const config = await writeConfig({
+      tasks: [
+        {
+          id: "btwq",
+          type: "loop",
+          product: "backwpup",
+          cell: "two@nginx",
+          cooldownMinutes: 1,
+        },
+      ],
+    });
+    const r = rig(undefined, {
+      loadProductList: () => Promise.resolve(SITES_LIST),
+    });
+    const started = start({ config }, r.deps);
+    await waitForText(runLog("btwq-1"), FAKE_LINES.ready);
+    const locks = ["c.qa.test/wp", "d.qa.test"].map((key) =>
+      siteLockPath(join(checkout, "cell-locks"), key),
+    );
+    for (const [index, lock] of locks.entries())
+      expect(parseOwner(await readFile(lock, "utf8"))).toMatchObject({
+        kind: "owner",
+        owner: {
+          key: ["c.qa.test/wp", "d.qa.test"][index],
+          label: "backwpup two@nginx",
+          run: join(stateDir, "runs", "btwq-1", "run.json"),
+        },
+      });
+    r.proc.emit("SIGINT");
+    expect(await started).toBe(130);
+    for (const lock of locks) expect(existsSync(lock)).toBe(false);
+    await expectCleanEnd(r.proc);
+  });
+});
+
+test.describe("start — the lock and the log at the exit", () => {
+  test("the lock is released only once the log is closed: its last line is written while the lock is held", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const atRelease: string[] = [];
+    const r = rig((id) => runner(id, 1, "passed"), {
+      acquireLock: async (dir, deps) => {
+        const lock = await acquireLock(dir, deps);
+        return {
+          ...lock,
+          release: () => {
+            atRelease.push(
+              readFileSync(join(stateDir, "orchestrator.log"), "utf8"),
+            );
+            return lock.release();
+          },
+        };
+      },
+    });
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    expect(atRelease).toHaveLength(1);
+    expect(atRelease[0]).toMatch(/ orchestrator {2}exiting 0\n$/);
+    // Nothing written after the release.
+    expect(await logText()).toBe(atRelease[0]);
+    await expectCleanEnd(r.proc);
+  });
+});
+
+test.describe("start — the runs it names when it gives up", () => {
+  test("only each stuck task's latest run is its own, however many it began", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const r = rig(undefined, {
+      killSettleMs: 100,
+      loop: {
+        runOnce: (task, deps) => {
+          for (let n = 1; n <= 10_000; n += 1)
+            deps.onRunBegun?.(`bpng-${String(n)}`, task.id);
+          return { stop: () => undefined, done: new Promise(() => undefined) };
+        },
+      },
+    });
+    const started = start({ config }, r.deps);
+    await expect.poll(logText).toContain("started · 1 task");
+    // Records still saying running, written after the orphan check: an early run's and the latest's.
+    for (const n of [1, 10_000]) {
+      const identity = runIdentity({
+        taskId: "bpng",
+        product: "backwpup",
+        cell: "pro@nginx",
+        number: n,
+        startedAt: T0,
+        stateDir,
+        checkout,
+      });
+      await mkdir(identity.dir, { recursive: true, mode: 0o700 });
+      await writeRunRecord(identity.record, runningRecord(identity, "bpng"));
+    }
+    for (const _ of [1, 2, 3]) {
+      r.proc.emit("SIGINT");
+      r.clock.ms += 2_000;
+    }
+    expect(await started).toBe(130);
+    const log = await logText();
+    expect(log).toContain("bpng  bpng-10000 left nothing to kill");
+    expect(log).not.toMatch(/bpng {2}bpng-1 /);
+    await expectCleanEnd(r.proc);
+  });
 });

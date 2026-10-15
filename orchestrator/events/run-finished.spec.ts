@@ -164,6 +164,17 @@ test.describe("buildRunFinished", () => {
     expect(event.scenarios).toEqual([]);
   });
 
+  test("points at no report or log for a run that never had a folder", () => {
+    expect(buildRunFinished({ ...INPUT, hadFolder: false }).report).toEqual({
+      dir: null,
+      log: null,
+    });
+    expect(buildRunFinished({ ...INPUT, hadFolder: true }).report).toEqual({
+      dir: INPUT.reportDir,
+      log: INPUT.log,
+    });
+  });
+
   test("takes the edition from the stream when the facts are missing", () => {
     expect(buildRunFinished({ ...INPUT, facts: undefined }).unit.edition).toBe(
       "pro",

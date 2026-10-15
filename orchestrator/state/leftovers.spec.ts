@@ -178,6 +178,22 @@ test.describe("sweepLeftovers", () => {
     });
   });
 
+  test("sweeps a state directory reached through a link — the operator's choice — where it leads, never through tasks/'s link", async () => {
+    const real = join(dir, "real");
+    await mkdir(join(real, TASKS_DIR), { recursive: true });
+    const lockTemp = join(real, `.orchestrator.lock.${HEX12}.tmp`);
+    const counterTemp = join(real, TASKS_DIR, `.bpng.json.${HEX12}.tmp`);
+    for (const file of [lockTemp, counterTemp])
+      await fileAged(file, LEFTOVER_AGE_MS + 1);
+    const state = join(dir, "state");
+    await symlink(real, state);
+    const sweep = await sweepLeftovers(state, NOW);
+    expect(sweep.failed).toEqual([]);
+    expect(sweep.removed).toHaveLength(2);
+    expect(await readdir(real)).toEqual([TASKS_DIR]);
+    expect(await readdir(join(real, TASKS_DIR))).toEqual([]);
+  });
+
   test("never rejects for a state directory it cannot list", async () => {
     expect(await sweepLeftovers(join(dir, "none"), NOW)).toEqual({
       removed: [],

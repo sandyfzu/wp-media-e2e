@@ -17,7 +17,9 @@ import { fakeCommand } from "./fake-suite";
  * `FAKE_LATE_SIGNAL=SIGINT`, the process sends itself that signal once `start` has returned — after
  * `start` removed its handlers, before `process.exit`; with `FAKE_SLOW_PREPARE=1`, the dry run's
  * preparation says `preparing` on standard error, then waits 10 s — a dry run still in progress;
- * `FAKE_PARENT_WATCH_MS` reads the parent's PID that often instead of every second.
+ * `FAKE_PARENT_WATCH_MS` reads the parent's PID that often instead of every second; `FAKE_RUN_MS`
+ * makes each run's fake runner last that long instead of a minute (`0`: a run that ends at once, its
+ * loop then cooling down).
  */
 
 export * from "../start";
@@ -65,7 +67,9 @@ export async function start(options: StartOptions): Promise<ExitCode> {
     loop: {
       commandsFor: () => ({
         bddgen: fakeCommand({ exitCode: 0 }),
-        playwright: fakeCommand({ runMs: 60_000 }),
+        playwright: fakeCommand({
+          runMs: Number(process.env.FAKE_RUN_MS ?? 60_000),
+        }),
       }),
       launchOptions: { pollMs: 20 },
     },

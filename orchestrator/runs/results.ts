@@ -195,6 +195,7 @@ export function readRunResults(text: string): RunResults {
  *
  * @param schema - the line's schema.
  * @param line - the line, as the suite's reader parsed it.
+ * @returns the parsed line, or `undefined` when the schema refuses it.
  */
 function parsed<T extends z.ZodType>(
   schema: T,
