@@ -73,7 +73,7 @@ is either a bare array of sites (editionless) or an object `{ edition?, sites }`
 | `username`   | yes      | WordPress admin login.                                             |
 | `password`   | yes      | WordPress admin password.                                          |
 | `transport`  | yes      | How WP-CLI reaches the site (below).                               |
-| `overrides`  | no       | Per-site service-credential overrides, merged over product globals. |
+| `overrides`  | no       | Per-site service-credential overrides. Validated only: not merged or read yet (phase-6 6H). |
 
 The resolved [`SiteConfig`](../../src/common/config/types.ts) adds a computed
 `storageState` path (where the worker's saved login is written).
@@ -177,7 +177,7 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 | `REPORT_MODE` | _(unset)_ → self-contained | `rich` → external attachments + embedded trace viewer (serve over http). |
 | `RUN_ID`      | auto-stamped           | Per-run report token; pin to share one token across a batch. One folder name: no `/` or `\`, not hidden, no control character, ≤ 255 bytes — else the run fails naming it. |
 | `E2E_RUN_NAME` | _(unset)_ → the `RUN_ID` | **Display only**: the run's name in every report's title line, Cucumber banner and Allure name (`run-facts.json`). Set by the orchestrator; never acted on. |
-| `E2E_REQUESTED_REF` | _(unset)_      | **Display only**: the plugin ref the run was asked for (`develop`), shown in place of the pin the orchestrator runs it on (`commit:<sha>`) and as "Requested ref". Never acted on. |
+| `E2E_REQUESTED_REF` | _(unset)_      | **Display only**: the plugin ref the run was asked for (`develop`), shown in place of the pin a run is built from (`commit:<sha>`, once the orchestrator pins runs) and as "Requested ref". Never acted on. |
 | `CI`          | _(unset)_              | Non-empty enables CI config (retries, `forbidOnly`).                    |
 | `E2E_CELL`    | _(unset)_ → no pin     | Pins the run — `bddgen`, the runner, its workers — to one cell of the product: the config holds that cell alone, so `bddgen` regenerates only its specs and cells can run side by side. Exact name; blank means unset. A name the product lacks, or a `--project` selecting none of the cell's projects, fails naming the variable. **Pass it per command, never in `.env`**, which would pin every run started from that folder. Ignored by the healthcheck and the artifact warm, which span cells by design. |
 | `PRODUCT`     | `wp-rocket`            | Product for the bare `playwright.config.ts`: a name listed in [`products.ts`](../../src/projects/products.ts) (whitespace ignored). Any other name fails the run. |

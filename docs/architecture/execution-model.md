@@ -61,7 +61,7 @@ environment is the one channel that reaches `bddgen`, the runner and every worke
 Unpinned, everything is as before: `--project=<cell>` runs one cell, but its `bddgen` regenerates
 every cell's specs, so it is safe only when no other run of the product is going. A blank
 `E2E_CELL` is no pin. `.env` is read from the working directory and loaded into every process, so a
-pin there pins every run started from that folder. The planned orchestrator is to build each run's
+pin there pins every run started from that folder. The orchestrator builds each run's
 environment itself, from an allowlist and with `E2E_LOAD_DOTENV=false`, so neither a `.env` nor an
 inherited variable reaches it.
 The healthcheck and the artifact warm ignore the pin: they span cells by design (`--cell` narrows
@@ -244,7 +244,7 @@ own reports, traces and Allure's results keep an error as Playwright wrote it.
 
 [`src/projects/products.ts`](../../src/projects/products.ts) is the one list of products. It is
 read by every entry point that spans products: the bare `playwright.config.ts` (`productFromEnv`
-over `PRODUCT`), the healthcheck, the artifact warm, and the orchestrator later
+over `PRODUCT`), the healthcheck, the artifact warm, and the orchestrator
 (`productByName`, `playwrightConfigFor`). A product's own `playwright.<product>.config.ts`
 imports only that product, so its runs never load another product's sites files.
 
@@ -308,7 +308,7 @@ Per-project knobs the factory sets:
 
 - `baseURL` defaults to the cell's first site (overridden per-worker by the
   `baseURL` fixture so each worker targets its own bound site).
-- `retries: 2` under CI, `0` locally.
+- `retries: 2` everywhere, local runs included (`E2E_RETRIES` overrides, 0–10).
 - Edition-ful cells generate only their edition's scenarios via a Cucumber tag
   filter (`pro` → `not @free`, `free` → `not @pro`).
 - `workers` per project is a defensive cap only; correctness rests on the global
@@ -449,6 +449,6 @@ E2E_CELL=apache npm run test:wp-rocket
 > primes APVM's cache for the cells a run will need, so each `artifacts:<cell>`
 > build becomes a cache copy instead of a fresh build. It plans through the same
 > request builder the resolver uses (the parity invariant), so a warmed entry is
-> always the one the run looks up. The planned orchestrator
-> ([its plan](../plans/orchestrator-plan.md)) calls the same `warmArtifacts` before
-> each run.
+> always the one the run looks up. The orchestrator's later phases
+> ([its plan](../plans/orchestrator-plan.md)) will call the same `warmArtifacts` before
+> each run; Phase 0.5 lets each run build its own.

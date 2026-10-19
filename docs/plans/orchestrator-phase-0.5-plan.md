@@ -902,15 +902,8 @@ guide, so they follow item 1; items 5 and 6 depend on nothing.
 3. `CLAUDE.md`: the documentation map's row and its "When to update" orchestrator section point at
    the guide instead of this plan; check that the `orchestrator/` structure line and the script
    still match.
-4. Stale wording, brought to the as-built state:
-   - `docs/guides/configuration.md:180`: `E2E_REQUESTED_REF` "shown in place of the pin the
-     orchestrator runs it on" (Phase 1's behaviour);
-   - `docs/architecture/execution-model.md:64` ("The planned orchestrator is to build each run's
-     environment"), `:247` ("the orchestrator later": it reads the product list now, through
-     `loadProductList`), `:452–454` ("The planned orchestrator … calls the same `warmArtifacts`
-     before each run": Phase 1's; Phase 0.5 never warms, §1);
-   - `CLAUDE.md:377` ("and, later, the orchestrator") and its structure line's "(being built)"
-     (`CLAUDE.md:62`), once the guide lands.
+4. Stale wording: done 2026-10-19 (configuration.md, execution-model.md, CLAUDE.md now say what
+   is built); re-check once the guide lands.
 5. `.env.example` stays untouched: the orchestrator reads no `E2E_*` variable.
 6. A soak, for the test gaps 5K left: that many cycles leave the process's listeners and handles
    flat, and what pruning costs as run folders accumulate. How it runs, what it measures and when it
