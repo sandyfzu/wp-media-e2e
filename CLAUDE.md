@@ -791,12 +791,9 @@ the gates yourself.
 Larger initiatives are tracked as living design docs in `docs/plans/`. Check
 these before starting related work — they hold the current plan, not history:
 
-- [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md) — full design rationale and decisions.
-- [`docs/plans/plugin-artifact-management-plan.md`](docs/plans/plugin-artifact-management-plan.md) — plugin artifact management.
+- [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md) — full design rationale and decisions; also the finished plugin-artifact and site-file-ownership designs (their facts and open obligations).
 - [`docs/plans/phase-6-feature-porting-plan.md`](docs/plans/phase-6-feature-porting-plan.md) — feature porting (BackWPup first); supersedes the parent plan's Phase 6.
-- [`docs/plans/site-file-ownership-plan.md`](docs/plans/site-file-ownership-plan.md) — keeping a site's docroot writable by both WP-CLI's user and the web server.
-- [`docs/plans/orchestrator-plan.md`](docs/plans/orchestrator-plan.md) — the orchestrator: a long-running service that runs and manages cells on a server (supersedes the parent plan's Phase 9).
-- [`docs/plans/orchestrator-phase-0-plan.md`](docs/plans/orchestrator-phase-0-plan.md) — the orchestrator's Phase 0: what the suite must change first, with verified findings and recommended solutions.
+- [`docs/plans/orchestrator-plan.md`](docs/plans/orchestrator-plan.md) — the orchestrator: a long-running service that runs and manages cells on a server (supersedes the parent plan's Phase 9); includes Phase 0 (done): the run contract and each suite change's decision.
 - [`docs/plans/orchestrator-phase-0.5-plan.md`](docs/plans/orchestrator-phase-0.5-plan.md) — the orchestrator's Phase 0.5: the minimal orchestrator (cycling cells, Slack, Datator) that replaces AutoE2E's BackWPup instances.
 
 ## When to update these docs

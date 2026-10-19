@@ -1,1120 +1,744 @@
 # E2E Modernization Plan — `wp-rocket-e2e` → `wp-media-projects-e2e`
 
-> **Status:** Phases 0–2 implemented (config foundation, execution model, artifact isolation). Phase 3 partially implemented (multi-file sites loading, pre-flight transport validation). Phases 3–9 planned; Phase 8 (CI on real cells) is dropped, and the orchestrator (Phase 9) has [its own plan](orchestrator-plan.md).
-> **Date:** 2026-06-24
-> **Baseline (reference):** `wp-rocket-e2e` — the legacy suite being superseded.
-> **Target (this repo):** `wp-media-projects-e2e`.
-> **Goal:** match or beat the baseline in every dimension (capabilities, reporting, maintainability,
-> security), and add first-class **multi-product, multi-environment parallel execution**.
-> **Porting principle:** "porting" means **modernise and improve**, never copy 1:1. The baseline was
-> written years ago by a less-experienced team; every capability is re-implemented with current
-> Playwright idioms (web-first assertions, auto-waiting locators, fixtures, `storageState`,
-> `toHaveScreenshot`), strict types, and explicit error handling. **Coverage never regresses; the
-> implementation always improves.**
-
----
-
-## 1. Executive summary
-
-`wp-media-projects-e2e` runs Gherkin through the **Playwright runner** via `playwright-bdd` (not the
-standalone Cucumber CLI), on **ESM**, **Node 24**, **TypeScript 6** (`strict`), the **ESLint 10** flat
-config, and **Prettier 3**. The **execution architecture** (§3) — the (product × cell) matrix with a
-site pool per cell, worker→site binding, per-cell reports, and artifact isolation — is **in place**.
-What remains is (a) the **WordPress automation plumbing** (WP-CLI/SSH/Docker command layer, plugin
-lifecycle, visual regression, settings diffing), (b) **Allure analytics** on top of the live reporters,
-and (c) **feature porting** per product.
-
-The execution architecture (§3) is the centerpiece:
-
-- A **product** (`wp-rocket`, `backwpup`, future plugins) is a fully self-contained unit — its own
-  BDD config, features/steps, page objects, **its own sites file**, and **its own report folders**.
-  Products share only `src/common/`.
-- A **cell** is a named environment a product runs against (`apache`, `nginx`, and later arbitrary
-  ones like `nginx@php8.2`). Cells are **provided by data**, not hard-coded — extensible without
-  touching code.
-- A **run unit** = one **(product × cell)** = one Playwright invocation = **one report** = a **pool of
-  sites** across which that product's scenarios are distributed by Playwright workers.
-- An **orchestrator** — a separate, long-running service on a server — runs cells in the background,
-  each as its own isolated invocation with its **own** report (no merging). Designed in
-  [its own plan](orchestrator-plan.md).
-
-Everything ships in **v1**; a pool may start at size 1 (serial within a cell), and growing it is a
-**data-only** change. The suite is built so the orchestrator can be added **later without changing
-its run model** — cells are runnable manually today (gaps found since in running cells side by side
-are that plan's Phase 0).
-
-Two findings simplify the migration:
-
-1. **The baseline carries dead dependencies.** `axios`, `boxen`, `node-zip`, `ssh2` (direct), and —
-   notably — **`multiple-cucumber-html-reporter`** are declared but **never imported**. The baseline's
-   "beautiful report" is in reality the **stock Cucumber HTML formatter**, media-rich on failure
-   (it base64-embeds a screenshot and the video) but **static** — no interactive trace viewer, no
-   trends.
-2. **Most remaining libraries have modern, often built-in replacements** (visual regression →
-   Playwright `toHaveScreenshot`; `shelljs` → `execa`; `chalk` → `node:util` `styleText`; `ts-node`
-   → native Node TS; `dotenv` → `process.loadEnvFile()`).
-
----
-
-## 2. Core decisions
-
-| # | Decision | Consequence |
-| --- | --- | --- |
-| D1 | **Execution = a (product × cell) matrix with a site pool per cell.** One Playwright invocation per run unit; an orchestrator spawns them. | §3 is the architecture; parallelism is **in v1**, not deferred. |
-| D2 | **Products are fully separated**: own BDD config, own directories, own sites file, own reports. Only `src/common/` is shared. | §4 layout; no shared `sites.json`; no cross-product config bleed (e.g. BackWPup storage config is invisible to WP Rocket). |
-| D3 | **Cells are data-provided and extensible**, not a fixed enum. `docker` ships an initial Apache + Nginx (fixed PHP); `ssh`/`local` accept unlimited cells. | §3.1, §4.2; code iterates the cell keys in each product's sites file. |
-| D4 | **Each run unit produces its own report — no merging.** | §6.3; `blob` + `merge-reports` is intentionally **not** used. |
-| D5 | **Server modes: `ssh` (default), `docker`, `local`.** `docker` provides **both Apache and Nginx**; `local` targets whatever web server the user runs. | §7.1; a custom `docker compose` (not `@wordpress/env`, which is Apache-only). |
-| D6 | **Full reporting stack now**: Playwright HTML + embedded Cucumber HTML (dual-mode via `REPORT_MODE`) + **Allure 3**. | §6. |
-| D7 | **Plugin lifecycle covers WP-CLI *and* the WordPress admin UI.** Cleanup hooks remove plugins **idempotently** (already-absent ⇒ no-op); deletion *as the action under test* asserts presence first. | §7.3. |
-| D8 | **The suite is orchestrator-ready from day one.** Cells run manually per (product × cell); the orchestrator is added later without changing the run model. | §3.5; Phase 2 establishes isolation. The orchestrator has [its own plan](orchestrator-plan.md), whose Phase 0 closes the isolation gaps found since. |
-| D9 | **BackWPup Free & Pro are one product; edition is a per-cell property.** Each cell declares its `edition` (Free/Pro are separate plugin packages); it selects the package to install, the scenario filter (`@free`/`@pro`/untagged), and the POM branch. | §4.5; not separate products (they share ~90%). |
-| D10 | **Site credentials never enter Playwright `metadata`** (which is serialized into reports). Pools reach workers through an in-process registry; `metadata` carries only non-secret routing (`product`, `cell`). | §3.3, §4.4. |
-
----
-
-## 3. Execution model & architecture
-
-This is the centerpiece. It is grounded in a verified Playwright behaviour (§3.2) that dictates the
-shape of everything else.
-
-### 3.1 Concepts
-
-- **Product** — `wp-rocket`, `backwpup`, … Each is a `playwright-bdd` configuration with its own
-  features, steps, page objects, sites file, and report output. Products differ in *what* they test
-  and in product-specific config (e.g. BackWPup needs third-party storage credentials; WP Rocket does
-  not).
-- **Cell** — a named environment a product is exercised against: `apache`, `nginx`, and arbitrary
-  descriptors such as `nginx@php8.2`, `apache@php8.5`, or an edition facet like `pro@nginx` /
-  `free@apache` (§4.5). **Cells are data, not code.** For `docker`, the project ships compose for an
-  initial set (Apache + Nginx, fixed PHP) and can grow it later; for `ssh`/`local`, the user lists **as
-  many cells as they have**. The config reads the cell names from each product's sites file
-  (`Object.keys`) and generates one Playwright project per cell.
-- **Site pool** — within a cell, a list of N interchangeable WordPress instances (each its own DB +
-  uploads). The pool is what makes a cell *fast*: Playwright distributes the product's scenarios across
-  the pool.
-- **Run unit** — **(product × cell)**. Exactly one Playwright invocation, one report, one pool. The
-  product is fixed by the chosen config file, so the Playwright **project name is the cell** (e.g.
-  `nginx`), selected with `--project=<cell>`.
-- **Orchestrator** — a separate, long-running service (not Playwright) that runs each run unit as an
-  isolated Playwright invocation ([its own plan](orchestrator-plan.md)).
-
-The two axes behave differently on purpose:
-
-```text
-                 cell: apache              cell: nginx              (cells are extensible →)
-              ┌────────────────────┐   ┌────────────────────┐
- wp-rocket    │ pool of N sites    │   │ pool of N sites    │   ← server-types MULTIPLY (matrix)
-              │ scenarios spread   │   │ scenarios spread   │   ← sites within a cell DISTRIBUTE (pool)
-              └────────────────────┘   └────────────────────┘
-              ┌────────────────────┐   ┌────────────────────┐
- backwpup     │ its own pool       │   │ its own pool       │   ← own sites + own config + own report
-              └────────────────────┘   └────────────────────┘
-```
-
-50 scenarios with two cells ⇒ 50 run on Apache **and** 50 on Nginx (matrix across cells), each 50
-distributed across that cell's pool (parallel within a cell). Each of the four boxes is one run unit
-with its own report.
-
-### 3.2 Why one invocation per run unit (the load-bearing finding)
-
-Playwright has two distinct parallelism mechanisms, verified against the official docs:
-
-- **Projects multiply.** Multiple projects matching the same tests run every test **once per project**
-  (the cross-browser matrix model). This is what gives us "Apache **and** Nginx."
-- **Workers distribute.** The `workers` pool runs each test **once**, handing the next pending file to
-  whichever worker is free (a dynamic pool). This is what spreads a cell's scenarios across its sites.
-
-To pin a worker to a site we use **`testInfo.parallelIndex`** (the stable, restart-safe slot id in
-`0…workers-1`). The critical constraint: **`parallelIndex` is *global* across an invocation — it is
-bounded by the global `workers`, not reset per project.** (Confirmed by the docs' single global
-`workers` cap and the shared-pool model; corroborated by Playwright maintainers — issue #38953 shows
-indices exceeding per-project worker counts.) Therefore:
-
-> Indexing a cell's K-site pool by `pool[parallelIndex]` is **only safe when a single project runs in
-> that invocation with `workers = K`**. In a single invocation running many projects, a cell's tests
-> could land on a `parallelIndex ≥ K` and overflow its pool.
-
-This is exactly why a run unit is **one invocation per (product × cell)** with `--workers = pool.length`
-— not one giant invocation running every cell. Per-project `workers` (Playwright ≥ 1.52) exists but
-caps *how many* workers a project uses, not *which* `parallelIndex` values it sees, so it does **not**
-make a single multi-cell invocation safe. The orchestrator (§3.4) gives us the matrix across cells
-*instead*.
-
-### 3.3 Worker → site binding & credential handling
-
-Because each invocation is one project with `workers = pool.length`, `parallelIndex ∈ 0…N-1` exactly
-indexes the pool. A worker-scoped fixture binds the worker to its site for the worker's lifetime, and
-`baseURL`/`storageState` derive from it.
-
-**Credentials never travel through `metadata`.** Playwright serializes a project's `metadata` verbatim
-into its reports, so the credential-bearing pool must not live there (D10). Instead, the config factory
-populates an **in-process pool registry** as a side effect of building the config — Playwright re-runs
-the config in every worker process, so each worker resolves its own pool locally. `metadata` carries
-only non-secret routing, `{ product, cell }`; the worker reads its pool from the registry:
-
-```ts
-// src/common/fixtures.ts
-import { test as base, createBdd } from "playwright-bdd";
-import { getPool, readRouting } from "./config/metadata";
-import type { SiteConfig } from "./config/types";
-
-export const test = base.extend<{ site: SiteConfig }, { boundSite: SiteConfig | undefined }>({
-  // worker-scoped: resolved once per worker; SAFE because workers === pool.length (§3.2)
-  boundSite: [async ({}, use, workerInfo) => {
-    const { product, cell } = readRouting(workerInfo.project.metadata); // non-secret routing only
-    const pool = getPool(product, cell);                                // credentials from the in-process registry
-    await use(pool.length === 0 ? undefined : pool[workerInfo.parallelIndex]);
-  }, { scope: "worker" }],
-
-  site:    async ({ boundSite }, use) => use(boundSite ?? throwNoPool()), // clear error if a scenario needs a site
-  baseURL: async ({ boundSite, baseURL }, use) => use(boundSite?.baseURL ?? baseURL),
-  // login/logout scenarios opt out of auth with @noauth
-  storageState: async ({ boundSite, storageState, $tags }, use) =>
-    use($tags.includes("@noauth") ? { cookies: [], origins: [] } : (boundSite?.storageState ?? storageState)),
-});
-
-export const { Given, When, Then, Step, Before, After, BeforeAll, AfterAll } = createBdd(test);
-```
-
-`config/metadata.ts` owns this contract end-to-end: `routingMetadata(product, cell)` (the builder the
-factory writes into `metadata`), `readRouting()` (the validated reader), and `registerPool`/`getPool`
-(the per-process registry). Steps and fixtures read `baseURL`/credentials from the bound site — **never
-hard-coded** — so adding sites or cells never touches step code.
-
-### 3.4 The orchestrator
-
-Moved to [its own plan](orchestrator-plan.md): a long-running service that runs cells in the
-background and manages those runs.
-
-### 3.5 Artifact isolation & lifecycle
-
-Artifacts split into **two lifecycles by whether keeping a history has value** — and that, not a single
-rule, is what governs each path. All paths are keyed by **`<product>/<cell>`**, so different cells never
-share a path: the real concurrency (the orchestrator running *different* cells at once) is isolated by
-construction (two exceptions found since, `bddgen` and the root `test-results/`, are the
-[orchestrator plan](orchestrator-plan.md)'s Phase 0). The same `(product × cell)` must not run
-concurrently regardless — a cell's site pool is shared WordPress state, so two simultaneous runs of one
-cell would corrupt each other at the *database* level; it is intentionally a singleton.
-
-| Artifact | Path | Lifecycle |
-| --- | --- | --- |
-| Report (Playwright HTML + Cucumber) | `reports/<product>/<cell>/<run>/` | **Accumulates** — one timestamped subdir per run, building a per-cell history. Pruned as each run ends, and by `npm run report:prune`: at most *N* per cell (`E2E_REPORTS_KEEP`, 20), none older than 30 days but the newest complete one, kept up to 182 days ([orchestrator Phase 0 plan](orchestrator-phase-0-plan.md) §8). |
-| Allure results + history | Allure's own results/history dir | **Accumulates by design** — Allure consumes run history to compute trends (§6.1). |
-| Generated BDD specs | `.features-gen/<product>/<cell>/` | **Ephemeral** — regenerated by `bddgen` every run; **overwritten in place**, so the unique-per-run generations never pile up. |
-| `storageState` auth files | `.auth/<product>/<cell>/site-<i>.json` | **Ephemeral** — rewritten by the setup project each run. |
-| Traces / video / screenshots | `test-results/<product>/<cell>/` | **Ephemeral** — Playwright clears `outputDir` at each run start; the report copies in the attachments it needs (below). |
-
-The rule of thumb: **history has value → accumulate (prune later); build output / transient state →
-overwrite in place.** A small `run-context` module encodes both — running a cell needs **no environment
-variables**:
-
-```ts
-// src/common/config/run-context.ts
-// RUN_ID: a non-blank inherited value, else a fresh sortable timestamp pinned into env so every worker
-// shares one token. Used ONLY to namespace the report dir (a blank RUN_ID="" is treated as unset).
-export const RUN_ID = resolveRunId();
-// All requested cells, parsed from every --project form (incl. the variadic one) — the single
-// signal Playwright itself uses to filter, so config sizing can't diverge from what runs. The
-// factory selects exactly one and rejects more than one fail-fast (§3.2).
-export const selectedCells = (): string[] => /* parsed --project values */ [];
-export const dirs = (product: string, cell: string) => {
-  const cellNs = `${product}/${cell}`;               // the namespace is ALWAYS appended, so cells never collide
-  return {
-    report: `${env("REPORT_ROOT", "reports")}/${cellNs}/${RUN_ID}`, // ACCUMULATES — one per run (pruned as runs end)
-    output: `${env("OUTPUT_ROOT", "test-results")}/${cellNs}`,      // EPHEMERAL — overwritten each run
-    auth:   `${env("AUTH_ROOT", ".auth")}/${cellNs}`,               // EPHEMERAL
-    bdd:    `.features-gen/${cellNs}`,                              // EPHEMERAL
-  };
-};
-```
-
-So `playwright test --config <product> --project <cell>` Just Works with **zero env**: the ephemeral
-paths are deterministic from the product and cell (no run token → every worker computes the same path and
-overwrites in place), while the report lands in its own timestamped subdir so history accumulates.
-`RUN_ID` only ever labels the **report** subdir — it defaults to a sortable timestamp, and CI or the
-orchestrator may pass a meaningful one (e.g. a build number / launch label) to group a launch's reports.
-`npm run report` opens the newest. The optional `REPORT_ROOT`/`OUTPUT_ROOT`/`AUTH_ROOT` overrides
-replace only the root prefix; the `<product>/<cell>` namespace is always appended, so an override can
-never collapse two cells onto one path.
-
-Reports are **self-contained** (each copies in its own screenshots/video/trace), so overwriting the
-ephemeral `test-results` never harms an older accumulated report. Report accumulation is **intended in
-v1**; it is bounded by each run's own pruning of its cell and by `npm run report:prune` — a cap of *N*
-per cell, an age limit, and the newest complete report kept longest
-([orchestrator Phase 0 plan](orchestrator-phase-0-plan.md) §8). Cross-run **trends** come from Allure (§6.1).
-
-This isolation lives **inside** the E2E project, so the orchestrator later only automates running cells —
-it adds **no** new requirement to the run model. That is the "orchestrator-ready from day one" guarantee (D8).
-
-### 3.6 v1 scope & extensibility
-
-- **All of it ships in v1**: the product separation, cells-as-data, per-cell pools, worker→site
-  binding, per-cell reports, and conflict isolation. A pool may be **size 1** (so `workers = 1`, serial
-  within that cell) — the machinery is identical; only the data is smaller.
-- **Scaling is data-only**: add sites to a pool, add a cell key, or add a product folder. No code
-  change, no refactor.
-- **The orchestrator is the only deferred piece** ([its own plan](orchestrator-plan.md)); it slots in
-  without changing the run model.
-
----
-
-## 4. Project structure & configuration
-
-### 4.1 Directory layout (full product separation)
-
-```text
-.                                  # repo root
-  playwright.config.ts             # dispatch entry (PRODUCT=… selects); IDE / default discovery
-  playwright.wp-rocket.config.ts   # WP Rocket entry → createProductConfig(wpRocket)
-  playwright.backwpup.config.ts    # BackWPup entry  → createProductConfig(backwpup)
-  .env.example  .npmrc  README.md  # onboarding; .npmrc enables the browser postinstall (§8.6)
-  eslint.config.js  prettier.config.js  tsconfig.json
-src/
-  common/                          # ONLY non-product-specific, shared code
-    fixtures.ts                    # worker→site binding (§3.3); @noauth; edition (§4.5)
-    guards.ts                      # generic type guards (isObject, isNonEmptyString) — reusable anywhere
-    auth/auth.setup.ts             # generic per-site login, reused by every product
-    steps/                         # generic, product-agnostic steps
-    wp/                            # exec layer, plugin guards, db helpers (Phase 3)
-    config/
-      env.ts                       # env() / requireEnv() / intEnv() / boolEnv()
-      load-env.ts                  # one-time .env loader (util.parseEnv; E2E_LOAD_DOTENV)
-      run-context.ts               # RUN_ID + selectedCells + namespaced dirs (§3.5)
-      metadata.ts                  # routing metadata + in-process pool registry (§3.3)
-      reporting.ts                 # reporter factory + REPORT_MODE (§6.2)
-      project.ts                   # createProductConfig: per-cell projects + binding (§4.4)
-      sites.ts                     # sites.json loader + validation + isPlaceholderSite
-      types.ts                     # SiteConfig, ProductConfig, ServiceConfig, Transport, Edition
-  projects/
-    wp-rocket/
-      features/  steps/  pages/
-      config/
-        wp-rocket.config.ts        # ProductConfig (globs; no storage)
-        sites.json                 # GITIGNORED — WP Rocket's OWN cells + pools
-        sites.example.json         # committed template
-    backwpup/
-      features/  steps/  pages/
-      config/
-        backwpup.config.ts         # ProductConfig + storage services (S3/FTP/…)
-        sites.json                 # GITIGNORED — BackWPup's OWN cells + pools (separate file)
-        sites.example.json
-orchestrator/                      # SEPARATE from the test projects (see orchestrator-plan.md)
-```
-
-The per-product Playwright **config entries live at the repo root** so every glob resolves
-repo-root-relative; each is a thin file that calls `createProductConfig(<product>)` (§4.4). Adding a
-product = add a `src/projects/<product>/` folder + its `ProductConfig` + a root entry; nothing shared
-changes. Adding a cell = add a key to that product's `sites.json`; no code changes.
-
-### 4.2 Per-product sites file (cells as dynamic keys)
-
-A constraint forces structured files over a single flat `.env`: in any one process, `process.env` is
-global — you cannot "load a different `.env` per product". So per-product/per-cell data lives in
-**structured, per-product files**, loaded once. Cells are the top-level keys, so the set of cells is
-purely data:
-
-```jsonc
-// src/projects/wp-rocket/config/sites.json   (gitignored; sites.example.json is committed)
-{
-  "apache": [
-    { "baseURL": "https://wpr-ap-1…", "username": "admin", "password": "…",
-      "transport": { "mode": "ssh", "host": "1.2.3.4", "key": "~/.ssh/id", "rootDir": "/var/www/s1" } },
-    { "baseURL": "https://wpr-ap-2…", "username": "admin", "password": "…", "transport": { /* … */ } }
-  ],
-  "nginx":        [ /* … */ ],
-  "nginx@php8.2": [ /* … */ ]    // ← arbitrary cell, picked up automatically (ssh/local)
-}
-```
-
-A cell maps to its site pool, shown here as the bare array (editionless). An **edition-ful** product
-wraps a cell's pool with its `edition` (`{ "edition": …, "sites": [ … ] }`) — see §4.5.
-
-### 4.3 Product config & secrets
-
-Each product config declares its globs and product-specific service config; **BackWPup's storage
-config lives only in `backwpup.config.ts`** and is structurally invisible to WP Rocket.
-
-```ts
-// src/projects/backwpup/config/backwpup.config.ts
-const configDir = dirname(fileURLToPath(import.meta.url));
-export const backwpup: ProductConfig = {
-  name: "backwpup",
-  features: "src/projects/backwpup/features/**/*.feature",   // repo-root-relative (entry lives at root, §4.1)
-  steps: ["src/common/fixtures.ts", "src/common/steps/**/*.ts", "src/projects/backwpup/steps/**/*.ts"],
-  sites: loadSites(configDir),                               // its own sites.json → { cell: SiteConfig[] }
-  services: {                                                // storage creds from env; global, per-site override
-    storage: {
-      ftp: { host: env("BWP_FTP_HOST"), username: env("BWP_FTP_USERNAME"), password: env("BWP_FTP_PASSWORD"),
-             port: intEnv("BWP_FTP_PORT", 21), secure: boolEnv("BWP_FTP_SECURE", true) },   // validated coercions
-      s3:  { accessKeyId: env("BWP_S3_ACCESS_KEY_ID"), secretAccessKey: env("BWP_S3_SECRET_ACCESS_KEY"),
-             bucket: env("BWP_S3_BUCKET"), region: env("BWP_S3_REGION", "us-east-1") },
-    },
-  },
-};
-// wp-rocket.config.ts has NO `services` key at all.
-```
-
-**Secrets and overrides.** Global service credentials (one set per product — they target a single
-external service, not a WordPress site) come from the **environment** (`requireEnv`), so the committed
-config carries only their shape. A specific site may need to **override** one — most commonly to dodge
-**per-host rate limits** (e.g. FTP connection/session caps) when its cell runs many sites in parallel, or
-to point at a different bucket/server. That override lives **on the site itself**, in an `overrides`
-block in the product's `sites.json`:
-
-```jsonc
-// one site entry in src/projects/backwpup/config/sites.json
-{ "baseURL": "https://bwp-ng-3…", "username": "admin", "password": "…",
-  "transport": { "mode": "ssh", "host": "…", "key": "…", "rootDir": "…" },
-  "overrides": { "storage": { "ftp": { "host": "51.68.87.200", "username": "rocketftp2", "password": "…" } } } }
-```
-
-The effective config for a site is a deep-merge — `merge(product.services, site.overrides)` — so a site
-inherits every global value and replaces only what it declares. The `overrides` block is **validated at
-load time** against the (partial) service shape, so a malformed override fails fast with a path-named
-error (`[sites] … overrides.storage.ftp.port must be a finite number`) rather than surfacing later.
-
-**Why on the site, not `SITE_<n>_<KEY>` env keys.** Two reasons make co-location the right model here:
-(1) **it fits the data shape** — sites already live in per-product, cell-keyed `sites.json`, so the
-override belongs in that same structured object, not a flat env namespace that would have to encode
-product + cell + index (`WPROCKET_NGINX_SITE_2_FTP_HOST`) just to stay unambiguous; (2) **index-based env
-keys are positionally fragile** — `SITE_2_*` binds to an array position, so reordering the pool silently
-remaps overrides, whereas an `overrides` block is bound to the site object itself. Secret exposure does
-**not** separate the two: `sites.json` is *already* gitignored and *already* holds each site's secrets
-(admin password, SSH key path), so an override secret sits exactly where the site's other secrets live.
-Global/default service secrets still come from env; only explicit per-site exceptions live in the entry.
-Likely override candidates: **FTP** (high rate-limit risk); **Dropbox**/**Rackspace** (medium);
-**S3**/**Azure** rarely need it (built for concurrency).
-
-### 4.4 The config factory (generates the per-cell projects)
-
-A single shared factory, `createProductConfig(product)` in `common/config/project.ts`, turns a
-`ProductConfig` into a Playwright config: **one project pair per cell** (a setup project + the BDD
-project that depends on it), each with a product-namespaced BDD output dir (the key isolation point).
-The per-product root entry is a one-liner:
-
-```ts
-// playwright.wp-rocket.config.ts   (repo root — globs resolve repo-root-relative)
-import "./src/common/config/load-env";
-import { createProductConfig } from "./src/common/config/project";
-import { wpRocket } from "./src/projects/wp-rocket/config/wp-rocket.config";
-export default createProductConfig(wpRocket);
-```
-
-```ts
-// src/common/config/project.ts  (the factory, abridged)
-export function createProductConfig(product: ProductConfig): PlaywrightTestConfig {
-  const cells = Object.keys(product.sites);
-  // Selecting >1 cell is unsafe (parallelIndex is global, §3.2) → reject fail-fast.
-  const requested = selectedCells().filter((c) => cells.includes(c));
-  if (requested.length > 1) throw new Error(`Multiple cells selected (${requested.join(", ")}); run one per invocation.`);
-  const selected   = requested[0];
-  const reportCell = selected ?? "_all";                          // cell-less run → an _all bucket, never mislabeled
-
-  const projects = cells.flatMap((cell) => {
-    const d      = dirs(product.name, cell);
-    const pooled = withState(product.sites[cell] ?? [], d.auth);   // each site gets its storageState path
-    registerPool(product.name, cell, pooled);                     // credentials → in-process registry, NOT metadata (§3.3)
-    const setup = `setup:${cell}`;
-    return [
-      { name: setup, testDir: "src/common/auth", testMatch: /auth\.setup\.ts$/,
-        metadata: routingMetadata(product.name, cell) },          // { product, cell } only
-      {
-        name: cell,                                               // run-unit project = the cell
-        testDir: defineBddConfig({
-          outputDir: d.bdd, features: product.features, steps: product.steps,
-          tags: editionFilter(product, cell),                     // §4.5: from the cell's edition; undefined when editionless (Phase 6 hook)
-        }),
-        outputDir: d.output,
-        dependencies: [setup],
-        workers: pooled.length || 1,                              // defensive cap (correctness is the global workers below)
-        retries: isCI ? 2 : 0,
-        metadata: routingMetadata(product.name, cell),
-      },
-    ];
-  });
-
-  return defineConfig({
-    fullyParallel: true,
-    workers: selectedPoolSize(product, selected) || 1,            // global workers = selected cell's pool size (§3.2)
-    reporter: reporters(dirs(product.name, reportCell).report),   // this run unit's OWN report dir (§6.3)
-    use: { trace: "retain-on-failure", screenshot: "only-on-failure", video: "retain-on-failure" },
-    projects,
-  });
-}
-```
-
-`reporting.ts` holds the reporter factory + `REPORT_MODE`; `project.ts` holds `devices`/capture defaults
-and the factory; `run-context.ts` resolves the namespaced dirs and `selectedCells` (§3.5); `metadata.ts`
-owns the routing + pool registry (§3.3). A bare `playwright.config.ts` at the root dispatches to a
-product by `PRODUCT` for IDE / default discovery.
-
-### 4.5 Editions (Free / Pro)
-
-BackWPup ships in two editions — **Free** and **Pro** — as **separate plugin packages** (different zips)
-that share the great majority of behaviour: Pro has everything Free has (minus a few Free-only items such
-as beta subscriptions) plus extra features (more storages, quality-of-life flows) and a few enhanced
-variants of shared flows. They are the **same plugin and domain**, so they live in the **one `backwpup`
-product** (D9), not separate products — a separate product would duplicate the shared ~90% or fake-share
-it across an artificial boundary.
-
-**Edition is a property of the cell.** A cell is one test environment, and its edition decides three
-cell-wide things — which **plugin package** to install (Free and Pro are different zips), which
-**scenarios** run (the `@free`/`@pro` filter, applied per cell at generation), and which **POM** branch.
-None of these is per-site, so edition is declared **once per cell**:
-
-- A cell carries an optional `edition: "free" | "pro"` alongside its pool; editionless products
-  (WP Rocket) simply omit it. Edition rides on the existing cells-as-data mechanism (a cell like
-  `pro@nginx` / `free@apache`), so per-edition reports, pools, and orchestration come for free — no new
-  matrix axis.
-- Because edition is **non-secret, cell-level** data, it travels in the routing `metadata`
-  (`{ product, cell, edition }`, §3.3); the `edition` fixture and the plugin-install hook read it from
-  there. There is a single value per cell — no per-site field and no pool-uniformity checks.
-
-```jsonc
-// src/projects/backwpup/config/sites.json — an edition-ful cell wraps its pool with `edition`
-{ "pro@nginx":  { "edition": "pro",  "sites": [ { /* site */ }, { /* site */ } ] },
-  "free@nginx": { "edition": "free", "sites": [ { /* site */ } ] } }
-// An editionless cell is just its pool (WP Rocket):  "nginx": [ { /* site */ } ]
-```
-
-**Plugin package selection — superseded by the artifacts capability.** This section originally
-sketched a static per-edition zip map in the product config
-(`plugin: { free: "…/backwpup-free.zip", pro: "…/backwpup-pro.zip" }`). That map is **gone**: a
-committed path to a hand-built zip cannot say *which build* it holds, and nothing verified that a
-`pro` cell was actually handed the Pro package. Both are now solved by the **plugin-artifact
-management** capability (implemented; design in
-[plugin-artifacts.md](../architecture/plugin-artifacts.md), rationale in the
-[artifact plan](plugin-artifact-management-plan.md)):
-
-- Each product declares an `artifacts` manifest instead of a zip map. For an edition-ful product it
-  maps **edition → the one APVM variant** to build (`pro` → `pro-en`, `free` → `free`) plus the
-  **identity** a zip of that edition must have (slug + `Plugin Name:` header).
-- A per-cell `artifacts:<cell>` setup project resolves that edition's zip for the execution (build a
-  git ref through APVM, or copy an operator-provided zip) and a static preflight **asserts** the
-  identity — so a `pro` cell physically cannot install the Free package.
-- The plugin `Before` hook (§7.3) consumes the result through the `pluginArtifact("plugin")` fixture
-  rather than a config constant, so "which edition" and "which build" stay one decision made per run.
-- Edition (`free`/`pro`, ours) and APVM variant (`free`/`pro-en`/`pro-de`) are deliberately distinct
-  namespaces — the manifest is the projection between them.
-
-**Applicability via tags**, with a low-tax default (most scenarios need no tag):
-
-| Category | Tag | Runs on |
-| --- | --- | --- |
-| Shared, identical | *(none)* | both editions |
-| Pro-only feature / flow | `@pro` | Pro cells |
-| Free-only feature / flow | `@free` | Free cells |
-
-A scenario tagged **both** `@free` and `@pro` is a contradiction (it would run nowhere) and is rejected.
-Genuinely different user journeys become **separate scenarios sharing a Background** — e.g. restore,
-where Free uploads a downloaded backup and Pro restores straight from the backup list:
-
-```gherkin
-@backwpup
-Feature: Restore a backup
-  Background:                                  # shared — both editions
-    Given a backup exists in the backup list
-
-  @pro
-  Scenario: Restore directly from the backup list
-    When I restore the latest backup from the list
-    Then the site is restored
-
-  @free
-  Scenario: Restore by uploading the backup file
-    Given I have downloaded that backup
-    When I upload the backup file and restore it
-    Then the site is restored
-```
-
-**Filtering is automatic per cell.** From the cell's `edition` the factory passes a tag expression to
-that cell's `defineBddConfig` (`tags?: string`, which filters scenarios at generation): a Pro cell gets
-`"not @free"` (runs untagged + `@pro`); a Free cell gets `"not @pro"`; an editionless cell gets no
-filter. So a Free cell never even generates the Pro specs, and the filter composes with a user's
-`--grep`.
-
-**Runtime branching.** An `edition` fixture (read from the routing metadata) lets the few divergent *shared*
-flows pick the right page object. Plain POMs only (§7.5): a small **strategy factory** returns the
-edition's page object for a divergent page, each edition's flow in its own class:
-
-```ts
-export interface RestorePage { restoreLatest(): Promise<void>; }
-class ProRestorePage  implements RestorePage { /* from the backup list */ }
-class FreeRestorePage implements RestorePage { /* download + upload */ }
-export const restorePage = (page: Page, edition: Edition): RestorePage =>
-  edition === "pro" ? new ProRestorePage(page) : new FreeRestorePage(page);
-```
-
-Shared pages stay single classes. **Authoring rule:** different user-visible steps → separate
-`@free`/`@pro` scenarios; same steps with only incidental UI differences → one untagged scenario plus an
-edition-aware page object. Pro-only **storages** need no config split — they live in the one `services`
-config and their scenarios are simply `@pro`, so Free cells never run them.
-
-**Absent edition.** Because the package, the filter, and the POM all read the cell's edition, a missing
-edition resolves cleanly by product:
-
-- **Editionless product (WP Rocket)** — no cell declares an edition: no filter, the product's single
-  package, `edition` fixture unused. Correct, zero config.
-- **Edition-ful product (BackWPup)** — edition is required on every cell, enforced **all-or-none across a
-  product's cells**: if any cell declares an edition, all must, so a BackWPup cell that omits it **fails
-  fast at load** (`[sites] cell "nginx" must declare an edition: "free" | "pro"`) rather than installing
-  an undefined package or running both editions' scenarios.
-
-**What it takes** (a thin addition, landing with Phase 6): an `Edition` type and the optional per-cell
-`edition` carried in routing metadata (`types.ts` / `metadata.ts`); the one all-or-none check in
-`sites.ts`; the `editionFilter` derivation in the factory (§4.4); the `edition` fixture; and the
-per-edition plugin install in the Before hook (§7.3), which reads the cell's resolved-and-verified zip
-from the `pluginArtifact` fixture. *(All of the above except the Before hook is now implemented — the
-edition model shipped with the artifacts capability rather than waiting for Phase 6.)*
-
----
-
-## 5. Authentication
-
-Authenticate **once per site**, persist cookies/localStorage to a per-site file, and reuse it — instead
-of the baseline's per-scenario UI login (slow, repetitive, no `storageState`).
-
-Each cell's BDD project depends on a **setup project** that authenticates that cell's pool. A single
-setup test resolves the cell's pool from the registry (routing → `getPool`, §3.3), **skips placeholder
-sites** (so a fresh checkout with only `sites.example.json` stays green), and logs each real site in
-inside its own isolated context, saving a per-site state file under the namespaced auth dir:
-
-```ts
-// src/common/auth/auth.setup.ts   (a normal Playwright test, NOT a .feature)
-import { test as setup, expect } from "@playwright/test";
-import { getPool, readRouting } from "../config/metadata";
-import { isPlaceholderSite } from "../config/sites";
-
-setup("authenticate site pool", async ({ browser }, testInfo) => {
-  const { product, cell } = readRouting(testInfo.project.metadata);
-  const real = getPool(product, cell).filter((s) => !isPlaceholderSite(s));
-  setup.skip(real.length === 0, "Only placeholder/example sites — create sites.json for real runs.");
-
-  for (const site of real) {
-    const context = await browser.newContext({ baseURL: site.baseURL });
-    try {
-      const page = await context.newPage();
-      await page.goto("/wp-login.php");
-      await page.getByLabel("Username or Email Address").fill(site.username);
-      await page.getByLabel("Password", { exact: true }).fill(site.password);
-      await page.getByRole("button", { name: "Log In" }).click();
-      // The Log In click waits for navigation, so the URL is settled: dismiss the WP
-      // "admin email verification" interstitial only when it is the landed page.
-      if (page.url().includes("action=confirm_admin_email"))
-        await page.getByRole("link", { name: /remind me later/i }).click();
-      await expect(page).toHaveURL(/\/wp-admin\/?/);
-      await context.storageState({ path: site.storageState }); // per-site file → no collisions
-    } finally {
-      await context.close();
-    }
-  }
-});
-```
-
-The cell's tests then reuse `pool[parallelIndex].storageState` via the worker fixture (§3.3).
-`@noauth` scenarios (login/logout) start unauthenticated. **Multi-user** (`admin` vs `admin2`, which the
-baseline supports) is a second per-site state file plus a dynamic step
-(`Given I am logged in as {string}` → `context.setStorageState(path)`).
-
----
-
-## 6. Reporting
-
-### 6.1 The layered stack (D6)
-
-| Tier | Reporter | Purpose |
-| --- | --- | --- |
-| Native | Playwright **HTML** | Interactive runner report — steps, screenshots, video, **trace viewer** (the baseline's true missing capability). Open with `npx playwright show-report`. |
-| Gherkin | `playwright-bdd` **`cucumberReporter('html')`** | Faithful BDD report (features/scenarios/steps) — the successor to the baseline report. **Dual-mode** (§6.2). |
-| Analytics | **Allure 3** (`allure-playwright`) | History/trends, flaky categorisation, dashboards; **`singleFile: true`** for a portable artefact. |
-
-These run together because `playwright-bdd` emits standard Playwright tests. The live config enables
-`list`, Playwright **HTML**, and the Cucumber **HTML** reporter today; **Allure** is added on top in
-Phase 4. **Capture settings** make every failure carry media + a trace: `trace`, `video`, `screenshot`
-all `"retain-on-failure"`.
-
-### 6.2 Dual-mode Cucumber report (one `REPORT_MODE` flag)
-
-The Cucumber HTML report has one trade-off (a portable single file vs. an in-report interactive trace
-viewer). Rather than choose, the target supports **both**, switched by `REPORT_MODE`:
-
-```ts
-// inside reporting.ts → reporters(reportDir)
-const isRich = process.env.REPORT_MODE === "rich";
-cucumberReporter("html", {
-  outputFile: `${reportDir}/cucumber/index.html`,
-  externalAttachments: isRich,                       // A: false (inline) · B: true (separate data/ + trace viewer)
-  skipAttachments: isRich ? false : ["application/zip"], // A: drop only the heavy trace zip; keep video
-});
-```
-
-| Mode | `externalAttachments` | What you get | Cost | Consumer |
-| --- | --- | --- | --- | --- |
-| **A — portable** *(default)* | `false` | One self-contained HTML; screenshots **and video embedded** on failure; opens from `file://`. | No in-report trace *viewer* (traces live in the Playwright HTML report). | autoe2e / CI — "download one file". |
-| **B — rich** (`REPORT_MODE=rich`) | `true` | Small HTML **+ a `data/` folder**; **embeds the interactive Playwright trace viewer**. | Not a single file; trace clicks need serving over `http(s)://` (`npx http-server …`), not `file://`. | targeted debug runs. |
-
-**Video** is embedded on failure in MODE A because Playwright records it (`video: "retain-on-failure"`)
-and the reporter embeds whatever exists — there is **no per-status "embed only on failure" switch**, so
-never add `video/webm` to `skipAttachments` in MODE A. The interactive trace viewer is **always**
-available via the Playwright HTML report regardless of mode; Allure's `singleFile` gives an independent
-portable analytics artefact.
-
-### 6.3 One report per run unit — no merging (D4)
-
-Each run unit writes its report into its **own** per-cell folder (`reports/<product>/<cell>/<run>/`, one
-timestamped subdir per run — §3.5). So `wp-rocket@apache`, `wp-rocket@nginx`, `backwpup@apache`, and
-`backwpup@nginx` each have a self-contained report containing **all of that cell's workers' results** —
-exactly the desired separation. Because edition is a cell facet (§4.5), `backwpup`'s `free@apache` and
-`pro@apache` likewise land in distinct report folders with no extra machinery. Playwright's `blob`
-reporter + `merge-reports` (the cross-machine sharding consolidation path) is **deliberately not used**:
-reports are kept separate by design, not merged.
-
-### 6.4 Versus the baseline
-
-- **Exceeds:** an interactive **trace viewer** (baseline had none), **history/trends + flaky detection**
-  via Allure (baseline had none), and per-(product × cell) reporting (baseline was single-product).
-- **Matches by choice:** embedded video + screenshots on failure in the Gherkin report (MODE A) — the
-  one baseline property kept intact.
-
----
-
-## 7. WordPress automation layer
-
-### 7.1 Server modes & WP-CLI transport
-
-All three modes are first-class; **`ssh` is the default** (matches the baseline's `external`). The mode
-decides **how WP-CLI is dispatched**; it is orthogonal to the cell/site list (which decides *which*
-WordPress instances run).
+- Status: Phases 0–5 done. Phase 6 (feature porting, BackWPup first) in progress in the [phase-6
+  plan](phase-6-feature-porting-plan.md). Phases 7 and 10 open. Phase 8 dropped. Phase 9 moved to
+  the [orchestrator plan](orchestrator-plan.md). WP Rocket's port starts after Phase 10.
+- Merged in, both done: plugin artifacts (§7) and site file ownership (§8), formerly plans of their
+  own.
+- Baseline (reference only): `wp-rocket-e2e`, the legacy suite being superseded. Target: this repo.
+- Scope: decisions, their reasons, verified external facts, limits and open work. The as-built
+  description is in `docs/architecture/` (execution-model, plugin-artifacts, wordpress-automation),
+  `docs/guides/` (configuration, authoring-tests), README and CLAUDE.md.
+
+## TL;DR
+
+- The suite runs Gherkin through the Playwright runner (`playwright-bdd`, not the Cucumber CLI) on
+  ESM, Node 24 and strict TypeScript. Goal: match or beat the baseline in capabilities, reporting,
+  maintainability and security, and add multi-product, multi-environment parallel runs.
+- Porting means modernise, never copy 1:1: every capability is re-implemented with current
+  Playwright idioms (web-first assertions, auto-waiting locators, fixtures, `storageState`), strict
+  types and explicit errors. Coverage never regresses.
+- Run model: a (product × cell) matrix. One Playwright invocation per run unit with `workers` = the
+  cell's pool size, because `parallelIndex` is global per invocation (§2.1). One report per run
+  unit, never merged. Products are separate; cells are data; credentials never enter report-bound
+  metadata.
+- The plugin zips under test are resolved, built through APVM and identity-verified per run (§7);
+  files the suite installs on a site are handed back to the site's own owner (§8).
+- Open: Phase 7 (live terminal progress), Phase 10 (dependency check, cleanup), then WP Rocket's
+  port, which uses the parity matrix (§4).
+
+## 1. Core decisions
+
+- D1 — Execution is a (product × cell) matrix with a site pool per cell: one Playwright invocation
+  per run unit, `workers` = pool size. Reason: §2.1. Parallelism shipped in v1, not deferred.
+- D2 — Products are fully separated: own BDD config, directories, sites file and reports; only
+  `src/common/` is shared. No config bleed: BackWPup's storage config is invisible to WP Rocket.
+- D3 — Cells are data (the top-level keys of a product's sites files), not an enum. `ssh`/`local`
+  take any number; `docker` ships Apache + Nginx with a fixed PHP. Code iterates the keys.
+- D4 — Each run unit produces its own report; no merging (`blob` + `merge-reports` deliberately
+  unused). Different cells, editions included, land in different folders with no extra machinery.
+- D5 — Server modes: `ssh` (default, the baseline's `external`), `docker` (Apache and Nginx),
+  `local` (whatever the user runs). Why a custom compose: §2.9.
+- D6 — Full reporting stack: Playwright HTML, the Cucumber HTML report (dual-mode, `REPORT_MODE`),
+  Allure 3 (§2.8).
+- D7 — The plugin lifecycle covers WP-CLI and the admin UI. Cleanup is idempotent (absent ⇒ no-op);
+  deletion as the action under test asserts presence first (§2.10).
+- D8 — Orchestrator-ready from day one: all isolation lives in the suite, so the orchestrator only
+  automates running cells and adds nothing to the run model. The two gaps found later (`bddgen`
+  rewriting every cell's specs, the shared root `test-results/`) were the orchestrator plan's 0A.1
+  and 0A.2, done.
+- D9 — BackWPup Free and Pro are one product; edition is a per-cell property. Same plugin and
+  domain, ~90 % shared: a second product would duplicate the shared part or fake-share it (§2.6).
+- D10 — Site credentials never enter Playwright `metadata`, which Playwright serialises verbatim
+  into its reports; pools reach workers through an in-process registry (§2.2).
+
+## 2. Design rationale
+
+What only this plan holds; each section names where the as-built mechanics are described.
+
+### 2.1 One invocation per run unit
+
+Verified against Playwright's docs (test-projects, test-parallel, class-testinfo, class-workerinfo,
+class-testproject):
+
+- Projects multiply: several projects matching the same tests run every test once per project (the
+  cross-browser model). That gives "Apache and Nginx".
+- Workers distribute: the pool runs each test once, handing the next pending file to a free worker.
+  That spreads a cell's scenarios over its sites.
+- `testInfo.parallelIndex` (a stable, restart-safe slot in `0…workers-1`) is bounded by the global
+  `workers` and not reset per project; maintainers corroborate it (microsoft/playwright#38953 shows
+  indices beyond per-project worker counts). So `pool[parallelIndex]` is safe only when one project
+  runs in the invocation with `workers` = pool size; two cells in one invocation overflow the
+  smaller pool.
+- Per-project `workers` (since 1.52) caps how many workers a project uses, not which `parallelIndex`
+  values it sees, so it does not make a multi-cell invocation safe.
+
+Hence one cell per invocation; selecting more fails fast; a cell-less run is serial (`workers = 1`)
+and reports to an `_all` bucket. The matrix across cells comes from running cells side by side.
+
+Example: 50 scenarios and two cells ⇒ 50 run on Apache and 50 on Nginx, each spread over that cell's
+pool; two products × two cells are four run units, four reports.
+
+As built: [execution-model.md](../architecture/execution-model.md), "Worker → site binding", with
+the `E2E_CELL` pin that later made two cells of one product safe side by side.
+
+### 2.2 Worker → site binding and credentials
+
+- A worker-scoped fixture binds the worker to `pool[parallelIndex]` for its lifetime; `baseURL` and
+  `storageState` derive from it. Steps never hard-code a URL or credential, so adding sites or cells
+  never touches step code.
+- The config factory registers each cell's pool in an in-process registry as a side effect of
+  building the config. Playwright re-runs the config in every worker, so each worker resolves its
+  own pool locally; `metadata` carries only `{ product, cell, edition? }`.
+- The pool never reached a report. The login's `fill()` put the site password into every real run's
+  reports until the orchestrator plan's 0D.4 (secrets now typed through `enterSecret`); a scenario's
+  retained trace still holds session cookies (CLAUDE.md).
+
+As built: execution-model.md, "Credential handling".
+
+### 2.3 Artifact lifecycles
+
+- Two lifecycles, decided by whether a history has value. History accumulates: reports, pruned as
+  each run ends and by `report:prune` (the orchestrator plan's 0F); Allure's per-cell
+  `allure-history.jsonl`, not pruned (its retention is open: the orchestrator plan, §4). Build
+  output and transient state (generated specs, `storageState`, `test-results`) is overwritten in
+  place, so it never piles up.
+- Every path is keyed by `<product>/<cell>`, so different cells never share one. `*_ROOT` overrides
+  replace only the root; the namespace is always appended, so an override cannot merge two cells.
+- A cell runs with zero env vars: ephemeral paths follow from product and cell; `RUN_ID` only names
+  the report folder (a sortable timestamp unless CI or an orchestrator passes a meaningful one).
+- Reports are self-contained (each copies in its attachments), so emptying `test-results` never
+  harms an older report. Cross-run trends come from Allure.
+- The same cell never runs twice at once: its pool is shared WordPress state, and two runs would
+  corrupt each other's database.
+
+As built: execution-model.md, "Artifact directories & lifecycle" and "Report retention".
+
+### 2.4 Scope and scaling
+
+Everything shipped in v1: product separation, cells as data, pools, binding, per-cell reports,
+isolation. A pool may be size 1 (serial within the cell, same machinery). Scaling a cell is data
+only: add sites to a pool, or a cell key. A product is a folder plus its entry in `products.ts`, a
+root `playwright.<name>.config.ts` and a `test:<name>` script (authoring-tests.md, "Adding a
+product").
+
+### 2.5 Products, sites files and service secrets
+
+- Per-product Playwright entries sit at the repo root so every glob resolves repo-root-relative;
+  each is a thin `createProductConfig(<product>)` call (authoring-tests.md, "Adding a product").
+- Per-product structured sites files, not one flat `.env`: `process.env` is global to a process, so
+  a different `.env` per product is impossible.
+- Global service credentials (one external service per product, not per site) come from the
+  environment; the committed config holds only their shape.
+- A site may override a service credential in its own `overrides` block, validated at load with a
+  path-named error — mostly to dodge per-host rate limits (FTP connection caps) when a cell runs
+  many sites, or to point at another bucket or server.
+- The override is to be deep-merged over the product's `services`
+  (`merge(product.services, site.overrides)`, a site inheriting every value it does not declare).
+  Not built: nothing reads `services` or `overrides` yet (only `sites.ts` validates them). Build the
+  merge, or correct this text, `types.ts` and configuration.md, before the storage scenarios
+  (phase-6 plan's 6H.2; the orchestrator plan's 0B.1).
+- On the site, not in `SITE_<n>_<KEY>` env keys: it fits the data shape (an env key would have to
+  encode product, cell and index, `WPROCKET_NGINX_SITE_2_FTP_HOST`), and index-based keys bind to an
+  array position, so reordering a pool silently remaps them. Secret exposure does not separate the
+  two: the sites file is already git-ignored and holds each site's secrets.
+- Likely override candidates: FTP (high rate-limit risk), Dropbox and Rackspace (medium); S3 and
+  Azure rarely (built for concurrency).
+
+As built: configuration.md (but the merge above).
+
+### 2.6 Editions (Free / Pro)
+
+- Free and Pro are separate packages sharing most behaviour: Pro has Free's features (minus a few
+  Free-only items such as beta subscriptions) plus more storages, quality-of-life flows and enhanced
+  variants of shared flows.
+- Edition belongs to the cell because it decides three cell-wide things: the package installed, the
+  scenarios generated, the page-object branch. None is per site, so it is declared once per cell
+  (`pro@nginx`, `free@apache`). It rides cells-as-data, so per-edition pools, reports and
+  orchestration come free, with no new matrix axis; being non-secret, it travels in routing
+  metadata. One value per cell, so no per-site field and no pool-uniformity check.
+- Tags: none = both editions; `@pro` / `@free` = that edition's cells. Each cell's `defineBddConfig`
+  gets a `tags` expression (`not @free` on Pro, `not @pro` on Free, none when editionless), which
+  filters at generation (playwright-bdd `tags?: string`) and composes with `--grep`.
+- A scenario tagged both would run nowhere. The design rejects it, but nothing enforces that today
+  (no check in `project.ts` or `types.ts`) — open; no phase owns it yet.
+- Different user journeys become separate `@free`/`@pro` scenarios sharing a Background (restore:
+  Pro restores from the backup list, Free uploads a downloaded backup). Same steps with incidental
+  UI differences: one untagged scenario and an edition-aware page object (an interface, one class
+  per edition, a small factory selected by the `edition` fixture). Pro-only storages need no config
+  split; their scenarios are `@pro`.
+- Absent edition: an editionless product declares none (no filter, one package). An edition-ful
+  product must declare it on every cell — all-or-none, failing at load — rather than install an
+  undefined package or run both editions' scenarios.
+- Package selection is the artifacts capability (§7). The first sketch, a static
+  `plugin: { free, pro }` zip map in the product config, was dropped: a committed path cannot say
+  which build it holds, and nothing verified that a `pro` cell got the Pro package.
+
+As built: configuration.md, "Editions"; authoring-tests.md, "Tags".
+
+### 2.7 Authentication
+
+Authenticate once per site and reuse its `storageState`, instead of the baseline's per-scenario UI
+login. Each cell's BDD project depends on a setup project that logs in every real site (placeholders
+skipped, so a fresh checkout stays green); `@noauth` scenarios start unauthenticated.
+
+Not built: multi-user, which the baseline supports (`admin` vs `admin2`) — a second per-site state
+file plus a step `Given I am logged in as {string}` → `context.setStorageState(path)`.
+
+As built: CLAUDE.md, "Auth fixture / setup".
+
+### 2.8 Reporting
+
+- Three tiers run together because playwright-bdd emits standard Playwright tests: Playwright HTML
+  (the interactive trace viewer, the baseline's real gap), the Cucumber HTML report (the baseline
+  report's successor), Allure 3 (history, trends, flaky categories, dashboards, `singleFile`).
+  Capture: trace, video and screenshot all `retain-on-failure`.
+- The Cucumber report trades a portable single file against an in-report trace viewer, so both exist
+  (`REPORT_MODE`). Default (A): one self-contained file, screenshots and video embedded, only the
+  trace zip skipped, opens from `file://` — for whoever downloads one file (planned for AutoE2E and
+  CI). `rich` (B), for targeted debugging: HTML plus `data/` with the trace viewer, which must be
+  served over `http(s)://`.
+- The reporter embeds whatever exists and has no "embed only on failure" switch, so never add
+  `video/webm` to `skipAttachments` in mode A.
+- Versus the baseline: exceeds it (trace viewer, trends and flaky detection, per-(product × cell)
+  reports); matches it by choice (video and screenshots embedded in the Gherkin report).
+
+As built: README, "Reporting"; `src/common/config/reporting.ts`.
+
+### 2.9 Server modes
 
 | Mode | WP-CLI transport | Provisioning | Web server(s) |
 | --- | --- | --- | --- |
-| `ssh` *(default)* | `node-ssh` `execCommand` on the remote host | existing remote sites | as configured on the host |
-| `docker` | `docker exec <container> wp …` (via `execa`; the cell's `transport.container`) | **custom `docker compose`** in [`docker/`](../../docker) | **Apache *and* Nginx** (D5) |
-| `local` | `execa(cliPath, […])` on the host | user's local install | **whatever the user runs** (agnostic) |
+| `ssh` (default) | node-ssh, remote host | existing remote sites | as the host configures |
+| `docker` | `docker exec <container> wp …` | custom compose, `docker/` | Apache and Nginx |
+| `local` | execa, on the host | the user's own install | whatever the user runs |
 
-**`docker` = Apache and Nginx.** `@wordpress/env` is **Apache-only** (`FROM wordpress${phpVersion}`,
-`APACHE_RUN_*`, no Nginx path — verified in installed source), so a single custom `docker compose`
-provides both over one MariaDB:
+- The mode decides how WP-CLI is dispatched; it is orthogonal to which sites run.
+- `@wordpress/env` is Apache-only (verified in its installed source: `FROM wordpress${phpVersion}`,
+  `APACHE_RUN_*`, no Nginx path), so a custom compose provides both over one MariaDB: Apache from
+  `wordpress:php8.x-apache`; Nginx = `wordpress:php8.x-fpm` with no published host port (Docker
+  Hub's FastCGI security note) plus `nginx` with a WordPress vhost — the vhost is required, php-fpm
+  alone serves nothing; a `wordpress:cli` container per install.
+- `@wordpress/env` stays an optional, Apache-only convenience.
 
-- **Apache** from `wordpress:php8.x-apache` (e.g. host port 8080).
-- **Nginx** = `wordpress:php8.x-fpm` (PHP-FPM, **no published host port** per Docker Hub's FastCGI
-  security note) **+** `nginx:alpine` with a WordPress vhost (`try_files`/`fastcgi_pass`) on e.g. 8081.
-  **The vhost file is a required deliverable** — php-fpm alone serves nothing.
-- A `wordpress:cli-php8.x` service for WP-CLI; pin image tags confirmed on Docker Hub at implementation
-  time.
+As built: README, "Local WordPress (Docker)"; `docker/`.
 
-These two web servers are the initial **cells** for `docker`; `local`/`ssh` cells come entirely from the
-product's sites file. `@wordpress/env` remains an **optional** convenience for a quick local Apache env.
+### 2.10 Exec layer and plugin lifecycle
 
-### 7.2 Exec layer
+- Commands are array args through execa or node-ssh (never a shell string), with an `exitCode` on
+  every mode — the baseline omitted it on its docker/local branch, which made guards impossible.
+- Two intents are never conflated. Cleanup (every scenario's Before/After) makes the plugin absent
+  and treats already-absent as success: a Before runs before the first install, an After may follow
+  a scenario that removed the plugin itself. Deletion as the action under test treats
+  absent-when-expected and a failed deletion as failures.
+- `wp plugin delete` exits non-zero both for "not found" and for a real failure, so state is probed
+  with `wp plugin is-installed` (0 = installed) and removal re-verified; distinct error types tell
+  the cases apart.
+- The UI path exists because some product flows exist only there. WP Rocket's post-delete "delete
+  data" confirmation is not exercised yet — to verify when porting WP Rocket.
+- Other baseline capabilities: DB ops → `wp db query` through exec (`dbQuery`); settings
+  export/import diff → Playwright `expect` deep-equality, `microdiff` only if a structured diff
+  object is needed (WP Rocket, pending); `debug.log` scan → tag-scoped hooks, with a direct file
+  read when a fatal stops WordPress booting; health check and report opener → `styleText`,
+  `npm run report`.
 
-`src/common/wp/exec.ts` dispatches by mode — local & Docker via **`execa`** (array args; never string
-concatenation → no shell injection), remote via **`node-ssh`** — and returns a structured result with an
-**`exitCode` on every mode** (the baseline omitted it on the docker/local branch, which made guards
-impossible). Surface `error.shortMessage` for diagnostics.
+As built: wordpress-automation.md (removal is `wp plugin uninstall`, never `delete` nor
+`uninstall --deactivate`); the UI delete flow in `src/common/pages/plugins.page.ts`.
 
-### 7.3 Plugin lifecycle — WP-CLI and UI; idempotent cleanup vs. asserted deletion (D7)
+### 2.11 Page objects and step wiring
 
-The baseline manages plugins both ways and the target keeps both, because some product flows exist only
-in the UI (e.g. WP Rocket's "delete data" confirmation). Two **different intents** must not be conflated:
+- Plain page objects only — no playwright-bdd decorators or `@Fixture` style, no hybrid. Interaction
+  logic lives once in the POM, Gherkin wiring entirely in thin step functions, so neither leaks into
+  the other. Product POMs register as fixtures in the product's own `fixtures.ts`.
+- Edition-divergent pages: §2.6.
+- Trap: a step file outside the product's `steps` glob, or not exported, registers zero steps
+  silently ("undefined step").
+- Port the baseline's `sections.ts` / `selectors.ts` to role- and label-based locators and web-first
+  assertions: no brittle CSS chains, no manual `isVisible()` polling.
 
-- **Cleanup (the `Before`/`After` hooks of every scenario)** — make the plugin absent. If it is already
-  absent, that is **success, not a failure** (a `Before` runs before the first install; an `After` may
-  run after a scenario that itself deleted the plugin). Only a *genuine failure to delete* must surface.
-- **Deletion as the action under test** — a scenario that verifies the delete flow. Here the plugin is
-  expected to be present (the `Before` installed it), so *absent-when-expected* is a real failure, and so
-  is a *failed* deletion.
+As built: authoring-tests.md, "Page Object Model".
 
-`wp plugin delete <slug>` exits **non-zero for both** "not found" *and* a real failure, so the exit code
-alone is ambiguous; the reliable probe is **`wp plugin is-installed`** (exit `0` = installed, `1` = not).
-Two distinct error types let steps and reports tell the failing cases apart:
+### 2.12 Visual regression
 
-```ts
-// src/common/wp/errors.ts
-export class PluginNotInstalledError   extends Error {}
-export class PluginDeletionFailedError extends Error {}
-```
+The baseline's BackstopJS was fully disabled (`return; // Skip VR tests` in every step, zero
+committed references) and used only an A/B model: the page with optimisations bypassed
+(`?nowprocket`) against the optimised page, same run, no stored baseline. So the active model is
+that A/B check, diffed with pixelmatch + pngjs (the engine Playwright uses internally, browser-free
+and unit-testable). A committed-baseline helper (`screenshot.ts`, `toHaveScreenshot`) exists as
+wiring only; if it is ever activated, generate baselines in the CI image or container, commit them
+per project and mask dynamic regions.
 
-```ts
-// src/common/wp/plugin.ts
-export const isPluginInstalled = (slug: string) =>
-  wpCli(["plugin", "is-installed", slug]).then((r) => r.exitCode === 0);
+As built: README, "Visual regression"; CLAUDE.md, "Visual testing". The `@visual` scenarios land
+with WP Rocket's port.
 
-/** CLEANUP (idempotent) — for Before/After hooks. Absent ⇒ no-op success; a real delete failure throws. */
-export async function ensurePluginAbsent(slug: string): Promise<void> {
-  if (!(await isPluginInstalled(slug))) return;           // already gone ⇒ nothing to do (NOT an error)
-  await wpCli(["plugin", "delete", slug]);                // delete's exit code is ambiguous — don't trust it
-  if (await isPluginInstalled(slug)) {                    // re-assert removal
-    throw new PluginDeletionFailedError(`Plugin "${slug}" still installed after delete; FAILED.`);
-  }
-}
+### 2.13 Device profiles
 
-/** ACTION UNDER TEST — only for scenarios that verify deletion. Absent-when-expected ⇒ failure. */
-export async function deletePlugin(slug: string): Promise<void> {
-  if (!(await isPluginInstalled(slug))) {
-    throw new PluginNotInstalledError(`Plugin "${slug}" expected installed before deletion, but is absent.`);
-  }
-  await wpCli(["plugin", "delete", slug]);
-  if (await isPluginInstalled(slug)) {
-    throw new PluginDeletionFailedError(`Plugin "${slug}" still installed after delete; FAILED.`);
-  }
-}
-```
+Device is a per-scenario client concern, orthogonal to cells and editions (it never multiplies the
+matrix or touches the binding), so it is tag-driven and desktop by default. Sizes come from the
+baseline: desktop 1600×700, mobile 389×829. `@mobile` applies a full `devices[…]` preset (viewport,
+`isMobile`, `hasTouch`, mobile user agent, `deviceScaleFactor`) as a `use` override at context
+creation — declarative, where standalone Cucumber forced imperative `setViewportSize` calls.
 
-So a `Before` hook runs `ensurePluginAbsent(slug)` then installs a fresh copy, and an `After` hook runs
-`ensurePluginAbsent(slug)` — cleanup never fails merely because the plugin was already gone, yet a real
-deletion failure still throws.
+As built: `src/common/config/devices.ts`; CLAUDE.md, "Device profiles".
 
-The **UI** path is for scenarios whose intent *is* the user-facing deletion flow; it is the asserted
-variant. Detect install state with `locator.count() > 0` on `#activate-<slug>`/`#deactivate-<slug>` (not
-`isVisible()`, which can't tell absent from offscreen). WordPress only offers Delete for inactive plugins,
-so an active plugin is **deactivated first** (failure ⇒ `PluginDeactivationFailedError`). Deletion itself
-is an **AJAX call** — `wp.updates` → `admin-ajax.php?action=delete-plugin`, guarded by a native
-`confirm()`, *not* a navigation (verified against live wp-admin in Phase 3d). So: accept the `confirm()`
-with a dialog handler removed in a `finally`; trigger Delete with a **forced click** (the normal
-actionability wait can stall right after an in-session deactivate); await the **slug-specific
-`delete-plugin` response** as a barrier (a missing one ⇒ failure); then **reload and re-assert** the
-action links are gone — WordPress's in-place row removal is unreliable under automation, so the reloaded
-DOM is the authoritative check. Throws the distinct errors above. Routine setup/teardown always uses the
-faster CLI `ensurePluginAbsent`. *(WP Rocket's own post-delete "delete data" page is not yet exercised —
-to be verified when porting WP Rocket, after Phase 10.)*
+Open, for WP Rocket's port:
 
-### 7.4 Other ported capabilities
+- Server-side mobile: WP Rocket serves different cached and beacon output by `wp_is_mobile()`.
+  Whether the mobile user agent alone makes it serve mobile content is to verify. If it does not
+  (caching edge cases), force it server-side with a `@mobile` Before/After hook (a
+  `force-wp-mobile`-style helper); prefer the user-agent path if it holds.
+- Form-factor data: steps comparing device-specific data (LCP/ATF expectations, the `is_mobile` DB
+  column) read `$tags` to pick the desktop or mobile dataset.
+- A rare mid-scenario resize stays available as an imperative `setViewportSize` step.
 
-- **DB ops** (`dbQuery`/`seedData`/`checkData`) → `wp db query` through the exec layer.
-- **Settings export/import diff** → Playwright `expect` deep-equality (reported, retried);
-  **`microdiff`** only if a structured diff object is needed.
-- **`debug.log` error scan** → a tag-scoped After hook reading the log via the exec layer — WP-CLI
-  `wp eval`, with a direct file read/removal fallback for when a fatal stops WordPress booting — and
-  attaching it on failure.
-- **Health check / report opener / archiving** → `node:util` `styleText` for colour;
-  `npx playwright show-report` for opening; a tiny `fs` script or CI artifact upload for archiving.
+## 3. Phases
 
-### 7.5 Page Object Model & step wiring
-
-Page-interaction logic lives **once** in a plain POM under `src/projects/<product>/pages/`
-(cross-product POMs in `common/`); steps delegate to it. Recommended default:
-
-```ts
-// pages/dashboard.page.ts — plain POM (usable programmatically anywhere)
-export class WpRocketDashboardPage {
-  constructor(private readonly page: Page) {}
-  async open() { await this.page.goto("/wp-admin/options-general.php?page=wprocket"); }
-  async expectLoaded() { await expect(this.page.getByRole("heading", { name: /WP Rocket/ })).toBeVisible(); }
-}
-// fixtures.ts: wpRocket: ({ page }, use) => use(new WpRocketDashboardPage(page))
-// steps:       Given("I am on the WP Rocket dashboard", ({ wpRocket }) => wpRocket.open());
-```
-
-**Only this pattern is used — no decorators, no hybrid.** All page-interaction logic lives in the POM;
-the Gherkin wiring lives entirely in the product's `steps/` directory as thin step functions that call
-POM methods (the POM is registered as a fixture in `common/fixtures.ts`). This keeps one source of truth
-(the POM) cleanly separated from the step declarations and prevents interaction logic from leaking into
-both places. playwright-bdd's decorator/`@Fixture` style is deliberately **not** adopted.
-
-**Edition-divergent pages (BackWPup Free/Pro)** stay plain POMs too: where a flow genuinely differs by
-edition, an interface + per-edition class + a small factory (`restorePage(page, edition)`) keeps each
-edition's logic in its own class, selected via the `edition` fixture (§4.5). Shared pages remain single
-classes used by both.
-
-**Pitfall to note:** the `steps` glob must cover **every** step file **and** `fixtures.ts`; a step
-file/class outside the glob (or not `export`ed) registers **zero steps silently** ("undefined step").
-Modernise the baseline's `sections.ts`/`selectors.ts` to role-/label-based locators and web-first
-assertions (no brittle CSS chains, no manual `isVisible()` polling).
-
-### 7.6 Visual regression
-
-Replace **BackstopJS** with Playwright **`toHaveScreenshot()`** (built-in: integrated into the runner,
-trace, retries, masking, `threshold`/`maxDiffPixelRatio`, `stylePath`, `animations:"disabled"`).
-Generate baselines **in the CI image/container** for cross-platform stability; commit per-project
-snapshots; mask dynamic regions.
-
-### 7.7 Device / viewport (desktop & mobile)
-
-WP Rocket runs scenarios in both desktop and mobile views. Device is a **per-scenario client**
-concern — orthogonal to cells and editions (it never multiplies the matrix or touches the worker→site
-binding) — so it is tag-driven, **desktop by default**:
-
-- **Sizes** (from the baseline): desktop **`1600×700`**, mobile **`389×829`**. The desktop viewport is
-  the **default now** — every project runs Desktop Chrome at `1600×700` (set in the config factory). The
-  mobile size applies via `@mobile` in Phase 6.
-- **`@mobile`** scenarios get a mobile device profile via a `$tags`-driven `use` override — viewport
-  **+ `isMobile` + `hasTouch` + mobile `userAgent` + `deviceScaleFactor`** from a `devices[...]` preset,
-  applied at context creation (the same mechanism as `@noauth`, §3.3). Untagged scenarios stay desktop.
-  This is declarative; the Playwright runner makes the `use` override possible where standalone Cucumber
-  forced imperative, size-only `setViewportSize` calls.
-- **Server-side mobile.** WP Rocket serves different cached/beacon output based on WordPress's
-  `wp_is_mobile()`. Since the `@mobile` profile already sends a **mobile User-Agent**, that alone may make
-  `wp_is_mobile()` true and WP Rocket serve mobile content — **to verify**. If it proves insufficient
-  (caching edge cases), fall back to forcing it server-side via a `@mobile` `Before`/`After` hook (a
-  `force-wp-mobile`-style helper). Prefer the UA-only path if testing confirms it.
-- **Form-factor data.** Steps comparing device-specific data (e.g. LCP/ATF expected results, the
-  `is_mobile` DB column) read `$tags` to pick the desktop vs mobile dataset.
-- **Mid-scenario resize** (rare) stays available as an imperative `setViewportSize` step.
-
-Lands with feature porting (Phase 6).
-
----
-
-## 8. Dependency disposition
-
-Legend: **DROP** = do not carry over · **REPLACE** = same capability, modern/built-in implementation ·
-**KEEP** = carry forward · **ADD** = new capability.
-
-### 8.1 DROP (dead weight or obsolete)
-
-`axios`, `@types/axios` (deprecated stub), `boxen`, `node-zip`, `ssh2` (direct — transitive of
-`node-ssh`), `@types/ssh2`, **`multiple-cucumber-html-reporter`** (declared, never invoked),
-`@types/cucumber` (deprecated stub), `eslint-plugin-es5`, and the duplicate `playwright` (redundant with
-`@playwright/test`). All proven unused by repo-wide source inspection.
-
-### 8.2 REPLACE
-
-| Baseline | Replace with | Why |
+| Phase | Status | As built, or where it is planned |
 | --- | --- | --- |
-| `backstopjs` (+ types, `backstop.json`) | Playwright **`toHaveScreenshot()`** | Built-in; integrated with runner/report; no separate engine. |
-| `shelljs` (+ types) | **`execa` 9** (or `node:child_process`) | Promise-based, auto-escapes args (no injection), structured errors, ESM-native. |
-| `chalk` 4 | **`node:util` `styleText`** (Node ≥ 24) | Zero-dependency native styling. |
-| `ts-node` | **Native Node TS** (scripts) / runner transpile (tests) | Node 24 runs `.ts` directly; Cucumber CLI is gone. |
-| `json-diff` (+ types) | Playwright `expect` deep-equality; `microdiff` if a diff object is needed | Assertions belong in `expect`; `microdiff` is tiny/typed. |
+| 0 Guardrails | done | §1; `.env.example`, `sites.example.json`, README |
+| 1 Config foundation | done | typed env, transport union, `.env` loader — configuration.md |
+| 2 Execution model & isolation | done | execution-model.md |
+| 3 WordPress automation layer | done | wordpress-automation.md; `docker/` |
+| 4 Reporting | done | README, "Reporting"; `allurerc.mjs`, `scripts/allure.mjs` |
+| 5 Visual regression | done | §2.12 |
+| 6 Feature porting | in progress | phase-6 plan (supersedes this phase; BackWPup only) |
+| 7 Tests output | open | below |
+| 8 CI on real cells | dropped | below |
+| 9 Orchestrator | moved | orchestrator plan |
+| 10 Cleanup & validation | open | below |
+| WP Rocket port | after Phase 10 | phase-6 plan, "After Phase 10 — WP Rocket" |
 
-### 8.3 KEEP
+Phases 7 and 10 state no dependencies, effort or parallelism; Phase 7 states no definition of done.
 
-- **`node-ssh`** (13.2.1) — remote WP-CLI for `ssh` mode (the default; Phase 3). Ships its own types.
+Phase 6: the three install-hook obligations this plan set (consume `pluginArtifact`, stage the zip
+for `ssh`/`docker`, clean the staging area in worker teardown) are done (6A; `releaseBoundSite`).
+Its open note on retries — "maybe 0 retries for local is not the best, must assess this" — has been
+acted on: 2 retries everywhere, local runs included, `E2E_RETRIES` overriding
+(`src/common/config/project.ts`); whether that is the final answer stays the phase-6 plan's to
+judge. Acceptance this plan set, beyond 6A's and still open: a review checklist confirms no 1:1
+carry-over from the baseline (WP Rocket's port included).
 
-`ServerMode`/transport validation uses a **native discriminated `switch`** with a fail-fast `default`
-(in `sites.ts`), so no pattern-matching dependency is required. The Phase 3 exec-layer dispatch can use
-the same native switch; **`ts-pattern`** is an **optional** ADD only if an exhaustive `match()` is wanted
-there.
+Phase 7 — Tests output (open).
 
-### 8.4 ADD
+- Goal: display very good progress in the terminal while tests run — how many tests ran, how many
+  remain, how many passed, how many failed, etc. Every time a test/scenario fails, display its name
+  and the failed step in the terminal (if not the default by Playwright).
+- Today: `list` prints a line per test; `results.jsonl` streams every event as it happens; the run
+  summary prints the verdict and counts only at the end (`src/common/reporting/`).
+- Pairs with the orchestrator's live progress, built from the same results stream (orchestrator
+  plan, "Output and logs").
 
-- **`allure-playwright`** (Allure 3, 3.10.0) — analytics/trends/flaky/dashboards (Phase 4).
-- **`execa`** (9.6.1) — process execution (or built-in `node:child_process`) (Phase 3).
-- *optional:* **`ts-pattern`** (exec-layer dispatch only), **`microdiff`** (settings diff object),
-  **`http-server`** (serve MODE B report), **`@wordpress/env`** (quick local Apache only — does **not**
-  satisfy the docker Apache+Nginx requirement).
+Phase 8 — CI on real cells (dropped). It planned a CI matrix of real cells (one job per product ×
+cell). Real-cell runs, PRs included, belong to the orchestrator; CI keeps its quality, unit and
+`@noauth` smoke jobs (`.github/workflows/ci.yml`).
 
-### 8.5 `package.json` deltas (indicative; re-pin at implementation time)
+Phase 9 — Orchestrator (moved): a long-running service with phases of its own. Report pruning (done
+there as 0F), the pre-warm call and the Free/Pro single build moved with it.
 
-- **Add (when their phase lands):** `execa`, `node-ssh`, `allure-playwright`; *optional:* `ts-pattern`,
-  `microdiff`, `http-server`, `@wordpress/env`.
-- **No new dependency needed for:** the execution model (plain Playwright config + factory), dual-mode
-  reporting (`REPORT_MODE` + bundled `cucumberReporter`), the Gherkin/Cucumber HTML report (bundled in
-  `playwright-bdd`; the standalone `@cucumber/cucumber` runner is **not** used), `.env` loading
-  (`process.loadEnvFile()`), config validation (hand-rolled, no `zod`), and the plugin install-state
-  checks (WP-CLI `is-installed`).
-- **Do not add (built-ins / hooks cover them):** `backstopjs`, `shelljs`, `chalk`, `ts-node`, `dotenv`,
-  `@playwright/browser-chromium` (§8.6).
-- **Never carry over:** the §8.1 DROP list.
+Phase 10 — Cleanup & validation (open).
 
-### 8.6 Browser provisioning
+- A `deps:check` script (e.g. `depcheck`) catching unused dependencies.
+- No dependency on §5's drop list reappears.
+- `lint`, `typecheck` and `format:check` green; the reports generate.
+- Remove every mention of plan phases from code comments (CLAUDE.md forbids citing plans in code).
 
-Chromium is downloaded by a `postinstall` script (`playwright install chromium`), so a fresh
-`npm install` is immediately runnable with no extra step. A committed **`.npmrc` (`ignore-scripts=false`)**
-ensures that hook runs even where install scripts are disabled globally; `npm run setup` re-runs it on
-demand. The standalone `@playwright/browser-chromium` helper is **not** used — the `postinstall` always
-matches the installed Playwright version, with one fewer version to keep in lockstep. The runner uses the
-bundled Chromium (`devices["Desktop Chrome"]`, no `channel`).
+## 4. Feature-parity matrix
 
----
+Baseline capability → target design → status. WP Rocket's port starts from the pending rows.
 
-## 9. Phased implementation plan
+1. WP-CLI exec (local/Docker/SSH) → `wp/exec.ts`: execa (local, `docker exec`), node-ssh (remote),
+   `exitCode` on every mode. Built.
+2. Server/env config → typed env accessors; the transport union (default `ssh`); per-product config
+   and sites files (§2.5). Built, except the `services` ← `overrides` merge (open, §2.5).
+3. Plugin/theme lifecycle → WP-CLI wrappers and UI page objects; idempotent cleanup, asserted
+   removal under test, distinct errors (§2.10). Plugins built; themes not.
+4. DB ops → `wp db query` through exec. `dbQuery` built; the baseline's `seedData`/`checkData` come
+   with WP Rocket.
+5. Visual regression → the A/B check (§2.12). Built; scenarios come with WP Rocket.
+6. Settings export/import diff → `expect` deep-equality; `microdiff` if a diff object is needed.
+   Pending (WP Rocket).
+7. Auth (login/logout) → per-site `storageState`, per-cell setup project, `@noauth` (§2.7). Built;
+   multi-user pending.
+8. POM (sections/selectors) → plain POM fixtures, thin steps, edition-divergent pages through a
+   factory (§2.11). Built.
+9. Lifecycle hooks → playwright-bdd `Before`/`After`/`BeforeAll`/`AfterAll` with `{ tags }`. Built.
+10. Health check / open report / archiving → `styleText`; `npm run report`; a CI artifact upload or
+    a small `fs` script. Health check and opener built; archiving not assessed.
+11. `debug.log` scan → tag-scoped hooks, the log attached on failure. Built (`@plugin`).
+12. Local WP env → `docker` = Apache + Nginx; `local` = any server; `@wordpress/env` optional
+    (§2.9). Built.
+13. Execution / parallelism (new) → (product × cell) run units, site pools, per-cell reports (§2.1).
+    Built; the orchestrator is in progress.
+14. Plugin editions (new) → one product, per-cell edition selecting package, scenarios and POM
+    branch (§2.6). Built.
+15. Credential safety (new) → pools through an in-process registry, never report-serialised metadata
+    (§2.2). Built.
+16. Plugin zip selection (new; the baseline's `new_release` / `previous_stable` zips in
+    `utils/plugin-builder.ts`) → per-run `plugin`/`previous` roles built from any git ref through
+    APVM or provided, identity-verified per product and edition, staged onto `ssh`/`docker` sites
+    (§7). Built.
 
-Each phase is independently shippable and verifiable. **Phases 0–2 are implemented; Phases 3–9 are
-planned.**
+## 5. Dependency disposition
 
-**Phase 0 — Guardrails. ✅** Ratify §2 decisions as the project ADR; commit `.env.example`, per-product
-`sites.example.json`, and a `README`.
+The baseline declares `axios`, `boxen`, `node-zip`, direct `ssh2` and
+`multiple-cucumber-html-reporter` but never imports them. Its "beautiful report" is the stock
+Cucumber HTML formatter: media-rich on failure (base64 screenshot and video) but static — no trace
+viewer, no trends. Most other libraries have modern, often built-in replacements.
 
-**Phase 1 — Config foundation. ✅** Typed `env`/`requireEnv`/`intEnv`/`boolEnv` (`src/common/config/env.ts`);
-the `Transport`/`ServerMode` discriminated union validated by a **native `switch`** with a fail-fast
-`default`; `process.loadEnvFile()` (guarded, `load-env.ts`); per-product config modules + per-product
-sites files (cells as keys) with the **validated** per-site `overrides` (§4.3); `reporting.ts` +
-`project.ts`. *Acceptance:* `typecheck` + `lint` clean; invalid env/sites error clearly.
+- Drop, never carry over (Phase 10 checks it): `axios`, `@types/axios` (deprecated stub), `boxen`,
+  `node-zip`, direct `ssh2` and `@types/ssh2` (ssh2 stays a transitive dependency of node-ssh),
+  `multiple-cucumber-html-reporter`, `@types/cucumber` (deprecated stub), `eslint-plugin-es5`, and
+  the duplicate `playwright` (redundant with `@playwright/test`). Proven unused by repo-wide
+  inspection.
+- Replace:
+  - `backstopjs` (+ types, `backstop.json`) → the A/B check over pixelmatch + pngjs (§2.12).
+  - `shelljs` (+ types) → execa: promise-based, array args (no injection), structured errors, ESM.
+  - `chalk` → `node:util` `styleText`: no dependency; emits no escapes off a TTY and honours
+    `NO_COLOR` (verified on Node 24).
+  - `ts-node` → `tsx` for the root scripts, the runner's own transpile for tests (the Cucumber CLI
+    is gone).
+  - `json-diff` (+ types) → `expect` deep-equality; `microdiff` if a diff object is needed.
+  - `dotenv` → `node:util` `parseEnv`, the parser of `process.loadEnvFile()` (`config/dotenv.ts`).
+- Not needed: the standalone Cucumber runner (playwright-bdd bundles the reporter);
+  `@playwright/browser-chromium` (below); a pattern-matching library (transport dispatch is a native
+  discriminated `switch` with a fail-fast `default`); a validation library for the suite's own
+  config (hand-rolled; zod serves only the orchestrator).
+- Optional, not added: `ts-pattern`, `microdiff`, `http-server` (serving a mode-B report),
+  `@wordpress/env`.
+- `adm-zip` 0.6.0 bundles its own types (no `@types/adm-zip`) and patches CVE-2026-39244; its
+  breaking changes (`extractEntryTo`, Node 12) do not touch the read-only use. `apvm-napi`: §7.1.
+- Browsers: `postinstall` runs `playwright install chromium`, so a fresh `npm install` is runnable;
+  the committed `.npmrc` sets `ignore-scripts=false` so the hook runs where scripts are disabled
+  globally (`npm run setup` reruns it). `@playwright/browser-chromium` is not used: the postinstall
+  always matches the installed Playwright, one version fewer to keep in step. The runner uses the
+  bundled Chromium (`devices["Desktop Chrome"]`, no `channel`).
 
-**Phase 2 — Execution model & isolation (orchestrator-ready). ✅** The `createProductConfig` factory +
-root entries generating one project per cell (§4.4); the worker→site fixture (`parallelIndex`, §3.3) with
-the **credential registry** (secrets off `metadata`, D10); the **multi-cell fail-fast guard** and `_all`
-report bucket; per-cell setup/auth projects with placeholder-skip; and the `run-context` module resolving
-the stable, overwrite-in-place `<product>/<cell>` paths (§3.5). *Acceptance:* a developer can run **any**
-cell manually with **no env vars** and the `@noauth` smoke is green on a fresh checkout; running two
-**different** cells at once never conflicts; ephemeral build/state dirs **overwrite in place** while
-reports accumulate per cell; no credential appears in any report — no orchestrator yet. *(Corrected
-2026-10-09: the login's `fill()` put the site password in every real run's reports until the
-orchestrator's Phase 0 item 0D.4 — see the [Phase 0 plan](orchestrator-phase-0-plan.md) §6.4.)*
+## 6. Live risks
 
-**Phase 3 — WordPress automation layer.** `exec.ts` (execa/node-ssh, `exitCode` on every mode, plus the
-per-transport **file transfer** `copyIntoTarget` and `wpRootDir` — WP-CLI reads files from the *site's*
-filesystem, so a runner path is useless to a remote `wp`); `staging.ts` (the per-site `.e2e_temp`
-staging area built on those primitives); WP-CLI
-helpers + UI plugin page-objects with idempotent cleanup vs. asserted deletion and distinct errors; the custom
-`docker compose` (Apache **and** Nginx + vhost). *Acceptance:* `wp core version` works in each mode and
-against both Apache and Nginx; deletion-under-test passes for an installed plugin; a `Before`/`After`
-`ensurePluginAbsent` is a **no-op** when the plugin is already gone; a genuine delete failure raises
-`PluginDeletionFailedError`.
+- Shared WordPress state under parallelism: each worker owns one site (§2.1) and a cell takes one
+  run at a time (the orchestrator's site locks; manual runs are not covered — CLAUDE.md). The
+  remaining gate is provisioning isolated sites, not code.
+- Lost SSH/Docker/UI nuance in WP Rocket's port: characterise each mode with a smoke test first,
+  then re-implement idiomatically.
+- Pixel differences across platforms: the A/B check needs no stored baseline; run `@visual` in the
+  Playwright container; tune `maxDiffPixelRatio`; mask dynamic content.
+- WP Rocket's "delete data" confirmation page: handle when porting (§2.10).
+- Credentials in shared artifacts: reports carry none (§2.2). Retained traces, `error-context.md`
+  and `test-results/` still hold session cookies and typed values — treat them as sensitive
+  (CLAUDE.md).
 
-**Phase 4 — Reporting. ✅** Dual-mode `cucumberReporter` via `REPORT_MODE`; `retain-on-failure` capture;
-Allure 3 (`allurerc.mjs`: categories incl. `flaky`, dashboard widgets, `singleFile: true`); per-cell
-report folders (no merge). *Acceptance:* MODE A = one portable file with embedded video on failure;
-MODE B = embedded trace viewer over http; Allure trends across ≥ 2 runs.
-*Implemented:* `allure-playwright` reporter writes raw results to `<report>/allure-results` (added to
-`reporters()`); `scripts/allure.mjs` (`npm run report:allure [product] [cell] [--open]`) finds the
-newest run and invokes the `allure` CLI, generating into `<report>/allure` with `awesome` + `dashboard`
-plugins (both `singleFile`). Trends/flaky accumulate via a **per-cell** `allure-history.jsonl` that
-`allure generate` reads then updates — so a per-run report shows the trend across all prior runs.
-Verified end-to-end across two runs (history grows 1 snapshot/run; flaky test categorised on retry).
+## 7. Plugin artifacts (done)
 
-**Phase 5 — Visual regression. ✅** Replaces the baseline's BackstopJS, which was confirmed **fully
-disabled** (`return; // Skip VR tests` in every step, zero committed references) and used **only** an
-A/B model: render with optimizations bypassed (`?nowprocket`) vs optimized, same run, no stored
-baseline.
-*Implemented* (`src/common/visual/`, layered for reuse):
+Phases 1–5 done (2026-07-14 to 2026-07-28) and audited. As built:
+[plugin-artifacts.md](../architecture/plugin-artifacts.md) (roles, manifest, request model,
+resolution, identity preflight, consumption, pre-warm, pinning),
+[configuration.md](../guides/configuration.md#plugin-artifacts-build--verify) (the six `E2E_*`
+variables and their rules) and [wordpress-automation.md](../architecture/wordpress-automation.md)
+("Site staging & file transfer"). Kept here: the facts the design rests on, decisions and rejected
+alternatives, limits, open obligations.
 
-- `compare.ts` — pure pngjs + pixelmatch diff (`comparePng` → `{diffPixels, totalPixels, ratio,
-  diffImage}`, `ImageDimensionsMismatchError`); the same engine Playwright uses internally,
-  browser-free and unit-tested.
-- `stabilize.ts` — `stabilizeForSnapshot` (lazy-load scroll + `document.fonts.ready`), shared by both
-  models; best-effort (logged, never throws).
-- `ab.ts` — **`expectOptimizedToMatchUnoptimized(page, url, opts)`**, the WP Rocket model: captures
-  `?nowprocket` then optimized, diffs them, attaches both renders + diff on failure; `captureFullPage`
-  exposed for custom A/B. Masking + per-call tolerance; bypass flag configurable.
-- `screenshot.ts` — committed-baseline `expectPageToMatch`/`expectElementToMatch` kept as a general
-  capability (config factory sets `expect.toHaveScreenshot` + a per-product/cell `snapshotPathTemplate`
-  under `src/projects/<product>/__snapshots__/`), but NOT what WP Rocket uses, so not in the README.
+### 7.1 Verified foundations
 
-Tolerances centralised in `config/visual.ts`. *Verified end-to-end* (committed specs, 24 unit tests):
-`comparePng` identical/different/dimension-mismatch; A/B passes on match, fails (right message) on a
-pixel difference, and masking ignores a differing region. The `@visual` scenarios that call
-`expectOptimizedToMatchUnoptimized` land with feature porting (Phase 6).
+APVM, measured at `develop` (npm `3.0.0`); pinned as
+`github:wp-media/automation-plugin-version-manager#cli/v3.0.0`, the `cli/vX.Y.Z` tag pattern:
 
-**Phase 6 — Feature porting (per product) — improve, don't copy.** Rewrite to modern idioms
-(web-first assertions, role/label locators, fixtures, `storageState`); port auth, POM, tag-scoped hooks,
-and the `debug.log` scan; migrate `backwpup` (`wp-rocket` is deferred until after Phase 10 — see below). The **editions** model (§4.5) is already
-in place (`Edition` type, per-cell `edition` in routing metadata, the all-or-none check, `editionFilter`,
-the `edition` fixture); what remains here is tagging scenarios `@free`/`@pro` (untagged = both) and the
-**plugin-install hook**, which must:
+- Install: a plain git dependency with prebuilt `.node` binaries committed for darwin-arm64/x64,
+  linux-x64/arm64-gnu and win32-x64-msvc — no musl, no Rust, no postinstall; engines
+  `node >=22.22.1`. Its `prepare: husky` is blocked by the repo's `allowScripts` gate; `.npmrc`'s
+  `allow-git=root` admits the declared git dependency on npm ≥ 12.
+- Token: `Apvm.createWithTokenResolution()` tries its config → `GITHUB_TOKEN` → `GH_TOKEN` → the
+  `gh` CLI → gh's config. Required for `backwpup`, whose source is the private
+  `wp-media/backwpup-pro` (APVM `registry.rs`); otherwise optional (rate limits).
+- `build({ project, gitRef, version?, variants?, outputDir, noCache? }, onProgress?)`: `outputDir`
+  absolute, created if missing. `warmCache()` runs the same pipeline without delivering; a later
+  identical `build()` is a cache copy (`fromCache: true`).
+- Refs: bare (`develop`, a sha, `123` = a PR) or prefixed `pr:`, `branch:`, `tag:`, `commit:`,
+  `release:`; keywords `latest-stable`, `previous-stable`, `latest`, `previous-latest` for `tag:`
+  and `release:`. A `release:` ref is a GitHub Releases download through plain `build()`.
+- `version`: required by `backwpup` on build refs; optional for `wp-rocket` and `imagify`
+  (auto-detected; when given, rewritten into the source and reported as `versionOverride`); a
+  `release:*` ref takes it from the tag.
+- Output: `result` (`artifacts[{ variantId?, path, filename, size, origin }]`, `version`,
+  `variantsBuilt`), `resolvedRef`, `commit`, `commitShort`, `description`, `fromCache`,
+  `versionOverride?`; `origin` is `cache`, `built` or `downloaded`.
+- Cache: `~/.apvm/cache` by default; `APVM_CACHE_DIR` overrides it for every instance — never set
+  here. Keyed by resolved commit and version, so keyword refs re-resolve, then hit the cache. Its
+  concurrency and per-variant layout: the orchestrator plan (0A.5, the Free/Pro single build).
+- Errors are typed promise rejections (`ProjectNotFound`, `PrivateRepoNoToken`, `ReleaseNotFound`,
+  `NoMatchingReleaseAssets`, …), never crashes. Progress events are a discriminated union
+  (`reference_resolved`, `phase_*`, `step_*`, `command_output`, `warning`, `build_succeeded`,
+  `build_failed`).
+- `wp-rocket` has no downloadable GitHub Releases, so `release:*` fails for it; its `previous`
+  default `tag:latest-stable` builds instead. BackWPup has release assets (`release:latest-stable`
+  was v5.7.4 on 2026-07-16, with `free`, `pro-en` and `pro-de`); a release download delivers every
+  variant and the variant filter selects ours.
+- A cold build runs composer and npm for minutes, so the artifacts setup allows ~20 min (measured
+  build times: the orchestrator plan).
+- Sources: the napi README and `index.d.ts` (the API's source of truth); the builders
+  `crates/core/src/build/plugins/{wpr,bwu}.rs`.
 
-- take the cell's zip from the `pluginArtifact("plugin")` fixture — already resolved *and* identity-verified
-  for this execution by the `artifacts:<cell>` setup — instead of any config-declared path (§4.5);
-- **stage it onto the site first** for `ssh`/`docker` targets (`stageAndInstallPlugin`, or
-  `stageArtifact` + `installPlugin`): the fixture yields a path on the *runner*, which only a `local`
-  transport's `wp` can read. See [wordpress-automation.md](../architecture/wordpress-automation.md);
-- wire `cleanSiteStaging` into the **worker teardown**, beside `disposeConnections`, as best-effort
-  cleanup so a run leaves no `.e2e_temp` behind on the site and never fails a passing scenario.
+Identity — the slug, main file and `Plugin Name:` expectations are in plugin-artifacts.md; what
+produces them:
 
-*Acceptance:* existing smoke features stay green; each cell installs its edition's package (over `ssh`
-and `docker`, not only `local`) and `@pro`/`@free` scenarios run only on their edition's cells; a review
-checklist confirms no 1:1 carry-over. (Check retries in this phase, maybe 0 retries for local is not the best, must assess this)
-
-**Phase 7 - Tests output.** Display a very good progress in the terminal/console when tests are running, displaying how many tests were run, how many remaining, how many passed, how many failed, etc. And every time a test/scenario fails, display the name of the failed test/scenario + the failed step in the terminal (if not the default by Playwright).
-
-**Phase 8 — CI. Dropped.** It planned the suite on real cells as a CI matrix (one job per product ×
-cell). Real-cell runs, PRs included, belong to the [orchestrator](orchestrator-plan.md) instead; CI
-keeps its quality, unit and `@noauth` smoke jobs (`.github/workflows/ci.yml`).
-
-**Phase 9 — Orchestrator → [its own plan](orchestrator-plan.md).** Moved out: it is a long-running
-service with phases of its own. `report:prune`, the pre-warm call and the Free/Pro single-build
-optimization moved with it.
-
-**Phase 10 — Cleanup & validation.** `deps:check` (e.g. `depcheck`) to catch unused deps; ensure no
-dropped dependency reappears; `lint`/`typecheck`/`format:check` green; reports generate. Remove any mention of the Phases in codebase comments, etc.
-
-**After Phase 10 — WP Rocket feature porting.** Deferred out of Phase 6 (decided 2026-10-06): Phase 6
-closes on BackWPup alone, and WP Rocket's port starts once Phase 10 is done, on the same rails and
-recipe. Scope and approach:
-[phase-6-feature-porting-plan.md §6](phase-6-feature-porting-plan.md#6-after-phase-10--wp-rocket).
-
----
-
-## 10. Feature-parity matrix (capability → target design)
-
-| # | Baseline capability | Target design |
+| Product / edition | APVM `project` + `variants` | Zip filename |
 | --- | --- | --- |
-| 1 | WP-CLI exec (local/Docker/SSH) | `common/wp/exec.ts`: `execa` (local + `docker exec <container>`), `node-ssh` (remote); `exitCode` on every mode. |
-| 2 | Server/env config | Typed env (`env`/`intEnv`/`boolEnv`) + `Transport`/`ServerMode` union validated by a native `switch` (default `ssh`); per-product config + per-product sites files (cells). §4. |
-| 3 | Plugin/theme lifecycle | WP-CLI wrappers **and** UI page-objects; idempotent `ensurePluginAbsent` for cleanup hooks, asserted `deletePlugin`/UI for deletion-under-test; distinct errors. §7.3. |
-| 4 | DB ops | `wp db query` through the exec layer. |
-| 5 | Visual regression | Playwright `toHaveScreenshot` (built-in). §7.6. |
-| 6 | Settings export/import diff | `expect` deep-equality; `microdiff` if a diff object is needed. |
-| 7 | Auth (login/logout) | `storageState`, per-cell setup project + per-site state file + `@noauth` fixture; worker→site via `parallelIndex`. §3.3, §5. |
-| 8 | POM (sections/selectors) | Plain POM as a fixture; thin steps delegate to it (no decorators/hybrid); edition-divergent pages via an interface + per-edition class + factory. §7.5, §4.5. |
-| 9 | Lifecycle hooks | `playwright-bdd` `Before/After/BeforeAll/AfterAll` with `{ tags }`. |
-| 10 | Health check / open report / archiving | `node:util styleText`; `playwright show-report`; `fs` script / CI artifact. |
-| 11 | `debug.log` scan | Tag-scoped After hook; attach on failure. |
-| 12 | Local WP env | `docker` = Apache + Nginx (custom compose); `local` = any server; `@wordpress/env` optional. §7.1. |
-| 13 | Execution / parallelism | **(product × cell)** run units, site pools, orchestrator; per-cell reports. §3 — *new capability*. |
-| 14 | Plugin editions (Free/Pro) | BackWPup Free & Pro as **one product**; edition is a **per-cell** property selecting the plugin package + scenario filter (`@free`/`@pro`) + POM branch. §4.5 — *new capability*. |
-| 15 | Credential safety | Site secrets resolved via an in-process registry, never via report-serialized `metadata`. §3.3 — *new capability*. |
-| 16 | Plugin zip selection (`new_release` / `previous_stable` paths) | Per-execution resolution: `plugin`/`previous` **roles** built from any git ref through APVM (or an operator zip), identity-verified per product **and edition** before scenarios run, consumed via the `pluginArtifact` fixture and staged onto `ssh`/`docker` targets. [plugin-artifacts.md](../architecture/plugin-artifacts.md) — *new capability*. |
+| WP Rocket | `wp-rocket` | `wp-rocket-{version}.zip` |
+| BackWPup Free | `backwpup` + `["free"]` | `backwpup-{version}-{commit8}.zip` |
+| BackWPup Pro | `backwpup` + `["pro-en"]` | `backwpup-pro-en-{version}-{commit8}.zip` |
+| Imagify | `imagify` | to verify when wired, with its slug, main file and header |
 
----
+Our cells are English, so Pro builds `pro-en` (`pro-de` exists, untested).
 
-## 11. Risks & mitigations
+Transports' file access (2026-07-16):
 
-| Risk | Likelihood | Mitigation |
+- Every command runs with the WordPress root as its working directory: `rootDir` (local, ssh), the
+  container `WORKDIR` (docker: `/var/www/html` in `wordpress:cli-php8.3` and `wordpress:php8.3-*`;
+  `dockerArgv` passes no `-w`).
+- Copy primitives: an `fs` copy (local); `docker cp`, a top-level docker sub-command, not
+  `docker exec` (docker); node-ssh `putFile`, which does not create parent directories (ssh). All
+  ignore the exec working directory and need an absolute target; docker's root is read with `pwd`.
+- Write access at the WordPress root is a host property: on the ssh cell the docroot was
+  `drwxrwxrwx www-data` and `ubuntu` could create `.e2e_temp`; staged files landed `0664`, readable
+  by a differently-owned `wp`. Hence an overridable staging root.
+- node-ssh interpolates `exec` arguments into a shell string, escaped by `shell-escape`. Fuzzed with
+  4000 random arguments (quotes, `$()`, backticks, newlines, `;`, `|`, `&`) through `/bin/sh`: no
+  argv mismatch, except that an empty-string argument disappears — unreachable today, since every
+  value is a literal or refused when empty. Only the arguments are escaped, never the command, so no
+  dynamic value may sit in the program position.
+
+### 7.2 Decisions and rejected alternatives
+
+- Variable names `E2E_PLUGIN_*` / `E2E_PREVIOUS_*` (`_REF`, `_ZIP`, `_VERSION`): `E2E_` scopes them
+  without colliding with generic or CI-reserved names; the role words match how the artifacts are
+  discussed. Rejected: `E2E_CANDIDATE_*` / `E2E_BASELINE_*` ("baseline" already names the legacy
+  repo, and longer without being clearer); `E2E_TARGET_*` / `E2E_REFERENCE_*` ("target" is
+  overloaded, `E2E_REFERENCE_REF` stutters); the baseline's `new_release` / `previous_stable` (the
+  tested artifact is usually `develop`, and the comparison ref need be neither previous nor stable).
+- Overrides on a serial (cell-less) run warn and fall back to defaults: an earlier draft failed
+  fast, softened so a stray or shared variable cannot abort a broad run. `E2E_PREVIOUS_*` on a
+  product without the role warns too: cells of several products may share one shell or CI env.
+- BackWPup's version defaults differ per role — `plugin` `9.99.99`, `previous` one patch lower,
+  `9.99.98` — so an update or rollback test sees `previous` as older with nobody picking versions;
+  one patch is the smallest guaranteed-older delta under semver. Pass `E2E_PREVIOUS_VERSION` to test
+  a real upgrade. Only `plugin`'s default exists until the role lands (§7.4).
+- Edition and APVM variant stay two words: edition is the language-blind behavioural tier that
+  `@free`/`@pro` need; a variant is an exact buildable package; APVM has no edition concept.
+- Static identity preflight (`adm-zip`; `yauzl` the fallback) rather than an install-based probe: no
+  WordPress needed, milliseconds, cannot mutate a site, identical for built and provided zips. The
+  suite's first install proves installability minutes later anyway, and an uninstall–install–list
+  loop per artifact is slow, serial and adds failure modes. Dropped from the first draft: "exactly
+  one `.zip` in the role dir" — one artifact per role is enforced at resolution (`pickArtifact`),
+  and a `release:*` ref legitimately delivers every variant's zip into the dir.
+- APVM's cache is the only reuse layer: every execution wipes and re-resolves (a cache hit is a ~15
+  MB copy), and provided zips are copied in (uniform layout, immune to the source moving). Roles
+  resolve sequentially (readable logs, no assumptions about APVM's workspaces). Workers never
+  resolve: APVM per worker would race on the wipe and duplicate copies.
+- The transfer primitive lives in `exec.ts`, which already owns the cached SSH connection and the
+  per-mode dispatch; a standalone `transfer.ts` importing an exported connection was rejected as
+  leakier.
+- The site's `stagingDir` beats `E2E_SITE_STAGING_DIR`: the site's declaration is the specific
+  statement ("this host's docroot is not writable"), so a global default must not override it. Paths
+  are absolute throughout, since the copy primitives ignore the exec working directory — why the
+  pure path builder takes the root instead of hard-coding `.e2e_temp`.
+- The staging-root guard sits at the point of use, not in `sites.ts`: docker's root is unknown at
+  load, and one authoritative check cannot drift from a second. A relative `rootDir` is refused only
+  by the staging layer: `exec` has always accepted one as a working directory, and failing it at
+  load would break sites that work.
+- `cleanSiteStaging` throws on a real failure (a dirty site should be visible); the teardown caller
+  makes it best-effort. `mkdir` and `rm` are shelled out even on `local`: uniform behaviour across
+  transports beats a special case.
+- A bare numeric ref (`5.6.8`) is treated as a build ref although APVM may resolve it to a release;
+  the version default is then sent needlessly and ignored in favour of the tag. Narrowing it would
+  reimplement APVM's ref detection.
+- `--project` is matched exactly against cell names, while Playwright's own filter ignores case and
+  expands `*` (its `filterProjects`). Mirroring it would duplicate a third-party internal or let
+  `--project='*'` apply one operator's override to every cell; exact matching degrades visibly
+  (overrides warn and drop), never silently.
+- Trap (execution-model.md, "Reading the selection from a worker"): a worker has no CLI argv. An
+  argv-derived selection once silently dropped every `E2E_*` override while the warmer, with its
+  argv intact, honoured them.
+
+### 7.3 Limits
+
+- Sites sharing one absolute staging root — several sites on one host given the same absolute
+  `stagingDir` or `E2E_SITE_STAGING_DIR` — can collide when run concurrently. Within one invocation
+  it cannot happen (one worker per site). Namespacing staging by `RUN_ID` was rejected: a killed
+  run's folder would then be cleaned by nobody, leaving zips in a web-reachable docroot. The
+  scheduler must know which roots are shared: the orchestrator plan's 0A.3.
+- Two processes that both miss APVM's cache both build in full (its writes stay safe); pre-warming
+  exists to avoid that (the orchestrator plan's 0A.5).
+- A relative `E2E_*_ZIP` resolves against the repo root, never the process working directory;
+  absolute is recommended.
+- A keyword ref (`tag:latest-stable`) re-resolves at warm and at run time, so a release cut in
+  between makes the run build fresh — correct, only slower. Pinning (plugin-artifacts.md) closes it
+  for the orchestrator.
+
+### 7.4 Open obligations
+
+- BackWPup `previous` role (MUST, when its comparison tests arrive): add
+  `previous: "release:latest-stable"` and a `previous` default version (e.g. `9.99.98`, needed if
+  `E2E_PREVIOUS_REF` is ever pointed at a build ref) to `backwpup.config.ts`. Declaring the role
+  enables resolution and the identity preflight for the second artifact, which must not be skipped;
+  the only exemption is a test that builds inside its own scenario and owns its verification. Until
+  then the fixture hard-errors. Mirrored on the manifest and in CLAUDE.md.
+- Imagify: a manifest, and its identity row verified from its build definition, when it is wired.
+  Planned defaults: `plugin` `develop`, `previous` `tag:latest-stable`, version embedded.
+- Version-aware tests: `resolution.json` exposes each role's verified version and commit; BackWPup's
+  CLI feature already asserts `wp backwpup version` against it.
+- Deeper zip validation (a CRC pass, a trial install) only if a real failure class appears, behind
+  the same aggregated report.
+- Free/Pro single build (one APVM call for both variants of one ref and version): the orchestrator
+  plan.
+- `.e2e_temp` is served by the web server on these cells (wordpress-automation.md); the guard is the
+  phase-6 plan's 6J.
+
+Done since: `cleanSiteStaging` runs in worker teardown (`wp/teardown.ts`, the `releaseBoundSite`
+fixture).
+
+## 8. Site file ownership (done)
+
+Phases 0–6.5 done (2026-08-26) after five audit rounds; the full BackWPup suite passed on both cells
+with it (2026-08-28). As built: wordpress-automation.md ("File ownership", "Path guards", "Left-over
+plugin data"), configuration.md (`fileOwner`, `elevate`), CLAUDE.md (the MUST and the pre-flight
+reports), `src/common/wp/ownership.ts` (BusyBox and `id` parsing in its TSDoc). Kept here: cell
+facts, decisions and rejected alternatives, limits, open obligations.
+
+The problem: on an `ssh` cell WP-CLI runs as the transport's user (`ubuntu`, umask `0002`) and PHP
+as the web server (`www-data`), so what the suite installs lands `ubuntu:ubuntu 775/664` and the web
+server's next write into it fails — a raw `EACCES` inside `WP_Filesystem_Direct`, not an FTP prompt.
+`normalizeOwnership` hands it to the owner detected from the install.
+
+### 8.1 The cells (measured 2026-08-26 unless dated)
+
+`pro@nginx` is `simple.e2e.rocketlabsqa.ovh` on `qa-lnmp`; `pro@apache` is
+`auto-e2e-backwpup-apache.rocketlabsqa.ovh` on `qa-auto-e2e-apache`.
+
+| | `pro@nginx` | `pro@apache` |
 | --- | --- | --- |
-| Parallelism vs shared WP state | High | Each worker is pinned to its **own** isolated site (`pool[parallelIndex]`, §3.3); run units are one-invocation-per-cell so `parallelIndex` stays in range (§3.2). Residual gate is **provisioning isolated sites**, not a refactor. |
-| Artifact growth / concurrent clobbering | Low | Ephemeral build/state dirs (`.features-gen`, `.auth`, `test-results`) **overwrite in place** → never accumulate (§3.5). Reports accumulate per cell **by intent**, bounded by the pruning each run does as it ends and by `report:prune` (a cap of *N*, 30 days, the newest complete report up to 182 days). Different cells use different paths (concurrent different-cell runs don't clash, except the gaps in the [orchestrator plan](orchestrator-plan.md)'s Phase 0); the same cell must not run concurrently (shared WordPress state). |
-| Shell injection in WP-CLI calls | Med | `execa` **array args** (auto-escaped); never interpolate into a shell string. |
-| Lost SSH/Docker/UI nuance during the port | Med | Characterise with a per-mode smoke test first, then re-implement with modern idioms (coverage preserved). |
-| `storageState` goes stale | Med | The per-cell setup is a **dependency** of the cell's BDD project → re-authenticated each run into its own file; `@noauth` isolates login/logout. |
-| Plugin cleanup vs. deletion-under-test | Med | Cleanup hooks use the **idempotent** `ensurePluginAbsent` (already-absent ⇒ no-op), so teardown never fails on an already-deleted plugin; deletion-under-test asserts presence first. Arm `page.once("dialog")` before the click; handle WP Rocket's second confirmation page; detect state via `count()`; re-assert removal (`PluginDeletionFailedError`). |
-| Visual-regression baselines differ across OS/CI | High | Generate snapshots in the CI image/container; commit per-platform; tune `maxDiffPixelRatio`; mask dynamic content. |
-| `docker` mode setup (Apache + Nginx) | Med | The default `ssh` mode needs no Docker. `docker` requires a custom compose + Nginx vhost; pin image tags; never publish the php-fpm port. |
-| Credentials leaking into shared reports | Med | Pools reach workers via an in-process registry; project `metadata` carries only `{ product, cell }` (D10, §3.3). Verified: no secret appears in the generated report (plaintext or base64-decoded). **Corrected 2026-10-09:** the pool never did, but the login's `fill()` step carried the password into every real run's HTML and Allure reports, and retained traces hold the session cookies — fixed and canary-tested in the orchestrator's 0D.4 ([Phase 0 plan](orchestrator-phase-0-plan.md) §6.4). |
-| Edition tests run against the wrong edition | Low | Each cell declares its `edition`, which selects both the installed package and the per-cell tag filter (`not @free`/`not @pro`); a cell can neither install the wrong package nor generate the other edition's specs (§4.5). |
+| Transport user | `ubuntu` (1000:1000) | `ubuntu` (1000:1000) |
+| Web/PHP user | `www-data` (nginx + php-fpm) | `www-data` (apache2 + php-fpm) |
+| Docroot owner | `www-data:www-data` | `sftp_backwpup:www-data` (uid 1001) |
+| Docroot mode | `777` throughout | `777` throughout |
+| sudo | `(ALL) NOPASSWD: ALL` | `(ALL) NOPASSWD: ALL` |
+| Userland | GNU coreutils 9.4, kernel 6.8 (Ubuntu), WP 7.1 | GNU coreutils 9.4, WP 7.1 |
 
----
+- `pro@apache`'s WordPress root is `<vhost dir>/public/`; the vhost directory itself holds no
+  WordPress (its `rootDir` was fixed in the git-ignored sites file). The same host serves WP
+  Rocket's site to the same `ubuntu@host`, owned `sftp_wprocket:www-data` (uid 1002) — why ownership
+  caches are per install, not per host.
+- Group membership is host state: `ubuntu` was added to `www-data` on both hosts (`usermod -aG`,
+  2026-08-26; `qa-auto-e2e-apache`: `www-data:x:33:sftp_backwpup,sftp_wprocket,ubuntu`; `qa-lnmp`:
+  `www-data:x:33:ubuntu`). A check earlier that day found `qa-lnmp`'s group with no members and the
+  change had to be reapplied, so membership is measured on every run, never configured. A fresh SSH
+  session sees a new membership at once (node-ssh opens new sessions).
+- sudo probes, measured with a sudoer and a non-sudoer (`www-data`): `sudo -n true` works (exit 0,
+  else exit 1 with `sudo: a password is required`); `sudo -n -l` works but adds nothing;
+  `sudo -n -v` is a false negative — exit 1 even for a passwordless sudoer, since `-v` validates the
+  credential cache and tests no command. Never use it. "Not a sudoer" and "sudoer needing a
+  password" print the same message by design, so pre-flight reports one state and names both causes.
+- Known probe limit: a `NOPASSWD` grant for a command list excluding `true` fails `sudo -n true`
+  while permitting `chown`. The fleet grants `ALL` (`/etc/sudoers.d/`).
+- MariaDB 10.11.14 on `pro@apache` (2026-08-28): an `.ibd` file with no data-dictionary entry
+  (`wp_bwpup_backups.ibd`, dated 2026-05-04) made every `CREATE TABLE` of that name fail with errno
+  184 "Tablespace already exists", and `DROP TABLE IF EXISTS` does not remove it. `mariadbd`'s own
+  message prescribes removing the file; it was moved aside (reversible), after which create and drop
+  behaved again. An orphan is absent from `SHOW TABLES` and from
+  `information_schema.INNODB_SYS_TABLES` (queried as root); moving it is safe while the server runs
+  (no open handle) — re-check the dictionary just before acting. A sweep of every schema on the host
+  found only that orphan.
 
-## 12. References
+### 8.2 Decisions and rejected alternatives
 
-> Versions verified via the **npm registry** (2026-06-11). Library behaviour verified against
-> **official documentation** (Playwright, `playwright-bdd`, Allure 3, `execa`, WP-CLI, Docker Hub) and,
-> for runtime parallelism, corroborated by Playwright maintainer statements. Node-native behaviours
-> (TypeScript execution, `util.styleText`, `process.loadEnvFile`) were verified empirically on Node 24.
+- The owner is detected with `stat` on `wp-content` (else the WordPress root), never from the
+  web-server process: `ps` says `www-data` on both cells, wrong on `pro@apache`, where
+  `chown www-data:www-data` would strip `sftp_backwpup`, the host's SFTP deployment account, off the
+  tree.
+- Rejected: running WP-CLI as the docroot owner. `sudo -n -u <owner> wp …` works, even for the
+  `nologin` `sftp_backwpup`, but there is no single correct user (on `pro@apache` that owner's
+  primary gid is 123 and its umask `0022`, so it would create `sftp_backwpup:sftp_backwpup 755`
+  files the web server cannot write); `sudo -u` sets the target's `HOME` — `/var/www` on nginx,
+  `/public` (absent) on apache — where WP-CLI puts its cache; and it changes every WP-CLI call to
+  fix file creation.
+- Rejected: a `www-data:www-data` fallback when detection fails. It is wrong on `pro@apache`, and a
+  wrong owner applied as root is worse than none; detection cannot fail alone (pre-flight already
+  asserts root access and a booting WordPress); and the real failure, missing elevation, leaves
+  nothing able to apply any value. So an undetectable owner is warned about and skipped.
+- The grant's scope is measured from the transport user's groups (`ug+rwX`; `o+rwX` added only when
+  it is neither the owner nor in the group): a membership that can silently vanish does not belong
+  in the sites file. The `o+rwX` branch matches these cells' existing `777` and the reasoning behind
+  `DATA_DIR_MODE = "0777"`; it is avoidable, so it announces the fix. Both branches were exercised
+  on both cells by temporarily removing the membership.
+- The detected owner is memoised per worker process, not persisted: pre-flight runs in the setup
+  process and scenarios in workers, and a file (as `resolution.json`) would buy a lifecycle and a
+  staleness window to save one `stat` per worker per site over a pooled connection. Pre-flight
+  reports the decision (`planOwnership`) without being its source of truth.
+- Data-directory preparation sets the mode first, then hands the directory over — the reverse of the
+  plugin's grant-then-chown — because the mode is changed while the directory is still the transport
+  user's; normalising first would need privileges for a `chmod` that needs none. The hand-over is
+  recursive, so it also reaches what the plugin's own activation created as WP-CLI — closed by
+  construction, not by BackWPup's `activate()` creating no directories (`class-install.php`,
+  2026-08).
+- `fileOwner` is absent from the `sites.example.json` files: JSON has no comments, and neither other
+  optional knob (`elevate`, `stagingDir`) appears there, so showing only the rarest would read as
+  something a checkout needs. It is documented beside `elevate` in configuration.md.
+- Pre-flight reports elevation up front: a host without it degrades quietly (residue left behind,
+  `debug.log` perhaps not cleared, ownership not corrected), better learnt at a run's start than
+  from a full disk weeks later. The banner has one pure renderer (results in, text out) called by
+  pre-flight and the healthcheck, so the two cannot drift.
 
-**Key verified facts behind the architecture:**
+### 8.3 Known limits
 
-- `parallelIndex` is bounded by the **global** `workers` and is **not** reset per project; safe pool
-  indexing therefore requires one project per invocation with `workers = pool size`
-  (Playwright `class-testinfo`/`class-workerinfo`/`test-parallel`; corroborated by microsoft/playwright
-  #38953).
-- Projects **multiply** tests (matrix); workers **distribute** them (each test once) — Playwright
-  `test-projects`, `test-parallel`.
-- `testProject.workers` exists since **v1.52** but caps concurrency only, not which `parallelIndex`
-  values a project sees — `class-testproject`.
-- `defineBddConfig` returns the generated test dir and accepts a **`tags`** expression that filters
-  scenarios at generation (`tags?: string`, "filter scenarios for generation"); a distinct `outputDir`
-  per cell lets the same product features back multiple projects — playwright-bdd `config` types / `api`.
-- Cucumber reporter `externalAttachments` (embed vs external + the `http(s)://` trace-viewer
-  requirement) and `skipAttachments` content-types — playwright-bdd `reporters/cucumber`.
-- Playwright serializes a project's **`metadata`** verbatim into its reports, so site credentials are
-  kept out of `metadata` and resolved via an in-process registry instead — Playwright `class-testproject`.
+- The fast path (the transport user's uid and gid equal the target's) skips the grant. A host where
+  the transport user owns the docroot while the web server is another account relying on group bits
+  could be judged `unnecessary` under umask `022` and stay unwritable by the web server. No cell has
+  that shape (on `docker` the web user is the owner), and detecting a third user is what owner
+  detection rejects as unreliable.
+- `docker` is not literally untouched: each worker runs `stat` and `id` (and `pwd` without a
+  declared `rootDir`) before the fast path — reads only, nothing privileged, nothing changed.
 
-**Documentation:**
+### 8.4 Open obligations
 
-- Playwright — Test projects, parallelism, sharding, reporters, TestInfo/WorkerInfo/TestConfig/TestProject:
-  <https://playwright.dev/docs/test-projects> · <https://playwright.dev/docs/test-parallel> ·
-  <https://playwright.dev/docs/test-reporters> · <https://playwright.dev/docs/api/class-testinfo> ·
-  <https://playwright.dev/docs/api/class-testproject>
-- Playwright — Visual comparisons (`toHaveScreenshot`), Auth (`storageState`):
-  <https://playwright.dev/docs/test-snapshots> · <https://playwright.dev/docs/auth>
-- playwright-bdd — Cucumber reporter, `defineBddConfig` (incl. `tags` filter), authentication,
-  POM-as-fixture, hooks: <https://vitalets.github.io/playwright-bdd/>
-- Allure 3 — `allurerc.mjs` (`defineConfig`, `singleFile`, categories, dashboard):
+- Non-Linux targets: revisit only if a BSD/macOS `local` cell appears; `stat -c` and `id` are read
+  in one function each.
+- Dropping `prepareSiteDataDirs`'s `0777` floor: safe only where ownership correction is guaranteed,
+  and it is best-effort by contract. Where the transport user is in the docroot's group, the grant
+  alone (`ug+rwX` ⇒ `0775`) would suffice. Revisit if a cell is ever required to have working
+  elevation.
+- Batching the per-path commands. Measured on `pro@nginx`: preparation costs ~15 s for BackWPup's
+  two original paths (about seven round-trips each) and the plugin's handover 1.8 s. With a third
+  declared path and the directory the installed plugin names at runtime, the `@plugin` Before hook
+  now takes 44–50 s (73 s beside another run on the same server) of its 120 s budget, plus
+  `LEFT_WORK_ALLOWANCE_MS` for stopping a killed run's work (`HOOK_TIMEOUT_MS`'s comment,
+  `src/common/hooks/plugin-lifecycle.ts`). It is latency, not work: `mkdir`, `chmod`, `chmod -R` and
+  `chown -R` take several operands, so one command per step instead of per path would cut it about
+  threefold. Deferred: it changes `normalizeOwnership`'s one-path contract and needs its own tests.
+  Revisit when a product declares more than a handful of data paths, or the Before hook nears its
+  budget. (Residue removal is already batched — wordpress-automation.md.)
+- Running WP-CLI as the docroot owner (§8.2): rejected on evidence, not forgotten. If installing
+  call sites keep leaking ownership, revisit as a per-site opt-in (`transport.runWpAs`), never a
+  default.
+
+## 9. References
+
+- Playwright: <https://playwright.dev/docs/test-projects> ·
+  <https://playwright.dev/docs/test-parallel> · <https://playwright.dev/docs/test-reporters> ·
+  <https://playwright.dev/docs/api/class-testinfo> ·
+  <https://playwright.dev/docs/api/class-testproject> · <https://playwright.dev/docs/test-snapshots>
+  · <https://playwright.dev/docs/auth>; microsoft/playwright#38953 (`parallelIndex` is global).
+- playwright-bdd (Cucumber reporter `externalAttachments` / `skipAttachments`, `defineBddConfig`
+  with `tags` and a per-cell `outputDir`, POM as fixture, hooks):
+  <https://vitalets.github.io/playwright-bdd/>
+- Allure 3 (`allurerc.mjs`: `singleFile`, categories, dashboard):
   <https://allurereport.org/docs/playwright/> · <https://github.com/allure-framework/allure3>
-- WP-CLI — plugin `is-installed`/`is-active`/`delete`/`list` (exit-code semantics):
+- WP-CLI plugin commands and their exit codes:
   <https://developer.wordpress.org/cli/commands/plugin/>
-- Docker — official `wordpress` image (Apache vs `fpm`; FastCGI note): <https://hub.docker.com/_/wordpress>
-- execa — escaping (array args) & errors: <https://github.com/sindresorhus/execa>
-- node-ssh: <https://github.com/steelbrain/node-ssh> · ts-pattern: <https://github.com/gvergnaud/ts-pattern>
-- Node — native TS, `util.styleText`, `--env-file`/`process.loadEnvFile()`:
-  <https://nodejs.org/api/typescript.html> · <https://nodejs.org/api/util.html> ·
+- Docker's `wordpress` image (Apache vs `fpm`, the FastCGI note):
+  <https://hub.docker.com/_/wordpress>
+- execa (array args, errors): <https://github.com/sindresorhus/execa> · node-ssh:
+  <https://github.com/steelbrain/node-ssh>
+- Node: <https://nodejs.org/api/typescript.html> · <https://nodejs.org/api/util.html> ·
   <https://nodejs.org/api/process.html#processloadenvfilepath>
-
-**Installed (this repo):** `@playwright/test` 1.61.0 · `playwright-bdd` 9.2.0 · `typescript` 6.0.3 ·
-`eslint` 10.5.0 · `typescript-eslint` 8.61.1 · `prettier` 3.8.4 · `@types/node` 24.13.2 · Node ≥ 24.16.
-**Planned ADDs (re-pin at their phase):** `allure-playwright` 3.10.0 · `node-ssh` 13.2.1 · `execa` 9.6.1 ·
-`ts-pattern` 5.9.0 (optional) · `microdiff` 1.5.0 · `@wordpress/env` 11.8.0.
+- APVM: <https://github.com/wp-media/automation-plugin-version-manager> — its napi README and
+  `index.d.ts` (the API's source of truth); builders in `crates/core/src/build/plugins/`.
+- Identity ground truth: `wp-media/backwpup-pro` `gulpfile.ts` (`compressPackage`, the `free`/`pro`
+  tasks); `wp-media/wp-rocket` `wp-rocket.php`.

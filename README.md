@@ -29,7 +29,7 @@ WordPress (this is exactly what CI does).
   to one site by `parallelIndex`, so scenarios are distributed across the pool.
 - **Run unit** — one `(product × cell)`. Run exactly one cell per invocation, pinned with
   `E2E_CELL=<cell>`; selecting two cells at once fails fast (the global `parallelIndex`
-  would overflow a smaller pool — see plan §3.2).
+  would overflow a smaller pool — see plan §2.1).
 
 ## Running
 
