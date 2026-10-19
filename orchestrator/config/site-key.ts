@@ -10,11 +10,14 @@
  * the parser resolves it (`.`/`..`, `\` as `/`), escapes of unreserved characters decoded (`%7E` is
  * `~`) and the others uppercase, without trailing slashes. No credentials, query or fragment. Still
  * two keys for one site: a host and its IP address, two names for one server, a path differing only in
- * case.
+ * case. An `@` in the path of a URL with credentials is refused: it is a password holding `/` or `@`
+ * unescaped (`https://u:p@ss/word@host/`), which a parser reads as host `ss` and path `/word@host/` —
+ * another site, and a key carrying the password's tail into the locks and every message naming them.
  *
  * @param baseURL - the site's `baseURL`.
  * @returns `qa.example.test`, `10.0.0.5:8100/wp`.
- * @throws {@link RangeError} for anything but an http(s) URL.
+ * @throws {@link RangeError} for anything but an http(s) URL, or one with credentials and an `@` in its
+ *   path.
  *
  * @example
  * ```ts
@@ -30,6 +33,13 @@ export function siteKey(baseURL: string): string {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:")
     throw new RangeError("A site's baseURL must be an http(s) URL.");
+  if (
+    (url.username !== "" || url.password !== "") &&
+    url.pathname.includes("@")
+  )
+    throw new RangeError(
+      "A site's baseURL must hold no @ past its host: percent-encode a password's / and @ (%2F, %40).",
+    );
   const port = DEFAULT_PORTS.has(url.port) ? "" : `:${url.port}`;
   const host = url.hostname.replace(/\.$/, "");
   const path = url.pathname

@@ -532,6 +532,30 @@ test.describe("dryRunReport", () => {
     );
   });
 
+  test("a secret in a site's address is masked before the address is cut to what is shown: none of it shows", async () => {
+    // Showing the address drops what follows `?`, and cleaning makes a tab a space: either way, the
+    // secret is no longer whole in what is shown, so only masking it first hides it.
+    for (const [password, shown] of [
+      ["Secretpass99?part", "  site https://bwu2.qa.test/*** · qa-lnmp"],
+      ["Secret\tpass99-0042", "  site https://bwu2.qa.test/*** · qa-lnmp"],
+    ] as const) {
+      const site = sshSite(`https://bwu2.qa.test/${password}`, "qa-lnmp", {
+        password,
+      });
+      const lines = await report(example(), {
+        pastCheck: { "pro@nginx": [site] },
+        list: await productList({
+          "pro@nginx": [site],
+          "free@apache": [sshSite("https://bwu4.qa.test", "qa-apache")],
+        }),
+      });
+      expect(lines[4], JSON.stringify(password)).toBe(shown);
+      const output = lines.join("\n");
+      for (const part of ["Secretpass99", "Secret pass99", "pass99"])
+        expect(output, JSON.stringify(password)).not.toContain(part);
+    }
+  });
+
   test("a site password that is a word elsewhere masks only itself: the product's name stays", async () => {
     const config = example();
     config.serverWarningThreshold = 1;
@@ -678,7 +702,8 @@ test.describe("dryRunReport", () => {
     const lines = await report(example(), {
       list: await productList({
         "pro@nginx": [
-          sshSite(`https://bwu2.qa.test/${"p".repeat(3_000)}`, "qa-lnmp"),
+          // Past the line's cap, within a site key's (2,048), which the check refuses past.
+          sshSite(`https://bwu2.qa.test/${"p".repeat(2_030)}`, "qa-lnmp"),
         ],
         "free@apache": [sshSite("https://bwu4.qa.test", "qa-apache")],
       }),

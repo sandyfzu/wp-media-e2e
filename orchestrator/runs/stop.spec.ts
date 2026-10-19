@@ -36,6 +36,7 @@ const RUNNER: RunStopEvent = {
   pid: 200,
 };
 const EXITED: RunStopEvent = { type: "exited" };
+const LEADER_EXITED: RunStopEvent = { type: "leaderExited" };
 const toRunner = [BDDGEN, EXITED, RUNNER] as const;
 
 /**
@@ -129,6 +130,83 @@ test.describe("stepRunStop — the runner", () => {
   });
 });
 
+test.describe("stepRunStop — a runner that exited on its own", () => {
+  test("takes no drain nor interrupt: nothing is left to reach, and its own end stands", () => {
+    const { state, actions } = run([
+      ...toRunner,
+      LEADER_EXITED,
+      stop("drained"),
+      stop("interrupted"),
+    ]);
+    expect(actions).toEqual([]);
+    expect(state).toEqual({
+      phase: { name: "lingering", pgid: 200, asked: "interrupted" },
+      taken: { level: "none" },
+    });
+  });
+
+  test("kills what is left of its group, once, without taking the kill", () => {
+    const { state, actions } = run([
+      ...toRunner,
+      LEADER_EXITED,
+      stop("killed", "kill"),
+      stop("killed", "kill again"),
+      stop("interrupted"),
+    ]);
+    expect(actions).toEqual([{ type: "killGroup", pgid: 200 }]);
+    expect(state.taken).toEqual({ level: "none" });
+  });
+
+  test("keeps the stop taken before it exited, and never repeats its steps", () => {
+    const drained = run([
+      ...toRunner,
+      stop("drained", "first"),
+      LEADER_EXITED,
+      stop("drained"),
+      stop("killed"),
+    ]);
+    expect(drained.actions).toEqual([
+      { type: "createStopFile" },
+      { type: "killGroup", pgid: 200 },
+    ]);
+    expect(drained.state.taken).toEqual({ level: "drained", why: "first" });
+    // Killed before it exited: no second SIGKILL.
+    const killed = run([
+      ...toRunner,
+      stop("killed", "kill"),
+      LEADER_EXITED,
+      stop("killed", "again"),
+    ]);
+    expect(killed.actions).toEqual([{ type: "killGroup", pgid: 200 }]);
+    expect(killed.state.taken).toEqual({ level: "killed", why: "kill" });
+  });
+
+  test("hands back the very same state for a stop no further than one asked: the driver notes only a change", () => {
+    const { state } = run([...toRunner, LEADER_EXITED, stop("killed")]);
+    expect(stepRunStop(state, stop("killed", "again")).state).toBe(state);
+    expect(stepRunStop(state, stop("drained")).state).toBe(state);
+  });
+
+  test("ends once its group is empty", () => {
+    expect(run([...toRunner, LEADER_EXITED, EXITED]).state).toEqual({
+      phase: { name: "ended" },
+      taken: { level: "none" },
+    });
+  });
+
+  test("bddgen exiting changes nothing: a stop still kills its group, taken as a drain", () => {
+    const { state, actions } = run([BDDGEN, LEADER_EXITED, stop("drained")]);
+    expect(actions).toEqual([{ type: "killGroup", pgid: 100 }]);
+    expect(state).toEqual({
+      phase: { name: "bddgen", pgid: 100 },
+      taken: { level: "drained", why: "drained" },
+    });
+    expect(mayStartPlaywright(run([BDDGEN, LEADER_EXITED, EXITED]).state)).toBe(
+      true,
+    );
+  });
+});
+
 test.describe("stepRunStop — before the runner", () => {
   test("kills bddgen's group outright, taken as a drain whatever was asked", () => {
     const { state, actions } = run([BDDGEN, stop("killed", "SIGINT")]);
@@ -192,6 +270,15 @@ test.describe("stepRunStop — a driver's mistakes", () => {
     expect(() => run([EXITED])).toThrow(/cannot exit while it is starting/);
     expect(() => run([...toRunner, EXITED, EXITED])).toThrow(
       /cannot exit while it is ended/,
+    );
+    expect(() => run([LEADER_EXITED])).toThrow(
+      /process cannot exit while it is starting/,
+    );
+    expect(() => run([...toRunner, LEADER_EXITED, LEADER_EXITED])).toThrow(
+      /process cannot exit while it is lingering/,
+    );
+    expect(() => run([...toRunner, LEADER_EXITED, RUNNER])).toThrow(
+      /playwright cannot start while it is lingering/,
     );
   });
 });

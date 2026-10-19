@@ -8,6 +8,7 @@ import { MAX_REASON_LENGTH } from "../runs/outcome";
 import type { StopLevel } from "../runs/stop";
 import { failureLine, safeLine } from "../text";
 import type { HeldCell } from "../state/cell-lock";
+import type { RunNaming } from "../state/lock";
 import {
   runOnce,
   type CycleDeps,
@@ -21,9 +22,6 @@ import {
   type StopAsked,
 } from "./run-lines";
 
-/** The longest wait a Node timer takes as asked: past it, Node fires after 1 ms instead. */
-export const MAX_TIMER_MS = 2 ** 31 - 1;
-
 /**
  * A task's loop: a run (`cycle.ts`), then the cooldown, counted from the run's end, then the next run
  * — until it is stopped, or after its one run with `--once`.
@@ -36,12 +34,27 @@ export const MAX_TIMER_MS = 2 ** 31 - 1;
  * holds its cell's site locks from before its first run to its end, naming each run in them.
  */
 
+/** The longest wait a Node timer takes as asked: past it, Node fires after 1 ms instead. */
+export const MAX_TIMER_MS = 2 ** 31 - 1;
+
 /** A task, as its loop needs it: one run's fields and the cooldown. */
 export type LoopTask = CycleTask & Pick<TaskConfig, "cooldownMinutes">;
 
 /** The timers the cooldown is waited with: Node's, or a spec's. */
 export interface CooldownTimers {
+  /**
+   * Arms a timer.
+   *
+   * @param callback - called once `ms` have passed.
+   * @param ms - how long, in milliseconds.
+   * @returns its handle, for {@link CooldownTimers.clearTimeout}.
+   */
   setTimeout(callback: () => void, ms: number): unknown;
+  /**
+   * Disarms a timer; one already fired or cleared is left as it is.
+   *
+   * @param handle - what {@link CooldownTimers.setTimeout} returned.
+   */
   clearTimeout(handle: unknown): void;
 }
 
@@ -75,6 +88,9 @@ export interface LoopDeps extends CycleDeps {
 
 /** The longest refusal of a cell's site locks said, in code points: it names the holder and the way out. */
 const MAX_CELL_REFUSAL_LENGTH = 1_500;
+
+/** The longest failure to name a run in its cell's site locks said, in code points: a short cause. */
+const MAX_NAMING_FAILURE_LENGTH = 200;
 
 /**
  * A task's loop, for `--once`'s exit code: `passed` when its run passed or was flaky, `stopped` when
@@ -331,24 +347,43 @@ class Loop {
 
   /**
    * Names a run in the cell's site locks before its launch. A lock lost, or one that could not be
-   * rewritten, ends the loop after that run — fail-safe: no run starts unnamed in its sites' locks —
-   * and the words say which.
+   * rewritten — `setRun` rejecting, against its contract, included —, ends the loop after that run —
+   * fail-safe: no run starts unnamed in its sites' locks — and the words say which.
    *
    * @param cell - the locks.
    * @param record - the run's `run.json`.
-   * @returns `undefined` once named; else why not.
+   * @returns `undefined` once named; else why not. Never rejects.
    */
   private async claim(
     cell: HeldCell,
     record: string,
   ): Promise<string | undefined> {
-    const naming = await cell.setRun(record);
+    const naming = await this.nameRun(cell, record);
     if (naming.kind === "named") return undefined;
     this.cellLost =
       naming.kind === "lost"
         ? "its cell's site locks are no longer this orchestrator's — removed, or another's"
         : `its cell's site locks could not be rewritten to name the run (${naming.why}): they are still this orchestrator's, but no run starts unnamed in them`;
     return this.cellLost;
+  }
+
+  /**
+   * `cell.setRun`, a rejection made a `failed` naming: the locks may still be this orchestrator's,
+   * but the run is not named in them.
+   *
+   * @param cell - the locks.
+   * @param record - the run's `run.json`.
+   * @returns what naming the run came to.
+   */
+  private async nameRun(cell: HeldCell, record: string): Promise<RunNaming> {
+    try {
+      return await cell.setRun(record);
+    } catch (error) {
+      return {
+        kind: "failed",
+        why: failureLine(error, MAX_NAMING_FAILURE_LENGTH, this.deps.secrets),
+      };
+    }
   }
 
   /**
@@ -394,6 +429,7 @@ class Loop {
    * One run: created, held where a stop reaches it, waited for. A `runOnce` that throws, or a `done`
    * that rejects — both against its contract — is a line and a run that did not start.
    *
+   * @param deps - the run's deps: the loop's, with `claimCell` naming the run in the cell's locks.
    * @returns its result, and when it settled.
    */
   private async cycle(deps: CycleDeps): Promise<Settled> {
@@ -440,6 +476,7 @@ class Loop {
     return new Promise<void>((resolve, reject) => {
       // Read through an object: a stop changes it from within `setTimeout`.
       const state: { timer?: unknown; finished: boolean } = { finished: false };
+      /** Ends the wait once — the timer's or a stop's — disarming the timer and dropping the wake. */
       const finish = (): void => {
         if (state.finished) return;
         state.finished = true;

@@ -56,9 +56,11 @@ const FORMAT = /\p{Cf}/gu;
  * since a service's answer may echo it so —, then by its shape ({@link redactSecrets}). Values first:
  * a shape matching inside a secret (`pwd=…`, a token's head) masks that part alone and leaves the rest
  * of the secret in clear, which no value then matches. A secret under {@link MIN_MASKED_LENGTH} (8)
- * characters, spaces around it aside, is masked in no form: it would mask ordinary words. The longest
- * form first: a value inside a longer one, masked first, would leave the longer one's rest in clear.
- * Last, the head of a secret a cut left before its marker ({@link maskCutTails}).
+ * characters, spaces around it aside, is masked in no form: it would mask ordinary words. Each secret
+ * is also masked as cleaning writes it ({@link oneLine}): one holding an invisible character (a
+ * zero-width space pasted with it) reads without it once a line is clean — in the run facts, the
+ * summary, or here after a terminal code split it. Last, the head of a secret a cut left before its
+ * marker ({@link maskCutTails}).
  *
  * @param text - the text.
  * @param secrets - the secret values to mask wherever they appear, in any order.
@@ -68,13 +70,11 @@ function mask(text: string, secrets: readonly string[]): string {
   // Trimmed first, as a value is masked: a secret written with spaces around it is the same secret,
   // and its encoded forms must be the trimmed value's.
   const forms = secrets
-    .map((secret) => secret.trim())
+    .flatMap((secret) => [secret.trim(), oneLine(secret)])
     .filter((secret) => secret.length >= MIN_MASKED_LENGTH)
     .flatMap(secretForms);
-  const longestFirst = [...new Set(forms)].sort((a, b) => b.length - a.length);
-  return redactSecrets(
-    maskCutTails(maskValues(text, longestFirst), longestFirst),
-  );
+  const unique = [...new Set(forms)];
+  return redactSecrets(maskCutTails(maskValues(text, unique), unique));
 }
 
 /**

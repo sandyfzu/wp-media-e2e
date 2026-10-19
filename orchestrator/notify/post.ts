@@ -1,4 +1,4 @@
-import { cut, safeLine, secretForms } from "../text";
+import { cut, oneLine, safeLine, secretForms } from "../text";
 
 /**
  * The one HTTP call the notifiers make: a JSON `POST`, bounded in time and in what it reads back, and
@@ -118,10 +118,25 @@ interface Answer {
 }
 
 /**
+ * Every form a secret may show in a clean line, as masking reads it: trimmed, and as cleaning writes
+ * it ({@link oneLine}, trimmed) — one holding an invisible character reads without it — each in every
+ * written form ({@link secretForms}). A secret of nothing but spaces has none.
+ *
+ * @param secrets - the secret values.
+ * @returns their forms, each once, none empty.
+ */
+function shownForms(secrets: readonly string[]): string[] {
+  const values = secrets
+    .flatMap((secret) => [secret.trim(), oneLine(secret).trim()])
+    .filter((value) => value !== "");
+  return [...new Set(values.flatMap(secretForms))];
+}
+
+/**
  * A refused answer as one line safe to log: its start, masked ({@link safeLine}); when the body was
  * cut, without its last {@link CUT_TAIL} code points, where a credential the cut went through would
- * show its start. Withheld whole when a secret, in any form, still shows — one too short to mask by
- * value (under 8 characters).
+ * show its start. Withheld whole when a secret, in any form ({@link shownForms}), still shows — one
+ * too short to mask by value (under 8 characters).
  *
  * @param status - the HTTP status.
  * @param answer - what was read of the body.
@@ -133,7 +148,7 @@ function describeAnswer(
   answer: Answer,
   secrets: readonly string[],
 ): string {
-  const forms = secrets.flatMap(secretForms).filter((form) => form !== "");
+  const forms = shownForms(secrets);
   const line = safeLine(answer.text, Number.MAX_SAFE_INTEGER, secrets);
   const tail = Math.max(CUT_TAIL, ...forms.map((form) => form.length));
   const kept = answer.cut

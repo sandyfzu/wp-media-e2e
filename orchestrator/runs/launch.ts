@@ -18,6 +18,7 @@ import {
 import type { Command, RunCommands } from "./commands";
 import { variableNames } from "./environment";
 import type { RunIdentity } from "./identity";
+import { recordWords } from "./record";
 import { describeExit, type ProcessExit, type StopTaken } from "./outcome";
 import {
   signalGroup,
@@ -30,6 +31,7 @@ import {
   mayStartPlaywright,
   stepRunStop,
   type RunStopEvent,
+  type RunStopState,
   type StopAction,
   type StopLevel,
 } from "./stop";
@@ -59,7 +61,7 @@ export interface LaunchOptions {
   readonly commands: RunCommands;
   /** The checkout: both processes run in it. */
   readonly cwd: string;
-  /** The run's whole environment ({@link runEnvironment}): nothing else is inherited. */
+  /** The run's whole environment (`runEnvironment`, `./environment`): nothing else is inherited. */
   readonly env: Readonly<Record<string, string>>;
   /**
    * Awaited just before each process is spawned, for the run's record (`startingRecord`): the process
@@ -112,6 +114,9 @@ export interface LaunchedRun {
   /**
    * Stops it at least this far ({@link stepRunStop}); a stop that goes no further, or comes once the
    * run has ended, does nothing.
+   *
+   * @param level - how far: a drain, one SIGINT, or SIGKILL of the group.
+   * @param why - why, for the run's reason.
    */
   stop(level: StopLevel, why: string): void;
   /** Settles once both processes' groups are empty and the log is closed. Never rejects. */
@@ -147,8 +152,8 @@ interface NotStarted {
   readonly notStarted: string;
 }
 
-/** How a process ended when it could not be started at all. */
-const NOT_STARTED: ProcessExit = { code: null, signal: null };
+/** How a process ended when it could not be started at all, before its cause is added. */
+const NOT_STARTED = { code: null, signal: null } as const;
 
 /**
  * Starts a run.
@@ -156,7 +161,7 @@ const NOT_STARTED: ProcessExit = { code: null, signal: null };
  * @param options - the run, its commands, where and with what it runs.
  * @returns the run, once `bddgen` was spawned.
  * @throws {@link RangeError} for a `stuckRepeatMs` that is not a whole number from 1.
- * @throws {@link StateError} when the run folders' folder is a link, no folder, or open to others.
+ * @throws `StateError` (`../state/errors`) when the run folders' folder is a link, no folder, or open to others.
  * @throws {@link Error} when anything is already at the run's folder — a run of that id ran before,
  *   and sharing its folder would mix two runs' logs, records and stop files — when the folder is not
  *   a private folder of this user's, when its stop file or log is already there, or when any of them
@@ -388,6 +393,7 @@ class Launch {
    * @param pgid - its group.
    */
   private tell(name: "bddgen" | "playwright", pgid: number): void {
+    /** Notes the failure in the run's log. */
     const failed = (): void => {
       this.note(`recording ${name}'s process group failed`);
     };
@@ -417,9 +423,13 @@ class Launch {
         : await exitOf(child);
     const pid = "notStarted" in child ? undefined : child.pid;
     if (pid === undefined) {
-      this.note(`${name} could not start: ${exit.error ?? "unknown error"}`);
-      return NOT_STARTED;
+      // Made a record's words: it is written in run.json, and quoted in the run's reason.
+      const cause = recordWords(exit.error ?? "unknown error");
+      this.note(`${name} could not start: ${cause}`);
+      return { ...NOT_STARTED, notStarted: cause };
     }
+    // The process itself is gone: a stop from now on finds nothing to drain or interrupt.
+    this.dispatch({ type: "leaderExited" });
     const wait = {
       kill: this.kill,
       sleep: this.sleep,
@@ -519,7 +529,7 @@ class Launch {
     if (this.over) return;
     const step = stepRunStop(this.state, event);
     if (event.type === "stop" && step.state !== this.state)
-      this.note(`stop: ${step.state.taken.level} — ${event.why}`);
+      this.note(stopLine(step.state, event.level, event.why));
     this.state = step.state;
     for (const action of step.actions) this.perform(action);
   }
@@ -635,6 +645,29 @@ class Launch {
   private enqueue(work: () => Promise<void>): void {
     this.queue = this.queue.then(work);
   }
+}
+
+/**
+ * The log's line for a stop the machine took or noted.
+ *
+ * @param state - the machine's state after the stop.
+ * @param level - how far the stop was asked to go.
+ * @param why - why.
+ * @returns `stop: <level taken> — <why>`; once the runner has exited on its own, what was done
+ *   instead, since such a stop is not taken.
+ */
+export function stopLine(
+  state: RunStopState,
+  level: StopLevel,
+  why: string,
+): string {
+  if (state.phase.name !== "lingering")
+    return `stop: ${state.taken.level} — ${why}`;
+  const done =
+    level === "killed"
+      ? "what is left of its process group killed"
+      : "nothing left to stop";
+  return `stop: ${level} asked once the runner had exited on its own: ${done}, its own end stands — ${why}`;
 }
 
 /**

@@ -4,10 +4,18 @@ import { ConfigError } from "./errors";
 import { configSchema, type OrchestratorConfig } from "./schema";
 
 /**
- * A key shown as written: a name, as every setting and secret name is — a letter or `_` first, then
- * letters, digits and `_`, 40 at most.
+ * A key shown as written: a name shaped as the settings' and secrets' names are — camelCase words
+ * (`cooldownMinutes`), snake_case words (`cooldown_minutes`), an uppercase word (`PATH`), or UPPER_SNAKE
+ * words with digits after the first letter (`BWP_S3_SECRET`, `BWP_`); 40 characters at most
+ * ({@link MAX_SHOWN_KEY}). A credential pasted in a key's place is random: digits in a lowercase or
+ * camelCase run (a legacy 40-hex token, `sk_live_4eC3…`), or uppercase and digits with no `_` (an AWS
+ * key ID), none of which a name holds.
  */
-const SHOWN_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,39}$/;
+const SHOWN_KEY =
+  /^(?:[a-z]+(?:[A-Z][a-z]+)*|[a-z]+(?:_[a-z]*)+|[A-Z]+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]*)+)$/;
+
+/** The longest key shown as written. */
+const MAX_SHOWN_KEY = 40;
 
 /** The prefixes of GitHub's tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`). */
 const GITHUB_TOKEN_PREFIX = /^(gh[pousr]_|github_pat_)/;
@@ -15,14 +23,17 @@ const GITHUB_TOKEN_PREFIX = /^(gh[pousr]_|github_pat_)/;
 /**
  * A key as a message may show it. Keys are names, but a pasted credential can land in a key's place
  * (`"ghp_…": "GITHUB_TOKEN"`), and a key can hold anything — a newline that forges a line, a
- * terminal escape. So only a name is shown, and never one shaped like a GitHub token; any other key
- * is described by its length alone.
+ * terminal escape. So only a name ({@link SHOWN_KEY}) is shown, and never one shaped like a GitHub
+ * token; any other key is described by its length alone. A credential of letters alone that reads as
+ * a name cannot be told from one, and is shown.
  *
  * @param key - a key read from the file.
  * @returns the key, or `a key of N characters`.
  */
 export function describeKey(key: string): string {
-  return SHOWN_KEY.test(key) && !GITHUB_TOKEN_PREFIX.test(key)
+  return key.length <= MAX_SHOWN_KEY &&
+    SHOWN_KEY.test(key) &&
+    !GITHUB_TOKEN_PREFIX.test(key)
     ? key
     : `a key of ${String(key.length)} characters`;
 }

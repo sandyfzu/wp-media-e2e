@@ -208,6 +208,36 @@ test.describe("runOutcome — error: the run could not test", () => {
     ).toBe("bddgen was ended by SIGSEGV: last line");
   });
 
+  test("a process that could not start: its cause, never the log, which our own line is left out of", () => {
+    expect(
+      runOutcome(
+        input([], {
+          bddgen: { code: null, signal: null, notStarted: "ENOENT" },
+          playwright: undefined,
+          results: undefined,
+          logTail: ["Error: something the log says"],
+        }),
+      ),
+    ).toEqual({ status: "error", reason: "bddgen could not start: ENOENT" });
+    expect(
+      runOutcome(
+        input([], {
+          playwright: {
+            code: null,
+            signal: null,
+            notStarted: "recording that it starts failed (ENOSPC)",
+          },
+          results: undefined,
+          logTail: ["bddgen's last line"],
+        }),
+      ),
+    ).toEqual({
+      status: "error",
+      reason:
+        "Playwright could not start: recording that it starts failed (ENOSPC)",
+    });
+  });
+
   test("Playwright never started though bddgen passed", () => {
     expect(
       runOutcome(input([], { playwright: undefined, results: undefined }))

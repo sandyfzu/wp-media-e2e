@@ -6,6 +6,7 @@ import type { RunStatus } from "../runs/outcome";
 import {
   escapeCut,
   escapeSlack,
+  FENCE_BREAK,
   formatDuration,
   MAX_LISTED_SCENARIOS,
   sendSlack,
@@ -336,6 +337,23 @@ test.describe("slackMessage", () => {
     expect(text).toContain("x�");
   });
 
+  test("never lets two names holding three backticks make the lines between them one code block", () => {
+    const text = slackMessage(
+      finishedEvent({
+        scenarios: [
+          scenario({ name: "opens ```", status: "failed", error: "a ``` b" }),
+          scenario({ name: "x".repeat(400) + "````", status: "failed" }),
+          scenario({ name: "closes ```", status: "flaky" }),
+        ],
+      }),
+    );
+    expect(text).not.toContain("```");
+    expect(text).toContain(
+      `• Backups › opens ${FENCE_BREAK.repeat(3)} — a ${FENCE_BREAK.repeat(3)} b`,
+    );
+    expect(text).toContain(`• Backups › closes ${FENCE_BREAK.repeat(3)}`);
+  });
+
   test("shows a path holding a backtick as plain text, since code would end early", () => {
     const text = slackMessage(
       finishedEvent({ report: { dir: "/srv/a`b", log: "/srv/x.log" } }),
@@ -349,6 +367,18 @@ test.describe("escapeSlack and escapeCut", () => {
     expect(escapeSlack(`a & b < c > d "e" 'f' *g*`)).toBe(
       `a &amp; b &lt; c &gt; d "e" 'f' *g*`,
     );
+  });
+
+  test("breaks every run of three backticks or more, keeping one or two and the length", () => {
+    const b = FENCE_BREAK;
+    expect(escapeSlack("`a` ``b`` ```c``` ````d")).toBe(
+      `\`a\` \`\`b\`\` ${b}${b}${b}c${b}${b}${b} ${b}${b}${b}${b}d`,
+    );
+    expect(escapeSlack("&```<")).toBe(`&amp;${b}${b}${b}&lt;`);
+    // Cut or not, no three backticks survive, whatever the bound.
+    for (let max = 1; max < 30; max++)
+      expect(escapeCut("a````b&````".repeat(3), max)).not.toContain("```");
+    expect(escapeCut("``````", 4)).toBe(`${b}${b}${b}…`);
   });
 
   test("refuses a bound under 1", () => {

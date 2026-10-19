@@ -169,6 +169,15 @@ test.describe("readRunResults — lines of the wrong shape", () => {
     ).toBeUndefined();
   });
 
+  test("keeps the last run.end: the stream is written in order, so a later end is the newer word", () => {
+    const text = streamOf([
+      runEnd("failed", { total: 1, failed: 1 }),
+      runEnd("passed", { total: 1, passed: 1 }),
+    ]);
+    expect(readRunResults(text).end?.status).toBe("passed");
+    expect(readRunResults(text).end?.scenarios.passed).toBe(1);
+  });
+
   test("keeps the last well-formed run.end when a later one is malformed", () => {
     const text =
       streamOf([runEnd("failed", { total: 1, failed: 1 })]) +

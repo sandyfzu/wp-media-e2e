@@ -120,6 +120,12 @@ test.describe("nextAfter", () => {
       expect(() => nextAfter(text, 0, place)).toThrow(file);
     });
 
+  test("refuses a fractional counter as not a counter, naming the field — never as out of numbers", () => {
+    expect(() => nextAfter(`{"v":1,"lastRun":3.5}`, 0, place)).toThrow(
+      `The run counter ${file} is not a run counter (lastRun). It is never reset`,
+    );
+  });
+
   test("refuses a counter, or run folders, with no safe number left after them", () => {
     expect(() =>
       nextAfter(counterText(Number.MAX_SAFE_INTEGER), 0, place),

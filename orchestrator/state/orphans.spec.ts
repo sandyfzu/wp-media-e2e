@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   open,
@@ -33,10 +34,23 @@ import {
   orphanRefusal,
   type OrphanCheckDeps,
 } from "./orphans";
+import { INIT_PID_NAMESPACE, type PidSpace } from "./pid-space";
 
 const STARTED = new Date("2026-10-13T10:15:31.042Z");
 const FOUND = new Date("2026-10-13T12:00:00.000Z");
 const START = "ps:Tue Oct 13 10:15:31 2026";
+
+/** This boot, on a host whose PID space shows an earlier boot as one. */
+const HOST_SPACE: PidSpace = {
+  platform: "linux",
+  host: "qa-lnmp",
+  boot: "f6fb3842-61ea-4a8e-8577-4be12500a66e",
+  pidns: INIT_PID_NAMESPACE,
+  machine: "0123456789abcdef0123456789abcdef",
+};
+
+/** A leader start recorded in an earlier boot than {@link HOST_SPACE}'s. */
+const EARLIER_BOOT_START = "linux:0b5c2d7e-1111-4222-8333-944455566677:1347811";
 
 /**
  * A run's identity.
@@ -403,6 +417,58 @@ test.describe("classifyRunning", () => {
       why: "its group could not be asked (EINVAL)",
     });
   });
+
+  test("a leader from an earlier boot of this machine is stale, without asking its group: the number is any process's now", async () => {
+    const asked: number[] = [];
+    expect(
+      await classifyRunning(
+        {
+          process: {
+            name: "playwright",
+            pgid: 4242,
+            leaderStart: EARLIER_BOOT_START,
+          },
+        },
+        {
+          kill: (pid) => {
+            asked.push(pid);
+          },
+          readLeaderStart: startsOf({}),
+          space: () => Promise.resolve(HOST_SPACE),
+        },
+      ),
+    ).toEqual({ kind: "stale", reason: "earlier boot" });
+    expect(asked).toEqual([]);
+  });
+
+  test("a leader from another boot is judged by its group when the boot cannot be shown an earlier one of this machine", async () => {
+    const leaderless = {
+      kind: "orphan",
+      pgid: 4242,
+      confirmed: false,
+      why: "its playwright process has exited, and the rest of its group still runs",
+    };
+    const judge = (leaderStart: string, space: PidSpace) =>
+      classifyRunning(
+        { process: { name: "playwright", pgid: 4242, leaderStart } },
+        {
+          kill: killWith([4242]),
+          readLeaderStart: startsOf({}),
+          space: () => Promise.resolve(space),
+        },
+      );
+    // This very boot; a container's namespace; no machine id; a boot unread; a start that is no boot's.
+    const cases: [string, PidSpace][] = [
+      [`linux:${HOST_SPACE.boot ?? ""}:1347811`, HOST_SPACE],
+      [EARLIER_BOOT_START, { ...HOST_SPACE, pidns: "pid:[4026532829]" }],
+      [EARLIER_BOOT_START, { ...HOST_SPACE, machine: null }],
+      [EARLIER_BOOT_START, { ...HOST_SPACE, boot: null }],
+      ["linux:not-a-boot-id:1347811", HOST_SPACE],
+      [START, HOST_SPACE],
+    ];
+    for (const [start, space] of cases)
+      expect(await judge(start, space), start).toEqual(leaderless);
+  });
 });
 
 test.describe("checkOrphans", () => {
@@ -601,7 +667,7 @@ test.describe("checkOrphans", () => {
     });
   });
 
-  test("a malformed record is a warning, left as it is, never a crash", async () => {
+  test("a malformed record is an unconfirmed orphan, left as it is, never a crash: nothing says its run is over", async () => {
     const texts = {
       "bpng-7": "{not json",
       "bpng-8": JSON.stringify({ v: 2, state: "running", id: "bpng-8" }),
@@ -613,26 +679,28 @@ test.describe("checkOrphans", () => {
     const elsewhere = join(await runFolder("bpng-10"), "run.json");
     await writeRunRecord(elsewhere, runningRecord(identity("bpng-11"), "bpng"));
     const check = await checkOrphans(stateDir, deps());
-    expect(check.orphans).toEqual([]);
-    expect(check.stale).toEqual([]);
-    expect(check.warnings).toEqual(
+    expect(check.orphans).toEqual(
       [
         ["bpng-10", "another run's record"],
         ["bpng-7", "not JSON"],
         ["bpng-8", "not a run record this orchestrator reads"],
         ["bpng-9", "not JSON"],
-      ].map(
-        ([id, why]) =>
-          `run ${id ?? ""}'s record is not one this orchestrator reads (${why ?? ""}): passed over`,
-      ),
+      ].map(([id, why]) => ({
+        id,
+        record: join(stateDir, "runs", id ?? "", "run.json"),
+        unread: `is not one this orchestrator reads (${why ?? ""})`,
+        confirmed: false,
+      })),
     );
+    expect(check.stale).toEqual([]);
+    expect(check.warnings).toEqual([]);
     expect(await recordAt(elsewhere)).toMatchObject({ state: "running" });
     expect(
       await readFile(join(stateDir, "runs", "bpng-7", "run.json"), "utf8"),
     ).toBe("{not json");
   });
 
-  test("never reads through a link, nor waits on a FIFO, nor reads a huge file", async () => {
+  test("never reads through a link, nor waits on a FIFO, nor reads a huge file: each such record an unconfirmed orphan", async () => {
     // A link to a running record elsewhere: neither read nor rewritten.
     const outside = join(stateDir, "outside.json");
     await writeRunRecord(outside, runningRecord(identity("bpng-12"), "bpng"));
@@ -650,16 +718,87 @@ test.describe("checkOrphans", () => {
     );
     await writeFile(join(stateDir, "runs", "stray"), "");
     const check = await checkOrphans(stateDir, deps());
-    expect(check.orphans).toEqual([]);
+    expect(check.orphans).toEqual(
+      [
+        ["bpng-12", "is a symbolic link"],
+        ["bpng-13", "could not be read (not a file)"],
+        ["bpng-14", "is over 1048576 bytes"],
+      ].map(([id, unread]) => ({
+        id,
+        record: join(stateDir, "runs", id ?? "", "run.json"),
+        unread,
+        confirmed: false,
+      })),
+    );
     expect(check.stale).toEqual([]);
     expect(check.warnings).toEqual([
-      "run bpng-12's record is a symbolic link: passed over",
-      "run bpng-13's record could not be read (not a file): passed over",
-      "run bpng-14's record is over 1048576 bytes: passed over",
       "bpng-15 in the runs' folder is not a folder: passed over",
       "stray in the runs' folder is not a folder: passed over",
     ]);
     expect(await recordAt(outside)).toMatchObject({ state: "running" });
+  });
+
+  test("a record it may not read is an unconfirmed orphan, listed in run-folder order among the others", async () => {
+    test.skip(process.getuid?.() === 0, "root reads a file of mode 000");
+    await running("bpng-1", {
+      name: "playwright",
+      pgid: 4242,
+      leaderStart: START,
+    });
+    const path = join(await runFolder("bpng-2"), "run.json");
+    await writeFile(path, "{}");
+    await chmod(path, 0o000);
+    await running("bpng-3", {
+      name: "playwright",
+      pgid: 4343,
+      leaderStart: START,
+    });
+    const check = await checkOrphans(
+      stateDir,
+      deps({
+        kill: killWith([4242, 4343]),
+        readLeaderStart: startsOf({
+          4242: { kind: "start", value: START },
+          4343: { kind: "start", value: START },
+        }),
+      }),
+    );
+    expect(check.orphans.map(({ id }) => id)).toEqual([
+      "bpng-1",
+      "bpng-2",
+      "bpng-3",
+    ]);
+    expect(check.orphans[1]).toEqual({
+      id: "bpng-2",
+      record: path,
+      unread: "could not be read (EACCES)",
+      confirmed: false,
+    });
+    expect(check.warnings).toEqual([]);
+  });
+
+  test("marks a record whose leader started in an earlier boot lost, whatever holds its group's number now", async () => {
+    const path = await running("bpng-4", {
+      name: "playwright",
+      pgid: 4242,
+      leaderStart: EARLIER_BOOT_START,
+    });
+    const check = await checkOrphans(
+      stateDir,
+      deps({
+        kill: killWith([4242]),
+        space: () => Promise.resolve(HOST_SPACE),
+      }),
+    );
+    expect(check).toEqual({
+      orphans: [],
+      stale: [{ id: "bpng-4", reason: "earlier boot", rewritten: true }],
+      warnings: [],
+    });
+    expect(await recordAt(path)).toMatchObject({
+      state: "lost",
+      reason: "earlier boot",
+    });
   });
 
   test("names a folder safely in a warning", async () => {
@@ -870,6 +1009,24 @@ test.describe("orphanRefusal", () => {
         "lists those writing its log. End each one's group with: kill -KILL -<PGID>, its PGID from: " +
         "ps -o pgid= -p <PID>. If there are none, mark the run over: in " +
         `'/srv/my state/runs/bpng-12/run.json', set "state" to "lost".`,
+    );
+  });
+
+  test("one whose record cannot be read says why, how to find its processes by its log, and how to set the record aside", () => {
+    expect(
+      orphanRefusal({
+        id: "bpng-12",
+        record: "/srv/my state/runs/bpng-12/run.json",
+        unread: "is a symbolic link",
+        confirmed: false,
+      }),
+    ).toBe(
+      "Run bpng-12 may still be running — unconfirmed: its record is a symbolic link, so nothing " +
+        "says it is over. A second run would share its sites. Look for its processes first: lsof -- " +
+        "'/srv/my state/runs/bpng-12/run.log' lists those writing its log. End each one's group " +
+        "with: kill -KILL -<PGID>, its PGID from: ps -o pgid= -p <PID>. If there are none, repair " +
+        "its record, or set it aside: mv '/srv/my state/runs/bpng-12/run.json' " +
+        "'/srv/my state/runs/bpng-12/run.json.unread'",
     );
   });
 

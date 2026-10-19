@@ -291,11 +291,17 @@ export type OpenFile = (
 
 /** What {@link pathKind} reads of a path: `lstat`'s shape. */
 export type LstatPath = (path: string) => Promise<{
+  /** Whether it is a symbolic link (`lstat` never follows one). */
   isSymbolicLink(): boolean;
+  /** Whether it is a FIFO, which an append would block on. */
   isFIFO(): boolean;
+  /** Whether it is a socket. */
   isSocket(): boolean;
+  /** Whether it is a folder. */
   isDirectory(): boolean;
+  /** Whether it is a block device. */
   isBlockDevice(): boolean;
+  /** Whether it is a character device: a terminal, `/dev/null`. */
   isCharacterDevice(): boolean;
 }>;
 

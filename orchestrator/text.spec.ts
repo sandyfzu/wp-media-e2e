@@ -107,7 +107,27 @@ test.describe("safeLine", () => {
     );
   });
 
-  test("masks every secret value it is given, wherever it appears, the longest first", () => {
+  test("masks a secret holding an invisible character, as cleaning writes it too", () => {
+    const secret = "Hunter\u200b2Secret!";
+    // Cleaned before it reaches us (the run facts), or split by a terminal code here.
+    expect(safeLine("pw Hunter2Secret! end", 500, [secret])).toBe("pw *** end");
+    expect(
+      safeLine("pw Hunter\u001b[1m\u200b2Secret! end", 500, [secret]),
+    ).toBe("pw *** end");
+    expect(
+      safeBlock("pw Hunter\u001b[1m\u200b2Secret! end", 500, [secret]),
+    ).toBe("pw *** end");
+  });
+
+  test("masks two secrets that overlap in the text, neither one's rest left in clear", () => {
+    for (const secrets of [
+      ["abcdefgh12", "12345678zz"],
+      ["12345678zz", "abcdefgh12"],
+    ])
+      expect(safeLine("x abcdefgh12345678zz y", 500, secrets)).toBe("x *** y");
+  });
+
+  test("masks every secret value it is given, wherever it appears, one inside another included", () => {
     const secrets = ["Tr0ub4dor&3xyz", "Tr0ub4dor&3xyz-and-more"];
     expect(
       safeLine("a Tr0ub4dor&3xyz-and-more b Tr0ub4dor&3xyz", 500, secrets),
@@ -194,6 +214,10 @@ test.describe("a secret's head before a cut", () => {
     expect(maskCutTails(`one Site… two SitePa… three`, forms)).toBe(
       "one ***… two ***… three",
     );
+    // Cut one character before the secret's end: the longest head there is.
+    expect(maskCutTails(`a ${PASSWORD.slice(0, -1)}… tail`, forms)).toBe(
+      "a ***… tail",
+    );
   });
 
   test("leaves a head shorter than four characters, text that is no secret's head, and text with no mark", () => {
@@ -254,6 +278,8 @@ test.describe("secretForms", () => {
     expect(forms).toContain("p\\u00e4ssw\\u00f6rd\\/\\ud83d\\ude00");
     expect(forms).toContain("p\\u00e4ssw\\u00f6rd/\\ud83d\\ude00");
     expect(forms).toContain("pässwörd/😀");
+    // PHP with JSON_UNESCAPED_UNICODE: non-ASCII kept, `/` still escaped.
+    expect(forms).toContain("pässwörd\\/😀");
     expect(forms).toContain("p%C3%A4ssw%C3%B6rd%2F%F0%9F%98%80");
     expect(forms).toContain("p%c3%a4ssw%c3%b6rd%2f%f0%9f%98%80");
   });

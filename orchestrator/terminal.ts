@@ -4,8 +4,8 @@
  *
  * Node writes `process.stdout` **synchronously** when it is a terminal (`tty.WriteStream` sets its
  * handle blocking, on macOS and Linux), so a paused terminal — Ctrl-S, a frozen SSH client — stops the
- * whole event loop, timers and signal handlers included: a Ctrl-C is never handled. {@link
- * unblockTerminal} turns that handle back to non-blocking through Node's internal
+ * whole event loop, timers and signal handlers included: a Ctrl-C is never handled.
+ * {@link unblockTerminal} turns that handle back to non-blocking through Node's internal
  * `_handle.setBlocking(false)` — there is no public way — guarded, so a Node without it changes
  * nothing. Writes then queue in the stream ({@link Terminal.writableLength}) until the terminal takes
  * them, and the writer bounds that queue.
@@ -161,6 +161,7 @@ export function drainTerminal(
   assertWaitMs(maxWaitMs);
   const deadline = performance.now() + maxWaitMs;
   return new Promise((resolve) => {
+    /** Settles once the terminal holds nothing or the time is up; else looks again later. */
     const look = (): void => {
       if (holdsNothing(terminal)) {
         resolve(true);

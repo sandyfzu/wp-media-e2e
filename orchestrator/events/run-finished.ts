@@ -230,6 +230,7 @@ function finishedScenario(
   end: ScenarioResult,
   secrets: readonly string[],
 ): FinishedScenario {
+  /** A name as kept: masked, one line, within {@link MAX_NAME}. */
   const name = (text: string): string => safeLine(text, MAX_NAME, secrets);
   const message = end.error?.message;
   return {

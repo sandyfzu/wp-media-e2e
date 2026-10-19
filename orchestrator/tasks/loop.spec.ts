@@ -14,6 +14,11 @@ import {
 import { RESULTS_FILE } from "../../src/common/reporting/results-schema";
 import type { RunFinishedEvent } from "../events/run-finished";
 import { runIdentity } from "../runs/identity";
+import {
+  launchRun,
+  type LaunchedRun,
+  type LaunchOptions,
+} from "../runs/launch";
 import type { RunStatus } from "../runs/outcome";
 import { parseRunRecord } from "../runs/record";
 import type { StopLevel } from "../runs/stop";
@@ -490,20 +495,22 @@ test.describe("runTask — the cell's site locks, held for the whole loop", () =
    * A stand-in for the cell's site locks.
    *
    * @param seen - where its calls go.
-   * @param naming - what `setRun` resolves to.
+   * @param naming - what `setRun` resolves to; an `Error`, what it rejects with.
    * @param released - what `release` resolves to.
    * @returns it.
    */
   function heldCell(
     seen: CellSeen,
-    naming: RunNaming = { kind: "named" },
+    naming: RunNaming | Error = { kind: "named" },
     released = true,
   ): HeldCell {
     return {
       locks: [],
       setRun: (run) => {
         seen.events.push(`setRun ${run}`);
-        return Promise.resolve(naming);
+        return naming instanceof Error
+          ? Promise.reject(naming)
+          : Promise.resolve(naming);
       },
       release: () => {
         seen.events.push("release");
@@ -513,7 +520,8 @@ test.describe("runTask — the cell's site locks, held for the whole loop", () =
   }
 
   /**
-   * A `runOnce` that names each run in the locks as the real cycle does, then ends it at once.
+   * A `runOnce` that names each run in the locks as the real cycle does — a throw ends the run as its
+   * result says —, then ends it at once.
    *
    * @param seen - where it says each run.
    * @param result - how each run ends.
@@ -531,8 +539,11 @@ test.describe("runTask — the cell's site locks, held for the whole loop", () =
       return {
         stop: () => undefined,
         done: (async () => {
-          if (deps.claimCell !== undefined)
-            await deps.claimCell(`/s/runs/bpng-${String(number)}/run.json`);
+          try {
+            await deps.claimCell?.(`/s/runs/bpng-${String(number)}/run.json`);
+          } catch {
+            // The real cycle ends the run `error`: what `result` says.
+          }
           return result(number);
         })(),
       };
@@ -619,13 +630,20 @@ test.describe("runTask — the cell's site locks, held for the whole loop", () =
       { kind: "failed", why: "ENOSPC" },
       "its cell's site locks could not be rewritten to name the run (ENOSPC): they are still this orchestrator's, but no run starts unnamed in them",
     ],
+    [
+      new Error(`EIO renaming ${SECRET}`),
+      "its cell's site locks could not be rewritten to name the run (EIO renaming ***): they are still this orchestrator's, but no run starts unnamed in them",
+    ],
   ] as const)
-    test(`a run that cannot be named in them (${naming.kind}) ends the loop after it: no next run, said why, and the locks given back`, async () => {
+    test(`a run that cannot be named in them (${naming instanceof Error ? "setRun rejects" : naming.kind}) ends the loop after it: no next run, said why, and the locks given back`, async () => {
       const cell: CellSeen = { events: [] };
       const r = rig({
         takeCell: () => Promise.resolve(heldCell(cell, naming)),
         runOnce: claimingRunOnce(cell, () => endedRun("error")),
       });
+      // Checked before the end is awaited: a loop that cooled down would never end.
+      await delay(0);
+      expect(r.timers.timers).toEqual([]);
       expect((await r.loop.done).ended).toBe("failed");
       expect(r.lines).toContain(`bpng no next run: ${said}`);
       expect(cell.events.filter((event) => event.startsWith("run "))).toEqual([
@@ -1085,12 +1103,40 @@ test.describe("runTask — never rejects", () => {
 test.describe("runTask — over the real runOnce and the fake suite", () => {
   let checkout: string;
   let stateDir: string;
+  /** Every process group a test's runs started: killed, with whatever they left, as the test ends. */
+  const groups = new Set<number>();
+
+  /**
+   * The real launch, each process group it starts kept in {@link groups}.
+   *
+   * @param options - the launch's options.
+   * @returns the launched run.
+   */
+  const launch = (options: LaunchOptions): Promise<LaunchedRun> =>
+    launchRun({
+      ...options,
+      onProcess: (name, pgid) => {
+        groups.add(pgid);
+        return options.onProcess?.(name, pgid);
+      },
+    });
+
   test.beforeEach(async () => {
     checkout = await mkdtemp(join(tmpdir(), "e2e-loop-checkout-"));
     stateDir = join(checkout, ".orchestrator");
     await mkdir(stateDir, { mode: 0o700 });
   });
   test.afterEach(async () => {
+    // A group already gone (ESRCH), or no longer ours (EPERM), is skipped.
+    for (const pgid of groups) {
+      try {
+        process.kill(-pgid, "SIGKILL");
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ESRCH" && code !== "EPERM") throw error;
+      }
+    }
+    groups.clear();
     await rm(checkout, { recursive: true, force: true });
   });
 
@@ -1101,6 +1147,7 @@ test.describe("runTask — over the real runOnce and the fake suite", () => {
     const loop = runTask(TASK, {
       stateDir,
       checkout,
+      launch,
       config: {},
       secrets: [SECRET],
       inherited: { PATH: process.env.PATH },
@@ -1181,6 +1228,7 @@ test.describe("runTask — over the real runOnce and the fake suite", () => {
     const loop = runTask(TASK, {
       stateDir,
       checkout,
+      launch,
       config: {},
       secrets: [SECRET],
       inherited: { PATH: process.env.PATH },

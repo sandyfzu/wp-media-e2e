@@ -59,7 +59,7 @@ export interface DatatorPayload {
   readonly git_commit: string | null;
   /** Whole seconds: Datator refuses `845.7`. */
   readonly test_duration_seconds: number;
-  /** The pool's first site; `null` when unknown or not a URL Datator would accept. */
+  /** The pool's first site, without user or password; `null` when unknown or not a URL Datator would accept. */
   readonly website_url: string | null;
   readonly test_cases: readonly DatatorTestCase[];
 }
@@ -149,20 +149,22 @@ function isCommit(commit: string | null): commit is string {
 }
 
 /**
- * `url` when Datator's URL check (Django's `URLValidator`) would surely accept it: `http`/`https`, at
- * most {@link MAX_RUN_FIELD}, written as a URL parser writes it back (a trailing `/` aside) — so
- * nothing a parser rewrites, such as a space, a backslash, `%61` or the IPv4 shorthand `127.1` — and a
- * host that is `localhost`, an IPv4 address, or a name ending in a top-level domain of letters.
- * Anything else — a Docker service name such as `http://wp-apache` — is `null`: an optional field
- * Datator refuses would lose the whole record.
+ * `url` without its user and password, when Datator's URL check (Django's `URLValidator`) would surely
+ * accept it: `http`/`https`, written as a URL parser writes it back (a trailing `/` aside) — so
+ * nothing a parser rewrites, such as a space, a backslash, `%61` or the IPv4 shorthand `127.1` —, a
+ * host that is `localhost`, an IPv4 address, or a name ending in a top-level domain of letters, and at
+ * most {@link MAX_RUN_FIELD} once its user and password are gone. They are never posted: the event's
+ * address shows them `***@`, which Datator would keep as written, splitting the site's series. Anything
+ * else — a Docker service name such as `http://wp-apache` — is `null`: an optional field Datator
+ * refuses would lose the whole record.
  *
- * @param url - the site's `baseURL`.
+ * @param url - the site's `baseURL`, as the event shows it.
  * @returns the URL, or `null`.
  */
 export function acceptedUrl(url: string | undefined): string | null {
-  if (url === undefined || url.length > MAX_RUN_FIELD || !URL.canParse(url))
-    return null;
-  const { protocol, hostname, href } = new URL(url);
+  if (url === undefined || !URL.canParse(url)) return null;
+  const parsed = new URL(url);
+  const { protocol, hostname, href } = parsed;
   if (href !== url && href !== `${url}/`) return null;
   const hostOk =
     hostname === "localhost" ||
@@ -170,7 +172,12 @@ export function acceptedUrl(url: string | undefined): string | null {
     /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9]{1,59})$/.test(
       hostname,
     );
-  return (protocol === "https:" || protocol === "http:") && hostOk ? url : null;
+  if (!((protocol === "https:" || protocol === "http:") && hostOk)) return null;
+  parsed.username = "";
+  parsed.password = "";
+  // As written: without the `/` a parser adds to an address with no path.
+  const bare = href === url ? parsed.href : parsed.href.slice(0, -1);
+  return bare.length > MAX_RUN_FIELD ? null : bare;
 }
 
 /** Where and how a record is sent. */

@@ -9,7 +9,7 @@ import {
   type CellUnit,
 } from "./cell-lock";
 import { inspectLock, stateFolderProblem, type LockDeps } from "./lock";
-import { classifyRunning, orphanRefusal } from "./orphans";
+import { classifyRunning, orphanRefusal, unreadOrphan } from "./orphans";
 import { readRunningFolders } from "./run-folders";
 
 /**
@@ -70,11 +70,12 @@ export async function inspectState(
 }
 
 /**
- * The runs an earlier orchestrator left running, judged as the orphan check judges them, read only.
+ * The runs an earlier orchestrator left running, judged as the orphan check judges them, read only: a
+ * record that is there but cannot be read refuses as it does.
  *
  * @param stateDir - the state directory.
- * @param deps - `kill` and the start reader.
- * @returns a refusal per orphan, and what could not be read.
+ * @param deps - `kill`, the start reader and this process's PID space.
+ * @returns a refusal per orphan, and each entry that is no run folder.
  */
 async function orphanWarnings(
   stateDir: string,
@@ -85,11 +86,17 @@ async function orphanWarnings(
       deps.kill ??
       ((pid: number, signal: NodeJS.Signals | 0) => process.kill(pid, signal)),
     readLeaderStart: deps.readStart ?? readLeaderStart,
+    ...(deps.space === undefined ? {} : { space: deps.space }),
   };
   const warnings: string[] = [];
   try {
     const folders = await readRunningFolders(stateDir);
-    warnings.push(...folders.warnings.map(({ text }) => text));
+    for (const warning of folders.warnings) {
+      const unread = unreadOrphan(warning);
+      warnings.push(
+        unread === undefined ? warning.text : refused(orphanRefusal(unread)),
+      );
+    }
     for (const { record, path } of folders.running) {
       const verdict = await classifyRunning(record, judge);
       if (verdict.kind === "stale") continue;

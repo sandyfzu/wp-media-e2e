@@ -938,6 +938,88 @@ test.describe("the command, stopped by real signals", () => {
     );
   });
 
+  test("npm: SIGHUP to npm's own PID while the orchestrator still boots stops it all the same; exit 130, nothing left running", async () => {
+    // From as soon as npm's child appears — the orchestrator not yet booted, its parent's PID not yet
+    // read — to past its boot.
+    for (const afterMs of [0, 0, 50, 150, 300, 600]) {
+      removeTempDir(join(stateDir, "runs"));
+      removeTempDir(join(stateDir, "tasks"));
+      await rm(join(stateDir, "orchestrator.log"), { force: true });
+      const npm = spawnOwned(
+        "npm",
+        ["run", "orchestrator", "--", "start", "--config", config],
+        {
+          cwd: pkg,
+          env: childEnv(swapEnv()),
+          detached: true,
+          stdio: "ignore",
+        },
+      );
+      const group = npm.pid ?? 0;
+      let pid = 0;
+      try {
+        pid = await childOf(group);
+        await delay(afterMs);
+        send(group, "SIGHUP");
+        await gone(pid);
+        const log = logText();
+        expect(log, `${String(afterMs)} ms`).toContain("exiting 130");
+        // A run begun before the parent was seen gone is drained, never left running.
+        const run = join(stateDir, "runs", "bpng-1", "run.json");
+        if (existsSync(run))
+          expect(JSON.parse(readFileSync(run, "utf8"))).toMatchObject({
+            status: "stopped",
+          });
+        expect(existsSync(join(stateDir, "orchestrator.lock"))).toBe(false);
+      } finally {
+        // Its group, the orchestrator reparented but still in it, and a run's own group.
+        killHard(-group);
+        if (pid !== 0) killHard(pid);
+        killRunGroups();
+      }
+    }
+  });
+
+  /**
+   * The first child of a process, once it has one: npm's script, the orchestrator.
+   *
+   * @param parent - the parent's PID.
+   * @returns the child's PID.
+   */
+  async function childOf(parent: number): Promise<number> {
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      try {
+        const found = Number(
+          execFileSync("pgrep", ["-P", String(parent)], { encoding: "utf8" })
+            .trim()
+            .split("\n")[0],
+        );
+        if (found > 0) return found;
+      } catch {
+        // None yet: pgrep exits 1.
+      }
+      if (Date.now() > deadline)
+        throw new Error(`pid ${String(parent)} never had a child`);
+      await delay(5);
+    }
+  }
+
+  /** SIGKILLs the group every run record of the test's state directory names: its own runs alone. */
+  function killRunGroups(): void {
+    const runs = join(stateDir, "runs");
+    for (const name of existsSync(runs) ? readdirSync(runs) : [])
+      try {
+        const record = JSON.parse(
+          readFileSync(join(runs, name, "run.json"), "utf8"),
+        ) as { process?: { pgid?: unknown } };
+        const pgid = record.process?.pgid;
+        if (typeof pgid === "number" && pgid > 1) killHard(-pgid);
+      } catch {
+        // No record, or none readable: nothing it names.
+      }
+  }
+
   test("a dry run in progress ends at once on SIGINT, by Node's default: it holds no signal", async () => {
     const [program = "", ...words] = realScript()
       .replace(/^exec /, "")

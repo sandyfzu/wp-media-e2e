@@ -32,6 +32,19 @@ export interface RunFolderWarning {
   /** The folder's name, as listed. */
   readonly name: string;
   readonly text: string;
+  /**
+   * A run folder whose record is there but cannot be read, or is not one: its run may still run, so the
+   * orphan check refuses it ({@link UnreadRecord}). Absent for an entry that is no folder.
+   */
+  readonly unread?: UnreadRecord;
+}
+
+/** A record that is there but cannot be read, or is not one this orchestrator reads. */
+export interface UnreadRecord {
+  /** Its `run.json`, absolute. */
+  readonly path: string;
+  /** Why, as the end of a sentence naming the record: `is a symbolic link`. */
+  readonly why: string;
 }
 
 /** Every running record under the runs' folder, and what could not be read. */
@@ -43,7 +56,8 @@ export interface RunningFolders {
 
 /**
  * Reads every run folder's record that still says `running`. A record that cannot be read, or is not
- * one, is a warning; a folder being removed (hidden), with no record yet, or over, is passed over.
+ * one, is a warning that says so (`unread`); so is an entry that is no folder. A folder being removed
+ * (hidden), with no record yet, or over, is passed over.
  *
  * @param stateDir - the state directory.
  * @returns the running records and the warnings.
@@ -61,7 +75,11 @@ export async function readRunningFolders(
     const read = await readRunning(runsDir, entry);
     if (read.kind === "running") running.push(read.folder);
     else if (read.kind === "warning")
-      warnings.push({ name: entry.name, text: read.text });
+      warnings.push({
+        name: entry.name,
+        text: read.text,
+        ...(read.unread === undefined ? {} : { unread: read.unread }),
+      });
   }
   return { running, warnings };
 }
@@ -70,14 +88,18 @@ export async function readRunningFolders(
 type RunningRead =
   | { readonly kind: "running"; readonly folder: RunningFolder }
   | { readonly kind: "skip" }
-  | { readonly kind: "warning"; readonly text: string };
+  | {
+      readonly kind: "warning";
+      readonly text: string;
+      readonly unread?: UnreadRecord;
+    };
 
 /**
  * Reads one run folder's record, when it still says `running`.
  *
  * @param runsDir - `<state>/runs`.
  * @param entry - the folder's entry.
- * @returns the record, nothing, or a warning.
+ * @returns the record, nothing, or a warning — with what was unread, for a record that is there.
  */
 async function readRunning(
   runsDir: string,
@@ -100,16 +122,17 @@ async function readRunning(
       return { kind: "skip" };
     case "running":
       return { kind: "running", folder: { record: read.record, path } };
-    case "malformed":
+    default: {
+      const why =
+        read.kind === "malformed"
+          ? `is not one this orchestrator reads (${read.why})`
+          : describeUnread(read);
       return {
         kind: "warning",
-        text: `run ${name}'s record is not one this orchestrator reads (${read.why}): passed over`,
+        text: `run ${name}'s record ${why}: passed over`,
+        unread: { path, why },
       };
-    default:
-      return {
-        kind: "warning",
-        text: `run ${name}'s record ${describeUnread(read)}: passed over`,
-      };
+    }
   }
 }
 

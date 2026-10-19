@@ -59,6 +59,9 @@ import {
   type CycleTask,
 } from "./run-lines";
 
+/** A task as one run needs it, for the loop and the orchestrator. */
+export type { CycleTask } from "./run-lines";
+
 /**
  * One run of a task, from its number to its `run.finished`: the counter hands out the number, the
  * run is launched with its record written before each process is spawned and once it runs, then its
@@ -70,8 +73,6 @@ import {
  * runs never recorded are those with no folder of their own: no number could be taken, or the launch
  * refused the folder before anything ran there.
  */
-
-export type { CycleTask } from "./run-lines";
 
 /** How one run ended, for the loop: its status and when, or why there was no run. */
 export type RunResult =

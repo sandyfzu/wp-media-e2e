@@ -263,6 +263,10 @@ test.describe("judgeOwner", () => {
     expect(await judge(owner(77, 2), { ...me, start: null })).toEqual({
       kind: "dead",
     });
+    // Two unknown starts are not one start: an earlier process of this PID may have left it.
+    expect(
+      await judge(owner(77, 2, { start: null }), { ...me, start: null }),
+    ).toEqual({ kind: "dead" });
   });
 
   test("never judges a PID from another PID space: the other container's PID 1 is not this one's", async () => {
@@ -900,6 +904,16 @@ test.describe("acquireLock — the lock's real path", () => {
     } finally {
       await rm(link);
     }
+  });
+});
+
+test.describe("HeldLock.setRun", () => {
+  test("names the run on disk and in its owner, as last written", async () => {
+    const lock = await take(deps(77, 1));
+    const run = join(dir, "runs", "bpng-1", "run.json");
+    expect(await lock.setRun(run)).toEqual({ kind: "named" });
+    expect(lock.owner).toEqual({ ...owner(77, 1), run });
+    expect(await lockOnDisk()).toEqual(lock.owner);
   });
 });
 

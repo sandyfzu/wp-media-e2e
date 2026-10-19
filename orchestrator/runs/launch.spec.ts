@@ -28,19 +28,30 @@ import {
   LOG_PREFIX,
   openRunLog,
   runFolderRefusal,
+  stopLine,
   type LaunchedRun,
   type LaunchOptions,
 } from "./launch";
+import { endRun } from "./end";
 import type { KillFn } from "./process-group";
 import { runEnd } from "../__fixtures__/results";
 import { RESULTS_FILE } from "../../src/common/reporting/results-schema";
 
 /** A fresh run folder per test, removed after it. */
 let root: string;
+/** Every process group a test's runs started: SIGKILLed as the test ends, whatever it left. */
+const startedGroups: number[] = [];
 test.beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "e2e-launch-"));
 });
 test.afterEach(async () => {
+  for (const pgid of startedGroups.splice(0))
+    try {
+      process.kill(-pgid, "SIGKILL");
+    } catch (error) {
+      // Already empty: the run waited for it.
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
   await rm(root, { recursive: true, force: true });
 });
 
@@ -60,6 +71,7 @@ function options(
   more: Partial<LaunchOptions> = {},
 ): LaunchOptions {
   const dir = join(root, "runs", "bpng-1");
+  const { onProcess, ...rest } = more;
   return {
     identity: {
       dir,
@@ -78,7 +90,33 @@ function options(
       E2E_INTERNAL_STOP_FILE: join(dir, "stop"),
     },
     pollMs: 20,
-    ...more,
+    ...rest,
+    // Each group noted for the clean-up first, then handed on: a throw or a rejection stays the test's.
+    onProcess: (name, pgid) => {
+      startedGroups.push(pgid);
+      return onProcess?.(name, pgid);
+    },
+  };
+}
+
+/**
+ * A runner that leaves a child in its group for `childMs`, prints `crashed`, then exits `code` — no
+ * `run.end`: a runner that died on its own while its workers still tear down.
+ *
+ * @param code - its exit code.
+ * @param childMs - how long the child outlives it.
+ */
+function crashingRunner(
+  code: number,
+  childMs: number,
+): LaunchOptions["commands"]["playwright"] {
+  const child = `setTimeout(() => {}, ${String(childMs)})`;
+  return {
+    file: process.execPath,
+    args: [
+      "-e",
+      `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(child)}], { stdio: "ignore" }).unref(); console.log("cra" + "shed"); process.exit(${String(code)});`,
+    ],
   };
 }
 
@@ -238,6 +276,71 @@ test.describe("launchRun", () => {
     );
   });
 
+  test("takes no drain nor interrupt once the runner died on its own, its workers lingering: the crash stays the verdict", async () => {
+    const opts = options({ exitCode: 0 }, {});
+    const run = await launchRun({
+      ...opts,
+      commands: { ...opts.commands, playwright: crashingRunner(1, 1_500) },
+    });
+    await waitForText(opts.identity.log, "crashed");
+    // A turn for the runner's exit to reach the launch; its child still holds the group.
+    await delay(300);
+    run.stop("drained", "the orchestrator was stopped (SIGINT)");
+    run.stop("interrupted", "again");
+    const launch = await run.done;
+    expect(launch).toEqual({
+      bddgen: { code: 0, signal: null },
+      playwright: { code: 1, signal: null },
+      stop: { level: "none" },
+    });
+    // Nothing left to drain: no stop file.
+    expect(existsSync(opts.identity.stopFile)).toBe(false);
+    expect(await readFile(opts.identity.log, "utf8")).toContain(
+      "stop: drained asked once the runner had exited on its own: nothing left to stop, its own end stands — the orchestrator was stopped (SIGINT)",
+    );
+    const { outcome } = await endRun({
+      identity: {
+        id: "bpng-1",
+        runId: "2026-10-19T00-00-00-000Z-bpng-1",
+        startedAt: new Date("2026-10-19T00:00:00.000Z"),
+        log: opts.identity.log,
+        reportDir: opts.identity.reportDir,
+      },
+      task: { id: "bpng", product: "backwpup", cell: "pro@nginx" },
+      launch,
+      secrets: [],
+      endedAt: new Date(),
+    });
+    expect(outcome).toEqual({
+      status: "error",
+      reason:
+        "Playwright exited with code 1 without finishing its results: crashed",
+    });
+  });
+
+  test("kills what is left of a runner that exited on its own, without taking the kill", async () => {
+    const childFile = join(root, "child-done");
+    const opts = options(
+      { exitCode: 0 },
+      { runMs: 20, childMs: 30_000, childFile },
+    );
+    const run = await launchRun(opts);
+    await waitForText(opts.identity.log, FAKE_LINES.ready);
+    await delay(300);
+    run.stop("killed", "kill now");
+    run.stop("killed", "kill again");
+    const result = await run.done;
+    expect(result.playwright).toEqual({ code: 0, signal: null });
+    expect(result.stop).toEqual({ level: "none" });
+    expect(existsSync(childFile)).toBe(false);
+    const log = await readFile(opts.identity.log, "utf8");
+    expect(
+      log.match(
+        /what is left of its process group killed, its own end stands/g,
+      ),
+    ).toHaveLength(1);
+  });
+
   test("ends a run whose command cannot start, saying why in the log", async () => {
     const opts = options({}, {});
     const run = await launchRun({
@@ -248,7 +351,7 @@ test.describe("launchRun", () => {
       },
     });
     expect(await run.done).toEqual({
-      bddgen: { code: null, signal: null },
+      bddgen: { code: null, signal: null, notStarted: "ENOENT" },
       stop: { level: "none" },
     });
     expect(await readFile(opts.identity.log, "utf8")).toContain(
@@ -259,7 +362,11 @@ test.describe("launchRun", () => {
   test("ends a run Node refuses to spawn, without throwing", async () => {
     const opts = options({}, {});
     const run = await launchRun({ ...opts, env: { ...opts.env, BAD: "a\0b" } });
-    expect((await run.done).bddgen).toEqual({ code: null, signal: null });
+    expect((await run.done).bddgen).toEqual({
+      code: null,
+      signal: null,
+      notStarted: "ERR_INVALID_ARG_VALUE",
+    });
     expect(await readFile(opts.identity.log, "utf8")).toContain(
       "bddgen could not start: ERR_INVALID_ARG_VALUE",
     );
@@ -348,6 +455,54 @@ test.describe("launchRun", () => {
     const log = await readFile(opts.identity.log, "utf8");
     expect(log).not.toContain(FAKE_LINES.sigint);
     expect(log).toContain("interrupt skipped: the tests are over");
+  });
+
+  test("notes a SIGINT that fails, but not one that finds the runner gone", async () => {
+    for (const [index, code] of ["ESRCH", "EPERM"].entries()) {
+      const kill: KillFn = (pid, signal) => {
+        if (signal === "SIGINT" && pid > 0)
+          throw Object.assign(new Error("refused"), { code });
+        process.kill(pid, signal);
+      };
+      const dir = join(root, String(index));
+      const opts = options({ exitCode: 0 }, {}, { kill });
+      const identity = {
+        ...opts.identity,
+        dir,
+        log: join(dir, "run.log"),
+        stopFile: join(dir, "stop"),
+      };
+      // The fake drains on the stop file the interrupt creates first, so the run still ends.
+      const run = await launchRun({
+        ...opts,
+        identity,
+        env: { ...opts.env, E2E_INTERNAL_STOP_FILE: identity.stopFile },
+      });
+      await waitForText(identity.log, FAKE_LINES.ready);
+      run.stop("interrupted", "stop now");
+      expect((await run.done).stop.level).toBe("interrupted");
+      const log = await readFile(identity.log, "utf8");
+      if (code === "ESRCH") expect(log).not.toContain("interrupt failed");
+      else expect(log).toContain("interrupt failed: EPERM");
+    }
+  });
+
+  test("ends the run without a kill when its group cannot be watched", async () => {
+    const signals: (NodeJS.Signals | 0)[] = [];
+    const kill: KillFn = (pid, signal) => {
+      signals.push(signal);
+      if (signal === 0)
+        throw Object.assign(new Error("invalid"), { code: "EINVAL" });
+      process.kill(pid, signal);
+    };
+    const opts = options({ exitCode: 0 }, { runMs: 20 }, { kill });
+    const result = await (await launchRun(opts)).done;
+    expect(result.playwright).toEqual({ code: 0, signal: null });
+    const log = await readFile(opts.identity.log, "utf8");
+    expect(log).toContain("watching the process group failed: EINVAL");
+    // Not taken for a group that outlived its process: nothing was killed.
+    expect(log).not.toContain("outlived");
+    expect(signals).not.toContain("SIGKILL");
   });
 
   test("keeps waiting for a lingering group it cannot kill: it still holds the cell", async () => {
@@ -550,7 +705,11 @@ test.describe("launchRun", () => {
     const run = await launchRun(opts);
     expect(await run.done).toEqual({
       bddgen: { code: 0, signal: null },
-      playwright: { code: null, signal: null },
+      playwright: {
+        code: null,
+        signal: null,
+        notStarted: "recording that it starts failed (ENOSPC)",
+      },
       stop: { level: "none" },
     });
     expect(started).toEqual(["bddgen"]);
@@ -695,6 +854,35 @@ test.describe("openRunLog", () => {
     await rm(path);
     execFileSync("mkfifo", [path]);
     await expect(openRunLog(path)).rejects.toMatchObject({ code: "EEXIST" });
+  });
+});
+
+test.describe("stopLine", () => {
+  test("says the stop taken, and once the runner exited on its own, what was done instead", () => {
+    const taken = { level: "drained", why: "SIGINT" } as const;
+    expect(
+      stopLine(
+        { phase: { name: "playwright", pid: 200 }, taken },
+        "drained",
+        "SIGINT",
+      ),
+    ).toBe("stop: drained — SIGINT");
+    const lingering = {
+      phase: { name: "lingering", pgid: 200, asked: "interrupted" },
+      taken: { level: "none" },
+    } as const;
+    expect(stopLine(lingering, "interrupted", "again")).toBe(
+      "stop: interrupted asked once the runner had exited on its own: nothing left to stop, its own end stands — again",
+    );
+    expect(
+      stopLine(
+        { ...lingering, phase: { ...lingering.phase, asked: "killed" } },
+        "killed",
+        "kill",
+      ),
+    ).toBe(
+      "stop: killed asked once the runner had exited on its own: what is left of its process group killed, its own end stands — kill",
+    );
   });
 });
 

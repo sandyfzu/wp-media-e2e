@@ -141,6 +141,12 @@ export default defineConfig([
                 "The orchestrator imports from src/ only the modules orchestrator/suite-imports.json lists: run-context.ts, and every module importing it, loads .env and stamps RUN_ID into the importing process. Admit a module there once orchestrator/import-boundary.spec.ts proves it leaves the process as it was.",
             },
             {
+              // Any URL but a builtin's: a `data:` URL's code imports what it likes, unread.
+              regex: "^(?!node:)[a-z][a-z\\d+.-]*:",
+              message:
+                "Import a module by its path, never by a URL (data:, https:): the code a URL holds or leads to is read by no import guard.",
+            },
+            {
               regex: "(^|/)__fixtures__(/|$)|\\.spec(\\.[cm]?[jt]sx?)?$",
               message:
                 "Test code is exempt from the orchestrator's import boundary, so its own code must never import it.",

@@ -545,6 +545,7 @@ test.describe("configSchema", () => {
     ]);
     for (const bad of [
       "-oProxyCommand=x",
+      "-oX@host",
       "a@-oProxyCommand",
       "user@",
       "a@b@c",

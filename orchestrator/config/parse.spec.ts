@@ -4,9 +4,34 @@ import { ConfigError } from "./errors";
 import { configProblems, describeKey, formatPath, parseConfig } from "./parse";
 
 test.describe("describeKey", () => {
-  test("shows a name: a letter or _ first, then letters, digits and _, 40 at most", () => {
-    for (const key of ["tasks", "GH_TOKEN", "_x", "a".repeat(40)])
+  test("shows a name: camelCase, snake_case or UPPER_SNAKE words, 40 at most", () => {
+    for (const key of [
+      "tasks",
+      "cooldownMinutes",
+      "serverWarningThreshold",
+      "cooldown_minutes",
+      "GH_TOKEN",
+      "PATH",
+      "BWP_",
+      "BWP_S3_SECRET_ACCESS_KEY",
+      "a".repeat(40),
+    ])
       expect(describeKey(key)).toBe(key);
+  });
+
+  test("never shows a key shaped like a pasted credential", () => {
+    for (const key of [
+      "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3", // a legacy GitHub token
+      "AKIAIOSFODNN7EXAMPLE", // an AWS key ID
+      "Hunter2SuperSecret",
+      "Xk9fQ2LmZp7Rt",
+      "sk_live_4eC39HqLyjWDarjtT1zdp7dc",
+      "_x",
+      "token_2",
+    ])
+      expect(describeKey(key), key).toBe(
+        `a key of ${String(key.length)} characters`,
+      );
   });
 
   test("describes anything else by its length alone", () => {

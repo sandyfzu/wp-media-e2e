@@ -121,7 +121,37 @@ test.describe("runEnvironment", () => {
         REPORTS_KEEP_ENV,
       ]),
     );
-    expect(INHERITED_VARIABLES).toEqual(["PATH", "HOME", "LANG", "TMPDIR"]);
+  });
+
+  test("passes what a host behind a proxy needs to reach GitHub, and where the browsers are", () => {
+    const proxy = "http://qa:proxy-pass@proxy.example.test:3128";
+    const inherited = {
+      HTTPS_PROXY: proxy,
+      https_proxy: proxy,
+      HTTP_PROXY: proxy,
+      http_proxy: proxy,
+      ALL_PROXY: proxy,
+      all_proxy: proxy,
+      NO_PROXY: "localhost,.example.test",
+      no_proxy: "localhost",
+      NODE_USE_ENV_PROXY: "1",
+      NODE_EXTRA_CA_CERTS: "/etc/ssl/proxy-ca.pem",
+      SSL_CERT_FILE: "/etc/ssl/certs/ca-certificates.crt",
+      SSL_CERT_DIR: "/etc/ssl/certs",
+      PLAYWRIGHT_BROWSERS_PATH: "/opt/ms-playwright",
+      XDG_CACHE_HOME: "/home/qa/.cache",
+    };
+    const environment = runEnvironment({
+      ...BARE,
+      inherited: { ...BARE.inherited, ...inherited },
+    });
+    expect(environment).toMatchObject(inherited);
+    // Every inherited name is one of these or the four basics: nothing else of the host passes.
+    expect([...INHERITED_VARIABLES].sort()).toEqual(
+      [...Object.keys(inherited), "PATH", "HOME", "LANG", "TMPDIR"].sort(),
+    );
+    // The log's line names them, never the proxy's password.
+    expect(variableNames(environment).join(", ")).not.toContain("proxy-pass");
   });
 });
 

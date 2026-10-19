@@ -1,3 +1,6 @@
+// First, so it is evaluated before any other module of the graph: it reads the parent's PID at boot.
+import "./parent";
+
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 

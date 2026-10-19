@@ -33,6 +33,7 @@ import { RESULTS_FILE } from "../src/common/reporting/results-schema";
 import type { CheckedProduct } from "./config/check";
 import { loadProductList, type ProductList } from "./config/product-list";
 import { runIdentity } from "./runs/identity";
+import { launchRun } from "./runs/launch";
 import { readLeaderStart } from "./runs/leader";
 import type { KillFn } from "./runs/process-group";
 import { runningRecord, writeRunRecord } from "./runs/record";
@@ -150,8 +151,17 @@ class FakeStdout {
 /** A stand-in process: signals emitted by the test, its outputs kept. */
 class FakeProcess extends EventEmitter implements StartProcess {
   readonly pid = 4242;
-  readonly env = { PATH: process.env.PATH };
   readonly execPath = process.execPath;
+  /**
+   * @param env - its environment; `PATH` alone by default.
+   */
+  constructor(
+    readonly env: Readonly<Record<string, string | undefined>> = {
+      PATH: process.env.PATH,
+    },
+  ) {
+    super();
+  }
   readonly stdout = new FakeStdout();
   stderrText = "";
   readonly stderr = {
@@ -160,6 +170,40 @@ class FakeProcess extends EventEmitter implements StartProcess {
       return true;
     },
   };
+}
+
+/** A standard error that holds what it is given until `takesMs` later — for ever without one. */
+class SlowStderr {
+  text = "";
+  private held = 0;
+  /**
+   * @param takesMs - how long it takes each write; never taken when absent.
+   */
+  constructor(private readonly takesMs: number | undefined) {}
+  /** Keeps the text, held until taken. */
+  write(text: string): boolean {
+    this.text += text;
+    this.held += text.length;
+    if (this.takesMs !== undefined)
+      setTimeout(() => {
+        this.held = 0;
+      }, this.takesMs);
+    return true;
+  }
+  /** What it still holds, as a stream says it. */
+  get writableLength(): number {
+    return this.held;
+  }
+}
+
+/** A stand-in process whose standard error is slow. */
+class SlowStderrProcess extends FakeProcess {
+  /**
+   * @param stderr - its standard error.
+   */
+  constructor(override readonly stderr: SlowStderr) {
+    super();
+  }
 }
 
 /** A clock the shutdown reads, moved by the test: two SIGINTs a second apart in one turn. */
@@ -200,6 +244,41 @@ function activeTimeouts(): number {
 let checkout: string;
 let stateDir: string;
 
+/** Every rig a test made: a start it left running is stopped when the test ends. */
+const rigs = new Set<Rig>();
+
+/**
+ * Every process group a test started, by its leader's PID — the fake suite's runs, a child Node, a
+ * stand-in process — SIGKILLed, group and leader, when the test ends, passed or failed.
+ */
+const owned = new Set<number>();
+
+/**
+ * Records a process the test started, the leader of a group of its own, to be killed when it ends.
+ *
+ * @param pid - its PID; nothing is recorded without one.
+ * @returns the PID, `0` without one.
+ */
+function own(pid: number | undefined): number {
+  if (pid !== undefined && pid > 0) owned.add(pid);
+  return pid ?? 0;
+}
+
+/**
+ * SIGKILLs a process, or a group by its negated id, unless it is gone: `ESRCH`, or — macOS, for a group
+ * left only with its unreaped leader — `EPERM`, which never kills anything either.
+ *
+ * @param target - a PID, or a group's negated.
+ */
+function killHard(target: number): void {
+  try {
+    process.kill(target, "SIGKILL");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ESRCH" && code !== "EPERM") throw error;
+  }
+}
+
 test.beforeEach(async () => {
   checkout = await mkdtemp(join(tmpdir(), "e2e-start-"));
   stateDir = join(checkout, ".orchestrator");
@@ -207,6 +286,19 @@ test.beforeEach(async () => {
 });
 
 test.afterEach(async () => {
+  // A start the test left running — it failed before the start returned — kills its runs: three
+  // SIGINTs a debounce apart. Then every group the test started, whatever is left of it.
+  for (const r of rigs)
+    for (const _ of [1, 2, 3]) {
+      r.proc.emit("SIGINT");
+      r.clock.ms += 2_000;
+    }
+  rigs.clear();
+  for (const pid of owned) {
+    killHard(-pid);
+    killHard(pid);
+  }
+  owned.clear();
   await rm(checkout, { recursive: true, force: true });
 });
 
@@ -279,18 +371,21 @@ interface Rig {
 }
 
 /**
- * A rig: the fake process, the shutdown's clock, the product list, the fake suite's commands.
+ * A rig: the fake process, the shutdown's clock, the product list, the fake suite's commands — each
+ * run's processes recorded as the test's own ({@link own}), and the rig too, so that a test that fails
+ * leaves nothing running.
  *
  * @param playwright - each task's runner; by default one that waits for a stop.
  * @param more - deps replacing these.
+ * @param proc - the stand-in process; one with `PATH` alone by default.
  */
 function rig(
   playwright: (taskId: string) => FakeBehaviour = () => ({ runMs: 60_000 }),
   more: Partial<StartDeps> = {},
+  proc = new FakeProcess(),
 ): Rig {
-  const proc = new FakeProcess();
   const clock = new FakeClock();
-  return {
+  const made: Rig = {
     proc,
     clock,
     deps: {
@@ -308,11 +403,21 @@ function rig(
           bddgen: fakeCommand({ exitCode: 0 }),
           playwright: fakeCommand(playwright(task.id)),
         }),
+        launch: (options) =>
+          launchRun({
+            ...options,
+            onProcess: (name, pgid) => {
+              own(pgid);
+              return options.onProcess?.(name, pgid);
+            },
+          }),
         launchOptions: { pollMs: 20 },
         ...more.loop,
       },
     },
   };
+  rigs.add(made);
+  return made;
 }
 
 /** The log's text. */
@@ -567,6 +672,26 @@ test.describe("start — refusals", () => {
     await expectCleanEnd(r.proc);
   });
 
+  test("a run folder whose record cannot be read refuses the start: nothing says that run is over; exit 1", async () => {
+    const config = await writeConfig();
+    // Records are written atomically: a failed write leaves none, so an unreadable one is no crash's.
+    await mkdir(join(stateDir, "runs", "bpng-4"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await writeFile(join(stateDir, "runs", "bpng-4", "run.json"), "{");
+    const r = rig();
+    expect(await start({ config, tasks: ["bpng"] }, r.deps)).toBe(1);
+    const log = await logText();
+    expect(log).toContain(
+      "Run bpng-4 may still be running — unconfirmed: its record is not one this orchestrator reads (not JSON), so nothing says it is over.",
+    );
+    expect(log).toContain("exiting 1");
+    expect(existsSync(join(stateDir, "runs", "bpng-5"))).toBe(false);
+    expect(existsSync(join(stateDir, "runs", "bpng-1"))).toBe(false);
+    await expectCleanEnd(r.proc);
+  });
+
   test("a stale record is marked lost, said, and the start goes on", async () => {
     const config = await writeConfig();
     const identity = runIdentity({
@@ -663,6 +788,7 @@ test.describe("start — stopping", () => {
           reads.push(parent);
           return parent;
         },
+        bootParentPid: 100,
         intervalMs: 20,
       },
     });
@@ -694,7 +820,11 @@ test.describe("start — stopping", () => {
     let parent = 100;
     // The run ignores the drain and ends on its own 600 ms in: the watch would fire ~30 times more.
     const r = rig(() => ({ runMs: 600, ignoreDrain: true }), {
-      parentWatch: { parentPid: () => parent, intervalMs: 20 },
+      parentWatch: {
+        parentPid: () => parent,
+        bootParentPid: 100,
+        intervalMs: 20,
+      },
     });
     const started = start({ config }, r.deps);
     await waitForText(runLog("bpng-1"), FAKE_LINES.ready);
@@ -710,7 +840,11 @@ test.describe("start — stopping", () => {
     const config = await writeConfig({ tasks: [TASKS[0]] });
     let parent = 100;
     const r = rig(undefined, {
-      parentWatch: { parentPid: () => parent, intervalMs: 20 },
+      parentWatch: {
+        parentPid: () => parent,
+        bootParentPid: 100,
+        intervalMs: 20,
+      },
     });
     const started = start({ config }, r.deps);
     await waitForText(runLog("bpng-1"), FAKE_LINES.ready);
@@ -733,6 +867,7 @@ test.describe("start — stopping", () => {
             reads += 1;
             return 7;
           },
+          bootParentPid: 7,
           intervalMs: 20,
         },
       },
@@ -742,6 +877,64 @@ test.describe("start — stopping", () => {
     expect(count).toBeGreaterThan(1);
     await delay(100);
     expect(reads).toBe(count);
+  });
+
+  test("a parent gone while the process booted — already another than at boot when start begins — stops it before any run; 130", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    // No later read could see it: only the check as start begins does.
+    const r = rig(undefined, {
+      parentWatch: {
+        parentPid: () => 1,
+        bootParentPid: 100,
+        intervalMs: 600_000,
+      },
+    });
+    expect(await start({ config }, r.deps)).toBe(130);
+    // Said before the log is open, so on standard error.
+    expect(r.proc.stderrText).toContain(
+      "orchestrator: the parent process 100 ended (now 1): stopping as on a hangup",
+    );
+    expect(await logText()).toContain(
+      "orchestrator  stopped before any run started",
+    );
+    expect(existsSync(join(stateDir, "runs", "bpng-1"))).toBe(false);
+    await expectCleanEnd(r.proc);
+  });
+
+  test("under npm, a parent that is PID 1 already at boot is npm gone: stopped before any run; 130", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const r = rig(
+      undefined,
+      {
+        parentWatch: {
+          parentPid: () => 1,
+          bootParentPid: 1,
+          intervalMs: 600_000,
+        },
+      },
+      new FakeProcess({
+        PATH: process.env.PATH,
+        npm_lifecycle_event: "orchestrator",
+      }),
+    );
+    expect(await start({ config }, r.deps)).toBe(130);
+    expect(r.proc.stderrText).toContain(
+      "orchestrator: npm, the parent process, ended before the orchestrator started (its parent is PID 1): stopping as on a hangup",
+    );
+    expect(await logText()).toContain(
+      "orchestrator  stopped before any run started",
+    );
+    await expectCleanEnd(r.proc);
+  });
+
+  test("outside npm, a parent that is PID 1 is a parent like any other: it runs", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const r = rig((id) => runner(id, 1, "passed"), {
+      parentWatch: { parentPid: () => 1, bootParentPid: 1, intervalMs: 20 },
+    });
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    expect(await logText()).not.toContain("stopping");
+    expect(r.proc.stderrText).toBe("");
   });
 
   test("two SIGINTs within a second count as one: the run is drained, not interrupted", async () => {
@@ -885,6 +1078,7 @@ test.describe("start — stopping", () => {
         stdio: "ignore",
       },
     );
+    own(sleeper.pid);
     const stale = runIdentity({
       taskId: "bpng",
       product: "backwpup",
@@ -904,10 +1098,9 @@ test.describe("start — stopping", () => {
       }),
     );
     await chmod(stale.dir, 0o500);
-    // A stuck task's folder this start never made, its record unreadable: the orphan check warns once;
-    // the give-up, which says only the runs it began, never again.
-    await mkdir(join(stateDir, "runs", "bpng-4"), { mode: 0o700 });
-    await writeFile(join(stateDir, "runs", "bpng-4", "run.json"), "{");
+    // A stray entry named as a stuck task's run, no run folder: the orphan check warns once; the
+    // give-up, which says only the runs it began, never again.
+    await writeFile(join(stateDir, "runs", "bpng-4"), "");
     // SIGKILL never reaches bpng's group: it lives on, unkillable as a root `sudo` child would be.
     const box = { free: false };
     const kill: KillFn = (pid, signal) => {
@@ -975,7 +1168,7 @@ test.describe("start — stopping", () => {
         "bpng  its loop did not end, and no run of it is recorded running",
       );
       expect(
-        log.split("run bpng-4's record is not one this orchestrator reads")
+        log.split("bpng-4 in the runs' folder is not a folder: passed over")
           .length - 1,
       ).toBe(1);
       await expectCleanEnd(r.proc);
@@ -1100,6 +1293,64 @@ test.describe("start — stopping", () => {
 });
 
 test.describe("start — what it hands on and leaves", () => {
+  test("a secret only a task --task left out holds — its site's password — is masked in a line that quotes it", async () => {
+    const password = "unselected-Site-Password-0042";
+    const list = {
+      ...PRODUCT_LIST,
+      PRODUCTS: [
+        {
+          name: "backwpup",
+          sites: {
+            "pro@nginx": {
+              edition: "pro",
+              sites: [sshSite("https://a.qa.test")],
+            },
+            "free@nginx": {
+              edition: "free",
+              sites: [{ ...sshSite("https://b.qa.test"), password }],
+            },
+          },
+        },
+      ],
+    } as unknown as ProductList;
+    // The state directory's name holds it: the started line quotes the folder.
+    stateDir = join(checkout, `state-${password}`);
+    await mkdir(stateDir, { mode: 0o700 });
+    const config = await writeConfig();
+    const r = rig((id) => runner(id, 1, "passed"), {
+      loadProductList: () => Promise.resolve(list),
+    });
+    expect(await start({ config, once: true, tasks: ["bpng"] }, r.deps)).toBe(
+      0,
+    );
+    const log = await logText();
+    expect(log).toContain("started · 1 task (bpng) · once · state-***/");
+    for (const text of [log, r.proc.stdout.text, r.proc.stderrText])
+      expect(text).not.toContain(password);
+  });
+
+  test("a proxy password the runs inherit is masked in a line that quotes it", async () => {
+    const password = "Proxy-Password-0042";
+    stateDir = join(checkout, `state-${password}`);
+    await mkdir(stateDir, { mode: 0o700 });
+    const config = await writeConfig();
+    const r = rig(
+      (id) => runner(id, 1, "passed"),
+      {},
+      new FakeProcess({
+        PATH: process.env.PATH,
+        https_proxy: `http://user:${password}@proxy.test:3128`,
+      }),
+    );
+    expect(await start({ config, once: true, tasks: ["bpng"] }, r.deps)).toBe(
+      0,
+    );
+    const log = await logText();
+    expect(log).toContain("started · 1 task (bpng) · once · state-***/");
+    for (const text of [log, r.proc.stdout.text, r.proc.stderrText])
+      expect(text).not.toContain(password);
+  });
+
   test("the runs get the suite's own commands: this Node, the checkout's scripts, the product's config, the filter", async () => {
     const config = await writeConfig({
       tasks: [{ ...TASKS[0], grep: "@smoke" }],
@@ -1500,9 +1751,22 @@ test.describe("start — what it says about itself", () => {
 });
 
 test.describe("start — in a real process, real signals", () => {
+  // Runs before the file's own: the child's runs, which it spawned in groups of their own, are killed
+  // by the groups their records name — this state directory holds no record but the child's.
+  test.afterEach(async () => {
+    const runs = join(stateDir, "runs");
+    for (const name of existsSync(runs) ? readdirSync(runs) : []) {
+      const running = await record(name).catch(() => undefined);
+      const pgid = (running?.process as { pgid?: unknown } | undefined)?.pgid;
+      if (typeof pgid === "number" && pgid > 1) killHard(-pgid);
+    }
+  });
+
   /**
-   * Starts `start` in a child Node over the fake suite, its process the real one.
+   * Starts `start` in a child Node over the fake suite, its process the real one, the leader of a group
+   * of its own, which the test owns ({@link own}).
    *
+   * @param config - the config file.
    * @returns the child, and a promise of its exit code.
    */
   function child(config: string): {
@@ -1543,11 +1807,12 @@ test.describe("start — in a real process, real signals", () => {
           // The cells' locks under the spec's checkout, never this user's.
           XDG_STATE_HOME: join(checkout, "state-home"),
         },
+        detached: true,
         stdio: "ignore",
       },
     );
     return {
-      pid: proc.pid ?? 0,
+      pid: own(proc.pid),
       exit: new Promise((resolve) =>
         proc.on("exit", (code) => {
           resolve(code);
@@ -1588,18 +1853,6 @@ test.describe("start — the cells' site locks", () => {
     return siteLockPath(join(checkout, "cell-locks"), "a.qa.test");
   }
 
-  /** Processes a test started, killed with their groups after it. */
-  const alive: number[] = [];
-  test.afterEach(() => {
-    for (const pid of alive.splice(0))
-      for (const target of [-pid, pid])
-        try {
-          process.kill(target, "SIGKILL");
-        } catch {
-          // Gone already.
-        }
-  });
-
   /**
    * Starts a process that waits, the leader of a group of its own, and reads its start.
    *
@@ -1614,8 +1867,7 @@ test.describe("start — the cells' site locks", () => {
         stdio: "ignore",
       },
     );
-    const pid = child.pid ?? 0;
-    alive.push(pid);
+    const pid = own(child.pid);
     const read = await readLeaderStart(pid);
     if (read.kind !== "start") throw new Error("no start");
     return { pid, start: read.value };
@@ -1842,6 +2094,52 @@ test.describe("start — the sites a config's tasks share, and a pool of several
 });
 
 test.describe("start — the lock and the log at the exit", () => {
+  test("a signal once the exit is under way says nothing: every loop has ended", async () => {
+    const config = await writeConfig({ tasks: [TASKS[0]] });
+    const proc = new FakeProcess();
+    const r = rig(
+      (id) => runner(id, 1, "passed"),
+      {
+        acquireLock: async (dir, deps) => {
+          const lock = await acquireLock(dir, deps);
+          return {
+            ...lock,
+            release: () => {
+              // After the log is closed, before the terminal is waited for.
+              proc.emit("SIGINT");
+              return lock.release();
+            },
+          };
+        },
+      },
+      proc,
+    );
+    expect(await start({ config, once: true }, r.deps)).toBe(0);
+    expect(proc.stderrText).toBe("");
+    expect(await logText()).not.toContain("stopping");
+    await expectCleanEnd(proc);
+  });
+
+  test("a refusal on standard error is taken by it before start returns — process.exit would drop it — within the exit's wait", async () => {
+    for (const [takesMs, atLeastMs, atMostMs] of [
+      [300, 250, 900],
+      // Never taken: the exit's wait (the rig's 1 s) is the bound.
+      [undefined, 900, 3_000],
+    ] as const) {
+      const stderr = new SlowStderr(takesMs);
+      const r = rig(undefined, {}, new SlowStderrProcess(stderr));
+      const t0 = performance.now();
+      expect(
+        await start({ config: join(stateDir, "missing.json") }, r.deps),
+      ).toBe(1);
+      const took = performance.now() - t0;
+      expect(stderr.text).toContain("orchestrator: not started:");
+      if (takesMs !== undefined) expect(stderr.writableLength).toBe(0);
+      expect(took).toBeGreaterThanOrEqual(atLeastMs);
+      expect(took).toBeLessThan(atMostMs);
+    }
+  });
+
   test("the lock is released only once the log is closed: its last line is written while the lock is held", async () => {
     const config = await writeConfig({ tasks: [TASKS[0]] });
     const atRelease: string[] = [];

@@ -13,7 +13,7 @@ import { scenarioCounts, type RunResults } from "./results";
  * | --- | --- |
  * | the orchestrator killed it | `killed` |
  * | it was stopped: interrupted while it tested, or drained before it finished — by the orchestrator or not | `stopped` |
- * | `bddgen` failed; Playwright ended without `run.end`; a setup failed; the run's time limit; an error outside any test; no scenario ran; Playwright's status or exit code the scenarios do not explain | `error` |
+ * | `bddgen` failed or could not start; Playwright could not start, or ended without `run.end`; a setup failed; the run's time limit; an error outside any test; no scenario ran; Playwright's status or exit code the scenarios do not explain | `error` |
  * | a scenario failed | `failed` |
  * | a scenario was flaky | `flaky` |
  * | otherwise | `passed` |
@@ -29,6 +29,11 @@ export type RunStatus =
 export interface ProcessExit {
   readonly code: number | null;
   readonly signal: NodeJS.Signals | null;
+  /**
+   * Why it never started, when it did not (`ENOENT`, `recording that it starts failed (ENOSPC)`):
+   * printable ASCII, at most 200 characters (`recordWords`). Its code and signal are then `null`.
+   */
+  readonly notStarted?: string;
 }
 
 /**
@@ -51,7 +56,10 @@ export interface OutcomeInput {
   readonly playwright?: ProcessExit;
   /** The results stream; absent when there is none. */
   readonly results?: RunResults;
-  /** Why the stream was not read though it is there (`it is over 32 MiB`); absent otherwise. */
+  /**
+   * Why the stream was not read though it is there — past `end.ts`'s `MAX_RESULTS_BYTES`, 8 MiB (`it is
+   * 9437184 bytes, over the 8388608-byte cap`); absent otherwise.
+   */
   readonly resultsUnread?: string;
   /** The failed setups the run's facts name, in order; their first error's first line each. */
   readonly setupFailures: readonly SetupFailureFact[];
@@ -107,7 +115,7 @@ const EMPTY_RESULTS: RunResults = {
  * someone signalled it by hand. A stop that came too late to change anything is no stop: a drain
  * asked for as the last scenario ended, or an interrupt asked for once the tests were over — which
  * the launch then does not send — while the runner still ended on its own. That run is judged by its
- * results.
+ * results; so is one stopped only once its runner had exited on its own, which the launch never takes.
  *
  * @param input - the outcome's input.
  * @returns the reason, or `undefined` when it was not stopped.
@@ -137,9 +145,13 @@ function stopReason(input: OutcomeInput): string | undefined {
  */
 function errorReason(input: OutcomeInput): string | undefined {
   const { bddgen, playwright, results } = input;
+  if (bddgen.notStarted !== undefined)
+    return `bddgen could not start: ${bddgen.notStarted}`;
   if (!isSuccess(bddgen))
     return `bddgen ${describeExit(bddgen)}${fromLog(input.logTail, input.secrets, true)}`;
   if (playwright === undefined) return "Playwright never started";
+  if (playwright.notStarted !== undefined)
+    return `Playwright could not start: ${playwright.notStarted}`;
   if (results === undefined && input.resultsUnread !== undefined)
     return `Playwright ${describeExit(playwright)}, and its results could not be read: ${input.resultsUnread}`;
   if (results?.end === undefined)

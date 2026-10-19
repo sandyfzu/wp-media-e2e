@@ -52,6 +52,7 @@ export async function runSlowlyRead(
   // called, so the child's pipe fills.
   const chunks: Buffer[] = [];
   let reading = false;
+  /** Takes everything buffered, once reading is turned on. */
   const readAll = (): void => {
     if (!reading) return;
     for (let chunk: unknown; (chunk = child.stdout.read()) !== null;)

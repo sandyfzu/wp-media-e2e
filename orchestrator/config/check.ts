@@ -1,6 +1,7 @@
 import { isPlaceholderSite } from "../../src/common/config/sites";
 import { configProblems, formatPath } from "./parse";
 import { siteKey } from "./site-key";
+import { MAX_KEY } from "../state/lock-owner";
 import type { ProductList } from "./product-list";
 import type { OrchestratorConfig, TaskConfig } from "./schema";
 
@@ -56,16 +57,17 @@ export function serverOf(site: Site): string {
  * ignores, and every server reached by `serverWarningThreshold` tasks or more — all tasks loop at once,
  * so that count is how many runs it carries at a time.
  *
+ * A product or cell the suite does not know is named by its path, never quoted: what sits in its
+ * place could be anything pasted there. Once matched, it is the suite's own name and is shown.
+ *
  * @param config - a config the schema accepted.
  * @param products - the suite's products (`PRODUCTS`).
  * @param file - the config's path, for the message.
  * @param selected - the ids `--task` selects; every task when absent or empty. Only the selected tasks
  *   run, so only they count towards a server's load.
- * A product or cell the suite does not know is named by its path, never quoted: what sits in its
- * place could be anything pasted there. Once matched, it is the suite's own name and is shown.
- *
  * @returns each task joined to its product and cell, and the warnings.
- * @throws {@link ConfigError} listing every task the suite cannot run, each naming its path.
+ * @throws `ConfigError` (`./errors`, from {@link configProblems}) listing every task the suite
+ *   cannot run, each naming its path.
  */
 export function checkConfig<P extends CheckedProduct>(
   config: OrchestratorConfig,
@@ -114,6 +116,7 @@ function sharedSites(
 ): string[] {
   const owner = new Map<string, CheckedTask>();
   const lines: string[] = [];
+  /** A task as a line names it: its path, id, product and cell. */
   const name = (checked: CheckedTask): string =>
     `${formatPath(["tasks", all.indexOf(checked.task)])} (${checked.task.id}, ${checked.task.product} ${checked.task.cell})`;
   for (const checked of running)
@@ -143,6 +146,7 @@ function checkTask<P extends CheckedProduct>(
   index: number,
   products: readonly P[],
 ): CheckedTask<P> | string {
+  /** The path of this task's field `key`: `tasks[2].cell`. */
   const at = (key: string): string => formatPath(["tasks", index, key]);
   const product = products.find(({ name }) => name === task.product);
   if (product === undefined)
@@ -158,11 +162,14 @@ function checkTask<P extends CheckedProduct>(
   if (placeholders > 0)
     return `${at("cell")}: ${product.name} ${task.cell} has ${String(placeholders)} placeholder site${placeholders === 1 ? "" : "s"} (.example.test) of ${String(cell.sites.length)}: every site a run binds to must be real — declare the cell's real sites in the product's sites file`;
   // A site that is no http(s) address cannot be told apart from another, nor locked.
-  const unaddressed = cell.sites.filter(
-    ({ baseURL }) => !isSiteAddress(baseURL),
-  );
-  if (unaddressed.length > 0)
-    return `${at("cell")}: ${product.name} ${task.cell} has ${String(unaddressed.length)} site${unaddressed.length === 1 ? "" : "s"} whose baseURL is no http(s) URL: fix it in the product's sites file`;
+  const keys = cell.sites.map(({ baseURL }) => keyOf(baseURL));
+  const unaddressed = keys.filter((key) => key === undefined).length;
+  if (unaddressed > 0)
+    return `${at("cell")}: ${product.name} ${task.cell} has ${String(unaddressed)} site${unaddressed === 1 ? "" : "s"} whose baseURL is no http(s) URL, or holds credentials and an @ past its host (percent-encode a password's / and @): fix it in the product's sites file`;
+  // A site lock carries its key, and a lock that cannot be written would fail every run.
+  const unlockable = keys.filter((key) => (key?.length ?? 0) > MAX_KEY).length;
+  if (unlockable > 0)
+    return `${at("cell")}: ${product.name} ${task.cell} has ${String(unlockable)} site${unlockable === 1 ? "" : "s"} whose baseURL is too long to lock (over ${String(MAX_KEY)} characters as a site key): shorten it in the product's sites file`;
   return {
     task,
     product,
@@ -172,17 +179,16 @@ function checkTask<P extends CheckedProduct>(
 }
 
 /**
- * Whether a `baseURL` is an http(s) URL — one {@link siteKey} keys.
+ * A `baseURL`'s site key ({@link siteKey}), if it has one.
  *
  * @param baseURL - the site's `baseURL`.
- * @returns whether it is.
+ * @returns the key; `undefined` for an address {@link siteKey} refuses.
  */
-function isSiteAddress(baseURL: string): boolean {
+function keyOf(baseURL: string): string | undefined {
   try {
-    siteKey(baseURL);
-    return true;
+    return siteKey(baseURL);
   } catch {
-    return false;
+    return undefined;
   }
 }
 

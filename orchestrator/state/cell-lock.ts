@@ -116,11 +116,12 @@ export interface CellLocks {
    * @throws {@link StateError} naming the site, its holder and the way out when another orchestrator
    *   holds one — or another task of this one —, or its dead holder's run may still run; or naming a
    *   folder that is not this user's alone.
-   * @throws {@link RangeError} for a site whose `baseURL` is no http(s) URL.
+   * @throws {@link RangeError} for a site whose `baseURL` is no http(s) URL, or whose key a lock cannot
+   *   hold (over 2,048 characters).
    */
   acquire(unit: CellUnit, run?: string): Promise<HeldCell>;
   /**
-   * Judges a cell's sites' locks as {@link acquire} would, writing nothing — no folder made either.
+   * Judges a cell's sites' locks as {@link CellLocks.acquire} would, writing nothing — no folder made either.
    *
    * @param unit - the cell and its sites.
    * @returns `free` when every one may be taken; otherwise the first refusal, in the keys' order.
@@ -316,37 +317,61 @@ function heldBy(owner: LockOwner): string {
 }
 
 /**
- * Judges the site locks' folder — made first when asked: its parent `0700` too when missing, any
- * folder above with the default mode — by {@link PRIVATE_FOLDER}.
+ * Judges the site locks' folder and its parent `wp-media-e2e` — each made first when asked, `0700`, any
+ * folder above with the default mode — by {@link PRIVATE_FOLDER}: the parent first, so nothing is made or
+ * read through a link in its place, and since whoever may write in it may rename `site-locks` away and
+ * put another in its place, letting two orchestrators on one site. The state home and above are the
+ * operator's, never judged.
  *
- * @param folder - the folder.
+ * @param folder - the site locks' folder.
  * @param make - whether a missing one is made.
- * @returns `undefined` when it passes; `missing` when it is not there and not made; else the refusal.
+ * @returns `undefined` when both pass; `missing` when one is not there and not made; else the refusal.
  * @throws what `mkdir` and `lstat` throw besides `ENOENT` and `EEXIST`.
  */
 async function folderProblem(
   folder: string,
   make: boolean,
 ): Promise<string | undefined> {
-  if (make) {
-    // The state home and above are the operator's: made only when missing, with the default mode.
-    await mkdir(dirname(dirname(folder)), { recursive: true });
-    for (const dir of [dirname(folder), folder])
-      await mkdir(dir, { mode: 0o700 }).catch((error: unknown) => {
+  // The state home and above: made only when missing, with the default mode.
+  if (make) await mkdir(dirname(dirname(folder)), { recursive: true });
+  const ours = [
+    { path: dirname(folder), noun: "The site locks' parent folder" },
+    { path: folder, noun: "The site locks' folder" },
+  ];
+  for (const { path, noun } of ours) {
+    if (make)
+      await mkdir(path, { mode: 0o700 }).catch((error: unknown) => {
         if (errorCode(error) !== "EEXIST") throw error;
       });
+    const problem = await privateFolderProblem(path, noun);
+    if (problem !== undefined) return problem;
   }
+  return undefined;
+}
+
+/**
+ * Judges one of the site locks' folders by {@link PRIVATE_FOLDER}.
+ *
+ * @param path - the folder.
+ * @param noun - what it is, opening the refusal: `The site locks' folder`.
+ * @returns `undefined` when it passes; `missing` when it is not there; else the refusal and its remedy.
+ * @throws what `lstat` throws besides `ENOENT`.
+ */
+async function privateFolderProblem(
+  path: string,
+  noun: string,
+): Promise<string | undefined> {
   let check;
   try {
-    check = await checkOwnFolder(folder, PRIVATE_FOLDER);
+    check = await checkOwnFolder(path, PRIVATE_FOLDER);
   } catch (error) {
     if (errorCode(error) === "ENOENT") return "missing";
     throw error;
   }
   if (check.kind === "ok") return undefined;
   if (check.kind === "notFolder")
-    return `The site locks' folder ${folder} is not a folder (a symbolic link is never followed). Move it away: mv ${shellWord(folder)} ${shellWord(`${folder}.moved`)}`;
-  return `The site locks' folder ${folder} ${describeFolderProblem(check)}: it must be this user's alone (${ownFolderRemedy(folder, check, PRIVATE_FOLDER)}).`;
+    return `${noun} ${path} is not a folder (a symbolic link is never followed). Move it away: mv ${shellWord(path)} ${shellWord(`${path}.moved`)}`;
+  return `${noun} ${path} ${describeFolderProblem(check)}: it must be this user's alone (${ownFolderRemedy(path, check, PRIVATE_FOLDER)}).`;
 }
 
 /**
@@ -369,7 +394,7 @@ function runOf(owner: LockOwner): string {
  * @param path - the lock.
  * @param site - the site, in words.
  * @param owner - the dead holder.
- * @param deps - `kill` and the start reader.
+ * @param deps - `kill`, the start reader and this process's PID space.
  * @returns the refusal, or `undefined` to take the lock over.
  */
 async function deadHolderRefusal(
@@ -390,6 +415,7 @@ async function deadHolderRefusal(
       const verdict = await classifyRunning(read.record, {
         kill: deps.kill ?? ((target, signal) => process.kill(target, signal)),
         readLeaderStart: deps.readStart ?? readLeaderStart,
+        ...(deps.space === undefined ? {} : { space: deps.space }),
       });
       if (verdict.kind === "stale") return undefined;
       const refusal = orphanRefusal({

@@ -17,6 +17,12 @@ import type { StopTaken } from "./outcome";
  * has nothing to drain, and nothing was tested yet — so that stop is taken as `drained`, and the run
  * reads `stopped`, not `killed`. A stop before or between the two processes is taken the same way,
  * and the driver then starts nothing more ({@link mayStartPlaywright}).
+ *
+ * Once the runner has exited on its own, its group still tearing down (`lingering`), it is past
+ * stopping: a drain or an interrupt has nothing left to reach and is not taken, so the runner's own
+ * end stays the run's verdict — a crash still reads as one. A kill still SIGKILLs what is left of the
+ * group, once, without being taken either. `bddgen` exiting changes nothing: killing its group keeps
+ * the runner from starting, a real stop whether `bddgen` itself is still there or not.
  */
 
 /** How far a stop may go. */
@@ -29,6 +35,15 @@ export type RunPhase =
   | { readonly name: "between" }
   /** The runner: its PID is its group's id, since it is spawned detached. */
   | { readonly name: "playwright"; readonly pid: number }
+  /**
+   * The runner exited on its own, its group not empty yet. `asked`: the furthest stop asked for so far,
+   * the one taken before included — never taken from here on ({@link RunStopState.taken} stays).
+   */
+  | {
+      readonly name: "lingering";
+      readonly pgid: number;
+      readonly asked: StopTaken["level"];
+    }
   | { readonly name: "ended" };
 
 /** The machine's state: the run's phase, and how far it has been stopped. */
@@ -47,6 +62,8 @@ export type RunStopEvent =
       readonly process: "bddgen" | "playwright";
       readonly pid: number;
     }
+  /** The running process itself exited; its group may still hold processes. */
+  | { readonly type: "leaderExited" }
   /** The running process's group is empty. */
   | { readonly type: "exited" };
 
@@ -96,6 +113,8 @@ export function stepRunStop(
       return stop(state, event.level, event.why);
     case "started":
       return started(state, event.process, event.pid);
+    case "leaderExited":
+      return leaderExited(state);
     case "exited":
       return exited(state);
   }
@@ -123,6 +142,7 @@ export function mayStartPlaywright(state: RunStopState): boolean {
 function stop(state: RunStopState, level: StopLevel, why: string): RunStopStep {
   const { phase, taken } = state;
   const unchanged = { state, actions: [] };
+  if (phase.name === "lingering") return lingeringStop(state, phase, level);
   if (phase.name === "ended" || STOP_RANK[level] <= STOP_RANK[taken.level])
     return unchanged;
   if (phase.name !== "playwright") {
@@ -139,6 +159,29 @@ function stop(state: RunStopState, level: StopLevel, why: string): RunStopStep {
   return {
     state: { phase, taken: { level, why } },
     actions: escalation(taken.level, level, phase.pid),
+  };
+}
+
+/**
+ * A stop once the runner has exited on its own: noted in the phase, never taken — nothing is left to
+ * drain or interrupt, and the runner's end is its own. A kill still SIGKILLs what is left of its group.
+ *
+ * @param state - the state, its stop taken before the runner exited kept.
+ * @param phase - its phase, lingering.
+ * @param level - how far it is asked to go.
+ * @returns the phase with the furthest stop asked, and a kill of the group the first time a kill is
+ *   asked; the same state, with none, for a stop no further than one asked before.
+ */
+function lingeringStop(
+  state: RunStopState,
+  phase: Extract<RunPhase, { name: "lingering" }>,
+  level: StopLevel,
+): RunStopStep {
+  if (STOP_RANK[level] <= STOP_RANK[phase.asked]) return { state, actions: [] };
+  return {
+    state: { phase: { ...phase, asked: level }, taken: state.taken },
+    actions:
+      level === "killed" ? [{ type: "killGroup", pgid: phase.pgid }] : [],
   };
 }
 
@@ -195,8 +238,30 @@ function started(
 }
 
 /**
+ * The running process itself exited, its group perhaps not empty yet: the runner is then lingering;
+ * `bddgen` stays as it was, since killing its group still keeps the runner from starting.
+ *
+ * @param state - the state.
+ * @returns the next phase, with no action.
+ * @throws {@link Error} when neither process was running — a driver bug.
+ */
+function leaderExited(state: RunStopState): RunStopStep {
+  const { phase, taken } = state;
+  if (phase.name === "bddgen") return { state, actions: [] };
+  if (phase.name === "playwright")
+    return {
+      state: {
+        phase: { name: "lingering", pgid: phase.pid, asked: taken.level },
+        taken,
+      },
+      actions: [],
+    };
+  throw new Error(`A run's process cannot exit while it is ${phase.name}.`);
+}
+
+/**
  * The running process's group emptied: after `bddgen`, the run is between its two processes; after
- * the runner, it has ended.
+ * the runner, lingering or not, it has ended.
  *
  * @param state - the state.
  * @returns the next phase, with no action.
@@ -206,7 +271,7 @@ function exited(state: RunStopState): RunStopStep {
   const { phase } = state;
   if (phase.name === "bddgen")
     return { state: { ...state, phase: { name: "between" } }, actions: [] };
-  if (phase.name === "playwright")
+  if (phase.name === "playwright" || phase.name === "lingering")
     return { state: { ...state, phase: { name: "ended" } }, actions: [] };
   throw new Error(`A run cannot exit while it is ${phase.name}.`);
 }

@@ -8,7 +8,7 @@ import {
   type LoadedConfig,
 } from "./config/load";
 import { loadProductList, type ProductList } from "./config/product-list";
-import { allSecretValues } from "./config/secrets";
+import { allSecretValues, proxySecretValues } from "./config/secrets";
 import { builtRef } from "./dry-run";
 import { createEventBus, DEFAULT_DELIVERY_TIMEOUT_MS } from "./events/bus";
 import type { RunFinishedEvent } from "./events/run-finished";
@@ -17,6 +17,7 @@ import {
   subscribeNotifications,
   type NotificationOptions,
 } from "./notify/subscribe";
+import { runByNpm, watchParent, type ParentWatch } from "./parent";
 import { suiteCommands } from "./runs/commands";
 import { RUN_FILES } from "./runs/identity";
 import { readLeaderStart } from "./runs/leader";
@@ -67,6 +68,7 @@ import {
 import {
   drainTerminal,
   stdoutTerminal,
+  type DrainableTerminal,
   type Terminal,
   type TerminalStream,
 } from "./terminal";
@@ -79,10 +81,10 @@ import { failureLine, safeBlock, safeLine, textOf } from "./text";
  * selected task's loop at once. SIGINT, SIGTERM and SIGHUP drive the
  * shutdown machine (`runs/shutdown.ts`), and each escalation stops every loop — a stop ends a
  * cooldown and starts nothing, so loops, not only runs, are stopped. A parent that ends — npm killed
- * by a SIGHUP it does not relay — counts as SIGHUP ({@link ParentWatch}). It waits for every loop; once
+ * by a SIGHUP it does not relay — counts as SIGHUP (`parent.ts`). It waits for every loop; once
  * the runs were killed, only for {@link KILL_SETTLE_MS} more, then names what it leaves behind. Then
  * it settles the bus, closes the log, releases the lock — the log is only ever written under it — and
- * waits for the terminal.
+ * waits for the terminal and standard error.
  *
  * It **returns** the exit code rather than exiting: every step of the exit sequence but
  * `process.exit` itself is done here, so the command's only remaining act is `process.exit(code)` —
@@ -101,11 +103,11 @@ export const CHECKOUT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 /** How long the loops may still take once every run was killed: a SIGKILLed group empties at once. */
 export const KILL_SETTLE_MS = 60_000;
 
-/** How long closing the log, then emptying the terminal's queue, may each take at the exit. */
+/**
+ * How long closing the log, then emptying the terminal's and standard error's queues, may each take at
+ * the exit.
+ */
 export const EXIT_WAIT_MS = 5_000;
-
-/** How often the parent's PID is read, to notice the parent is gone (see {@link ParentWatch}). */
-export const PARENT_WATCH_MS = 1_000;
 
 /** The scope of the orchestrator's own lines. */
 const SCOPE = "orchestrator";
@@ -121,6 +123,8 @@ const MAX_FAILURE_LINE = 1_000;
 
 /** The longest refusal or failure printed before the log is open, in code points. */
 const MAX_REPORT_LENGTH = 8_000;
+
+export { PARENT_WATCH_MS, type ParentWatch } from "./parent";
 
 /** What the command line asks of `start`: `start [--config <file>] [--task <id>…] [--once]`. */
 export interface StartOptions {
@@ -142,8 +146,21 @@ export interface StartProcess {
   readonly execPath: string;
   /** The terminal: made non-blocking when it is one, and waited for before returning. */
   readonly stdout: Terminal & TerminalStream;
-  /** Where what fails before the log is open is printed. */
-  readonly stderr: { write(text: string): unknown };
+  /**
+   * Where what fails before the log is open is printed; waited for before returning, as the terminal
+   * is, when it says what it still holds (`writableLength`): a pipe is written asynchronously on
+   * macOS, and `process.exit` drops what it still holds.
+   */
+  readonly stderr: {
+    /**
+     * Writes text; may be asynchronous (a pipe on macOS).
+     *
+     * @param text - what to write.
+     */
+    write(text: string): unknown;
+    readonly writableLength?: number;
+    readonly destroyed?: boolean;
+  };
   /**
    * Installs a signal's handler.
    *
@@ -175,18 +192,6 @@ export type LoopSeams = Partial<
     | "prune"
   >
 >;
-
-/**
- * How `start` notices its parent is gone: npm, or the shell, ended without passing a signal on — npm
- * relays only SIGINT and SIGTERM, so a SIGHUP to npm's PID alone ends npm and leaves the orchestrator
- * running, reparented, holding the lock. A changed parent PID is then a hangup: the drain, as SIGHUP.
- */
-export interface ParentWatch {
-  /** The parent's PID now; `process.ppid` by default, which Node reads afresh each time. */
-  readonly parentPid: () => number;
-  /** How often it is read; {@link PARENT_WATCH_MS} by default. */
-  readonly intervalMs?: number;
-}
 
 /** Every seam of `start`; production uses none. */
 export interface StartDeps {
@@ -228,7 +233,10 @@ export interface StartDeps {
   readonly notifications?: NotificationOptions;
   /** The loops' seams. */
   readonly loop?: LoopSeams;
-  /** How the parent's end is noticed; `process.ppid` every {@link PARENT_WATCH_MS} by default. */
+  /**
+   * How the parent's end is noticed: `process.ppid` against its value at boot, at once and every
+   * second (`parent.ts`), by default.
+   */
   readonly parentWatch?: ParentWatch;
 }
 
@@ -249,8 +257,8 @@ export interface PreparedStart {
  * @param options - the config file and `--task`.
  * @param deps - the product list's loader.
  * @returns the list, the config loaded and checked, and the tasks selected.
- * @throws {@link ConfigError} when the product list or the config cannot be loaded, or `--task`
- *   names no task of the config.
+ * @throws `ConfigError` (`./config/errors`) when the product list or the config cannot be loaded, or
+ *   `--task` names no task of the config.
  */
 export async function prepareStart(
   options: Pick<StartOptions, "config" | "tasks">,
@@ -308,6 +316,7 @@ interface Deferred {
  * @returns it, and its resolver.
  */
 function deferred(): Deferred {
+  /** Replaced by the promise's own resolver at once. */
   let resolve = (): void => undefined;
   const promise = new Promise<void>((done) => {
     resolve = done;
@@ -323,14 +332,14 @@ class Orchestrator {
   private readonly budgets: ShutdownBudgets;
   /** The shutdown machine the signals drive. */
   private readonly shutdown: Shutdown;
-  /** The installed handlers, by signal: removed by {@link unlisten}. */
+  /** The installed handlers, by signal: removed by {@link Orchestrator.unlisten}. */
   private readonly handlers = new Map<ShutdownSignal, () => void>();
   /** Resolved once the loops had {@link KILL_SETTLE_MS} after the kill. */
   private readonly giveUp = deferred();
-  /** The timer that resolves {@link giveUp}, once armed. */
+  /** The timer that resolves {@link Orchestrator.giveUp}, once armed. */
   private giveUpTimer: unknown;
-  /** The parent watch's interval, while it runs. */
-  private parentTimer: NodeJS.Timeout | undefined;
+  /** Stops the parent watch; set while it runs. */
+  private stopParentWatch: (() => void) | undefined;
   /** The log, once open: until then, lines go to standard error. */
   private logger: Logger | undefined;
   /** Every secret of the config and of its tasks' sites, once loaded: masked wherever a line goes. */
@@ -370,6 +379,7 @@ class Orchestrator {
   /** Installs a handler for each shutdown signal: from now on, they stop the orchestrator. */
   listen(): void {
     for (const signal of SHUTDOWN_SIGNALS) {
+      /** Counts this signal. */
       const handler = (): void => {
         this.shutdown.signal(signal);
       };
@@ -380,28 +390,35 @@ class Orchestrator {
   }
 
   /**
-   * Reads the parent's PID now and, every interval, again: once it changed — the parent ended and the
-   * process was reparented — says so and stops as on SIGHUP, then stops watching. Unreferenced: it
-   * never keeps the process alive by itself.
+   * Watches the parent against its PID at boot, at once and every interval (`parent.ts`): once it is
+   * gone, says so and stops as on SIGHUP.
    */
   private watchParent(): void {
-    const watch = this.deps.parentWatch ?? { parentPid: () => process.ppid };
-    const first = watch.parentPid();
-    this.parentTimer = setInterval(() => {
-      const now = watch.parentPid();
-      if (now === first) return;
-      this.stopWatchingParent();
-      this.say(
-        `the parent process ${String(first)} ended (now ${String(now)}): stopping as on a hangup`,
-      );
-      this.shutdown.signal("SIGHUP");
-    }, watch.intervalMs ?? PARENT_WATCH_MS).unref();
+    this.stopParentWatch = watchParent(
+      this.deps.parentWatch ?? {},
+      runByNpm(this.process.env),
+      (why) => {
+        this.stopParentWatch = undefined;
+        this.say(`${why}: stopping as on a hangup`);
+        this.shutdown.signal("SIGHUP");
+      },
+    );
   }
 
   /** Stops the parent watch, if it runs. */
   private stopWatchingParent(): void {
-    if (this.parentTimer !== undefined) clearInterval(this.parentTimer);
-    this.parentTimer = undefined;
+    this.stopParentWatch?.();
+    this.stopParentWatch = undefined;
+  }
+
+  /**
+   * Ends what reacts to a stop: the parent watch, and the shutdown, so that a signal from now on says
+   * nothing — every loop has ended or was given up on, and the exit is under way. The handlers stay
+   * until {@link Orchestrator.unlisten}, so no signal takes Node's default action meanwhile.
+   */
+  private quiet(): void {
+    this.stopWatchingParent();
+    this.shutdown.dispose();
   }
 
   /** Removes the handlers and the parent watch, disarms the shutdown's budget and the wait after a kill. */
@@ -432,13 +449,17 @@ class Orchestrator {
         `stopped on an unexpected failure: ${failureLine(error, MAX_FAILURE_LINE, this.secrets)}`,
       );
     }
+    this.quiet();
     if (this.logger !== undefined) this.say(`exiting ${String(code)}`);
     const waitMs = this.deps.exitWaitMs ?? EXIT_WAIT_MS;
     await this.logger?.close(waitMs);
     // From here on, lines go to standard error: the log is written only while the lock is held.
     this.logger = undefined;
     await this.releaseLock();
-    await drainTerminal(terminal, waitMs);
+    await Promise.all([
+      drainTerminal(terminal, waitMs),
+      drainStderr(this.process.stderr, waitMs),
+    ]);
     return code;
   }
 
@@ -457,7 +478,7 @@ class Orchestrator {
   }
 
   /**
-   * Loads the config, takes the lock, and runs under it; {@link run} releases the lock whatever
+   * Loads the config, takes the lock, and runs under it; {@link Orchestrator.run} releases the lock whatever
    * happens.
    *
    * @returns the exit code.
@@ -471,7 +492,12 @@ class Orchestrator {
       return 1;
     }
     const { loaded } = prepared;
-    this.secrets = allSecretValues(loaded.config, loaded.tasks);
+    this.secrets = [
+      ...new Set([
+        ...allSecretValues(loaded.config, loaded.tasks),
+        ...proxySecretValues(this.process.env),
+      ]),
+    ];
     try {
       this.lock = await (this.deps.acquireLock ?? acquireLock)(
         loaded.stateDir,
@@ -881,6 +907,33 @@ class Orchestrator {
       // Nowhere left to say it.
     }
   }
+}
+
+/**
+ * Waits, within `maxWaitMs`, for standard error to take what was written to it — when it says what it
+ * holds: a stand-in that does not is taken as holding nothing.
+ *
+ * @param stderr - standard error.
+ * @param maxWaitMs - the longest wait, in milliseconds.
+ * @returns whether everything was taken. Never rejects.
+ */
+async function drainStderr(
+  stderr: StartProcess["stderr"],
+  maxWaitMs: number,
+): Promise<boolean> {
+  return saysWhatItHolds(stderr) ? drainTerminal(stderr, maxWaitMs) : true;
+}
+
+/**
+ * Whether a stream says what it still holds.
+ *
+ * @param stream - standard error, or a stand-in.
+ * @returns `true` when its `writableLength` is a number.
+ */
+function saysWhatItHolds(
+  stream: StartProcess["stderr"],
+): stream is StartProcess["stderr"] & DrainableTerminal {
+  return typeof stream.writableLength === "number";
 }
 
 /**

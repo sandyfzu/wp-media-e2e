@@ -58,6 +58,7 @@ export function dryRunReport(
   const { config } = loaded;
   const { checkout } = options;
   const secrets = allSecretValues(config, loaded.tasks);
+  /** A path as shown: from the checkout when it is known. */
   const show = (path: string): string =>
     checkout === undefined ? path : showPath(path, checkout);
   const warnings = [...(options.stateWarnings ?? []), ...loaded.warnings];

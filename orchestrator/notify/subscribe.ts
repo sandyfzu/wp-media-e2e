@@ -64,6 +64,8 @@ export interface Notifications {
    * test. Call it with the event object that is published. Frozen, `test_cases` and each case too:
    * what is kept can never differ from what is posted.
    *
+   * @param event - the run's `run.finished`, the very object published.
+   * @returns the record, frozen; `undefined` when none is sent.
    * @throws what building the record throws — nothing, for an event `buildRunFinished` made.
    */
   datatorPayload(event: RunFinishedEvent): DatatorPayload | undefined;
@@ -111,6 +113,7 @@ export function subscribeNotifications(
   const { slack, datator } = config.notifications ?? {};
   // One record per event object: what `datator.json` keeps is what was posted.
   const payloads = new WeakMap<RunFinishedEvent, DatatorPayload | undefined>();
+  /** `event`'s Datator record, built and frozen once; `undefined` without Datator. */
   const payloadOf = (event: RunFinishedEvent): DatatorPayload | undefined => {
     if (datator === undefined) return undefined;
     if (!payloads.has(event))

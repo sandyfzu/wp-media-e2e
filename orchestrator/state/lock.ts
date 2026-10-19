@@ -358,7 +358,9 @@ async function takeLock(
  * @param deps - the stand-ins.
  * @returns the taker.
  * @throws {@link StateError} for a folder the place refuses.
- * @throws {@link RangeError} for an injected PID or token a lock cannot hold.
+ * @throws {@link RangeError} for an injected PID or token a lock cannot hold, or an owner it cannot
+ *   read back — a start or PID space unlike the system's, a run, cell or site key too long or not one
+ *   line.
  */
 async function takerOf(place: LockPlace, deps: LockDeps): Promise<Taker> {
   const pid = deps.pid ?? process.pid;
@@ -383,7 +385,7 @@ async function takerOf(place: LockPlace, deps: LockDeps): Promise<Taker> {
   };
   if (!isWritableOwner(me))
     throw new RangeError(
-      "This process's start, PID space or run cannot be written.",
+      "This process's start, PID space, run, cell or site key cannot be written in a lock.",
     );
   return {
     place,

@@ -5,7 +5,9 @@ import {
   allSecretValues,
   hostSecretForms,
   secretValues,
+  proxySecretValues,
   siteSecretValues,
+  urlPassword,
 } from "./secrets";
 
 /** A Slack incoming webhook, as Slack gives it. */
@@ -98,6 +100,37 @@ test.describe("siteSecretValues", () => {
   test("lists nothing without tasks", () => {
     expect(siteSecretValues([])).toEqual([]);
   });
+
+  test("lists a baseURL's own password, as written and decoded", () => {
+    const task = cellOf("wp-pass-0001");
+    const site = task.cell.sites[0];
+    if (site === undefined) throw new Error("the cell should hold a site");
+    expect(
+      siteSecretValues([
+        {
+          cell: {
+            sites: [
+              { ...site, baseURL: "https://qa:Basic%2FAuth9@a.qa.test/" },
+            ],
+          },
+        },
+      ]),
+    ).toEqual(["wp-pass-0001", "Basic%2FAuth9", "Basic/Auth9"]);
+  });
+});
+
+test.describe("urlPassword", () => {
+  test("a URL's password as written and decoded; none without one, or for no URL", () => {
+    expect(urlPassword("https://u:p%40ss%2Fword@h.test/")).toEqual([
+      "p%40ss%2Fword",
+      "p@ss/word",
+    ]);
+    expect(urlPassword("https://u:plain-pass@h.test/")).toEqual(["plain-pass"]);
+    expect(urlPassword("https://u:bad%zz@h.test/")).toEqual(["bad%zz"]);
+    expect(urlPassword("https://user@h.test/")).toEqual([]);
+    expect(urlPassword("https://h.test/")).toEqual([]);
+    expect(urlPassword("not a url")).toEqual([]);
+  });
 });
 
 test.describe("allSecretValues", () => {
@@ -135,5 +168,23 @@ test.describe("hostSecretForms", () => {
     ]);
     expect(all).toEqual(["BackWPup1", "Site-Pass-0001", "site-pass-0001.host"]);
     expect(all).not.toContain("backwpup1");
+  });
+});
+
+test.describe("proxySecretValues", () => {
+  test("each proxy URL's password, either spelling, as written and decoded; none without one", () => {
+    expect(
+      proxySecretValues({
+        HTTPS_PROXY: "http://u:Proxy%2FPass1@proxy.test:3128",
+        http_proxy: "http://u:Proxy%2FPass1@proxy.test:3128",
+        all_proxy: "socks5://v:Other-Pass2@proxy.test:1080",
+        NO_PROXY: "http://w:not-a-proxy-url@x.test",
+        PATH: "/usr/bin",
+      }),
+    ).toEqual(["Proxy%2FPass1", "Proxy/Pass1", "Other-Pass2"]);
+    expect(
+      proxySecretValues({ HTTPS_PROXY: "http://proxy.test:3128" }),
+    ).toEqual([]);
+    expect(proxySecretValues({})).toEqual([]);
   });
 });

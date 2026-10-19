@@ -36,7 +36,7 @@ import { StateError } from "./errors";
 import { LEFTOVER_AGE_MS } from "./leftovers";
 import { replaceLockFile, type LockDeps } from "./lock";
 import { formatOwner, parseOwner, type LockOwner } from "./lock-owner";
-import type { PidSpace } from "./pid-space";
+import { INIT_PID_NAMESPACE, type PidSpace } from "./pid-space";
 
 /** The cell every test locks: two sites. */
 const UNIT: CellUnit = {
@@ -384,6 +384,17 @@ test.describe("CellLocks.acquire", () => {
     expect((await ownerOn(KEYS[1] ?? ""))?.run).toBeUndefined();
   });
 
+  test("a run cannot be named once the first lock is another's: lost, though every later one is named", async () => {
+    const cell = await take(deps(100, 1));
+    await plantHolder(KEYS[0] ?? "", undefined, 300);
+    expect(await cell.setRun(recordOf("bpng-1"))).toEqual({ kind: "lost" });
+    expect(await ownerOn(KEYS[0] ?? "")).toMatchObject({ pid: 300 });
+    expect(await ownerOn(KEYS[1] ?? "")).toMatchObject({
+      pid: 100,
+      run: recordOf("bpng-1"),
+    });
+  });
+
   test("a run path too long for a lock is never written: false, the lock as it was", async () => {
     const cell = await take(deps(100, 1));
     const long = `/${"é".repeat(4000)}/runs/bpng-1/run.json`;
@@ -457,6 +468,54 @@ test.describe("CellLocks.acquire", () => {
     });
   });
 
+  test("takes over a dead orchestrator's lock whose run's leader started in an earlier boot of this machine", async () => {
+    // This process on a host: the holder died in this boot, its run's leader in an earlier one.
+    const host: PidSpace = {
+      ...SPACE,
+      pidns: INIT_PID_NAMESPACE,
+      machine: "0123456789abcdef0123456789abcdef",
+    };
+    const run = recordOf("bpng-9");
+    await mkdir(join(otherRuns, "bpng-9"), { recursive: true });
+    await writeRunRecord(
+      run,
+      runningRecord(
+        {
+          id: "bpng-9",
+          runId: formatRunId(STARTED, "bpng-9"),
+          startedAt: STARTED,
+        },
+        "bpng",
+        {
+          name: "playwright",
+          pgid: RUN_PGID,
+          leaderStart: "linux:0b5c2d7e-1111-4222-8333-944455566677:1347811",
+        },
+      ),
+    );
+    await mkdir(folder, { recursive: true, mode: 0o700 });
+    const owner: LockOwner = {
+      pid: DEAD_PID,
+      token: "d".repeat(32),
+      start: `test:${String(DEAD_PID)}`,
+      space: host,
+      label: "backwpup other@cell",
+      run,
+    };
+    await writeFile(siteLockPath(folder, KEYS[0] ?? ""), formatOwner(owner), {
+      mode: 0o600,
+    });
+    // Its group's number alive now, its leader gone: an unconfirmed orphan, were its boot this one.
+    const cell = await take({
+      ...deps(100, 1, [RUN_PGID]),
+      readStart: (pid) =>
+        pid === RUN_PGID ? Promise.resolve({ kind: "gone" }) : readStart(pid),
+      space: () => Promise.resolve(host),
+    });
+    expect(await ownerOn(KEYS[0] ?? "")).toMatchObject({ pid: 100 });
+    expect(await cell.release()).toBe(true);
+  });
+
   test("refuses a dead orchestrator's lock whose run still runs: an orphan, with the command that ends it", async () => {
     const run = await runningRun("bpng-6");
     await plantHolder(KEYS[0] ?? "", run);
@@ -498,6 +557,50 @@ test.describe("CellLocks.acquire", () => {
       `The site locks' folder ${folder} is not a folder (a symbolic link is never followed).`,
     );
     expect(await readdir(elsewhere)).toEqual([]);
+  });
+
+  test("refuses a site whose key a lock cannot hold, naming the site key, and takes nothing", async () => {
+    const long = `https://c.qa.test/${"x".repeat(2100)}`;
+    const error = await rejectionOf(
+      take(deps(100, 1), { ...UNIT, sites: [...UNIT.sites, long] }),
+    );
+    expect(error).toBeInstanceOf(RangeError);
+    expect(error.message).toBe(
+      "This process's start, PID space, run, cell or site key cannot be written in a lock.",
+    );
+    expect(await readdir(folder)).toEqual([]);
+  });
+
+  test("refuses a parent wp-media-e2e that is a link, making and taking nothing through it", async () => {
+    const parent = join(folder, "..");
+    const elsewhere = join(root, "elsewhere");
+    await mkdir(elsewhere, { mode: 0o700 });
+    await chmod(elsewhere, 0o777);
+    await mkdir(join(parent, ".."), { recursive: true });
+    await symlink(elsewhere, parent);
+    const error = await rejectionOf(take(deps(100, 1)));
+    expect(error).toBeInstanceOf(StateError);
+    expect(error.message).toBe(
+      `The site locks' parent folder ${parent} is not a folder (a symbolic link is never followed). Move it away: mv ${parent} ${parent}.moved`,
+    );
+    expect(await readdir(elsewhere)).toEqual([]);
+    expect((await cellLocks(folder, deps(100, 1)).inspect(UNIT)).kind).toBe(
+      "refused",
+    );
+  });
+
+  test("refuses a parent wp-media-e2e open to others, even with a private site-locks in it", async () => {
+    const parent = join(folder, "..");
+    await mkdir(folder, { recursive: true, mode: 0o700 });
+    await chmod(parent, 0o777);
+    try {
+      expect((await rejectionOf(take(deps(100, 1)))).message).toBe(
+        `The site locks' parent folder ${parent} is mode 777: it must be this user's alone (chmod 700 ${parent}).`,
+      );
+      expect(await readdir(folder)).toEqual([]);
+    } finally {
+      await chmod(parent, 0o700);
+    }
   });
 
   test("sweeps its own sites' old leftovers as they are taken, and no other site's", async () => {

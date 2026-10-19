@@ -20,7 +20,7 @@ import { runningRecord, writeRunRecord } from "../runs/record";
 import { inspectState } from "./inspect";
 import { inspectLock, LOCK_FILE, stateFolderProblem } from "./lock";
 import { formatOwner, type LockOwner } from "./lock-owner";
-import { readPidSpace, type PidSpace } from "./pid-space";
+import { INIT_PID_NAMESPACE, readPidSpace, type PidSpace } from "./pid-space";
 
 /** A fresh state directory per test, mode 0700, removed after it. */
 let dir: string;
@@ -282,6 +282,55 @@ test.describe("inspectState — runs left running, and the selected cells", () =
     });
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("Another orchestrator (pid 2000");
+  });
+
+  test("a run whose record cannot be read is the start's refusal; an entry that is no folder is only said", async () => {
+    const record = join(dir, "runs", "bpng-6", "run.json");
+    await mkdir(join(dir, "runs", "bpng-6"), { recursive: true, mode: 0o700 });
+    await writeFile(record, "{");
+    await writeFile(join(dir, "runs", "stray"), "");
+    expect(await inspectState(dir, DEPS)).toEqual([
+      `a start would be refused: Run bpng-6 may still be running — unconfirmed: its record is not one this orchestrator reads (not JSON), so nothing says it is over. A second run would share its sites. Look for its processes first: lsof -- ${join(dir, "runs", "bpng-6", "run.log")} lists those writing its log. End each one's group with: kill -KILL -<PGID>, its PGID from: ps -o pgid= -p <PID>. If there are none, repair its record, or set it aside: mv ${record} ${record}.unread`,
+      "stray in the runs' folder is not a folder: passed over",
+    ]);
+    expect(await readFile(record, "utf8")).toBe("{");
+  });
+
+  test("a run whose leader started in an earlier boot of this machine is no warning, and its record is left running", async () => {
+    const started = new Date("2026-10-13T10:15:31.042Z");
+    await mkdir(join(dir, "runs", "bpng-7"), { recursive: true, mode: 0o700 });
+    const path = join(dir, "runs", "bpng-7", "run.json");
+    await writeRunRecord(
+      path,
+      runningRecord(
+        {
+          id: "bpng-7",
+          runId: formatRunId(started, "bpng-7"),
+          startedAt: started,
+        },
+        "bpng",
+        {
+          name: "playwright",
+          pgid: PGID,
+          leaderStart: "linux:0b5c2d7e-1111-4222-8333-944455566677:1347811",
+        },
+      ),
+    );
+    const before = await readFile(path, "utf8");
+    const host: PidSpace = {
+      ...SPACE,
+      pidns: INIT_PID_NAMESPACE,
+      machine: "0123456789abcdef0123456789abcdef",
+    };
+    // Its group alive, its leader gone: an unconfirmed orphan, were its boot not an earlier one.
+    expect(
+      await inspectState(dir, {
+        ...DEPS,
+        readStart: () => Promise.resolve({ kind: "gone" }),
+        space: () => Promise.resolve(host),
+      }),
+    ).toEqual([]);
+    expect(await readFile(path, "utf8")).toBe(before);
   });
 
   test("a runs' folder that cannot be read is said as the start would refuse it", async () => {

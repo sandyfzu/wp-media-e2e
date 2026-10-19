@@ -87,10 +87,14 @@ test.describe("postJson", () => {
     expect(!sent.ok && Array.from(sent.detail)).toHaveLength(MAX_DETAIL);
   });
 
-  test("reads no more of an endless answer than its cap", async () => {
+  test("reads no more of an endless answer than its cap, and closes its connection there", async () => {
     let written = 0;
+    let closedAt: number | undefined;
     const server = await sink((_request, response) => {
       response.writeHead(400);
+      response.once("close", () => {
+        closedAt = Date.now();
+      });
       // Writes until the client goes away.
       const chunk = "y".repeat(1024);
       const pump = (): void => {
@@ -100,9 +104,14 @@ test.describe("postJson", () => {
       };
       pump();
     });
-    const sent = await postJson(server.url, {}, OPTIONS);
+    const timeoutMs = 5_000;
+    const started = Date.now();
+    const sent = await postJson(server.url, {}, { ...OPTIONS, timeoutMs });
     expect(sent).toMatchObject({ ok: false, status: 400 });
     expect(written).toBeGreaterThan(MAX_ANSWER_BYTES);
+    // Left open, the download would go on until the time limit aborted it.
+    await expect.poll(() => closedAt, { timeout: 2_000 }).toBeDefined();
+    expect((closedAt ?? Infinity) - started).toBeLessThan(timeoutMs / 2);
   });
 
   test("does not follow a redirect, which would drop the body: the redirect is the answer", async () => {
@@ -247,6 +256,30 @@ test.describe("postJson", () => {
       status: 403,
       detail: "HTTP 403 (its answer is withheld: it quotes a secret)",
     });
+  });
+
+  test("withholds an answer that quotes a short secret written with spaces around it, or an invisible character in it", async () => {
+    const server = await sink(reply(403, "bad credential:pw12x."));
+    for (const secret of [
+      " pw12x ",
+      "\tpw12x\n",
+      "pw\u200b12x",
+      " pw\u00ad12x ",
+    ])
+      expect(
+        await postJson(server.url, {}, { ...OPTIONS, secrets: [secret] }),
+      ).toEqual({
+        ok: false,
+        status: 403,
+        detail: "HTTP 403 (its answer is withheld: it quotes a secret)",
+      });
+  });
+
+  test("a secret of nothing but spaces withholds nothing", async () => {
+    const server = await sink(reply(403, "bad credential: no key"));
+    expect(
+      await postJson(server.url, {}, { ...OPTIONS, secrets: [" ", "\t", ""] }),
+    ).toEqual({ ok: false, status: 403, detail: "bad credential: no key" });
   });
 
   test("never rejects on an invalid time limit or signal", async () => {

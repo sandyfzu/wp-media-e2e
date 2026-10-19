@@ -21,7 +21,12 @@ import { RESULTS_FILE } from "../../src/common/reporting/results-schema";
 import type { RunFinishedEvent } from "../events/run-finished";
 import { datatorPayload } from "../notify/datator";
 import { runIdentity } from "../runs/identity";
-import { launchRun, type LaunchResult } from "../runs/launch";
+import {
+  launchRun,
+  type LaunchedRun,
+  type LaunchOptions,
+  type LaunchResult,
+} from "../runs/launch";
 import {
   createRecordWriter,
   parseRunRecord,
@@ -30,6 +35,7 @@ import {
   type RunRecord,
   type RunningRecord,
 } from "../runs/record";
+import { writeJsonAtomic } from "../state/atomic";
 import { pruneTaskRuns } from "../state/run-retention";
 import {
   runOnce,
@@ -64,6 +70,8 @@ const TASK: CycleTask = {
 /** The checkout and the state directory, fresh per test. */
 let checkout: string;
 let stateDir: string;
+/** Every process group a test's runs started: killed, with whatever they left, as the test ends. */
+const groups = new Set<number>();
 /** Rejections nobody handled during a test: there must be none. */
 let unhandled: unknown[];
 /** Records them. */
@@ -83,9 +91,45 @@ test.afterEach(async () => {
   // A turn for any rejection still on its way to the handler.
   await delay(50);
   process.off("unhandledRejection", onUnhandled);
+  killGroups();
   await rm(checkout, { recursive: true, force: true });
   expect(unhandled).toEqual([]);
 });
+
+/**
+ * SIGKILLs every group in {@link groups}, then forgets them. A group already gone (`ESRCH`), or no
+ * longer ours (`EPERM`), is skipped.
+ */
+function killGroups(): void {
+  for (const pgid of groups) {
+    try {
+      process.kill(-pgid, "SIGKILL");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH" && code !== "EPERM") throw error;
+    }
+  }
+  groups.clear();
+}
+
+/**
+ * A launch whose process groups are kept in {@link groups}, for the test's end to kill.
+ *
+ * @param launch - the launch to watch: the real one by default.
+ * @returns it, each group it is told of kept before the cycle hears of it.
+ */
+function tracking(
+  launch: (options: LaunchOptions) => Promise<LaunchedRun> = launchRun,
+): (options: LaunchOptions) => Promise<LaunchedRun> {
+  return (options) =>
+    launch({
+      ...options,
+      onProcess: (name, pgid) => {
+        groups.add(pgid);
+        return options.onProcess?.(name, pgid);
+      },
+    });
+}
 
 /** What a test sees of a run: its lines, what it published, every record written, in order. */
 interface Seen {
@@ -138,6 +182,7 @@ function harness(
         },
       }),
     ...more,
+    launch: tracking(more.launch),
   };
   return { deps, seen };
 }
@@ -331,6 +376,46 @@ test.describe("runOnce — runs to their end", () => {
     expect(
       JSON.parse(await readFile(join(stateDir, "tasks", "bpng.json"), "utf8")),
     ).toEqual({ v: 1, lastRun: 1 });
+  });
+
+  test("keeps a run's end before telling it: run-finished.json, datator.json, the ended record, the outcome line, the event, then pruning", async () => {
+    const order: string[] = [];
+    const { deps } = harness({ exitCode: 0 }, runnerWith("passed"), {
+      writeJson: async (path, value) => {
+        order.push(`file ${basename(path)}`);
+        await writeJsonAtomic(path, value);
+      },
+      recordWriter: (path) =>
+        createRecordWriter(path, {
+          write: async (to, record) => {
+            if (record.state === "ended") order.push("record ended");
+            await writeRunRecord(to, record);
+          },
+        }),
+      logger: {
+        line: (_scope, text) => {
+          if (text.startsWith("bpng-1 ✔ passed")) order.push("outcome line");
+        },
+      },
+      bus: {
+        publish: () => {
+          order.push("publish");
+        },
+      },
+      prune: (input) => {
+        order.push("prune");
+        return pruneTaskRuns(input);
+      },
+    });
+    expect(ended(await runOnce(TASK, deps).done).status).toBe("passed");
+    expect(order).toEqual([
+      "file run-finished.json",
+      "file datator.json",
+      "record ended",
+      "outcome line",
+      "publish",
+      "prune",
+    ]);
   });
 
   test("records a failed run with its Datator record, its error masked everywhere", async () => {
@@ -786,6 +871,46 @@ test.describe("runOnce — stopped at each stage", () => {
       expect(record.stop).toEqual({ level, why: `asked: ${level}` });
       expect(seen.published.map((event) => event.status)).toEqual([status]);
     });
+
+  test("a stop asked after bddgen's spawn is allowed but before the launch hands out the run reaches the run", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // An object: a flag the launch sets in a closure would read as always false here.
+    const gap = { reached: false };
+    const forwarded: string[] = [];
+    const { deps } = harness(
+      {},
+      {},
+      {
+        launch: async (options) => {
+          await mkdir(options.identity.dir, { recursive: true });
+          await options.onSpawning?.("bddgen");
+          // Past the last check before the spawn, the run not yet handed out: a real async gap.
+          gap.reached = true;
+          await gate;
+          return {
+            stop: (level, why) => {
+              forwarded.push(`${level}: ${why}`);
+            },
+            done: Promise.resolve<LaunchResult>({
+              bddgen: { code: 0, signal: null },
+              stop: { level: "none" },
+            }),
+          };
+        },
+        end: () => Promise.reject(new Error("unread")),
+      },
+    );
+    const run = runOnce(TASK, deps);
+    for (let i = 0; i < 200 && !gap.reached; i += 1) await delay(10);
+    expect(gap.reached).toBe(true);
+    run.stop("drained", "Ctrl-C");
+    release();
+    await run.done;
+    expect(forwarded).toEqual(["drained: Ctrl-C"]);
+  });
 
   test("a stop that goes no further than one before changes nothing", async () => {
     const { deps, seen } = harness({ exitCode: 0 }, { runMs: 60_000 });

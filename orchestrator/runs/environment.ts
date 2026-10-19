@@ -14,10 +14,42 @@ import type { OrchestratorConfig, TaskConfig } from "../config/schema";
  */
 
 /**
- * What a run takes from the orchestrator's environment, when set: where its tools are (`PATH`),
- * where APVM's cache and `gh`'s login live (`HOME`), its language, and its temporary folder.
+ * The proxy variables that hold a proxy's URL — and so may hold its password — in both spellings.
  */
-export const INHERITED_VARIABLES = ["PATH", "HOME", "LANG", "TMPDIR"] as const;
+export const PROXY_URL_VARIABLES = [
+  "HTTPS_PROXY",
+  "https_proxy",
+  "HTTP_PROXY",
+  "http_proxy",
+  "ALL_PROXY",
+  "all_proxy",
+] as const;
+
+/**
+ * What a run takes from the orchestrator's environment, when set: where its tools are (`PATH`),
+ * where APVM's cache and `gh`'s login live (`HOME`), its language, and its temporary folder; where
+ * Playwright's browsers are (`PLAYWRIGHT_BROWSERS_PATH`, else under `XDG_CACHE_HOME` on Linux); and
+ * what a host behind a proxy needs to reach GitHub — the proxy variables in both spellings (APVM's
+ * HTTP client reads both; `gh` and Node read them too, Node's `fetch` only with `NODE_USE_ENV_PROXY`)
+ * and the CA certificates a TLS-inspecting proxy signs with (`NODE_EXTRA_CA_CERTS` for Node,
+ * `SSL_CERT_FILE` and `SSL_CERT_DIR` for APVM). A proxy URL may carry a password: like every value
+ * here, never logged — the run's log names variables only ({@link variableNames}).
+ */
+export const INHERITED_VARIABLES = [
+  "PATH",
+  "HOME",
+  "LANG",
+  "TMPDIR",
+  "PLAYWRIGHT_BROWSERS_PATH",
+  "XDG_CACHE_HOME",
+  ...PROXY_URL_VARIABLES,
+  "NO_PROXY",
+  "no_proxy",
+  "NODE_USE_ENV_PROXY",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+] as const;
 
 /** What a run's environment is made from. */
 export interface RunEnvironmentInput {

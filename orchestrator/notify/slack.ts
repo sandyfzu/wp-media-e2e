@@ -13,8 +13,9 @@ import { DEFAULT_POST_TIMEOUT_MS, postJson, type Delivery } from "./post";
  * with their first error, and where the report is. A run that could not test says why instead.
  *
  * The event's text is already masked and one line per field (`run-finished.ts`); this escapes it as
- * Slack requires (`&`, `<`, `>` — else `<!channel>` in a scenario's name would ping a channel) and
- * bounds every piece and every list, so a message stays far under Slack's 40,000-character
+ * Slack requires (`&`, `<`, `>` — else `<!channel>` in a scenario's name would ping a channel), breaks
+ * every run of three backticks (two such names would make every line between them one code block),
+ * and bounds every piece and every list, so a message stays far under Slack's 40,000-character
  * truncation. Slack's own formatting (`*bold*`, `_italic_`, a bare link) is left to it: a run can
  * style its text, not ping, link under false text or reach past its line. Links are not unfurled,
  * and the paths to copy are code, which Slack does not format.
@@ -57,18 +58,51 @@ const HEADLINES: Readonly<Record<RunStatus, string>> = {
 };
 
 /**
- * Text as Slack shows it literally: `&`, `<` and `>` escaped, as its message format requires, and a
- * lone surrogate — which no JSON reader need accept — made U+FFFD.
+ * What stands for each backtick of a run of three or more: U+02CB `ˋ`, which reads as one but is not
+ * markup — Slack has no escape for a backtick, and an invisible character between them would be
+ * a guess at its parser.
+ */
+export const FENCE_BREAK = "\u02cb";
+
+/**
+ * Text with every run of three backticks or more written in {@link FENCE_BREAK}s: Slack opens a code
+ * block at three backticks and closes it at the next three, lines apart, so the text between two
+ * such names would lose its formatting and read as one block. One or two backticks are kept.
+ *
+ * @param text - the text.
+ * @returns the text, its length in UTF-16 units unchanged.
+ */
+function breakFences(text: string): string {
+  return text.replace(/`{3,}/g, (run) => FENCE_BREAK.repeat(run.length));
+}
+
+/**
+ * One character as Slack shows it literally: `&`, `<` and `>` escaped, as its message format
+ * requires.
+ *
+ * @param char - one code point.
+ * @returns it, escaped.
+ */
+function escapeChar(char: string): string {
+  return char === "&"
+    ? "&amp;"
+    : char === "<"
+      ? "&lt;"
+      : char === ">"
+        ? "&gt;"
+        : char;
+}
+
+/**
+ * Text as Slack shows it literally: `&`, `<` and `>` escaped, as its message format requires, a run of
+ * three backticks or more broken ({@link breakFences}), and a lone surrogate — which no JSON reader
+ * need accept — made U+FFFD.
  *
  * @param text - the text.
  * @returns the escaped text.
  */
 export function escapeSlack(text: string): string {
-  return text
-    .toWellFormed()
-    .replace(/[&<>]/g, (char) =>
-      char === "&" ? "&amp;" : char === "<" ? "&lt;" : "&gt;",
-    );
+  return breakFences(text.toWellFormed()).replace(/[&<>]/g, escapeChar);
 }
 
 /**
@@ -88,8 +122,9 @@ export function escapeCut(text: string, max: number): string {
   const whole = escapeSlack(text);
   if (whole.length <= max) return whole;
   let kept = "";
-  for (const char of text) {
-    const escaped = escapeSlack(char);
+  // Fences broken before the cut, which reads one code point at a time and could not see a run.
+  for (const char of breakFences(text.toWellFormed())) {
+    const escaped = escapeChar(char);
     if (kept.length + escaped.length > max - 1) break;
     kept += escaped;
   }

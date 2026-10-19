@@ -107,6 +107,7 @@ function spelledName(node: ts.Node): string | undefined {
 export function forbiddenNames(file: string, source: string): string[] {
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
   const found: string[] = [];
+  /** Records `node` when it spells a refused name, then visits its children. */
   const visit = (node: ts.Node): void => {
     const name = spelledName(node);
     const reason = name === undefined ? undefined : REFUSED_NAMES.get(name);
@@ -208,6 +209,13 @@ export function isProbed(path: string): boolean {
 }
 
 /**
+ * A specifier written as a URL with any scheme but `node:` (`data:`, `file:`, `https:`): the code a
+ * `data:` URL holds imports whatever it names — `run-context.ts` by a `file:` URL — where no resolver
+ * or rule looks, and the others lead outside the module graph this spec walks.
+ */
+const URL_SPECIFIER = /^(?!node:)[a-z][a-z\d+.-]*:/i;
+
+/**
  * Why an import leading to `target` is refused — or `undefined` when it is allowed: inside
  * `orchestrator/` but test code, or outside it and not admitted.
  *
@@ -232,7 +240,7 @@ function refusal(
 /**
  * The imports of `source`, read as the file `file`, that the boundary refuses, as
  * `<specifier> — <reason>`: a computed path, which cannot be checked; one of
- * {@link REFUSED_BUILTINS}; a path or `#` import that leads nowhere outside `orchestrator/`; test
+ * {@link REFUSED_BUILTINS}; a URL ({@link URL_SPECIFIER}); a path or `#` import that leads nowhere outside `orchestrator/`; test
  * code; anything outside `orchestrator/` but an `admitted` module (absolute paths). Each import is
  * judged where it really leads — `.js` to `.ts`, a detour, a `#` import — and lexically when it leads
  * nowhere.
@@ -255,6 +263,11 @@ export function forbiddenImports(
     if (specifier === undefined) return ["(computed) — cannot be checked"];
     if (isRefusedBuiltin(specifier)) {
       return [`${specifier} — loads or runs code unchecked`];
+    }
+    if (URL_SPECIFIER.test(specifier)) {
+      return [
+        `${specifier.slice(0, 80)} — a URL import: loads code no guard reads`,
+      ];
     }
     const resolution = resolveImport(specifier, file);
     if (resolution.kind === "package") return [];

@@ -243,6 +243,21 @@ test.describe("NODE_TIMERS", () => {
   test("reads a monotonic clock, never the wall clock an NTP step can move back", () => {
     expect(Math.abs(NODE_TIMERS.now() - performance.now())).toBeLessThan(1_000);
   });
+
+  test("arms a budget that never keeps the process alive by itself, and clears it", async () => {
+    let fired = false;
+    const handle = NODE_TIMERS.setTimeout(() => {
+      fired = true;
+    }, 20) as NodeJS.Timeout;
+    try {
+      // A referenced 15 min budget would hold a process that has nothing else left to do.
+      expect(handle.hasRef()).toBe(false);
+    } finally {
+      NODE_TIMERS.clearTimeout(handle);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(fired).toBe(false);
+  });
 });
 
 test.describe("describeBudget", () => {

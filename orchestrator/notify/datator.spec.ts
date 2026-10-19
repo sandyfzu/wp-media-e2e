@@ -3,6 +3,7 @@ import { test, expect } from "@playwright/test";
 import { reply, startSink } from "../__fixtures__/http-sink";
 import { finishedEvent, scenario } from "../__fixtures__/run-finished";
 import type { RunStatus } from "../runs/outcome";
+import { safeSiteUrl } from "../text";
 import {
   acceptedUrl,
   datatorPayload,
@@ -161,6 +162,14 @@ test.describe("datatorPayload", () => {
     expect(payloadOf({ sites: [] }).website_url).toBeNull();
   });
 
+  test("posts null for a first site whose address Datator would refuse: a Docker host", () => {
+    expect(
+      payloadOf({
+        sites: [{ baseURL: "http://wp-apache", wordpress: null, php: null }],
+      }).website_url,
+    ).toBeNull();
+  });
+
   test("prefixes a scenario's name with its Rule and Outline path", () => {
     const [testCase] = payloadOf({
       scenarios: [
@@ -248,6 +257,35 @@ test.describe("acceptedUrl", () => {
       "HTTPS://A.COM/",
     ])
       expect(acceptedUrl(url)).toBeNull();
+  });
+
+  test("drops a user and password, as the event shows them or not: one series per site, never a credential", () => {
+    for (const [url, bare] of [
+      ["https://***@a.example.com/wp", "https://a.example.com/wp"],
+      ["https://user:pa55word@a.example.com/wp/", "https://a.example.com/wp/"],
+      ["http://***@127.0.0.1:8101", "http://127.0.0.1:8101"],
+      ["https://u@localhost/", "https://localhost/"],
+      [`https://${"u".repeat(300)}@a.example.com`, "https://a.example.com"],
+    ])
+      expect(acceptedUrl(url)).toBe(bare);
+    // Still refused when what is left is not a URL Datator accepts.
+    expect(acceptedUrl("http://***@wp-apache/")).toBeNull();
+    expect(
+      acceptedUrl(`https://***@a.example.com/${"x".repeat(240)}`),
+    ).toBeNull();
+  });
+
+  test("posts the address of a site whose baseURL holds credentials without them", () => {
+    const baseURL = safeSiteUrl(
+      "https://user:Sup3rSecretPw@site.example.com/wp",
+      300,
+      ["Sup3rSecretPw"],
+    );
+    expect(baseURL).toBe("https://***@site.example.com/wp");
+    expect(
+      payloadOf({ sites: [{ baseURL, wordpress: null, php: null }] })
+        .website_url,
+    ).toBe("https://site.example.com/wp");
   });
 });
 

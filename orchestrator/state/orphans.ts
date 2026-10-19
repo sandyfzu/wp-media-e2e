@@ -11,7 +11,13 @@ import {
   type RunRecord,
 } from "../runs/record";
 import { MAX_QUOTED_PATH, safeLine, shellWord } from "../text";
-import { readRunningFolders } from "./run-folders";
+import {
+  BOOT_TEXT,
+  earlierBoot,
+  readPidSpace,
+  type PidSpace,
+} from "./pid-space";
+import { readRunningFolders, type RunFolderWarning } from "./run-folders";
 
 /**
  * The orphan check, as the orchestrator starts: every run whose record still says `running` is either
@@ -39,14 +45,20 @@ import { readRunningFolders } from "./run-folders";
  * not askable — is an unconfirmed orphan too: a refusal can be retried, a record rewritten cannot. So
  * is a record saying a process was **starting** (`startingRecord`): its orchestrator stopped between
  * writing it and recording the process's group, the process may run, and with no group recorded there
- * is nothing to probe — the refusal says how to find its processes instead.
+ * is nothing to probe — the refusal says how to find its processes instead. And so is a run folder
+ * whose record is there but cannot be read, or is not one (a link, over its cap, `EACCES`, malformed):
+ * nothing says its run is over. Records are written atomically, so none is left half-written.
+ *
+ * A leader started in an **earlier boot** of this machine (`linux:<boot>:<ticks>`, its boot not this
+ * one's, as `earlierBoot` judges a lock's) ended with that boot: stale, whatever now holds its group's
+ * number.
  *
  * Run it under the orchestrator's lock, before any run starts: a run of this orchestrator still
  * starting, with no process recorded yet, would read as stale.
  */
 
 /** A run left running: its group alive, and the run's or possibly the run's. */
-export interface Orphan {
+export interface RunOrphan {
   readonly taskId: string;
   /** The run's id, `bpng-12`. */
   readonly id: string;
@@ -60,9 +72,27 @@ export interface Orphan {
   readonly why?: string;
 }
 
+/** A run folder whose record is there but cannot be read, or is not one: its run may still run. */
+export interface UnreadOrphan {
+  /** The run folder's name, as listed: the run's id. */
+  readonly id: string;
+  /** Its `run.json`, absolute. */
+  readonly record: string;
+  /** Why it cannot be read, as the end of a sentence naming it: `is a symbolic link`. */
+  readonly unread: string;
+  /** Never shown to be the run's. */
+  readonly confirmed: false;
+}
+
+/** A run that refuses the start: one left running, or one whose record cannot tell. */
+export type Orphan = RunOrphan | UnreadOrphan;
+
 /** Why a running record is taken to be over. */
 export type StaleReason =
-  "no process recorded" | "process group ended" | "leader differs";
+  | "no process recorded"
+  | "process group ended"
+  | "leader differs"
+  | "earlier boot";
 
 /** A running record found over. */
 export interface StaleRun {
@@ -90,6 +120,8 @@ export interface OrphanCheckDeps {
   readonly now: () => Date;
   /** Writes a record; `writeRunRecord` (atomic) by default. */
   readonly writeRecord?: (path: string, record: RunRecord) => Promise<void>;
+  /** This process's PID space, for a leader from an earlier boot; `readPidSpace` by default. */
+  readonly space?: () => Promise<PidSpace>;
 }
 
 /** How one running record is classified. */
@@ -108,12 +140,12 @@ export type Classification =
  * Classifies one running record; see this module's description for each case.
  *
  * @param record - the record, as read back.
- * @param deps - `kill` and the start reader.
+ * @param deps - `kill`, the start reader, and this process's PID space.
  * @returns orphan (confirmed, or not and why) or stale, and why.
  */
 export async function classifyRunning(
   record: Pick<RunningRecordRead, "process" | "starting">,
-  deps: Pick<OrphanCheckDeps, "kill" | "readLeaderStart">,
+  deps: Pick<OrphanCheckDeps, "kill" | "readLeaderStart" | "space">,
 ): Promise<Classification> {
   if (record.starting !== undefined)
     return {
@@ -124,7 +156,11 @@ export async function classifyRunning(
   const { process } = record;
   if (process === undefined)
     return { kind: "stale", reason: "no process recorded" };
+  // Before the group is asked: after a reboot its number may be any process's.
+  if (await fromEarlierBoot(process.leaderStart, deps.space ?? readPidSpace))
+    return { kind: "stale", reason: "earlier boot" };
   const { pgid } = process;
+  /** An orphan of this group that could not be confirmed, and why (`why`). */
   const unconfirmed = (why: string): Classification => ({
     kind: "orphan",
     pgid,
@@ -163,9 +199,34 @@ export async function classifyRunning(
   );
 }
 
+/** A Linux leader start as `readLeaderStart` writes it: `linux:<boot id>:<ticks>`. */
+const LINUX_START = /^linux:([^:]+):[0-9]+$/;
+
 /**
- * Checks every run folder under `<stateDir>/runs/`. A record that cannot be read, or is not one, is
- * a warning and left as it is; only a run folder with no record yet is passed over in silence.
+ * Whether a recorded leader start is from an earlier boot of this machine: {@link earlierBoot} of this
+ * process's space and the same space at the recorded boot — every run is judged in this process's PID
+ * space (its group is asked here), so the run's space is this one but for its boot. A container, a
+ * machine with no id, a start that is not Linux's or names no boot id: never so judged.
+ *
+ * @param recorded - the leader's start, as recorded at spawn.
+ * @param space - reads this process's PID space; read only for a Linux start.
+ * @returns `true` only when the recorded boot is shown to be an earlier one.
+ */
+async function fromEarlierBoot(
+  recorded: string | undefined,
+  space: () => Promise<PidSpace>,
+): Promise<boolean> {
+  const boot =
+    recorded === undefined ? undefined : LINUX_START.exec(recorded)?.[1];
+  if (boot === undefined || !BOOT_TEXT.test(boot)) return false;
+  const now = await space();
+  return earlierBoot({ ...now, boot }, now);
+}
+
+/**
+ * Checks every run folder under `<stateDir>/runs/`. A record that is there but cannot be read, or is
+ * not one, is an unconfirmed orphan ({@link UnreadOrphan}); an entry that is no folder is a warning;
+ * a run folder with no record yet is passed over in silence.
  *
  * @param stateDir - the state directory.
  * @param deps - the system.
@@ -180,7 +241,12 @@ export async function checkOrphans(
   const orphans: Orphan[] = [];
   const stale: StaleRun[] = [];
   const folders = await readRunningFolders(stateDir);
-  const warnings = folders.warnings.map(({ text }) => text);
+  const warnings: string[] = [];
+  for (const warning of folders.warnings) {
+    const orphan = unreadOrphan(warning);
+    if (orphan === undefined) warnings.push(warning.text);
+    else orphans.push(orphan);
+  }
   for (const { record, path } of folders.running) {
     const verdict = await classifyRunning(record, deps);
     if (verdict.kind === "orphan") {
@@ -205,7 +271,36 @@ export async function checkOrphans(
       rewritten: code === undefined,
     });
   }
-  return { orphans, stale, warnings };
+  return { orphans: orphans.sort(byId), stale, warnings };
+}
+
+/**
+ * The orphan a run folder's warning makes when its record is there but unread.
+ *
+ * @param warning - the run folder's warning.
+ * @returns the orphan; `undefined` for an entry that is no folder.
+ */
+export function unreadOrphan(
+  warning: RunFolderWarning,
+): UnreadOrphan | undefined {
+  if (warning.unread === undefined) return undefined;
+  return {
+    id: warning.name,
+    record: warning.unread.path,
+    unread: warning.unread.why,
+    confirmed: false,
+  };
+}
+
+/**
+ * Orders orphans as their run folders are listed: by id, code unit by code unit.
+ *
+ * @param a - one orphan.
+ * @param b - another.
+ * @returns their order.
+ */
+function byId(a: Orphan, b: Orphan): number {
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
 /**
@@ -213,13 +308,14 @@ export async function checkOrphans(
  * the command that ends it; an unconfirmed one first says how to look at the group — `ps -g` selects
  * a process group on macOS and a session on Linux, the same thing for a run, which is spawned in a
  * session of its own — and how to mark the run over when the group is not its. One with no group
- * recorded says how to find the run's processes: each the run spawned writes its output to the run's
- * log, so `lsof` on the log lists them while they run.
+ * recorded, or whose record cannot be read, says how to find the run's processes: each the run spawned
+ * writes its output to the run's log, so `lsof` on the log lists them while they run.
  *
  * @param orphan - the orphan.
  * @returns one line for the terminal and the log.
  */
 export function orphanRefusal(orphan: Orphan): string {
+  if ("unread" in orphan) return unreadRefusal(orphan);
   const markLost = `mark the run over: in ${safeLine(shellWord(orphan.record), MAX_QUOTED_PATH)}, set "state" to "lost".`;
   if (orphan.pgid === undefined) return groupUnknownRefusal(orphan, markLost);
   const pgid = String(orphan.pgid);
@@ -245,16 +341,46 @@ export function orphanRefusal(orphan: Orphan): string {
  * @param markLost - how to mark the run over, as the sentence's end.
  * @returns one line for the terminal and the log.
  */
-function groupUnknownRefusal(orphan: Orphan, markLost: string): string {
+function groupUnknownRefusal(orphan: RunOrphan, markLost: string): string {
+  return (
+    `Task ${orphan.taskId} may still have run ${orphan.id} running — unconfirmed: ` +
+    `${orphan.why ?? "it could not be checked"}. A second run would share its sites. ` +
+    `${lookByLog(orphan.record)} If there are none, ${markLost}`
+  );
+}
+
+/**
+ * The refusal of a run whose record is there but cannot be read: nothing says it is over. How to find
+ * its processes by its log, and — none found — how to set the record aside, after which its folder is
+ * one with no record: passed over by the orphan check, and kept by the retention, as any other.
+ *
+ * @param orphan - the unread run.
+ * @returns one line for the terminal and the log.
+ */
+function unreadRefusal(orphan: UnreadOrphan): string {
+  const record = safeLine(shellWord(orphan.record), MAX_QUOTED_PATH);
+  const aside = safeLine(shellWord(`${orphan.record}.unread`), MAX_QUOTED_PATH);
+  return (
+    `Run ${safeLine(orphan.id, 80)} may still be running — unconfirmed: its record ${orphan.unread}, ` +
+    `so nothing says it is over. A second run would share its sites. ${lookByLog(orphan.record)} ` +
+    `If there are none, repair its record, or set it aside: mv ${record} ${aside}`
+  );
+}
+
+/**
+ * How to find and end a run's processes by its log, which each of them writes its output to.
+ *
+ * @param record - the run's `run.json`, beside its log.
+ * @returns two sentences.
+ */
+function lookByLog(record: string): string {
   const log = safeLine(
-    shellWord(join(dirname(orphan.record), RUN_FILES.log)),
+    shellWord(join(dirname(record), RUN_FILES.log)),
     MAX_QUOTED_PATH,
   );
   return (
-    `Task ${orphan.taskId} may still have run ${orphan.id} running — unconfirmed: ` +
-    `${orphan.why ?? "it could not be checked"}. A second run would share its sites. Look for its ` +
-    `processes first: lsof -- ${log} lists those writing its log. End each one's group with: ` +
-    `kill -KILL -<PGID>, its PGID from: ps -o pgid= -p <PID>. If there are none, ${markLost}`
+    `Look for its processes first: lsof -- ${log} lists those writing its log. End each one's group ` +
+    `with: kill -KILL -<PGID>, its PGID from: ps -o pgid= -p <PID>.`
   );
 }
 

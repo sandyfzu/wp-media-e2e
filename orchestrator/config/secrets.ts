@@ -1,4 +1,5 @@
 import { MIN_MASKED_LENGTH } from "../../src/common/text";
+import { PROXY_URL_VARIABLES } from "../runs/environment";
 import type { CheckedTask } from "./check";
 import type { OrchestratorConfig } from "./schema";
 
@@ -48,7 +49,7 @@ type Site = CheckedTask["cell"]["sites"][number];
 
 /**
  * Every credential the tasks' sites hold — each site's WordPress password, its FTP password and its
- * S3 keys — for masking what the orchestrator logs or sends: a run's failure, a site's answer or a
+ * S3 keys, its `baseURL`'s password — for masking what the orchestrator logs or sends: a run's failure, a site's answer or a
  * malformed `baseURL` can quote one, and {@link secretValues} holds only the config's. Every task's,
  * selected or not: a site may serve several cells.
  *
@@ -115,7 +116,8 @@ export function hostSecretForms(
  * A site's credentials, those it sets.
  *
  * @param site - the site.
- * @returns its WordPress password, then its overrides' FTP password and S3 keys.
+ * @returns its WordPress password, its overrides' FTP password and S3 keys, then its `baseURL`'s own
+ *   password ({@link urlPassword}).
  */
 function siteCredentials(site: Site): string[] {
   const { ftp, s3 } = site.overrides?.storage ?? {};
@@ -124,5 +126,42 @@ function siteCredentials(site: Site): string[] {
     ftp?.password,
     s3?.accessKeyId,
     s3?.secretAccessKey,
+    ...urlPassword(site.baseURL),
   ].filter((value): value is string => value !== undefined);
+}
+
+/**
+ * The password of each proxy URL the orchestrator's environment holds, which its runs inherit
+ * (`HTTPS_PROXY`, …; {@link urlPassword}): masked by shape where a tool quotes the URL whole, by value
+ * where it quotes the password alone.
+ *
+ * @param env - the orchestrator's environment.
+ * @returns the passwords' forms, each once.
+ */
+export function proxySecretValues(
+  env: Readonly<Record<string, string | undefined>>,
+): string[] {
+  return [
+    ...new Set(
+      PROXY_URL_VARIABLES.flatMap((name) => urlPassword(env[name] ?? "")),
+    ),
+  ];
+}
+
+/**
+ * A URL's password — HTTP basic auth in a site's `baseURL` —, as written and decoded: masked by shape
+ * only where the URL is quoted whole, it is masked by value wherever a tool quotes it alone.
+ *
+ * @param url - the URL.
+ * @returns its password's forms; none when it has none or does not parse.
+ */
+export function urlPassword(url: string): string[] {
+  const written = URL.parse(url)?.password ?? "";
+  if (written === "") return [];
+  try {
+    return [...new Set([written, decodeURIComponent(written)])];
+  } catch {
+    // A malformed escape (`%zz`): only as written.
+    return [written];
+  }
 }

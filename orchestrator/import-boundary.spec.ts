@@ -178,7 +178,23 @@ const CASES: readonly ImportCase[] = [
   {
     code: `import { a } from ${JSON.stringify(pathToFileURL(`${RUN_CONTEXT}.ts`).href)};`,
     lint: true,
-    scan: `${pathToFileURL(`${RUN_CONTEXT}.ts`).href} — leads nowhere`,
+    scan: `${pathToFileURL(`${RUN_CONTEXT}.ts`).href.slice(0, 80)} — a URL import: loads code no guard reads`,
+  },
+  {
+    // The code a `data:` URL holds imports what it likes: `run-context.ts` by a `file:` URL.
+    code: `import ${JSON.stringify(`data:text/javascript,import '${pathToFileURL(`${RUN_CONTEXT}.ts`).href}'`)};`,
+    lint: true,
+    scan: `${`data:text/javascript,import '${pathToFileURL(`${RUN_CONTEXT}.ts`).href}'`.slice(0, 80)} — a URL import: loads code no guard reads`,
+  },
+  {
+    code: `export async function later() { await import(${JSON.stringify(`data:text/javascript,import '${pathToFileURL(`${RUN_CONTEXT}.ts`).href}'`)}); }`,
+    lint: false,
+    scan: `${`data:text/javascript,import '${pathToFileURL(`${RUN_CONTEXT}.ts`).href}'`.slice(0, 80)} — a URL import: loads code no guard reads`,
+  },
+  {
+    code: 'import { x } from "https://example.test/x.js";',
+    lint: true,
+    scan: "https://example.test/x.js — a URL import: loads code no guard reads",
   },
   {
     code: 'import { a } from "#suite/run-context";',

@@ -303,6 +303,17 @@ test.describe("checkConfig — two tasks on one site", () => {
         renamed: { sites: [sshSite("http://A.QA.test:443/", "qa-lnmp")] },
         other: { sites: [sshSite("https://c.qa.test", "qa-lnmp")] },
         unaddressed: { sites: [sshSite("not a url", "qa-lnmp")] },
+        "split-password": {
+          sites: [
+            sshSite(
+              "https://qa:S3c@ret.example/Pw-tail@qa-lnmp.example/",
+              "qa-lnmp",
+            ),
+          ],
+        },
+        "too-long": {
+          sites: [sshSite(`https://a.qa.test/${"p".repeat(2048)}`, "qa-lnmp")],
+        },
       },
     },
   ];
@@ -363,6 +374,20 @@ test.describe("checkConfig — two tasks on one site", () => {
   test("refuses a cell with a site whose baseURL is no http(s) URL: it cannot be told apart, nor locked", () => {
     expect(refusal([["bxun", "unaddressed"]])).toContain(
       "tasks[0].cell: backwpup unaddressed has 1 site whose baseURL is no http(s) URL",
+    );
+  });
+
+  test("refuses a baseURL whose password a parser splits: never a key holding its tail", () => {
+    const message = refusal([["bxsp", "split-password"]]);
+    expect(message).toContain(
+      "tasks[0].cell: backwpup split-password has 1 site whose baseURL is no http(s) URL, or holds credentials and an @ past its host",
+    );
+    expect(message).not.toContain("Pw-tail");
+  });
+
+  test("refuses a site too long to lock, by name, before any run", () => {
+    expect(refusal([["bxtg", "too-long"]])).toContain(
+      "tasks[0].cell: backwpup too-long has 1 site whose baseURL is too long to lock (over 2048 characters as a site key)",
     );
   });
 });

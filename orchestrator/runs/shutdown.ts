@@ -201,12 +201,30 @@ export function describeBudget(ms: number): string {
 
 /** The timers the driver uses: Node's own, or a fake clock's. */
 export interface ShutdownTimers {
+  /** A monotonic clock, in ms: what the signals' debounce measures. */
   now(): number;
+  /**
+   * Arms a budget.
+   *
+   * @param callback - run once it runs out.
+   * @param ms - its length.
+   * @returns the handle {@link ShutdownTimers.clearTimeout} takes.
+   */
   setTimeout(callback: () => void, ms: number): unknown;
+  /**
+   * Disarms a budget.
+   *
+   * @param handle - what {@link ShutdownTimers.setTimeout} returned.
+   */
   clearTimeout(handle: unknown): void;
 }
 
-/** Node's timers. An armed budget does not keep the process alive by itself. */
+/**
+ * Node's timers. An armed budget does not keep the process alive by itself: while a run is stopping,
+ * its launch's own waits keep the process alive, and once every loop has ended the budget has nothing
+ * left to escalate — referenced, it would hold for up to 15 min a process (a spec's, a driver never
+ * disposed) that has nothing else to do.
+ */
 export const NODE_TIMERS: ShutdownTimers = {
   // Monotonic: a wall clock stepped back would read every later signal as within the debounce.
   now: () => performance.now(),
@@ -221,6 +239,7 @@ export interface Shutdown {
   /**
    * Counts a signal.
    *
+   * @param signal - the signal received.
    * @returns the escalation it caused, if any.
    */
   signal(signal: ShutdownSignal): ShutdownStep["escalated"];
@@ -251,10 +270,17 @@ export function createShutdown(options: CreateShutdownOptions): Shutdown {
   let armed: unknown;
   let disposed = false;
 
+  /** Clears the armed budget, if any. */
   const disarm = (): void => {
     if (armed !== undefined) timers.clearTimeout(armed);
     armed = undefined;
   };
+  /**
+   * Steps the machine on `event` and re-arms the budget it names; nothing once disposed.
+   *
+   * @param event - a signal or a budget run out.
+   * @returns the escalation it caused, if any.
+   */
   const apply = (event: ShutdownEvent): ShutdownStep["escalated"] => {
     if (disposed) return undefined;
     const step = stepShutdown(state, event, budgets);
