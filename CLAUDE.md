@@ -14,7 +14,7 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 > **Current state:** the scaffolded, runnable products are **WP Rocket** and
 > **BackWPup**. Imagify is a planned product and not yet wired up — add it as a new
 > product under `src/projects/` when work begins (see
-> [authoring-tests.md](docs/guides/authoring-tests.md)).
+> [authoring-tests.md → Adding a product](docs/guides/authoring-tests.md#adding-a-product)).
 
 ## Key technologies
 
@@ -26,6 +26,8 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 | BDD                | **Cucumber/Gherkin** via **`playwright-bdd`** (`bddgen` generates specs)                                                                                        |
 | WP-CLI transport   | **execa** (local/docker), **node-ssh** (ssh)                                                                                                                    |
 | Visual diff        | **pixelmatch** + **pngjs**                                                                                                                                      |
+| Config validation  | **zod 4** (the orchestrator's config)                                                                                                                           |
+| Command line       | **commander 15** (the orchestrator's `start`)                                                                                                                   |
 | Reporting          | Playwright HTML, Cucumber HTML, **Allure** (`allure`, `allure-playwright`)                                                                                      |
 | Quality            | **ESLint** (typescript-eslint, strict + type-checked), **Prettier**, **husky** + **lint-staged**                                                                |
 
@@ -34,23 +36,30 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 ```text
 src/
 ├── common/                 # product-agnostic, shared by every product
-│   ├── config/             # env, sites loading, run-context, metadata, devices, file-owner rule, the config factory
-│   ├── auth/               # auth.setup.ts (login → storageState)
+│   ├── config/             # env, sites loading, run-context (+ run-id.ts: RUN_ID's formatter/parser, a run's report folder; run-env.ts: the run-setting variables' names), the cell pin, the drain, metadata, devices, file-owner rule, the config factory
+│   ├── reporting/          # the suite's own reporters: cell-notice.ts, results-stream.ts (results.jsonl), run-facts.reporter.ts (run-facts.json, report titles), run-summary.ts; their pure parts (results.ts, setup-facts.ts, run-facts.ts, report-files.ts) and the stream's schema + reader; report retention (retention.ts, report-tree.ts, run-pruning.ts, prune-command.ts)
+│   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ending a saved login's session)
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
+│   ├── text.ts             # small shared string helpers (escapeRegExp, escapeHtml, redactSecrets/maskValues — masking credentials, a URL's password a parser would refuse included, maskSiteUrl — a site's baseURL shown parsed, credentials `***@`, a stand-in when it is no http(s) URL, plain — one line of plain text)
+│   ├── deadline.ts         # withinBudget: a time limit for a best-effort step
 │   ├── steps/              # generic step definitions
 │   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
-│   ├── pages/              # cross-product Page Object Model (e.g. plugins.page.ts)
+│   ├── pages/              # cross-product Page Object Model (plugins.page.ts, site-health.page.ts) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
-│   ├── artifacts/          # the plugin zips under test (resolve, verify, consume, pre-warm)
+│   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
+│   ├── __fixtures__/       # spec helpers (temp-dir.ts: removeTempDir — a spec's temporary folder removed only when it is one; child-node.ts: run code in a fresh Node; import-probe.ts: what importing a module does to the process; import-scan.ts: every module a file loads, resolved, and what that reaches; report-tree.ts: fake report trees; drain/: the drain spec's scenarios; secret-scan.ts + secrets/: the no-credential canary; mock-wordpress.ts: wp-login and Site Health served locally)
 │   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
-└── projects/<product>/
-    ├── config/             # <product>.config.ts + sites.json / sites.*.json / sites.example.json
-    ├── fixtures.ts         # this product's test instance: common's + its page objects
-    ├── features/           # *.feature (Gherkin)
-    ├── pages/              # this product's page objects (+ locator-contract specs)
-    ├── steps/              # product-specific steps
-    └── support/            # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
+└── projects/
+    ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
+    └── <product>/
+        ├── config/         # <product>.config.ts + sites.json / sites.*.json / sites.example.json
+        ├── fixtures.ts     # this product's test instance: common's + its page objects
+        ├── features/       # *.feature (Gherkin)
+        ├── pages/          # this product's page objects (+ locator-contract specs)
+        ├── steps/          # product-specific steps
+        └── support/        # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
 
+orchestrator/               # the orchestrator: suite-imports.json, the suite modules it may import, + its import-boundary spec; config.example.json; cli.ts (the command's entry, run by the `orchestrator` script as `exec node --import tsx` — never the `tsx` CLI, and no shell left between npm and Node: `process.exit(await runCommand(…))`, the boundary probe's one exclusion); command.ts (commander: `start [--config] [--task <id…>] [--once] [--dry-run]`, help, version; refuses when npm took one of its options for itself (no `--`: `npm_config_dry_run`, and on npm 11 `_once`, `_task`, `_config`, set while the option is missing); a failing standard output or error dropped, no crash; a relative `--config` from `INIT_CWD`; an option value starting with `-` a usage error; `start`'s code returned untouched, the shutdown signals given do-nothing handlers until the exit; every other path's outputs drained, without a practical limit; the dry run on stdout, 0 whatever its warnings, a refusal masked on stderr, 1; usage errors 1); start.ts (the process: config, lock, orphan check, the selected cells' locks, bus and senders, every selected task's loop at once; SIGINT/SIGTERM/SIGHUP stop every loop through shutdown.ts, and so does its parent ending (npm killed by a SIGHUP it does not relay, any launcher that exits: `process.ppid` against its value at boot, `parent.ts`); once runs are killed, waits 60 s more, then names each run it began and left behind — `kill -KILL -<pgid>` only for a group shown to be the run's (`classifyRunning`); settles, closes the log, then releases the lock (the log is written only under it), drains the terminal and standard error and returns the exit code — 0/1 with `--once`, 130 once signalled, 1 on a refusal — for the command to `process.exit` with; `prepareStart`: everything before the lock, `--dry-run`'s seam); parent.ts (the parent's PID at boot, read by `command.ts`'s first import; `parentGone`, `watchParent`); start-lines.ts (`--task`'s selection, its lines, the exit code, pure); dry-run.ts (`--dry-run`'s report, pure: each selected task, the plugin it builds (the suite's own planner, `artifacts/request.ts`), its sites and their servers as written, the runs' settings, the notifications and secrets by name, the warnings, the state directory's first — never a field holding a secret, every value masked by all the orchestrator's secrets before it is normalised, a site's address by `safeSiteUrl`); config/ (product-list.ts: the product list loaded as a config error, errors.ts: ConfigError; its config file: schema.ts (zod), parse.ts (messages; keys shown only as names), json-keys.ts (keys JSON would lose), check.ts (against the suite's products and cells; a server's load counted over the tasks `--task` selects; two selected tasks on one site refused, a site with no http(s) `baseURL` too, or one holding credentials and an `@` past its host, or too long to lock), site-key.ts (a site's key: what the site locks and that check compare), load.ts, secrets.ts (every secret value, for masking — the config's, its sites' passwords, storage keys and `baseURL` passwords, an SSH host holding one lowercased, and the proxy URLs' passwords the runs inherit)); runs/ (identity.ts: a run's id, RUN_ID and paths; environment.ts: its allowlisted environment (proxy, CA and browser-path variables included); commands.ts: bddgen's and the runner's commands; launch.ts: both spawned detached into a new run folder and run.log (the folder removed again when it fails before the first record), waited for until their process group is empty (process-group.ts), no SIGINT once the tests are over (stream-end.ts); stop.ts: one run's stop machine — drain, one SIGINT, SIGKILL of the group; nothing taken once the runner exited on its own (`lingering`: a kill only clears its group); shutdown.ts: the orchestrator's signals and budgets; end.ts: what it left, read within caps (results.ts, facts.ts: checked field by field), then outcome.ts: its status and reason, and its run.finished; record.ts: run.json — one reader for every state (running, ended, lost), a process recorded as starting before it is spawned, and a writer that keeps its writes in order; leader.ts: the start time that tells a run's process from a reused id); state/ (atomic.ts: a state file written atomically and durably; read.ts, errors.ts: StateError; lock.ts: orchestrator.lock, judged in the PID space it was written in (lock-owner.ts, pid-space.ts), its leftovers swept (leftovers.ts; a linked state directory where it leads); cell-lock.ts: the same lock per site, a cell's taken together, for every orchestrator of this user on the machine (see Core concepts); inspect.ts: the state directory, its lock, the runs an earlier start left running and the selected cells' locks judged as a start would, writing nothing (`--dry-run`); runs-folder.ts: `runs/` never a link nor open to other writers, wherever it is made or read; counter.ts: a task's run numbers, never below its run folders; orphans.ts: a run still alive — or not provably over — from an earlier start refuses the start (a record that cannot be read too), a dead one's — or one from an earlier boot — becomes `lost`; run-folders.ts: the run folders' running records and those that cannot be read, never through a link — the orphan check's and the start's one reader; run-retention.ts: a task's run folders pruned by the reports' policy); events/ (bus.ts: the event bus; run-finished.ts: `run.finished` v1 and its builder); tasks/ (cycle.ts: one run of a task — its number, launch, records, end (`run-finished.json` and `datator.json` beside a small `ended` record, never parsed back), outcome line, `run.finished` and run-folder pruning, every dependency's failure a masked line, a stop before `bddgen` spawns nothing and reads `stopped`; the run named in its cell's site locks before the launch (no longer this orchestrator's: `error`, nothing launched, no report or log pointed at); a run that could not be watched to its end flagged `unwatched`; a group that will not empty after its SIGKILL said every 5 minutes; `onRunBegun` tells each run's id and task as it begins — handed out as `{ stop(level, why), done }`; run-lines.ts: its lines and fallbacks, pure; loop.ts: a task's loop — the cycle, then the cooldown from the run's end (`next run HH:MM:SS (cooldown Nm)`), again until stopped or once with `--once`; a stop reaches the run in flight or one being created, ends a cooldown at once (no timer left) and starts no run; a cooldown outside the config's bounds ends it `failed` before any run, and so does an `unwatched` run, with no next run; the cell's site locks held from the loop's start to its end (refused: the loop ends `failed` before any run, said once), kept after an `unwatched` run; `--once`'s verdict and exit code (0, 1, 130)); notify/ (post.ts: one bounded JSON POST that never rejects; slack.ts, datator.ts: each one's message or record from `run.finished`, and its sender; subscribe.ts: both on the bus, one `slack ✓ · datator ✓ 201` line per run, and the Datator record a run keeps, frozen); text.ts (cut; safe line and block: masked by shape and by value — as written, URL- or form-encoded, JSON-escaped —, cleaned; safeSiteUrl: a site's address masked by value, then by `maskSiteUrl`; textOf, failureLine: any thrown value as text, total); log.ts (the terminal's and orchestrator.log's lines, the file's dated); terminal.ts (stdout made non-blocking, so a paused terminal cannot freeze the process; drained, bounded, before `process.exit`); files.ts (a file read within a cap, never blocking, links optionally refused); folders.ts (a folder judged by owner and mode: the state directory's rule, a private folder's); error-code.ts; __fixtures__/ (spec helpers: fake-suite.ts — a stand-in `bddgen` and runner, real processes and signals, no site; fake-start.ts + swap-start.mjs — the real `orchestrator` script, `cli.ts` and `command.ts` over the fake suite; http-sink.ts — a local Slack/Datator; import-boundary.ts — the boundary spec's functions; results.ts, run-finished.ts — stream lines and events; file-handle.ts — a file failing on cue; slow-reader.ts — a terminal that does not keep up; soak.ts — the soak's samples and verdicts); soak.spec.ts (the soak: the real `start` over the fake suite for hundreds of runs — listeners, handles, timers and descriptors flat, run folders at the cap, pruning under 1 ms a folder; skipped unless `ORCHESTRATOR_SOAK=1`, `npm run orchestrator:soak`)
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)
 playwright*.config.ts       # entry configs (default, per-product, unit)
@@ -62,11 +71,75 @@ playwright*.config.ts       # entry configs (default, per-product, unit)
   steps, sites, and optional service credentials.
 - **Cell** — a named environment (`apache`, `nginx`, `pro@nginx`). Cells are
   data-driven: the merged top-level keys of a product's sites files
-  (`sites.json` + any `sites.*.json` overlays — see Configuration below).
+  (`sites.json` + any `sites.*.json` overlays — see Configuration below). A name is
+  lowercase `a-z0-9@._-`, never `_`-prefixed, checked at load: it names folders and projects.
+- **Output folders** — Playwright empties a selected project's output folder as a run starts,
+  so only a run targeting a cell writes in `test-results/<product>/<cell>`; any other run
+  writes in `<product>/_all/<cell>`, unit runs in `_unit` (`outputDirFor`). Reports and
+  logins are absolute paths in the checkout, wherever a run starts.
 - **Pool** — the interchangeable WordPress sites under a cell; each worker binds to
   one site by `parallelIndex`.
-- **Run unit** — one `(product × cell)`. **Run exactly one cell per invocation**
-  (`--project=<cell>`); selecting two at once fails fast.
+- **Run unit** — one `(product × cell)`. **Run exactly one cell per invocation**; selecting
+  two at once fails fast — a cell named beside another that `--project` reaches by Playwright's own
+  matching (any case, `*`, its `setup:`) included. **Pin it with `E2E_CELL=<cell>`**: the config then holds that cell
+  alone, so `bddgen` regenerates only its specs and two cells of one product can run side by
+  side. `--project=<cell>` still works, but `bddgen` then regenerates every cell's specs, which
+  breaks another run of the product started beside it. An unknown pin, or a `--project` the pin
+  cannot satisfy, fails naming `E2E_CELL`; so does a pinned run that inherited another run's
+  `PLAYWRIGHT_BDD_CONFIGS`. Each run prints a `[cell]` line saying which it is (unless a
+  command-line `--reporter` replaces the configured reporters).
+- **Stopping a run** — the **drain**: creating the stop file `E2E_INTERNAL_STOP_FILE` names
+  (absolute, in a folder that exists and is kept for the run's lifetime, the file itself **not** there
+  yet — both checked as the run starts; set by the orchestrator) skips each scenario's first attempt
+  as `stopped` while the one in flight finishes (`config/drain.ts`, the
+  `drainGate` fixture, which `storageState` depends on so it runs first). Escalate with **one**
+  SIGINT to the runner, then SIGKILL to its process group — never SIGTERM, never a second SIGINT.
+- **Watching a run** — every run streams its results to `<report dir>/results.jsonl`, one JSON line
+  per event (`run.begin`, `setup.end`, `scenario.begin`/`retry`/`end`, `run.error`, `run.end`; schema
+  v1, `reporting/results-schema.ts`) as it happens, silently; no `run.end` means the runner died. The
+  terminal ends with a summary (`reporting/run-summary.ts`): the verdict — `INTERRUPTED`, then
+  `COULD NOT TEST` when a setup failed, `STOPPED` when the drain skipped a scenario (counted as
+  `drained` in `run.end`), `NO TESTS` only when no error came from outside a test (a spec that would
+  not load is `FAILED`, its error on an `Error` line) — the counts, the plugin and sites tested, and
+  where the reports are. Both judge a
+  scenario by its result, never by a step's error (a skip carries one); predict a retry by the
+  dispatcher's rule and settle, as the run ends, one that never ran (`retryNotRun`); and never write a
+  step's parameters, a Playwright API step's title or a call log — the stream is still as sensitive as
+  the reports. Every credential a message quotes is masked by its shape (`redactSecrets`, `text.ts`:
+  a URL's userinfo, a GitHub token, a credential URL parameter, an `Authorization` header, a WordPress
+  login cookie), in the stream, the summary and the run facts alike; one with no shape (a legacy
+  40-hex token, a bare password) only by its value (`maskValues` — APVM's output, against the
+  process's `GITHUB_TOKEN`/`GH_TOKEN`).
+- **One cell, one orchestrator run** — the orchestrator locks the **sites** a cell runs on, one lock per
+  site keyed by its `baseURL` (`config/site-key.ts`: host as a URL parser writes it, no trailing dot;
+  port, none for 80 or 443; path normalised, unreserved escapes decoded, no trailing slash), in
+  `$XDG_STATE_HOME/wp-media-e2e/site-locks/<hash of the key>.lock` (else under `~/.local/state`; our two
+  folders `0700`, never a link; the file holds the key, the holding cell and its latest run;
+  `orchestrator/state/cell-lock.ts`), shared by every orchestrator of this user on this machine
+  whatever its config or checkout. A task's loop takes all its cell's sites, sorted, all-or-nothing, as
+  it starts, names each run in them before its launch, and gives them back as it ends — kept while a
+  run's processes may live —, so two orchestrators never take turns on a site. Two selected tasks of one
+  config on one site are refused by the config's check (start and `--dry-run` alike); a site held by a live
+  orchestrator refuses the start (warned by `--dry-run`), or the task's loop once, as it starts; a dead
+  holder's lock is taken over only once the run it names is over. Two cell names on one site exclude
+  each other; a reused name on other sites does not. **Not covered:** other users, other machines, runs
+  started by hand (`npm run test:<product>`), and one site under two addresses (a host and its IP, two
+  names for one server, a path differing only in case) — those take or see no lock.
+- **What a run tested, up front** — the run-facts reporter (`reporting/run-facts.reporter.ts`, before
+  the reports) says it in one line — product, cell, plugin version, ref and commit, WordPress and PHP,
+  the run's name (`E2E_RUN_NAME`, display only; `E2E_REQUESTED_REF` shows the ref asked for) — as the
+  HTML report's title, a banner on the Cucumber report and the Allure report's name; every fact (the
+  zip's SHA-256 included) in their metadata and in `<report dir>/run-facts.json`, rewritten as each setup
+  ends. A missing fact says why, never blank; only whitelisted values (of the sites file, `baseURL`);
+  everything caught, so it can never fail a run. `captureGitInfo` is set **off** in the config factory:
+  left unset, Playwright turns it on under CI and the HTML report carries authors' emails and a diff.
+- **Report retention** — each run prunes **its own cell's** report folder as it ends (the summary's
+  `onExit`, `reporting/run-pruning.ts`; a `Pruned` line says what went): at most `E2E_REPORTS_KEEP`
+  (20; `0` lifts the cap, not the age rules), none older than 30 days except the newest complete
+  report (up to 182 days); an empty run (`--list`, no tests) never counts; the run in progress is never
+  removed. A run is a folder named by a RUN_ID or holding a `run.begin` stream — never dated by mtime.
+  `npm run report:prune` does every cell. Removal renames to a hidden `.pruning-…` folder first, never
+  follows a link, and never fails a run (`reporting/retention.ts`).
 
 Full detail — the `parallelIndex` invariant, the config factory, the credential
 registry, and artifact lifecycle — is in
@@ -77,12 +150,14 @@ registry, and artifact lifecycle — is in
 ```bash
 # Testing
 npm run test                       # default product, bddgen + run
-npm run test:wp-rocket -- --project=<cell>    # one product, one cell
-npm run test:backwpup  -- --project=<cell>
-npm run test:wp-rocket -- --project=apache --grep @smoke   # filter by tag
+E2E_CELL=<cell> npm run test:wp-rocket       # one product, one cell (safe beside other cells)
+E2E_CELL=<cell> npm run test:backwpup
+E2E_CELL=apache npm run test:wp-rocket -- --grep @smoke   # filter by tag
+npm run test:backwpup -- --project=<cell>     # also one cell, but regenerates every cell's specs:
+                                              # never beside another run of the same product
 npm run test:ui                    # Playwright UI mode
 npm run test:headed                # headed browser
-npm run test:unit                  # unit/integration specs (src/**/*.spec.ts)
+npm run test:unit                  # unit/integration specs (src/**/*.spec.ts, orchestrator/**/*.spec.ts)
 npm run test:unit:ui
 
 # Fleet health check
@@ -100,11 +175,23 @@ npm run lint:fix                   # eslint . --fix
 npm run format                     # prettier --write .
 npm run format:check               # prettier --check .
 
+# Orchestrator (runs cells in loops; config in .orchestrator/config.json, from orchestrator/config.example.json)
+npm run orchestrator -- start --dry-run          # check the config, print what would run; runs and writes nothing
+npm run orchestrator -- start --task <id> --once # one run of that task, then exit 0 (passed/flaky), 1, or 130 if stopped
+npm run orchestrator -- start                    # every task, each in its own loop, until stopped
+                                                 # Ctrl-C drains (exit 130); again interrupts; a third kills
+npm run orchestrator -- start --help             # options (--config <file>, --task <id...>), exit codes
+                                                 # options always after "--": npm takes --dry-run itself
+npm run orchestrator:soak                        # the soak: hundreds of runs of the real start over the fake suite
+                                                 # (minutes; ORCHESTRATOR_SOAK_RUNS, default 200)
+
 # Reporting
 npm run report                     # open the newest Playwright HTML report
 npm run report -- wp-rocket apache # open a specific product/cell's newest report
 npm run report:allure              # generate Allure report for the newest run
 npm run report:allure -- wp-rocket apache --open
+npm run report:prune               # dry run of the retention policy over every cell's reports
+npm run report:prune -- --apply    # remove (--keep, --older-than, --keep-newest-for, --product, --cell)
 
 # Local WordPress (Docker transport)
 npm run env:up                     # start + install Apache(:8100) & Nginx(:8101) sites
@@ -132,7 +219,8 @@ Two surfaces — schema reference in
     Credentials live only in these files and never enter reports.
 - **`.env`** (copied from `.env.example`, loaded by
   [`load-env.ts`](src/common/config/load-env.ts)) holds runtime flags and BackWPup
-  storage credentials. Real env vars always win over `.env`. Access env only through
+  storage credentials. Real env vars always win over `.env`; `E2E_LOAD_DOTENV=false` in the
+  environment skips the file (the orchestrator's runs). Access env only through
   the typed accessors in [`env.ts`](src/common/config/env.ts).
 
 ## Fixtures
@@ -152,6 +240,7 @@ shared fixtures:
 | `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                                                              |
 | `pluginArtifact`          | test   | `pluginArtifact(role)` → the resolved zip under test; `.slug` addresses the plugin, `.zipPath` feeds `stageAndInstallPlugin`. |
 | `releaseBoundSite`        | worker | Automatic teardown: removes the site's staging area, closes SSH connections. Best-effort — never fails a passing run.         |
+| `drainGate`               | test   | Automatic: once the run's stop file (`E2E_INTERNAL_STOP_FILE`) exists, skips each scenario's first attempt as `stopped`.      |
 | `baseURL` (override)      | —      | Points navigation at the bound site.                                                                                          |
 | `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                              |
 | device options (override) | —      | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else the desktop default.    |
@@ -208,7 +297,9 @@ module so it is unit-testable without the runtime.
 **`@plugin`** ([`plugin.hooks.ts`](src/common/hooks/plugin.hooks.ts)) — tag a scenario
 `@plugin` and it gets:
 
-- **Before** — `debug.log` cleared, any existing copy of the plugin uninstalled (so the
+- **Before** — `debug.log` cleared, any **work the plugin is still running** stopped
+  (`ProductConfig.stopRunningWork` — a job a killed run left behind; reported, and a failure only
+  if it would not stop), any existing copy of the plugin uninstalled (so the
   install is genuinely fresh, DB footprint included), then the cell's own resolved
   artifact staged and installed with `--activate`, its files handed back to the ownership the
   **site** uses (WP-CLI installs as the transport's user, which the web server is not — see
@@ -239,8 +330,11 @@ module so it is unit-testable without the runtime.
   fails, and the others are still logged. Having to stop running work is reported, not failed;
   work that _would not_ stop is a cleanup failure. Left-over data the transport's user is not
   _permitted_ to remove is reported, not failed — see
-  [wordpress-automation.md](docs/architecture/wordpress-automation.md).
-- The scenario timeout is extended **additively** to cover both hooks (remote WP-CLI plus
+  [wordpress-automation.md](docs/architecture/wordpress-automation.md). A scenario the drain
+  skipped is left alone: it installed nothing.
+- The Before hook has a budget of its own on top of the shared one for stopping a killed run's
+  work (`LEFT_WORK_ALLOWANCE_MS`, which every `stopRunningWork` must fit). The scenario timeout is
+  extended **additively** to cover both hooks (remote WP-CLI plus
   an SFTP upload is slow), so a scenario keeps any budget it asked for.
 
 **MUST — `src/common/hooks/**/*.hooks.ts` belongs in every product's `steps` globs.**
@@ -275,8 +369,39 @@ is not flagged — a gate that fires on innocent code is one people start disabl
 [`visual/stabilize.ts`](src/common/visual/stabilize.ts) uses one timeboxed, already-caught
 `networkidle` attempt to settle lazy media before a screenshot.
 
+It also keeps `src/common/**` from importing anything under `src/projects/`: a product hands the
+shared code its policy through `ProductConfig` and the config factory's registries. ESLint
+(`no-restricted-imports`) flags a static import as it is typed. It cannot see a dynamic `import()`
+or a `typeof import()` type, so [`import-boundary.spec.ts`](src/common/import-boundary.spec.ts)
+checks every form with TypeScript's own import scanner. The product list,
+[`src/projects/products.ts`](src/projects/products.ts), is therefore read
+only by the entry points that span products — `playwright.config.ts`, the healthcheck, the
+artifact warm and the orchestrator. Importing it never loads `.env` or stamps `RUN_ID`.
+Its spec fails when it and `src/projects/`, the root `playwright.<product>.config.ts` files or
+the `test:<product>` scripts disagree.
+
+The orchestrator is a long-lived process and must keep the process-wide state it started with, while
+`run-context.ts`, and every module importing it, loads `.env` and stamps `RUN_ID` as it is imported.
+So the orchestrator's code imports from the suite only the modules
+[`orchestrator/suite-imports.json`](orchestrator/suite-imports.json) lists — never test code, never a
+computed `import()` path, nor a URL (`data:`, `file:`, `https:` — a `data:` URL's code imports what it
+likes), nor a builtin or name that loads or runs code no guard reads (`module`,
+`worker_threads`, `vm`, `inspector`, `repl`, `process.getBuiltinModule`, `eval`, `Function`), and
+it is ES modules only — no `.cts`, `.cjs` or `package.json` (CommonJS hands every module a `require`). It loads the
+product list only through `loadProductList` (`orchestrator/config/product-list.ts`): importing it reads
+every product's sites file, so a broken one must be a config error, not a crash. ESLint reads the
+list (`no-restricted-imports`, by spelling; test code exempt); [`orchestrator/import-boundary.spec.ts`](orchestrator/import-boundary.spec.ts) judges every
+import form where it really leads, walks all an admitted module can load (never `load-env.ts` or
+`run-context.ts`, even lazily), and imports the admitted modules and the orchestrator's code but the
+root `cli.ts` in a fresh Node to prove environment, process listeners, working directory, exit
+code, umask, listener limits and `Error.stackTraceLimit` unchanged, and `fetch`, `process.exit`,
+`process.cwd`, `process.chdir`, `fs.close` and `fs.closeSync` not replaced
+(`__fixtures__/import-probe.ts`) — but for graceful-fs's patch, which Playwright's bundle applies and
+the product list reaches: accepted only by its own marks, all four at once (`GRACEFUL_FS_PATCH`).
+Admit a module only once that spec passes with it.
+
 **Auth fixture / setup:** [`src/common/auth/auth.setup.ts`](src/common/auth/auth.setup.ts)
-is a dependency project that runs before any BDD scenarios. It does two things in order:
+is a dependency project that runs before any BDD scenarios. It does three things in order:
 
 1. **Pre-flight transport verification** — for each real site, verifies that its
    transport is reachable and functional (SSH connectivity + WP-CLI + rootDir access;
@@ -300,25 +425,47 @@ is a dependency project that runs before any BDD scenarios. It does two things i
    banner ([`setup/elevation-report.ts`](src/common/setup/elevation-report.ts)), printed once per
    run, silent when every site can elevate or has opted out, and naming the ownership cost only for
    the sites that actually needed a handover.
-2. **Authentication** — logs into each real site once through the WordPress UI and
-   saves the session to that site's `storageState`, which the BDD project reuses.
+2. **Authentication** ([`auth/authenticate.ts`](src/common/auth/authenticate.ts)) — per real
+   site, first **ends the session the cell's previous run saved** (`auth/session.ts`: that one
+   token, for that site's host only, through `WP_Session_Tokens`, so no other session of the user is
+   touched), then logs in once through the WordPress UI and saves the session to that site's
+   `storageState`, which the BDD project reuses. A setup that fails ends the sessions it saved before
+   failing — one that times out too, from its `afterEach` (`endSessionsWhenSetupFails`), since a
+   timeout abandons the body. Not at the run's end: the `--no-deps` loop reuses the saved login, and an interrupted run
+   skips its teardown. Best-effort and bounded (`BEST_EFFORT_ALLOWANCE_PER_SITE_MS`, added to the
+   setup's timeout): a session that cannot be ended is a warning, and expires in two days.
+3. **Site versions** — reads Site Health's "Copy site info" text
+   ([`SiteHealthPage`](src/common/pages/site-health.page.ts)), cut down **in the page** to the
+   whitelisted lines (a traced call records what it returns), and keeps that whitelist — WordPress, PHP
+   as the web server runs it, its SAPI, the web server, the database and its extension
+   ([`setup/site-info.ts`](src/common/setup/site-info.ts)) — printed as a `[site]` line and attached
+   as `site-info.json`. Best-effort: a failure is a warning and an `error` entry, never a failed setup.
 
 The shared login ([`auth/login.ts`](src/common/auth/login.ts)) confirms each credential
 field actually kept its value before submitting. `fill()` writes into whatever element has
 focus at that instant, and WordPress's login page re-focuses the username field, so a
-re-focus landing mid-fill otherwise diverts the password into the username box and the run
-fails much later as "login never settled".
+re-focus landing mid-fill otherwise diverts text into the wrong field and the run
+fails much later as "login never settled". The password goes in through
+[`enterSecret`](src/common/pages/secret-field.ts) and is checked with `holdsSecret`, both in the page.
 
-> **Traces carry site credentials.** Playwright records every `fill()` argument, so a
-> retained trace (`trace: "retain-on-failure"`) contains the site password — and BackWPup's restore
-> wizard renders the site's **database** password into its connection step's markup, which a trace's
-> DOM snapshots keep. Pro's restore deep link, and any message naming BackWPup's restore working
+> **No site password in a report; traces still need care.** Playwright titles a `fill()`, `type()`
+> or `pressSequentially()` step with its text and has no masking, so **every secret is typed with
+> `enterSecret`** (`StorageSidebar.fillSecret` for a storage key): set in the page, checked in the page,
+> never a step's title, parameter or result. The auth setup traces **without DOM snapshots** (a snapshot
+> records every field's value, and turning them off stops network recording), and turns off, for each
+> of its tests, the failure page snapshot `error-context.md` would print field values into
+> (`keepSecretsOutOfFailureSnapshots`: `PLAYWRIGHT_NO_COPY_PROMPT`, undocumented; back on only after a
+> test that passed, since a setup worker hands its changed variables to the scenarios' workers) —
+> [`secrets.run.spec.ts`](src/common/auth/secrets.run.spec.ts) proves all of this through the real
+> runner and reporters. What remains: a **scenario's** retained trace keeps its DOM snapshots and
+> network, and its `error-context.md` its page snapshot, so they hold the WordPress **session
+> cookies** (trace) — live until the cell's next run ends that session, or WordPress's two-day expiry —
+> and any value a scenario typed or the page showed in a field; BackWPup's restore wizard renders the
+> site's **database** password into its connection step's markup. Pro's restore deep link, and any message naming BackWPup's restore working
 > directory, carry that directory's 20-hex name: on nginx the only thing keeping it, and the database
 > credentials its `restore.dat` holds during a restore, from being served (the teardown removes it
-> after every scenario). Treat
-> `test-results/` and report artifacts as sensitive, exactly like the sites file. Login
-> failures are asserted in code rather than with `toHaveValue` so at least the failure
-> _message_ never quotes the password.
+> after every scenario). Treat `test-results/` and report artifacts as sensitive, exactly like the
+> sites file.
 
 The entire setup is skipped when only placeholder sites exist. Details:
 [authoring-tests.md](docs/guides/authoring-tests.md#fixtures-srccommonfixturests).
@@ -377,10 +524,16 @@ request model, resolution lifecycle, preflight, pre-warm — is in
 - **Overrides:** six `E2E_*` env vars select a git ref **or** a prebuilt zip per role
   (ref XOR zip) — full table and rules in
   [configuration.md](docs/guides/configuration.md).
+- **What was tested:** every resolved zip's SHA-256 (`digest.ts`), a build's **full** commit and
+  its `pinRef` (the ref that rebuilds it — for a release, the tag a selector chose) are recorded in
+  `resolution.json` and the setup's report attachment.
 - **Pre-warm:** `npm run artifacts:warm` primes APVM's cache for the cells a run will
   need, so each `artifacts:<cell>` build becomes a cache copy. It plans through the
   same request builder the resolver uses (the parity invariant), so a warmed entry is
-  always the one a run looks up.
+  always the one a run looks up. Each warm returns the pin that rebuilds exactly what it cached
+  (`pin.ts`: `release:<tag>`, or `commit:<sha>` with the version built), for a run that must not
+  follow a moving ref; an unpinnable or uncached result is a failed warm. A cached commit pin needs
+  no network; a release pin does (APVM asks GitHub for the release).
 
 **Identity matrix** (what the preflight asserts — the slug alone pins product +
 edition; the header is a second, exact-equality witness):
@@ -614,7 +767,7 @@ npm run test:unit     # unit/integration specs pass
 ```
 
 For behavioural changes, also verify against a real cell:
-`npm run test:<product> -- --project=<cell>`. Keep the runner awake through it (`caffeinate -i`
+`E2E_CELL=<cell> npm run test:<product>`. Keep the runner awake through it (`caffeinate -i`
 on macOS): a runner that sleeps drops its SSH connections, and the run fails as if the network
 had — hooks far past their timeouts, `ECONNRESET` after each wake.
 
@@ -634,17 +787,18 @@ the gates yourself.
 | You're adding features, steps, fixtures, or page objects.                        | [`docs/guides/authoring-tests.md`](docs/guides/authoring-tests.md)                       |
 | You're editing sites files, transports, editions, or env vars.                   | [`docs/guides/configuration.md`](docs/guides/configuration.md)                           |
 | You want the full design rationale and decisions.                                | [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md)           |
+| You're running or configuring the orchestrator.                                  | [`docs/guides/orchestrator.md`](docs/guides/orchestrator.md)                             |
+| You're changing the orchestrator: its design and decisions.                      | [`docs/plans/orchestrator-phase-0.5-plan.md`](docs/plans/orchestrator-phase-0.5-plan.md) |
 
 ## In-progress plans
 
 Larger initiatives are tracked as living design docs in `docs/plans/`. Check
 these before starting related work — they hold the current plan, not history:
 
-- [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md) — full design rationale and decisions.
-- [`docs/plans/plugin-artifact-management-plan.md`](docs/plans/plugin-artifact-management-plan.md) — plugin artifact management.
+- [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md) — full design rationale and decisions; also the finished plugin-artifact and site-file-ownership designs (their facts and open obligations).
 - [`docs/plans/phase-6-feature-porting-plan.md`](docs/plans/phase-6-feature-porting-plan.md) — feature porting (BackWPup first); supersedes the parent plan's Phase 6.
-- [`docs/plans/site-file-ownership-plan.md`](docs/plans/site-file-ownership-plan.md) — keeping a site's docroot writable by both WP-CLI's user and the web server.
-- [`docs/plans/orchestrator-plan.md`](docs/plans/orchestrator-plan.md) — the orchestrator: a long-running service that runs and manages cells on a server (supersedes the parent plan's Phase 9).
+- [`docs/plans/orchestrator-plan.md`](docs/plans/orchestrator-plan.md) — the orchestrator: a long-running service that runs and manages cells on a server (supersedes the parent plan's Phase 9); includes Phase 0 (done): the run contract and each suite change's decision.
+- [`docs/plans/orchestrator-phase-0.5-plan.md`](docs/plans/orchestrator-phase-0.5-plan.md) — the orchestrator's Phase 0.5: the minimal orchestrator (cycling cells, Slack, Datator) that replaces AutoE2E's BackWPup instances.
 
 ## When to update these docs
 
@@ -681,7 +835,9 @@ instead and link it from the [Documentation map](#documentation-map).
 
 Update it when you change anything about:
 
-- How products, cells, pools, or run units are defined or selected.
+- How products, cells, pools, or run units are defined or selected — the product list
+  (`src/projects/products.ts`) and its drift guard, the cell pin (`E2E_CELL`, `cell-pin.ts`) and
+  the `[cell]` notice included.
 - The `parallelIndex` invariant or the worker-to-site binding.
 - The config factory (`createProductConfig`) or the project pairs it generates.
 - The metadata/credential registry (`registerPool`, `routingMetadata`), or the per-process
@@ -689,6 +845,15 @@ Update it when you change anything about:
   `registerSiteResidue`, `registerSiteDbResidue`, `registerSiteDataDirResolver`,
   `registerStopRunningWork`).
 - Artifact directories, `RUN_ID` handling, or the `*_ROOT` env vars.
+- Stopping a run: the drain (`config/drain.ts`, `E2E_INTERNAL_STOP_FILE`, the `drainGate` fixture)
+  and the signals that escalate it.
+- The run's own reporters: the `[cell]` notice, the results stream (`results.jsonl`, its schema and
+  reader, `reporting/results.ts`), the run facts (`run-facts.json`, the reports' titles, banner and
+  metadata) and the end-of-run summary; the project names that tell a setup from a scenario
+  (`config/project-names.ts`).
+- Report retention: the policy and its removal (`reporting/retention.ts`, `report-tree.ts`), a run's
+  own pruning (`run-pruning.ts`, `E2E_REPORTS_KEEP`), `npm run report:prune` (`prune-command.ts`), and
+  the RUN_ID format (`config/run-id.ts`).
 
 ### docs/architecture/wordpress-automation.md
 
@@ -720,7 +885,11 @@ Update it when you change anything about:
   variant mapping, identity expectations) or a product's copy of it.
 - The request/plan model, override precedence, or what throws vs. warns.
 - Resolution (the artifacts dir lifecycle, `resolution.json`) or the identity preflight.
-- The `pluginArtifact` consumption path, or pre-warming (`warmArtifacts`, `artifacts:warm`).
+- What a resolved artifact records — its full commit, its digest (`digest.ts`: `sha256File`,
+  `isSha256`, `ResolvedArtifact.sha256`).
+- The `pluginArtifact` consumption path, or pre-warming (`warmArtifacts`, `artifacts:warm`) and
+  pinning (`pin.ts`: `fullCommit`, `pinOf`, `requirePin`; `WarmedBuild`, `toWarmedBuild`,
+  `assertCached`, `ResolvedArtifact.pinRef`).
 - The APVM pin, or which products/editions exist.
 
 ### docs/guides/authoring-tests.md
@@ -733,6 +902,21 @@ Update it when you change anything about:
 - Tags and their effects (`@noauth`, `@smoke`, `@visual`, `@free`/`@pro`, new tags).
 - The Page Object Model conventions or page objects in `common/pages/`.
 - The unit-test setup (`playwright.unit.config.ts`, `*.spec.ts` conventions).
+
+### The orchestrator (`orchestrator/`)
+
+Its operator's guide is [`docs/guides/orchestrator.md`](docs/guides/orchestrator.md); its design is
+[`docs/plans/orchestrator-phase-0.5-plan.md`](docs/plans/orchestrator-phase-0.5-plan.md) (§4 design, §5
+code layout, §6 running it). Update the guide, the plan and the `orchestrator/` line above when you
+change:
+
+- The command: `start`'s options, its help text, its exit codes, the npm options it refuses.
+- The config file (`config/schema.ts`): a field, a bound, a check, `config.example.json`.
+- What a run is given or keeps: its environment, commands, records (`run.json`'s states), the files
+  beside it, the state directory's layout, the cell locks.
+- Stopping: the signals, the budgets (`runs/shutdown.ts`), the orphan check and its refusals.
+- `run.finished`, the Slack message, the Datator record, or the terminal's and `orchestrator.log`'s lines.
+- `suite-imports.json` (also the boundary spec, which must pass first).
 
 ### docs/guides/configuration.md
 

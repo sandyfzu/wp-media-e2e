@@ -6,6 +6,36 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 import eslintConfigPrettier from "eslint-config-prettier/flat";
 
+import suiteImports from "./orchestrator/suite-imports.json" with { type: "json" };
+
+/**
+ * The `src/` modules the orchestrator may import, as the alternatives of a regular expression:
+ * relative to `src/`, without `.ts`, regex characters escaped.
+ */
+/**
+ * The builtins orchestrator code may not load, each a way to load or run code no import guard sees:
+ * `require` (`module`), a thread sharing the process (`worker_threads`), a context (`vm`), and code
+ * evaluated in the process itself (`inspector`, `repl`). The orchestrator spawns processes and needs
+ * none of them. `orchestrator/__fixtures__/import-boundary.ts` refuses the same list.
+ */
+const refusedBuiltins = [
+  "module",
+  "worker_threads",
+  "vm",
+  "inspector",
+  "inspector/promises",
+  "repl",
+].flatMap((name) => [name, `node:${name}`]);
+
+const admittedSuiteModules = suiteImports
+  .map((path) =>
+    path
+      .replace(/^src\//, "")
+      .replace(/\.ts$/, "")
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+  )
+  .join("|");
+
 export default defineConfig([
   globalIgnores([
     ".features-gen/",
@@ -54,6 +84,97 @@ export default defineConfig([
           caughtErrorsIgnorePattern: "^_",
         },
       ],
+    },
+  },
+
+  // The shared layer never imports product code: a product hands `common/` its policy through
+  // `ProductConfig` and the per-process registries the config factory fills. This is why the
+  // product list lives in `src/projects/products.ts`, for the entry points to import. The rule sees
+  // static imports only; `src/common/import-boundary.spec.ts` also catches a dynamic `import()` and
+  // a `typeof import()` type.
+  {
+    files: ["src/common/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              regex: "(^|/)projects(/|$)",
+              message:
+                "src/common/ must not import product code. Declare what the shared code needs on ProductConfig and pass it through the config factory's registries instead.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+
+  // The orchestrator is a long-lived process that must keep the process-wide state it started with,
+  // and `run-context.ts` — with every module importing it — loads `.env` and stamps `RUN_ID` into the
+  // importing process. So its code imports from `src/` only the modules
+  // `orchestrator/suite-imports.json` lists (an allowlist: each new one is a decision), never test
+  // code, never a module whose path it computes, nor the builtins and calls that load or run code
+  // unchecked. Test code never runs in that process and is exempt. These rules read only a static
+  // import's spelling, and are stricter than the spec where spelling misleads them (a `../` detour
+  // back into an admitted module); they miss `typeof import()`, a literal `import()` and anything
+  // outside `src/`. `orchestrator/import-boundary.spec.ts` resolves every form and imports the code
+  // itself.
+  {
+    files: ["orchestrator/**/*.{ts,mts,cts,js,mjs,cjs}"],
+    ignores: ["orchestrator/**/*.spec.*", "orchestrator/**/__fixtures__/**"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: refusedBuiltins.map((name) => ({
+            name,
+            message:
+              "This builtin loads or runs code no import guard sees (require, a thread, a VM context, the inspector, a REPL), and the orchestrator needs none: import the module itself, or spawn a process.",
+          })),
+          patterns: [
+            {
+              // A path (relative, absolute or `file:`) into a `src/` folder, unless it names an
+              // admitted module, with or without its `.js` or `.ts`. Never a package's own `src/`.
+              regex: `^(\\.{1,2}/|/|file:)(.*/)?src(/(?!(${admittedSuiteModules})(\\.[jt]s)?$)|/?$)`,
+              message:
+                "The orchestrator imports from src/ only the modules orchestrator/suite-imports.json lists: run-context.ts, and every module importing it, loads .env and stamps RUN_ID into the importing process. Admit a module there once orchestrator/import-boundary.spec.ts proves it leaves the process as it was.",
+            },
+            {
+              // Any URL but a builtin's: a `data:` URL's code imports what it likes, unread.
+              regex: "^(?!node:)[a-z][a-z\\d+.-]*:",
+              message:
+                "Import a module by its path, never by a URL (data:, https:): the code a URL holds or leads to is read by no import guard.",
+            },
+            {
+              regex: "(^|/)__fixtures__(/|$)|\\.spec(\\.[cm]?[jt]sx?)?$",
+              message:
+                "Test code is exempt from the orchestrator's import boundary, so its own code must never import it.",
+            },
+          ],
+        },
+      ],
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "ImportExpression[source.type!='Literal']",
+          message:
+            "Write the path as a plain string: a computed import() path cannot be checked against orchestrator/suite-imports.json.",
+        },
+      ],
+      // On any object, so `globalThis.process.getBuiltinModule` is caught too.
+      "no-restricted-properties": [
+        "error",
+        {
+          property: "getBuiltinModule",
+          message:
+            "process.getBuiltinModule loads any builtin by a name no import guard reads: import the module itself.",
+        },
+      ],
+      // Code evaluated from a string is code no guard reads. `no-new-func` covers `.js` too, which
+      // `@typescript-eslint/no-implied-eval` does not lint.
+      "no-eval": "error",
+      "no-new-func": "error",
     },
   },
 

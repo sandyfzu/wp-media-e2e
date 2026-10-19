@@ -56,7 +56,8 @@ export function parseOwnerSpec(declared: string, context: string): OwnerSpec {
     !OWNER_NAME.test(group)
   ) {
     throw new Error(
-      `${context} must be ${OWNER_SPEC_RULE} — got "${declared}". Both halves are required: the ` +
+      `${context} must be ${OWNER_SPEC_RULE} — got a text of ${String(Array.from(declared).length)} ` +
+        "characters (never quoted: it comes from the sites file, which holds credentials). Both halves are required: the " +
         "group is what lets the web server write when the docroot's owner is a deployment account " +
         "rather than the web-server user.",
     );

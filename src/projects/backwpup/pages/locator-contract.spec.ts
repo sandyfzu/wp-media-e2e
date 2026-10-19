@@ -853,6 +853,33 @@ test.describe("Sidebars — onboarding's aside", () => {
     }
   });
 
+  test("a provider's secret field takes a secret entered without fill()", async ({
+    page,
+  }) => {
+    // S3's secret key is a captured `type="password"` field in a hidden panel: what a scenario with
+    // real credentials will enter into. The value lands and is checked in the page.
+    const sidebar = new StorageSidebar(page);
+    const secret = "AbC/123+xyz=";
+    await sidebar.fillSecret("S3", "s3secretkey", secret);
+    expect(await sidebar.field("S3", "s3secretkey").inputValue()).toBe(secret);
+  });
+
+  test("a secret field that will not keep its value fails naming the field, not the value", async ({
+    page,
+  }) => {
+    const sidebar = new StorageSidebar(page);
+    await sidebar.field("S3", "s3secretkey").evaluate((input) => {
+      input.addEventListener("input", () => {
+        (input as HTMLInputElement).value = "";
+      });
+    });
+    const failure = await sidebar
+      .fillSecret("S3", "s3secretkey", "AbC/123+xyz=")
+      .catch((error: unknown) => error);
+    expect(String(failure)).toMatch(/S3 field "s3secretkey" did not keep/);
+    expect(String(failure)).not.toContain("AbC/123+xyz=");
+  });
+
   test("no provider panel offers 'Back to Storages' here", async ({ page }) => {
     // The back link is emitted only when a panel is rendered with `is_in_form === false`, which only
     // happens when the dashboard's picker fetches it. During onboarding `storage-*.php` forces

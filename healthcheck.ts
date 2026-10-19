@@ -21,8 +21,8 @@ import {
 import type { CheckResult } from "./src/common/setup/preflight";
 import type { ElevationSupport } from "./src/common/wp/exec";
 import { disposeConnections } from "./src/common/wp/exec";
-import { backwpup } from "./src/projects/backwpup/config/backwpup.config";
-import { wpRocket } from "./src/projects/wp-rocket/config/wp-rocket.config";
+import { redactSecrets } from "./src/common/text";
+import { PRODUCTS } from "./src/projects/products";
 
 /**
  * Fleet-wide health check: for every product × cell × site, verifies the transport
@@ -49,8 +49,6 @@ import { wpRocket } from "./src/projects/wp-rocket/config/wp-rocket.config";
  * Usage: `npm run healthcheck` (headless) or `npm run healthcheck:ui` (headed — the browser is
  * visible on screen so you can watch each login; everything else is identical).
  */
-
-const PRODUCTS: readonly ProductConfig[] = [wpRocket, backwpup];
 
 // Bounded so a large fleet does not open unbounded SSH connections / browser contexts
 // at once. Override with HEALTHCHECK_CONCURRENCY for bigger/smaller fleets.
@@ -305,7 +303,7 @@ function siteLabel(
     "product" | "cell" | "index" | "baseURL" | "transport"
   >,
 ): string {
-  return `${result.product}/${result.cell} · site[${String(result.index)}] ${result.baseURL} [${transportLabel(result.transport)}]`;
+  return `${result.product}/${result.cell} · site[${String(result.index)}] ${redactSecrets(result.baseURL)} [${transportLabel(result.transport)}]`;
 }
 
 /** Prints the top banner and the fleet-wide counts about to be checked. */

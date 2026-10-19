@@ -5,13 +5,17 @@
  *
  * This is the only module that imports `apvm-napi` (loading its native binding), so pure logic
  * (`request.ts`, `manifest.ts`) and the identity preflight (`verify.ts`) stay free of it and of
- * the native dependency. `resolve.ts` is the sole caller.
+ * the native dependency. `resolve.ts` (a run) and `warm.ts` (pre-warming) are its callers.
  */
 
 import { styleText } from "node:util";
 
 import { Apvm } from "apvm-napi";
 import type { JsBuildEvent } from "apvm-napi";
+
+import { env } from "../config/env";
+import { maskValues, redactSecrets } from "../text";
+import type { ArtifactOrigin } from "./types";
 
 /**
  * Projects whose source repository is **private**, so a build/warm needs a GitHub token.
@@ -54,11 +58,24 @@ export function getApvm(): Promise<Apvm> {
 }
 
 /**
+ * Narrows APVM's per-artifact `origin` string to our {@link ArtifactOrigin}. An unknown value reads
+ * as `"built"` — the conservative claim, since it never suggests a build was skipped.
+ */
+export function toArtifactOrigin(origin: string): ArtifactOrigin {
+  return origin === "built" || origin === "cache" || origin === "downloaded"
+    ? origin
+    : "built";
+}
+
+/**
  * Throws an actionable error if {@link project} needs a token and {@link apvm} has none — caught
  * *before* any clone/download is attempted, so a missing token surfaces as one clear message
  * with the fix, not a deep-in-the-build git failure.
  */
-export function assertToken(apvm: Apvm, project: string): void {
+export function assertToken(
+  apvm: Pick<Apvm, "hasToken">,
+  project: string,
+): void {
   if (requiresToken(project) && !apvm.hasToken()) {
     throw new Error(
       `Building "${project}" needs a GitHub token — its source repository is private. ${TOKEN_HINT}`,
@@ -66,38 +83,21 @@ export function assertToken(apvm: Apvm, project: string): void {
   }
 }
 
-// ── Secret redaction ───────────────────────────────────────────────────────────────
-//
-// A private-repo build authenticates with a GitHub token, and git echoes the remote URL
-// verbatim in several of its failure messages (`fatal: unable to access
-// 'https://user:token@github.com/…'`) — so raw builder output can carry the token. Everything
-// we retain from APVM reaches a console log and the error a Playwright HTML/Allure report
-// keeps, which CI routinely publishes as an artifact; scrubbing here is what keeps a token
-// out of them.
-
-/** GitHub tokens in every issued form: `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` and `github_pat_`. */
-const GITHUB_TOKEN_RE = /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{10,}/g;
-
-/** `scheme://userinfo@host` — credentials embedded in a URL; the scheme and host are kept. */
-const URL_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi;
-
-/** The placeholder a redacted secret is replaced with. */
-const REDACTED = "***";
+// A private-repo build authenticates with a GitHub token, and raw builder output is third-party
+// text: everything kept from it reaches a console log and the error a Playwright HTML/Allure report
+// keeps, which CI publishes — so it is masked (`redactBuildText`) on its way out.
 
 /**
- * Replaces anything that looks like a credential in `text`. Applied to every APVM-sourced
- * string we log or attach to an error — never a substitute for not passing secrets around,
- * but the last line of defence before third-party output reaches a report. Idempotent, so
- * scrubbing twice on the way through nested handlers is harmless.
+ * A build's or a warm's text with every credential masked: by shape ({@link redactSecrets}), and the
+ * GitHub tokens this process holds by value — a legacy token is 40 hex digits, which no pattern can
+ * tell from a commit. A token APVM reads from its own config or `gh` is masked by shape alone.
  *
- * Uses only `replace`, which resets a global regex's `lastIndex` on every call. Do **not**
- * switch these module-level `/g/` patterns to `test`/`exec`: those advance `lastIndex` and
- * would make every other call silently skip the start of the string.
+ * @param text - what APVM, git or a build step said.
  */
-export function redactSecrets(text: string): string {
-  return text
-    .replace(GITHUB_TOKEN_RE, REDACTED)
-    .replace(URL_USERINFO_RE, `$1${REDACTED}@`);
+export function redactBuildText(text: string): string {
+  return redactSecrets(
+    maskValues(text, [env("GITHUB_TOKEN"), env("GH_TOKEN")]),
+  );
 }
 
 /** How many trailing command-output lines to retain for a failed build's error context. */
@@ -141,14 +141,14 @@ export function createBuildReporter(label: string): BuildReporter {
         console.log(
           `  ${styleText(["dim"], `[${label}]`)} ${String(event.phase)}` +
             (event.message !== undefined
-              ? `: ${redactSecrets(event.message)}`
+              ? `: ${redactBuildText(event.message)}`
               : ""),
         );
         break;
       case "warning":
         if (event.message !== undefined) {
           console.warn(
-            `  ${styleText(["yellow"], `[${label}] warning:`)} ${redactSecrets(event.message)}`,
+            `  ${styleText(["yellow"], `[${label}] warning:`)} ${redactBuildText(event.message)}`,
           );
         }
         break;
@@ -175,7 +175,7 @@ export function createBuildReporter(label: string): BuildReporter {
       );
     }
     // Scrub on the way out — this is the only place the buffer and the reason are exposed.
-    return redactSecrets(parts.join(""));
+    return redactBuildText(parts.join(""));
   };
 
   return { onProgress, failureContext };

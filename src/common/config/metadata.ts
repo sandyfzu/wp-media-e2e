@@ -212,9 +212,9 @@ export function getSiteDataDirResolver(
 const runningWorkStops = new Map<string, StopRunningWork>();
 
 /**
- * Registers how a product stops its own background work, for the shared teardown to call before it
- * removes the plugin. Called while building the config, in each process. A product that runs
- * nothing in the background is not registered.
+ * Registers how a product stops its own background work, for the shared `@plugin` hooks to call
+ * before each removal of the plugin. Called while building the config, in each process. A product
+ * that runs nothing in the background is not registered.
  */
 export function registerStopRunningWork(
   product: string,
@@ -225,8 +225,8 @@ export function registerStopRunningWork(
 }
 
 /**
- * How a product stops its background work, or `undefined` when it declares none — the teardown then
- * has nothing to ask, and costs no round trip. Never throws, for the same reason as
+ * How a product stops its background work, or `undefined` when it declares none — the hooks then
+ * have nothing to ask, and cost no round trip. Never throws, for the same reason as
  * {@link getSiteResidue}.
  */
 export function getStopRunningWork(

@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import type { Locator, Page } from "@playwright/test";
 
+import { enterSecret, holdsSecret } from "../../../common/pages/secret-field";
 import { STORAGE_PANEL_TITLES } from "./storages";
 import type { StorageSlug } from "./storages";
 import { waitForRest } from "../support/rest";
@@ -119,11 +120,35 @@ export class StorageSidebar {
     return this.panel(slug).locator(`[name="${name}"]`);
   }
 
-  /** Fills one of a provider's fields and asserts the value stuck. */
+  /**
+   * Fills one of a provider's fields and asserts the value stuck. For a value that is not a secret:
+   * the report names it — use {@link fillSecret} for a key, a token or a password.
+   */
   async fill(slug: StorageSlug, name: string, value: string): Promise<void> {
     const input = this.field(slug, name);
     await input.fill(value);
     await expect(input).toHaveValue(value);
+  }
+
+  /**
+   * Enters a provider's secret — an access key, a password — and asserts it stuck, without the
+   * value appearing in a step's title, parameters or failure message ({@link enterSecret}). A
+   * scenario's trace still records it in its DOM snapshots: treat a retained trace as a credential.
+   *
+   * @throws {@link Error} when the field will not hold the value — naming the field, never the value.
+   */
+  async fillSecret(
+    slug: StorageSlug,
+    name: string,
+    secret: string,
+  ): Promise<void> {
+    const input = this.field(slug, name);
+    await enterSecret(input, secret);
+    if (!(await holdsSecret(input, secret))) {
+      throw new Error(
+        `[backwpup/storage] the ${slug} field "${name}" did not keep the secret entered into it`,
+      );
+    }
   }
 
   /**

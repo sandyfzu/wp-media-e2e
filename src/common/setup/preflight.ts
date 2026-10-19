@@ -10,6 +10,7 @@ import type { OwnershipPlan } from "../wp/ownership";
 import { renderElevationWarning } from "./elevation-report";
 import type { SiteElevation } from "./elevation-report";
 import { isPlaceholderSite } from "../config/sites";
+import { maskSiteUrl } from "../text";
 import type {
   DockerTransport,
   LocalTransport,
@@ -858,7 +859,7 @@ function buildReport(
   lines.push("Fix the issues below before re-running the suite:\n");
 
   for (const result of failed) {
-    const label = `Site ${String(result.index)} — ${result.baseURL}  [${transportLabel(result.transport)}]`;
+    const label = `Site ${String(result.index)} — ${maskSiteUrl(result.baseURL)}  [${transportLabel(result.transport)}]`;
     lines.push(
       `  ${styleText(["bold", "red"], "✗")} ${styleText(["bold"], label)}`,
     );

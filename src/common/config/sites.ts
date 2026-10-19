@@ -166,6 +166,23 @@ function mergeCellMaps(
 
 // ── Validation helpers ─────────────────────────────────────────────────────────
 
+/**
+ * A refused value as an error may describe it: its kind, and a text's length — never the text. A
+ * sites file holds credentials, and a password written one field off (or a shifted line) would
+ * otherwise be printed in a message that reaches terminals, CI logs and the orchestrator's log.
+ *
+ * @param value - the value read from the file.
+ * @returns e.g. `a text of 8 characters`, `a number`, `null`.
+ */
+export function describeValue(value: unknown): string {
+  if (typeof value === "string")
+    return `a text of ${String(Array.from(value).length)} characters`;
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "a list";
+  if (typeof value === "object") return "an object";
+  return typeof value === "boolean" ? String(value) : `a ${typeof value}`;
+}
+
 /** Returns `value` when it is a non-empty string; otherwise throws an error naming `path`. */
 function requireString(value: unknown, path: string): string {
   if (!isNonEmptyString(value)) {
@@ -218,7 +235,7 @@ function validateTransport(value: unknown, path: string): Transport {
       };
     default:
       throw new Error(
-        `[sites] ${path}.mode must be "ssh" | "docker" | "local" (got ${JSON.stringify(value.mode)}).`,
+        `[sites] ${path}.mode must be "ssh" | "docker" | "local" (got ${describeValue(value.mode)}).`,
       );
   }
 }
@@ -269,7 +286,7 @@ function optionalFileOwner(
   if (!isNonEmptyString(value)) {
     throw new Error(
       `[sites] ${path} must be ${OWNER_SPEC_RULE}, or false to opt out — got ` +
-        `${JSON.stringify(value)}.`,
+        `${describeValue(value)}.`,
     );
   }
   // Throws with the same rule the ownership layer enforces, so the two can never disagree.
@@ -361,7 +378,7 @@ function validateSite(value: unknown, path: string): SiteInput {
 function validateEdition(value: unknown, path: string): Edition | undefined {
   if (value === undefined || value === "free" || value === "pro") return value;
   throw new Error(
-    `[sites] ${path} must be "free" | "pro" (got ${JSON.stringify(value)}).`,
+    `[sites] ${path} must be "free" | "pro" (got ${describeValue(value)}).`,
   );
 }
 
@@ -415,6 +432,26 @@ function checkEditionConsistency(
 }
 
 /**
+ * What a cell may be named. A cell names folders (`<OUTPUT_ROOT>/<product>/<cell>`, its reports,
+ * logins, generated specs and zips) and Playwright projects (`<cell>`, `setup:<cell>`,
+ * `artifacts:<cell>`). So: one path segment; lowercase, because `--project` ignores case and
+ * would select two cells differing in case alone together; and no leading `_`, kept for the
+ * suite's own folders (`_all`, `_unit`).
+ */
+const CELL_NAME = /^[a-z0-9][a-z0-9@._-]*$/;
+
+/** Throws, naming the file and the rule, unless `cell` is a name {@link CELL_NAME} allows. */
+function validateCellName(cell: string, source: string): void {
+  if (!CELL_NAME.test(cell)) {
+    throw new Error(
+      `[sites] ${source}: cell name ${JSON.stringify(cell)} must start with a lowercase ` +
+        'letter or digit and hold only lowercase letters, digits, "@", ".", "_" and "-": it ' +
+        "names folders and Playwright projects.",
+    );
+  }
+}
+
+/**
  * Validates the parsed JSON of one file into a {@link CellMap}. Checks edition
  * consistency within the file; cross-file consistency is checked after merging.
  */
@@ -426,6 +463,7 @@ function validateCellMap(value: unknown, source: string): CellMap {
   }
   const result: Record<string, CellConfig> = {};
   for (const [cell, raw] of Object.entries(value)) {
+    validateCellName(cell, source);
     result[cell] = validateCell(raw, `${source} → ${cell}`);
   }
   checkEditionConsistency(result, source);

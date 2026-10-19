@@ -1,31 +1,66 @@
-#!/usr/bin/env node
 // Generate (and optionally serve) the Allure report for a product/cell from its most recent run.
 //
-//   node scripts/allure.mjs [product] [cell] [--open]
+//   npx tsx scripts/allure.mjs [product] [cell] [--open]
 //
 // With no product/cell it picks the most recently written results across all cells. The report
 // is written next to that run's Playwright/Cucumber reports (`reports/<product>/<cell>/<run>/
-// allure`); the trend chart comes from a cell-level history file that accumulates across runs.
-// Respects REPORT_ROOT (same as the test config) so it finds custom report roots.
+// allure`); the trend chart comes from a cell-level history file that accumulates across runs. Its
+// name is the run's one-line facts (`run-facts.json`: plugin, commit, site, run), else product · cell.
+// Respects REPORT_ROOT (same as the test config) so it finds custom report roots,
+// `.env`'s included: it loads `.env` as a run does, which is why it runs under tsx.
+import "../src/common/config/load-env";
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const argv = process.argv.slice(2);
 const open = argv.includes("--open");
 const [product, cell] = argv.filter((arg) => !arg.startsWith("--"));
 
-const reportRoot = process.env.REPORT_ROOT || "reports";
+/** The checkout's root: a run resolves REPORT_ROOT against it, wherever it starts — so does this. */
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const reportRoot = resolve(repoRoot, process.env.REPORT_ROOT || "reports");
 
-/** Immediate subdirectory names of `dir` (empty when `dir` is absent). */
+/**
+ * Immediate subdirectory names of `dir` (empty when `dir` is absent). Hidden ones are left out: the
+ * report pruning renames a run it is removing to a hidden name first.
+ */
 function subdirs(dir) {
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
     .map((entry) => entry.name);
 }
 
-// Collect every run that has non-empty Allure results, optionally filtered to one product/cell.
+/**
+ * The report's name: the run's title line from its `run-facts.json`, or `fallback` when the run left
+ * none readable (an older run, or one whose facts could not be written).
+ */
+function reportName(runDir, fallback) {
+  try {
+    const facts = JSON.parse(
+      readFileSync(join(runDir, "run-facts.json"), "utf8"),
+    );
+    const title = typeof facts?.title === "string" ? facts.title.trim() : "";
+    return title === "" ? fallback : title;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Whether a folder holds Allure results: at least one test result. A run that ran nothing — `--list`,
+ * "No tests found" — may still leave the run facts' `environment.properties` there.
+ */
+function hasResults(resultsDir) {
+  return (
+    existsSync(resultsDir) &&
+    readdirSync(resultsDir).some((name) => name.endsWith("-result.json"))
+  );
+}
+
+// Collect every run that has Allure results, optionally filtered to one product/cell.
 const runs = [];
 for (const prod of subdirs(reportRoot)) {
   if (product && prod !== product) continue;
@@ -34,11 +69,12 @@ for (const prod of subdirs(reportRoot)) {
     const cellDir = join(reportRoot, prod, cellName);
     for (const runId of subdirs(cellDir)) {
       const resultsDir = join(cellDir, runId, "allure-results");
-      if (existsSync(resultsDir) && readdirSync(resultsDir).length > 0) {
+      if (hasResults(resultsDir)) {
         runs.push({
           product: prod,
           cell: cellName,
           cellDir,
+          runDir: join(cellDir, runId),
           resultsDir,
           output: join(cellDir, runId, "allure"),
           mtime: statSync(resultsDir).mtimeMs,
@@ -52,7 +88,7 @@ if (runs.length === 0) {
   const scope = [product, cell].filter(Boolean).join("/");
   console.error(
     `No Allure results found under "${reportRoot}/"${scope ? ` for ${scope}` : ""}. ` +
-      "Run a suite first, e.g. `npm run test:wp-rocket -- --project=apache`.",
+      "Run a suite first, e.g. `E2E_CELL=apache npm run test:wp-rocket`.",
   );
   process.exit(1);
 }
@@ -67,7 +103,7 @@ console.log(`  results: ${target.resultsDir}`);
 console.log(`  output:  ${target.output}`);
 console.log(`  history: ${historyPath}`);
 
-const allureBin = resolve("node_modules", ".bin", "allure");
+const allureBin = resolve(repoRoot, "node_modules", ".bin", "allure");
 
 // `allure generate` reads the cell-level history file (ALLURE_HISTORY, configured in
 // allurerc.mjs) to render the trend, then writes this run back into it — so each run's report
@@ -78,9 +114,10 @@ const generateArgs = [
   "-o",
   target.output,
   "-c",
-  "allurerc.mjs",
+  resolve(repoRoot, "allurerc.mjs"),
   "--name",
-  `${target.product} · ${target.cell}`, // report header identifies the cell
+  // The report's header says what was tested; at least, which cell.
+  reportName(target.runDir, `${target.product} · ${target.cell}`),
 ];
 if (open) generateArgs.push("--open");
 const generated = spawnSync(allureBin, generateArgs, {

@@ -1,10 +1,20 @@
+import { resolve } from "node:path";
+
 import { defineConfig } from "@playwright/test";
 import type { PlaywrightTestConfig, Project } from "@playwright/test";
 import { defineBddConfig } from "playwright-bdd";
 
 import { registerManifest } from "../artifacts/registry";
+import {
+  BDD_CONFIGS_ENV,
+  assertNoForeignBddConfigs,
+  assertPinKnown,
+  assertSelectionFitsPin,
+  cellsReached,
+  pinnedCell,
+} from "./cell-pin";
 import { DESKTOP } from "./devices";
-import { intEnv } from "./env";
+import { env, intEnv } from "./env";
 import {
   registerDebugLogOptions,
   registerPool,
@@ -14,8 +24,32 @@ import {
   registerStopRunningWork,
   routingMetadata,
 } from "./metadata";
+import { cellProjectNames } from "./project-names";
+import {
+  REPORTS_KEEP_ENV,
+  REQUESTED_REF_ENV,
+  RETRIES_ENV,
+  RUN_NAME_ENV,
+} from "./run-env";
+import type { RunDescription } from "../reporting/run-description";
 import { reporters } from "./reporting";
-import { dirs, seedSelectedCells, selectedCells } from "./run-context";
+import { DEFAULT_RETENTION, MAX_REPORTS_KEEP } from "../reporting/retention";
+import {
+  assertNotStoppedYet,
+  assertStopFileFolder,
+  stopFileFromEnv,
+} from "./drain";
+import {
+  NO_CELL,
+  REPO_ROOT,
+  RUN_ID,
+  cellOwningOutput,
+  dirs,
+  outputDirFor,
+  projectSelection,
+  seedSelectedCells,
+  selectedCells,
+} from "./run-context";
 import { VISUAL_EXPECT, snapshotPathTemplateFor } from "./visual";
 import type { Edition, ProductConfig, SiteConfig, SitePool } from "./types";
 
@@ -42,13 +76,57 @@ const isCI = process.env.CI !== undefined && process.env.CI !== "";
  * Deliberately applied to the scenario projects only: the auth and artifact setups are not tests,
  * and a setup that cannot succeed should say so at once rather than three times.
  */
-const RETRIES = intEnv("E2E_RETRIES", 2, 0, 10);
+const RETRIES = intEnv(RETRIES_ENV, 2, 0, 10);
 
-/** Assigns each pooled site its per-run `storageState` path under the cell's auth dir. */
+/**
+ * How many reports the run's report folder keeps as the run ends (`reporting/run-pruning.ts`):
+ * `E2E_REPORTS_KEEP`, 20 by default, `0` for no cap — the age rules still apply. Read here, as the
+ * config is built, so a bad value fails the run at its start, naming the variable.
+ */
+const REPORTS_KEEP = intEnv(
+  REPORTS_KEEP_ENV,
+  DEFAULT_RETENTION.keep,
+  0,
+  MAX_REPORTS_KEEP,
+);
+
+/**
+ * The auth setup's trace: kept for a failed attempt, like every project's, but without DOM snapshots.
+ *
+ * A snapshot records every form field's value — the login's password included, however it was
+ * entered — and turning snapshots off also stops the trace recording network traffic, which carries
+ * the session cookies WordPress sets. The setup only logs in and reads Site Health, so its trace
+ * loses little: the actions, their timings and the screenshots stay.
+ */
+const SETUP_TRACE = {
+  mode: "retain-on-failure",
+  snapshots: { dom: false },
+} as const;
+
+/**
+ * What the run is called and the plugin ref it was asked for, from the two display-only variables an
+ * orchestrator sets (`E2E_RUN_NAME`, `E2E_REQUESTED_REF`) — it pins the run itself to the commit it
+ * built, so the ref a person asked for would otherwise be lost. The reports show them; nothing acts
+ * on them. A blank one is absent.
+ */
+function displayOnlyFacts(): Pick<RunDescription, "runName" | "requestedRef"> {
+  const runName = env(RUN_NAME_ENV);
+  const requestedRef = env(REQUESTED_REF_ENV);
+  return {
+    ...(runName !== "" ? { runName } : {}),
+    ...(requestedRef !== "" ? { requestedRef } : {}),
+  };
+}
+
+/**
+ * Assigns each pooled site its per-run `storageState` path under the cell's auth dir. The path
+ * is absolute: Playwright and `fs` resolve a relative one against the working directory, which
+ * would put the logins wherever the run was started.
+ */
 function withState(pool: SitePool, authDir: string): SiteConfig[] {
   return pool.map((site, index) => ({
     ...site,
-    storageState: `${authDir}/site-${String(index)}.json`,
+    storageState: resolve(REPO_ROOT, authDir, `site-${String(index)}.json`),
   }));
 }
 
@@ -63,18 +141,44 @@ function editionFilter(edition: Edition | undefined): string | undefined {
 }
 
 /**
+ * The cells this config holds: every cell of the product, or only the one `E2E_CELL` pins the run
+ * to — so `bddgen`, which generates every cell a config holds, touches that cell's specs alone.
+ *
+ * @param product - the product being built.
+ * @param pin - the pinned cell, from `pinnedCell()`; `undefined` when the run is not pinned.
+ * @throws {@link Error} when the pin names no cell of the product, a `--project` selects none of
+ *   the pinned cell's projects, or this process inherited other cells' BDD configs — each naming
+ *   `E2E_CELL` and the fix.
+ */
+function cellsToBuild(
+  product: ProductConfig,
+  pin: string | undefined,
+): string[] {
+  const cells = Object.keys(product.sites);
+  if (pin === undefined) return cells;
+  assertPinKnown(pin, product.name, cells);
+  assertSelectionFitsPin(
+    pin,
+    Object.values(cellProjectNames(pin)),
+    projectSelection(),
+  );
+  // Read before this process defines its own BDD config, so only what it inherited is judged.
+  assertNoForeignBddConfigs(env(BDD_CONFIGS_ENV), product.name, pin);
+  return [pin];
+}
+
+/**
  * Builds the config for one product. Each `cell` becomes three projects: two sibling setup
  * projects — one authenticates the cell's site pool, one resolves & verifies its plugin
  * artifacts — and the BDD project that depends on both (either failing skips the
- * scenarios). A run targets exactly one cell via `--project=<cell>`, which keeps
- * the global `parallelIndex` in range for the worker→site binding; selecting more than
- * one cell at once is rejected fail-fast below.
+ * scenarios). A run targets exactly one cell — pinned with `E2E_CELL=<cell>`, which builds that
+ * cell alone, or selected with `--project=<cell>` — which keeps the global `parallelIndex` in
+ * range for the worker→site binding; selecting more than one cell at once is rejected fail-fast
+ * below.
  */
 export function createProductConfig(
   product: ProductConfig,
 ): PlaywrightTestConfig {
-  const cells = Object.keys(product.sites);
-
   // Publish the CLI's cell selection to the environment before anything reads it: worker
   // processes rebuild this config with an empty argv, so this is their only way to tell an
   // explicitly selected cell from a broad serial run (see run-context.ts).
@@ -105,13 +209,30 @@ export function createProductConfig(
   // before it removes the plugin — a function, so this registry is its only possible channel.
   registerStopRunningWork(product.name, product.stopRunningWork);
 
+  // A stop file the drain gate could never see fails the run here, as it starts — not every
+  // scenario, and not silently, as a gate that never closes would; so does one already there, which
+  // would skip every scenario. A worker (Playwright sets `TEST_WORKER_INDEX`) may start after a stop.
+  const stopFile = stopFileFromEnv();
+  if (stopFile !== undefined) {
+    assertStopFileFolder(stopFile);
+    assertNotStoppedYet(stopFile, env("TEST_WORKER_INDEX") !== "");
+  }
+
+  const pin = pinnedCell();
+  const cells = cellsToBuild(product, pin);
+
   // Resolve the targeted cell. Selecting multiple cells in one invocation is unsafe
-  // (parallelIndex is global), so fail fast instead of silently mis-sizing workers.
-  const requested = selectedCells().filter((c) => cells.includes(c));
-  if (requested.length > 1) {
+  // (parallelIndex is global), so fail fast instead of silently mis-sizing workers. A cell named
+  // exactly targets it, so the run is sized for its pool — unless the selection also reaches another
+  // cell by Playwright's looser matching (`SMALL`, `sm*`, `*`), whose workers would then index past
+  // their own pool. A selection of wildcards alone is a broad, serial run, as without `--project`.
+  const selection = selectedCells();
+  const requested = selection.filter((c) => cells.includes(c));
+  const reached = cellsReached(cells, selection);
+  if (requested.length > 1 || (requested.length === 1 && reached.length > 1)) {
     throw new Error(
-      `Multiple cells selected (${requested.join(", ")}). Run one cell per ` +
-        "invocation, e.g. --project=<cell>, so parallelIndex stays in range.",
+      `Multiple cells selected (${reached.join(", ")}). Run one cell per ` +
+        "invocation, e.g. E2E_CELL=<cell> or --project=<cell>, so parallelIndex stays in range.",
     );
   }
   const selected = requested[0];
@@ -119,7 +240,8 @@ export function createProductConfig(
     selected === undefined ? undefined : product.sites[selected];
   // A cell-less run (no / `*` / unknown --project) is serial and safe; its report goes
   // to an `_all` bucket so it is never mislabeled as belonging to a single cell.
-  const reportCell = selected ?? "_all";
+  const reportDir = dirs(product.name, selected ?? NO_CELL).report;
+  const outputOwner = cellOwningOutput(selected, projectSelection());
 
   const projects: Project[] = cells.flatMap((cell): Project[] => {
     const cellConfig = product.sites[cell];
@@ -130,30 +252,34 @@ export function createProductConfig(
     // Hand the credential-bearing pool to workers in-process; never via metadata,
     // which Playwright serializes into reports (see config/metadata.ts).
     registerPool(product.name, cell, pooled);
-    const setupName = `setup:${cell}`;
-    const artifactsName = `artifacts:${cell}`;
+    const names = cellProjectNames(cell);
     const firstSite = pooled[0];
     const tags = editionFilter(edition);
     const routing = routingMetadata(product.name, cell, edition);
+    // All three projects of a cell share one output folder, which Playwright empties for each
+    // project a run selects; see `outputDirFor` for which runs may own the cell's own folder.
+    const outputDir = outputDirFor(product.name, cell, outputOwner);
 
     return [
       {
-        name: setupName,
+        name: names.setup,
         testDir: "src/common/auth",
         testMatch: /auth\.setup\.ts$/,
-        use: { ...DESKTOP },
+        use: { ...DESKTOP, trace: SETUP_TRACE },
+        outputDir,
         metadata: routing,
       },
       {
         // Sibling of the auth setup (no dependency between them): resolves & verifies the
         // cell's plugin artifacts. Needs no browser. Skips on placeholder-only pools.
-        name: artifactsName,
+        name: names.artifacts,
         testDir: "src/common/artifacts",
         testMatch: /artifacts\.setup\.ts$/,
+        outputDir,
         metadata: routing,
       },
       {
-        name: cell,
+        name: names.scenarios,
         testDir: defineBddConfig({
           outputDir: cellDirs.bdd,
           features: product.features,
@@ -165,8 +291,8 @@ export function createProductConfig(
           ...DESKTOP,
           ...(firstSite ? { baseURL: firstSite.baseURL } : {}),
         },
-        outputDir: cellDirs.output,
-        dependencies: [setupName, artifactsName],
+        outputDir,
+        dependencies: [names.setup, names.artifacts],
         // Defensive upper bound only: per-project `workers` caps how many workers a
         // project uses, not which parallelIndex slots it sees, so it cannot by itself
         // keep parallelIndex within a smaller pool. Correctness rests on the
@@ -180,6 +306,10 @@ export function createProductConfig(
 
   return defineConfig({
     forbidOnly: isCI,
+    // Off, and said so: left unset, Playwright turns both on under CI (GitHub Actions, GitLab,
+    // Jenkins), and the HTML report then carries the commit's author and committer emails and the
+    // pull request's diff.
+    captureGitInfo: { commit: false, diff: false },
     fullyParallel: true,
     // Global workers = the SELECTED cell's pool size, so parallelIndex ∈ 0…N-1 and
     // `pool[parallelIndex]` is always in range for a single-cell invocation.
@@ -187,7 +317,20 @@ export function createProductConfig(
       selectedCellConfig && selectedCellConfig.sites.length > 0
         ? selectedCellConfig.sites.length
         : 1,
-    reporter: reporters(dirs(product.name, reportCell).report),
+    reporter: reporters({
+      product: product.name,
+      ...(selected !== undefined ? { cell: selected } : {}),
+      ...(selectedCellConfig?.edition !== undefined
+        ? { edition: selectedCellConfig.edition }
+        : {}),
+      pinned: pin !== undefined,
+      runId: RUN_ID,
+      reportCell: selected ?? NO_CELL,
+      reportDir,
+      reportPath: resolve(REPO_ROOT, reportDir),
+      ...displayOnlyFacts(),
+      reportsKeep: REPORTS_KEEP,
+    }),
     // Committed-baseline visual checks (`toHaveScreenshot`): comparison tolerance + where the
     // per-product/cell baselines live. WP Rocket's A/B check (visual/ab.ts) diffs live renders and
     // does NOT use this — it is the wiring for the general committed-baseline capability.

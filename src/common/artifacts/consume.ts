@@ -17,10 +17,11 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { errorMessage, isNonEmptyString, isObject } from "../guards";
 import { REPO_ROOT, RUN_ID, dirs } from "../config/run-context";
+import { isSha256 } from "./digest";
 import { rolesOf } from "./manifest";
 import { getManifest, peekArtifacts, registerArtifacts } from "./registry";
 import type {
@@ -84,7 +85,7 @@ export function readResolvedArtifact(
     throw new Error(
       `[artifacts] the resolved "${role}" zip for "${product}/${cell}" is gone ` +
         `("${artifact.zipPath}" no longer exists). The artifacts directory is ephemeral — ` +
-        "re-run the artifacts setup for this cell (run via --project=<cell>, not --no-deps).",
+        "re-run the artifacts setup for this cell (run it with E2E_CELL=<cell>, not --no-deps).",
     );
   }
   return artifact;
@@ -107,8 +108,8 @@ function loadCellArtifacts(product: string, cell: string): CellArtifacts {
   if (!existsSync(path)) {
     throw new Error(
       `[artifacts] no resolution found for "${product}/${cell}" ("${path}" is missing). ` +
-        "The artifacts setup did not run for this cell in this execution — run via " +
-        "--project=<cell> (not --no-deps).",
+        "The artifacts setup did not run for this cell in this execution — run it with " +
+        "E2E_CELL=<cell> (not --no-deps).",
     );
   }
 
@@ -137,14 +138,23 @@ function warnIfStale(raw: unknown, product: string, cell: string): void {
   console.warn(
     `[artifacts] using the resolution a PREVIOUS execution wrote for "${product}/${cell}" ` +
       `(run "${runId}", this run is "${RUN_ID}") — the artifacts setup did not run here. The ` +
-      "zips may be older than the refs you expect; re-run via --project=<cell> without --no-deps " +
+      "zips may be older than the refs you expect; re-run with E2E_CELL=<cell> without --no-deps " +
       "to resolve them afresh.",
   );
 }
 
+/**
+ * Absolute path to a cell's ephemeral artifacts dir: `ARTIFACTS_ROOT` (default `.artifacts`)
+ * resolved against {@link REPO_ROOT} — a relative root lands in the checkout, an absolute one stays
+ * where it points, as the report and login roots do — then `<product>/<cell>`.
+ */
+export function cellArtifactsDir(product: string, cell: string): string {
+  return resolve(REPO_ROOT, dirs(product, cell).artifacts);
+}
+
 /** Absolute path to a cell's `resolution.json` (inside its ephemeral artifacts dir). */
 export function resolutionFilePath(product: string, cell: string): string {
-  return join(REPO_ROOT, dirs(product, cell).artifacts, "resolution.json");
+  return join(cellArtifactsDir(product, cell), "resolution.json");
 }
 
 /** Reads and JSON-parses `resolution.json`, wrapping a parse failure with the path. */
@@ -188,7 +198,9 @@ export function parseResolution(raw: unknown, source: string): CellArtifacts {
 /**
  * Validates one role entry from `resolution.json` into a {@link ResolvedArtifact}, checking the
  * required string fields, narrowing the `source`/`origin` enums, and passing optional
- * `ref`/`commit`/`version` through when present.
+ * `ref`/`commit`/`pinRef`/`version` through when present. A `sha256` must be a well-formed digest when
+ * present; its absence is tolerated, since a `resolution.json` written before it was recorded may
+ * still be read by a `--no-deps` run.
  *
  * @throws Error naming the role and `source` on any missing/invalid field.
  */
@@ -216,6 +228,10 @@ function parseRole(
   const origin = requireString(entry.origin, "origin", fail);
   if (!SOURCES.has(source_)) fail(`unknown source "${source_}"`);
   if (!ORIGINS.has(origin)) fail(`unknown origin "${origin}"`);
+  // A digest that is present but malformed is a corrupt file, not an old one: never pass it on.
+  if (entry.sha256 !== undefined && !isSha256(entry.sha256)) {
+    fail('"sha256" must be 64 lowercase hex characters');
+  }
 
   return {
     role,
@@ -227,7 +243,9 @@ function parseRole(
     resolvedAt,
     ...(isNonEmptyString(entry.ref) ? { ref: entry.ref } : {}),
     ...(isNonEmptyString(entry.commit) ? { commit: entry.commit } : {}),
+    ...(isNonEmptyString(entry.pinRef) ? { pinRef: entry.pinRef } : {}),
     ...(isNonEmptyString(entry.version) ? { version: entry.version } : {}),
+    ...(isSha256(entry.sha256) ? { sha256: entry.sha256 } : {}),
   };
 }
 

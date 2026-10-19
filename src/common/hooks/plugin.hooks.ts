@@ -1,15 +1,18 @@
 import { After, Before } from "../fixtures";
+import { wasDrained } from "../config/drain";
 import {
   getDebugLogOptions,
   getStopRunningWork,
   readRouting,
 } from "../config/metadata";
 import {
+  BEFORE_HOOK_TIMEOUT_MS,
   HOOK_TIMEOUT_MS,
   PLUGIN_TAG,
   declaredResidue,
   extendedTimeout,
   installPluginUnderTest,
+  leftWorkOf,
   scenarioReport,
   teardownPluginUnderTest,
 } from "./plugin-lifecycle";
@@ -19,10 +22,12 @@ import {
  *
  * A tagged scenario gets the cell's own edition installed and activated beforehand, a `debug.log`
  * scoped to just that scenario, a failure if PHP logged a fatal, and a clean site afterwards —
- * clean including the **files** the plugin wrote, which its own uninstall keeps, and with any work
- * it left running stopped before it is removed. Neither the edition nor the product is named here:
- * the slug comes from the resolved artifact and the product policy from the product's own config,
- * so one hook pair serves `backwpup`, `backwpup-pro` and `wp-rocket` alike.
+ * clean including the **files** the plugin wrote, which its own uninstall keeps. Work the plugin is
+ * still doing is stopped before each removal: before the install, work a killed run left behind;
+ * afterwards, the scenario's own. A scenario the drain skipped (`config/drain.ts`) is left alone.
+ * Neither the edition nor the product is named here: the slug comes from the resolved artifact and
+ * the product policy from the product's own config, so one hook pair serves `backwpup`,
+ * `backwpup-pro` and `wp-rocket` alike.
  *
  * **This file must be listed in every product's `steps` globs.** A hook file outside them is
  * never imported, so its hooks register silently and the lifecycle simply never runs — the
@@ -35,7 +40,7 @@ Before(
   {
     name: "install the plugin under test",
     tags: PLUGIN_TAG,
-    timeout: HOOK_TIMEOUT_MS,
+    timeout: BEFORE_HOOK_TIMEOUT_MS,
   },
   async ({ site, pluginArtifact, $testInfo }) => {
     // Playwright times a scenario and its hooks against one clock, so make room for both hooks
@@ -46,6 +51,7 @@ Before(
       site.transport,
       pluginArtifact("plugin"),
       declaredResidue(product),
+      leftWorkOf(product, scenarioReport($testInfo)),
     );
   },
 );
@@ -57,6 +63,9 @@ After(
     timeout: HOOK_TIMEOUT_MS,
   },
   async ({ site, pluginArtifact, $testInfo }) => {
+    // A drained scenario never began: no Before hook ran, so there is no log of its own to judge and
+    // nothing it installed to remove — and a run being stopped should not spend minutes here.
+    if (wasDrained($testInfo.annotations)) return;
     const { product } = readRouting($testInfo.project.metadata);
     await teardownPluginUnderTest(
       site.transport,

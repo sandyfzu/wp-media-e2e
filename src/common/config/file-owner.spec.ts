@@ -14,6 +14,13 @@ import { parseOwnerSpec } from "./file-owner";
 const spec = (declared: string) => parseOwnerSpec(declared, "[test] fileOwner");
 
 test.describe("parseOwnerSpec", () => {
+  test("never quotes a refused value: it comes from the sites file", () => {
+    expect(() => spec("Hunter2Secret")).toThrow(
+      /^\[test\] fileOwner must be .* got a text of 13 characters \(never quoted/,
+    );
+    expect(() => spec("Hunter2Secret")).not.toThrow(/Hunter2/);
+  });
+
   test("accepts a user:group pair", () => {
     expect(spec("www-data:www-data")).toEqual({
       user: "www-data",

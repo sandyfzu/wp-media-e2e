@@ -12,6 +12,7 @@ import { join, relative } from "node:path";
 import { REPO_ROOT, RUN_ID } from "../config/run-context";
 
 import {
+  cellArtifactsDir,
   parseResolution,
   readResolvedArtifact,
   resolutionFilePath,
@@ -45,6 +46,13 @@ const PLUGIN_ONLY: ProductArtifacts = {
   },
 };
 
+/** A full commit SHA, as the resolver records a git build's. */
+const COMMIT = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+
+/** A zip's SHA-256, as the resolver records it for every role. */
+const SHA256 =
+  "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
 /**
  * A resolved `plugin` artifact, as the registry / a parsed resolution would hold it. Its
  * `zipPath` points at a real temp file, because the reader asserts the zip is still on disk.
@@ -63,7 +71,8 @@ test.beforeAll(() => {
     zipFilename: "wp-rocket-3.17.4.zip",
     source: "default-ref",
     ref: "develop",
-    commit: "a1b2c3d",
+    commit: COMMIT,
+    sha256: SHA256,
     version: "3.17.4",
     origin: "built",
     resolvedAt: "2026-07-14T00:00:00.000Z",
@@ -88,7 +97,9 @@ test.describe("parseResolution", () => {
         zipFilename: "wp-rocket-3.17.4.zip",
         source: "default-ref",
         ref: "develop",
-        commit: "a1b2c3d",
+        commit: COMMIT,
+        pinRef: `commit:${COMMIT}`,
+        sha256: SHA256,
         version: "3.17.4",
         origin: "built",
         resolvedAt: "2026-07-14T00:00:00.000Z",
@@ -139,6 +150,42 @@ test.describe("parseResolution", () => {
     expect(plugin).not.toHaveProperty("commit");
     expect(plugin).not.toHaveProperty("version");
   });
+
+  test("round-trips a full commit, its pin and a digest exactly", () => {
+    const plugin = parseResolution(doc, "test").plugin;
+    expect(plugin?.commit).toBe(COMMIT);
+    expect(plugin?.pinRef).toBe(`commit:${COMMIT}`);
+    expect(plugin?.sha256).toBe(SHA256);
+  });
+
+  test("reads a resolution written before digests were recorded", () => {
+    // An older `resolution.json` — a short commit, no `sha256` — is still read by a `--no-deps`
+    // run until the next setup rewrites it; it must not fail that run.
+    const { sha256: _sha256, ...older } = doc.roles.plugin;
+    const plugin = parseResolution(
+      { roles: { plugin: { ...older, commit: "a1b2c3d" } } },
+      "test",
+    ).plugin;
+    expect(plugin).not.toHaveProperty("sha256");
+    expect(plugin?.commit).toBe("a1b2c3d");
+  });
+
+  for (const [label, value] of [
+    ["uppercase", SHA256.toUpperCase()],
+    ["too short", SHA256.slice(1)],
+    ["too long", `${SHA256}0`],
+    ["not hex", "z".repeat(64)],
+    ["empty", ""],
+    ["not a string", 42],
+    ["null", null],
+  ] as const) {
+    test(`throws on a sha256 that is ${label}`, () => {
+      const bad = { roles: { plugin: { ...doc.roles.plugin, sha256: value } } };
+      expect(() => parseResolution(bad, "f.json")).toThrow(
+        /malformed "plugin" entry in "f\.json".*sha256/s,
+      );
+    });
+  }
 
   test("ignores unknown role keys", () => {
     const extra = { roles: { plugin: doc.roles.plugin, bogus: { x: 1 } } };
@@ -254,7 +301,8 @@ test.describe("readResolvedArtifact — from a resolution.json on disk", () => {
             zipFilename: ZIP_NAME,
             source: "default-ref",
             ref: "develop",
-            commit: "a1b2c3d",
+            commit: COMMIT,
+            sha256: SHA256,
             version: "3.17.4",
             origin: "built",
             resolvedAt: "2026-07-14T00:00:00.000Z",
@@ -268,8 +316,7 @@ test.describe("readResolvedArtifact — from a resolution.json on disk", () => {
   test.beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "artifact-disk-"));
     savedRoot = process.env.ARTIFACTS_ROOT;
-    // `dirs()` yields REPO_ROOT-relative paths that the reader joins onto REPO_ROOT, so the
-    // override has to be relative too — this is that same temp tree, expressed that way.
+    // The temp tree as a relative root, the form `.env` usually gives; one test sets it absolute.
     process.env.ARTIFACTS_ROOT = relative(REPO_ROOT, root);
     warnings = [];
     realWarn = console.warn;
@@ -300,7 +347,8 @@ test.describe("readResolvedArtifact — from a resolution.json on disk", () => {
       zipFilename: ZIP_NAME,
       source: "default-ref",
       ref: "develop",
-      commit: "a1b2c3d",
+      commit: COMMIT,
+      sha256: SHA256,
       version: "3.17.4",
       origin: "built",
       resolvedAt: "2026-07-14T00:00:00.000Z",
@@ -332,11 +380,58 @@ test.describe("readResolvedArtifact — from a resolution.json on disk", () => {
     expect(warnings).toEqual([]);
   });
 
+  test("reads the resolution under an absolute ARTIFACTS_ROOT, where that root points", () => {
+    process.env.ARTIFACTS_ROOT = root;
+    const zipPath = writeResolution(RUN_ID);
+    expect(readResolvedArtifact(PRODUCT, CELL, "plugin").zipPath).toBe(zipPath);
+  });
+
   test("reports a corrupt document with the path, not a raw JSON error", () => {
     mkdirSync(join(root, PRODUCT, CELL), { recursive: true });
     writeFileSync(join(root, PRODUCT, CELL, "resolution.json"), "{ not json");
     expect(() => readResolvedArtifact(PRODUCT, CELL, "plugin")).toThrow(
       /could not read ".*resolution\.json".*may be corrupt/s,
+    );
+  });
+});
+
+test.describe("cellArtifactsDir and resolutionFilePath — where a cell's zips live", () => {
+  let savedRoot: string | undefined;
+
+  test.beforeEach(() => {
+    savedRoot = process.env.ARTIFACTS_ROOT;
+  });
+
+  test.afterEach(() => {
+    if (savedRoot === undefined) {
+      Reflect.deleteProperty(process.env, "ARTIFACTS_ROOT");
+    } else {
+      process.env.ARTIFACTS_ROOT = savedRoot;
+    }
+  });
+
+  test("default to .artifacts in the repository", () => {
+    Reflect.deleteProperty(process.env, "ARTIFACTS_ROOT");
+    expect(cellArtifactsDir("wp-rocket", "nginx")).toBe(
+      join(REPO_ROOT, ".artifacts", "wp-rocket", "nginx"),
+    );
+  });
+
+  test("resolve a relative ARTIFACTS_ROOT against the repository", () => {
+    process.env.ARTIFACTS_ROOT = "elsewhere/zips";
+    expect(cellArtifactsDir("wp-rocket", "nginx")).toBe(
+      join(REPO_ROOT, "elsewhere", "zips", "wp-rocket", "nginx"),
+    );
+  });
+
+  test("keep an absolute ARTIFACTS_ROOT where it points, never under the repository", () => {
+    const root = join(tmpdir(), "e2e-artifacts-root");
+    process.env.ARTIFACTS_ROOT = root;
+    expect(cellArtifactsDir("backwpup", "pro@nginx")).toBe(
+      join(root, "backwpup", "pro@nginx"),
+    );
+    expect(resolutionFilePath("backwpup", "pro@nginx")).toBe(
+      join(root, "backwpup", "pro@nginx", "resolution.json"),
     );
   });
 });

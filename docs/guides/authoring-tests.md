@@ -22,11 +22,12 @@ src/
 │   ├── fixtures.ts               # the base test instance + Given/When/Then exports
 │   ├── steps/                    # generic steps (e.g. world.steps.ts)
 │   ├── hooks/                    # shared scenario hooks (*.hooks.ts) + their policy modules
-│   ├── pages/                    # cross-product page objects (e.g. plugins.page.ts)
+│   ├── pages/                    # cross-product page objects (plugins.page.ts, site-health.page.ts) + secret-field.ts
 │   ├── visual/                   # visual helpers (ab.ts, screenshot.ts, …)
 │   ├── config/devices.ts         # desktop & @mobile device profiles
 │   ├── artifacts/                # the plugin zips under test (see ../architecture/plugin-artifacts.md)
 │   └── wp/                       # WordPress automation (see ../architecture/wordpress-automation.md)
+├── projects/products.ts          # the one product list (see "Adding a product" below)
 └── projects/<product>/
     ├── config/<product>.config.ts   # ProductConfig + sites.json/sites.*.json/sites.example.json
     ├── fixtures.ts                  # this product's test instance: common's + its page objects
@@ -43,6 +44,23 @@ A product's `steps` array (in its config) is the exact set of files loaded at ru
 available to that product — and a **hook file missing from that array never registers**,
 leaving its lifecycle silently absent rather than failing. Add new shared hooks as
 `src/common/hooks/<name>.hooks.ts` so the existing glob picks them up.
+
+### Adding a product
+
+1. `src/projects/<name>/config/<name>.config.ts` exports its `ProductConfig`: `name: "<name>"`,
+   features and its own steps under `src/projects/<name>/`, its artifact manifest (see
+   [plugin-artifacts.md](../architecture/plugin-artifacts.md)), and a committed `sites.example.json`
+   beside it.
+2. List it in `PRODUCTS` ([`src/projects/products.ts`](../../src/projects/products.ts)).
+3. Create `playwright.<name>.config.ts` at the root: `import "./src/common/config/load-env"`, then
+   `export default createProductConfig(<its config>)`, importing only that product.
+4. Add the `test:<name>` script, which runs `bddgen` and then `playwright test`, each with
+   `--config playwright.<name>.config.ts`, plus its `:ui` and `:headed` variants.
+5. Add its `@noauth` smoke step to `.github/workflows/ci.yml` once it has a `@noauth` scenario.
+   Without one the step fails with "No tests found". Without the step, CI never runs the product.
+
+`products.spec.ts` fails until the folder, the list, the entry config and the script agree. It
+does not check the CI step or the example sites file.
 
 ## Fixtures ([`src/common/fixtures.ts`](../../src/common/fixtures.ts))
 
@@ -247,7 +265,7 @@ await stageAndInstallPlugin(site.transport, artifact.zipPath, {
 | Tag         | Effect                                                                                          |
 | ----------- | ----------------------------------------------------------------------------------------------- |
 | `@noauth`   | Scenario starts unauthenticated with an empty session (login/logout flows). The only tag that runs against placeholder sites, so it is what CI's smoke job greps. |
-| `@plugin`   | The plugin under test is freshly installed + activated before the scenario, `debug.log` is scoped to it and **a PHP fatal fails it**, and afterwards — once anything it left running has been stopped (`ProductConfig.stopRunningWork`) — the plugin is removed along with *the files and the database rows it left behind*. "Freshly" is load-bearing: a site whose plugin directory went without its `uninstall.php` ever running still carries that plugin's options and tables, and those are swept before the install rather than installed on top of. Needs a real site. |
+| `@plugin`   | Before the scenario, any work an earlier (killed) run left the plugin doing is stopped, then the plugin under test is freshly installed + activated, `debug.log` is scoped to it and **a PHP fatal fails it**, and afterwards — once anything it left running has been stopped (`ProductConfig.stopRunningWork`) — the plugin is removed along with *the files and the database rows it left behind*. "Freshly" is load-bearing: a site whose plugin directory went without its `uninstall.php` ever running still carries that plugin's options and tables, and those are swept before the install rather than installed on top of. Needs a real site. A scenario the drain skipped (`E2E_INTERNAL_STOP_FILE`) gets neither hook. |
 | `@mobile`   | Runs under the mobile device profile (viewport + `isMobile` + `hasTouch` + mobile UA + DPR). Untagged scenarios stay desktop. |
 | `@smoke`    | Scaffolding/smoke scenarios; run with `--grep @smoke`.                                           |
 | `@free` / `@pro` | Edition scoping. An edition-ful cell auto-filters: a `pro` cell skips `@free` and vice-versa. |
@@ -272,6 +290,22 @@ UI interactions belong in page objects, not inline in steps: cross-product ones 
 wp-admin Plugins screen and exposes `goto`, `isInstalled`, `isActive`, `activate`,
 `deactivate`, `delete` (the asserted UI flow), and `ensureAbsent` (idempotent cleanup).
 Methods throw the typed errors from [`wp/errors.ts`](../../src/common/wp/errors.ts) on failure.
+[`SiteHealthPage`](../../src/common/pages/site-health.page.ts) reads Site Health's "Copy site info"
+text, which the auth setup turns into the site's versions — only the fields asked for leave the page
+(`siteInfoFields`), since a trace records what a call returns and a locator's wait logs the element
+with its attributes.
+
+### Typing a secret
+
+Playwright titles a `fill()`, `type()` or `pressSequentially()` step with the text it enters, so the
+value lands in the HTML report, the Allure results and every retained trace — a boxed step hides
+nothing. Type a password, a key or a token with
+[`enterSecret`](../../src/common/pages/secret-field.ts) and check it with `holdsSecret`: the value is
+set and compared in the page, never a step's title, parameter or result, and the field must be visible
+and editable, as for `fill()`. A page object wraps them for its own fields — `StorageSidebar.fillSecret`
+for a storage provider's key. A **scenario's** trace still records the value in its DOM snapshots, and
+a failed scenario's `error-context.md` in its page snapshot: treat both as credentials. Everything that is not
+a secret keeps `fill()`, whose report entry helps.
 
 ### Registering a product's page objects as fixtures
 
@@ -376,7 +410,7 @@ a short one that needs a neighbour.
 5. Document every new function/method with TSDoc; type everything explicitly.
 6. Run the quality gates (typecheck, lint, format, unit tests) — see
    [CLAUDE.md](../../CLAUDE.md#required-workflow-after-every-edit).
-7. Verify against a real cell: `npm run test:<product> -- --project=<cell>`.
+7. Verify against a real cell: `E2E_CELL=<cell> npm run test:<product>`.
 
 ## Banned waits (enforced by lint)
 
@@ -405,10 +439,13 @@ second before the budget runs out"). That is a race, not a check.
 
 ## Unit / integration tests
 
-Files matching `*.spec.ts` anywhere under `src/` are unit tests run by
-`npm run test:unit` (config: [`playwright.unit.config.ts`](../../playwright.unit.config.ts))
-— the shared `common/` layer **and** each product's own specs, so a product page object's
-locator contract is covered by the same command. They run with **no external
+Files matching `*.spec.ts` anywhere under `src/` or `orchestrator/` are unit tests run by
+`npm run test:unit` (config: [`playwright.unit.config.ts`](../../playwright.unit.config.ts), one
+project per folder: `src`, `orchestrator`). That covers the shared `common/` layer, each product's
+own specs — so a product page object's locator contract runs with the same command — and the
+orchestrator's. Select a folder with `--project=orchestrator` (the `=` matters: `--project` takes
+several values and would swallow a file filter after it); a file filter is a regex on the absolute
+path. UI mode ticks only the first project until a choice is saved. They run with **no external
 environment**: the WP-CLI layer is exercised through a stub `wp` on `PATH`, and page
 objects against `page.setContent()` fixtures. They are kept separate from the BDD product
 configs, whose generated specs live in `.features-gen/` (outside `src/`). Add a
@@ -416,3 +453,21 @@ configs, whose generated specs live in `.features-gen/` (outside `src/`). Add a
 one that drops tables, say — can be driven against a fake `$wpdb` with the local `php`
 ([`table-padding.php.spec.ts`](../../src/projects/backwpup/support/table-padding.php.spec.ts));
 such a spec skips where PHP is not installed, as in CI.
+
+Some things can only be measured in a process nothing else has touched: what importing a
+module does to the process, or how a config builds under a given `--project`.
+[`runInChildNode`](../../src/common/__fixtures__/child-node.ts) runs such code in a fresh Node
+under tsx, with only `PATH` and `HOME` and a 15 s limit, and returns the JSON it prints
+(`project.spec.ts`, `products.spec.ts`). [`probeImports`](../../src/common/__fixtures__/import-probe.ts)
+uses the same child: it imports files one after another, from a folder whose `.env` sets a sentinel,
+and reports what each import changed — variables, process listeners, the working directory, the exit
+code — then what changed once the process went idle; it reads that from a file, not stdout, so
+nothing a module prints can forge or garble it. That is
+how a module is proved to leave the process as it was (`products.spec.ts`,
+`orchestrator/import-boundary.spec.ts`). An import boundary is checked with
+[`import-scan.ts`](../../src/common/__fixtures__/import-scan.ts): `importsIn` reads every module a
+file loads from TypeScript's syntax tree — a dynamic `import()` and a `typeof import()` included,
+which ESLint does not see, and a computed path reported as such — `createResolver` resolves it as
+the repository's TypeScript does, and `localClosure` walks everything a module can load. Unit runs
+write their output to `<OUTPUT_ROOT>/_unit`, a folder of their own, so running them never empties a
+cell run's output.

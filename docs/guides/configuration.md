@@ -35,7 +35,11 @@ index, so a malformed file fails fast.
 
 ### Shape
 
-The top-level keys are **cell names** (`apache`, `nginx`, `pro@nginx`, …). A cell
+The top-level keys are **cell names** (`apache`, `nginx`, `pro@nginx`, …). A name
+starts with a lowercase letter or digit and holds only lowercase letters, digits, `@`,
+`.`, `_` and `-`, checked at load. It names folders, so it must be one safe path
+segment. It also names Playwright projects, whose `--project` filter ignores case.
+Names starting with `_` are kept for the suite's own folders (`_all`, `_unit`). A cell
 is either a bare array of sites (editionless) or an object `{ edition?, sites }`:
 
 ```jsonc
@@ -69,7 +73,7 @@ is either a bare array of sites (editionless) or an object `{ edition?, sites }`
 | `username`   | yes      | WordPress admin login.                                             |
 | `password`   | yes      | WordPress admin password.                                          |
 | `transport`  | yes      | How WP-CLI reaches the site (below).                               |
-| `overrides`  | no       | Per-site service-credential overrides, merged over product globals. |
+| `overrides`  | no       | Per-site service-credential overrides. Validated only: not merged or read yet (phase-6 6H). |
 
 The resolved [`SiteConfig`](../../src/common/config/types.ts) adds a computed
 `storageState` path (where the worker's saved login is written).
@@ -155,9 +159,13 @@ maps each edition to the single variant it builds (`pro` → `pro-en`) — see
 ## `.env` ([`.env.example`](../../.env.example))
 
 Copied to `.env` and loaded once by
-[`load-env.ts`](../../src/common/config/load-env.ts), imported first by every
-Playwright config entry. **Real environment variables always win** over `.env`
-(CI secrets are never overwritten). Validation happens only at this boundary,
+[`load-env.ts`](../../src/common/config/load-env.ts), imported first by every product
+Playwright config and script (healthcheck, artifact warm, fixture capture, `report`,
+`report:allure`, `report:prune`) — never by the unit config — from the **working directory**. **Real
+environment variables always win** over `.env`, even blank ones (CI secrets are never
+overwritten). Every key is loaded, unknown ones included; a malformed line is skipped. A
+`.env` that exists but cannot be read (a directory, no permission, a link to a missing
+file) fails the run naming it; a missing one is fine. Validation happens only at this boundary,
 through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 (`env`, `requireEnv`, `intEnv`, `boolEnv`).
 
@@ -165,15 +173,24 @@ through the typed accessors in [`env.ts`](../../src/common/config/env.ts)
 
 | Var           | Default                | Purpose                                                                 |
 | ------------- | ---------------------- | ----------------------------------------------------------------------- |
+| `E2E_LOAD_DOTENV` | `true`              | `false`/`0` **in the environment** skips `.env` entirely, in every process of the run — for a caller that hands the run its whole environment (the orchestrator). Any other value but `true`/`1`/blank fails the run naming it. Set inside `.env` it has no effect (the file is already being read) and a warning says so — once per process that reads the file, so `npm run test:*` (`bddgen`, then the runner) prints it twice. |
 | `REPORT_MODE` | _(unset)_ → self-contained | `rich` → external attachments + embedded trace viewer (serve over http). |
-| `RUN_ID`      | auto-stamped           | Per-run report token; pin to share one token across a batch.            |
+| `RUN_ID`      | auto-stamped           | Per-run report token; pin to share one token across a batch. One folder name: no `/` or `\`, not hidden, no control character, ≤ 255 bytes — else the run fails naming it. |
+| `E2E_RUN_NAME` | _(unset)_ → the `RUN_ID` | **Display only**: the run's name in every report's title line, Cucumber banner and Allure name (`run-facts.json`). Set by the orchestrator; never acted on. |
+| `E2E_REQUESTED_REF` | _(unset)_      | **Display only**: the plugin ref the run was asked for (`develop`), shown in place of the pin a run is built from (`commit:<sha>`, once the orchestrator pins runs) and as "Requested ref". Never acted on. |
 | `CI`          | _(unset)_              | Non-empty enables CI config (retries, `forbidOnly`).                    |
-| `PRODUCT`     | `wp-rocket`            | Default product for the bare `playwright.config.ts`.                    |
-| `REPORT_ROOT` | `reports`              | Report artifact root (accumulates).                                     |
-| `OUTPUT_ROOT` | `test-results`         | Ephemeral Playwright artifact root.                                     |
+| `E2E_CELL`    | _(unset)_ → no pin     | Pins the run — `bddgen`, the runner, its workers — to one cell of the product: the config holds that cell alone, so `bddgen` regenerates only its specs and cells can run side by side. Exact name; blank means unset. A name the product lacks, or a `--project` selecting none of the cell's projects, fails naming the variable. **Pass it per command, never in `.env`**, which would pin every run started from that folder. Ignored by the healthcheck and the artifact warm, which span cells by design. |
+| `PRODUCT`     | `wp-rocket`            | Product for the bare `playwright.config.ts`: a name listed in [`products.ts`](../../src/projects/products.ts) (whitespace ignored). Any other name fails the run. |
+| `REPORT_ROOT` | `reports`              | Report artifact root (accumulates; pruned as each run ends).            |
+| `E2E_REPORTS_KEEP` | `20`              | How many reports a cell keeps: each run prunes its own cell's folder as it ends, beyond the newest this many, and anything older than 30 days but the newest complete report (kept up to 182 days). `0` = no cap (the age rules still apply; nothing turns the pruning off). An integer 0–10000, else the run fails at its start naming it. Also `npm run report:prune`'s default `--keep`. See [execution-model.md](../architecture/execution-model.md#report-retention). |
+| `OUTPUT_ROOT` | `test-results`         | Ephemeral Playwright artifact root: `<product>/<cell>` for a run targeting that cell, `<product>/_all/<cell>` for any other run, `_unit` for unit tests. |
 | `AUTH_ROOT`   | `.auth`                | Ephemeral `storageState` root.                                          |
 | `ARTIFACTS_ROOT` | `.artifacts`        | Resolved plugin-zip root (**wiped & rebuilt each run**; see Plugin artifacts). |
+| `E2E_INTERNAL_STOP_FILE` | _(unset)_ → no drain | **Internal**, set by the orchestrator. An absolute path, no surrounding whitespace, in a folder that exists for the run's lifetime, the file itself not there yet as the run starts; once that file exists, every scenario's first attempt is skipped as `stopped` while the one in flight finishes (the drain — see [execution-model.md](../architecture/execution-model.md#stopping-a-run-the-drain)). Any other value fails the run as it starts. |
 | `E2E_SITE_STAGING_DIR` | `.e2e_temp`   | Where artifacts are staged **on each site** (absolute, or relative to its WordPress root). A site's own `transport.stagingDir` wins over this. |
+
+Each `*_ROOT` is relative to the repository root or absolute — a root on another disk stays where it
+points — and `<product>/<cell>` is always appended to it.
 
 ### Plugin artifacts (build & verify)
 
@@ -199,10 +216,18 @@ Rules (enforced in
   `PREVIOUS` vars) fails fast — they are mutually exclusive and neither wins by default.
 - **Overrides need a cell, named exactly.** On a serial (cell-less) run these are **ignored with
   a warning** and the defaults are used — never a hard failure, so leftover/shared env can't
-  abort a broad run. Apply them with `--project=<cell>` (or `--project=artifacts:<cell>`, to
-  resolve zips without running scenarios). A wildcard or differently-cased `--project` still
-  runs the cell, but counts as a broad selection here and warns instead — spell the cell out.
+  abort a broad run. Apply them to a run of one cell: `E2E_CELL=<cell>`, or
+  `--project=<cell>`. To resolve the zips without running scenarios, select
+  `--project=artifacts:<cell>` alone (with or without the pin). Without a pin, a wildcard or
+  differently-cased `--project` still runs the cell, but counts as a broad selection here and
+  warns instead — spell the cell out.
   No override → defaults.
+- **Pinning a moving ref.** `develop` or `release:latest-stable` can move between two runs. To
+  repeat exactly what a warm cached, give the run the pin `npm run artifacts:warm` prints per
+  request: its ref (`commit:<full sha>` or `release:<tag>`) as `_REF`, and its version, if it prints
+  one, as `_VERSION`. A cached commit pin then resolves with no network; a release pin still asks
+  GitHub which asset that tag is. A run's setup summary shows each role's full `commit`, its zip's
+  `sha256`, and for a release the tag it got (`pin=release:<tag>`).
 - **Values are trimmed**, so a stray space in `.env` or a CI YAML block never becomes part of a
   ref or a path. A blank value means "unset".
 - **Don't keep a `_ZIP` under `ARTIFACTS_ROOT`.** That tree is ephemeral: each cell's directory
@@ -230,7 +255,8 @@ Rules (enforced in
 
 Read by [`backwpup.config.ts`](../../src/projects/backwpup/config/backwpup.config.ts)
 into the product's `services`; ignored by WP Rocket. Any can be overridden per
-site via that site's `overrides` block.
+site via that site's `overrides` block. They come from the environment or `.env` alike;
+with `E2E_LOAD_DOTENV=false`, only from the environment.
 
 | Var                       | Default       |
 | ------------------------- | ------------- |

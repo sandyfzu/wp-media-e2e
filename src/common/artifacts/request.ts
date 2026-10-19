@@ -93,9 +93,9 @@ export interface PlanInput {
   /** The cell's edition, or `undefined` for an editionless product/cell. */
   readonly edition: Edition | undefined;
   /**
-   * Whether this is a serial (cell-less) run — no `--project=<cell>` selected. Serial runs
-   * always use defaults; any applicable override is **warned and ignored**, never fatal
-   * — so the operator sees it had no effect without the run aborting.
+   * Whether this is a serial (cell-less) run — no cell pinned (`E2E_CELL`) or selected
+   * (`--project=<cell>`). Serial runs always use defaults; any applicable override is **warned
+   * and ignored**, never fatal — so the operator sees it had no effect without the run aborting.
    */
   readonly serial: boolean;
   /** The already-read env vars (see {@link readArtifactEnv}). */
@@ -332,7 +332,7 @@ function warnSerialOverridesIgnored(
   if (ignored.length === 0) return;
   warnings.push(
     `[artifacts] ${ignored.join(", ")} ${ignored.length === 1 ? "is" : "are"} ignored on a ` +
-      "serial (cell-less) run — using defaults. Select a cell with --project=<cell> to apply overrides.",
+      "serial (cell-less) run — using defaults. Pin a cell with E2E_CELL=<cell> to apply overrides.",
   );
 }
 

@@ -1,0 +1,39 @@
+{
+  "instance": "AutoE2E nginx",
+  "tasks": [
+    {
+      "id": "bpng",
+      "name": "BackWPup Pro on nginx",
+      "type": "loop",
+      "product": "backwpup",
+      "cell": "pro@nginx",
+      "plugin": { "ref": "develop", "version": "9.99.99" },
+      "cooldownMinutes": 5
+    },
+    {
+      "id": "bfap",
+      "name": "BackWPup Free on Apache, smoke only",
+      "type": "loop",
+      "product": "backwpup",
+      "cell": "free@apache",
+      "grep": "@smoke"
+    }
+  ],
+  "runs": { "retries": 2, "reportsKeep": 20 },
+  "secrets": {
+    "GITHUB_TOKEN": "replace-with-a-token-that-reads-the-plugin-repositories",
+    "BWP_S3_ACCESS_KEY_ID": "replace-me",
+    "BWP_S3_SECRET_ACCESS_KEY": "replace-me"
+  },
+  "notifications": {
+    "slack": {
+      "webhookUrl": "https://hooks.slack.com/services/T00000000/B00000000/replace-me"
+    },
+    "datator": {
+      "url": "https://datator.wp-media.me/e2e_tests/results/",
+      "apiKey": "replace-me"
+    }
+  },
+  "reports": { "sshHost": "auto-e2e" },
+  "serverWarningThreshold": 5
+}

@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -12,15 +13,26 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { resolveArtifacts, writeResolutionFile } from "./resolve";
+import {
+  builtArtifact,
+  resolveArtifacts,
+  writeResolutionFile,
+} from "./resolve";
 import { parseResolution } from "./consume";
-import type { ArtifactRequest, ResolvedArtifact, RoleOutcome } from "./types";
+import type {
+  ArtifactRequest,
+  BuildRequest,
+  ResolvedArtifact,
+  RoleOutcome,
+} from "./types";
+import type { JsBuildOutput } from "apvm-napi";
 
 /**
  * The resolver's **provided-zip** path, which is the half that needs no APVM: validation
  * (suffix, existence, file-ness, and the containment guard), the wipe, the copy into the role
- * dir, and the `resolution.json` round-trip. The APVM build path is thin glue over the native
- * binding and is exercised end-to-end against a real cell instead.
+ * dir, the digest every role gets, and the `resolution.json` round-trip. Of the APVM build path,
+ * the mapping of its output (`builtArtifact`) is tested here; the call itself is thin glue over the
+ * native binding and is exercised end-to-end against a real cell instead.
  */
 
 let tmp: string;
@@ -94,6 +106,19 @@ test.describe("resolveArtifacts — provided zips", () => {
     // Every role carries the cell's expected slug, whatever the zip is called.
     expect(artifact.slug).toBe(SLUG);
     expect(existsSync(artifact.zipPath)).toBe(true);
+  });
+
+  test("records the SHA-256 of the zip it delivered", async () => {
+    const source = sourceZip("wp-rocket-3.17.4.zip");
+    const outcomes = await resolveArtifacts({
+      requests: [zipRequest(source)],
+      artifactsDir: artifactsDir(),
+      slug: SLUG,
+    });
+    // Known bytes, hashed independently: the digest must be the zip's, not anything else's.
+    expect(resolvedOf(outcomes[0]).sha256).toBe(
+      createHash("sha256").update("zip bytes").digest("hex"),
+    );
   });
 
   test("normalises the zip's mode so any user on the site can read it", async () => {
@@ -241,9 +266,146 @@ test("writeResolutionFile round-trips through the consumer's parser", async () =
 
   const path = join(dir, "resolution.json");
   const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+  expect(artifact.sha256).toMatch(/^[0-9a-f]{64}$/);
   // Field-for-field equality, so the slug a worker reads back is the one that was verified.
   expect(parseResolution(raw, path).plugin).toEqual(artifact);
   expect(parseResolution(raw, path).plugin?.slug).toBe(SLUG);
   // The run stamp is what lets a consumer notice a resolution from a previous invocation.
   expect(raw).toHaveProperty("runId");
+});
+
+test.describe("builtArtifact", () => {
+  /** A full SHA, as APVM reports a git build's `commit`. */
+  const SHA = "f1ebfd05c0ffee00112233445566778899aabbcc";
+
+  /** A BackWPup Pro `develop` build request. */
+  const request: BuildRequest = {
+    kind: "build",
+    role: "plugin",
+    source: "default-ref",
+    params: {
+      project: "backwpup",
+      gitRef: "develop",
+      version: "9.99.99",
+      variants: ["pro-en"],
+    },
+  };
+
+  /** APVM's build output for {@link request}; `over` replaces any top-level field. */
+  function output(over: Partial<JsBuildOutput> = {}): JsBuildOutput {
+    return {
+      result: {
+        artifacts: [
+          {
+            variantId: "pro-en",
+            path: "/cell/plugin/backwpup-pro.zip",
+            filename: "backwpup-pro.zip",
+            size: 1,
+            origin: "cache",
+          },
+        ],
+        buildDir: "/tmp/build",
+        version: "9.99.99",
+        variantsBuilt: ["pro-en"],
+        totalSize: 1,
+        artifactCount: 1,
+      },
+      resolvedRef: {
+        input: "develop",
+        source: { type: "branch", value: "develop", description: "" },
+        gitRef: "develop",
+        commitSha: SHA,
+      },
+      commit: SHA,
+      commitShort: SHA.slice(0, 7),
+      branch: "develop",
+      description: "",
+      fromCache: true,
+      ...over,
+    };
+  }
+
+  test("records the full commit, never the short one, and the commit pin", () => {
+    const artifact = builtArtifact(request, output());
+    expect(artifact).toMatchObject({
+      role: "plugin",
+      zipPath: "/cell/plugin/backwpup-pro.zip",
+      zipFilename: "backwpup-pro.zip",
+      source: "default-ref",
+      ref: "develop",
+      commit: SHA,
+      pinRef: `commit:${SHA}`,
+      version: "9.99.99",
+      origin: "cache",
+    });
+  });
+
+  test("still delivers a build it cannot pin, without a pin", () => {
+    // The run tested what it built; refusing it would only hide that. A warm is what must pin.
+    const artifact = builtArtifact(
+      request,
+      output({ commit: "f1ebfd0", commitShort: "f1ebfd0" }),
+    );
+    expect(artifact).not.toHaveProperty("pinRef");
+    expect(artifact).not.toHaveProperty("commit");
+    expect(artifact.zipPath).toBe("/cell/plugin/backwpup-pro.zip");
+  });
+
+  test("records no commit for a release download, which APVM labels release-<tag>", () => {
+    const artifact = builtArtifact(
+      {
+        ...request,
+        params: { project: "backwpup", gitRef: "release:latest-stable" },
+      },
+      output({
+        commit: "release-5.7.6",
+        commitShort: "5.7.6",
+        resolvedRef: {
+          input: "release:latest-stable",
+          source: { type: "release", value: "5.7.6", description: "" },
+          gitRef: "5.7.6",
+        },
+      }),
+    );
+    expect(artifact).not.toHaveProperty("commit");
+    expect(artifact.ref).toBe("release:latest-stable");
+    // The only record of the tag the selector chose: the version comes from the zip's header.
+    expect(artifact.pinRef).toBe("release:5.7.6");
+  });
+
+  test("a built artifact's ref, full commit, pin, version and digest survive resolution.json", async () => {
+    // The provided-zip round trip has no ref, commit or version; this is the writer's other half.
+    const dir = artifactsDir();
+    mkdirSync(dir, { recursive: true });
+    const artifact: ResolvedArtifact = {
+      ...builtArtifact(request, output()),
+      slug: "backwpup-pro",
+      sha256: "b".repeat(64),
+    };
+    await writeResolutionFile(dir, [artifact]);
+
+    const path = join(dir, "resolution.json");
+    const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+    expect(parseResolution(raw, path).plugin).toEqual(artifact);
+    expect(artifact).toMatchObject({
+      ref: "develop",
+      commit: SHA,
+      pinRef: `commit:${SHA}`,
+    });
+  });
+
+  test("refuses an output that is not the one zip the role expects", () => {
+    const base = output();
+    expect(() =>
+      builtArtifact(
+        { ...request, params: { ...request.params, variants: ["free"] } },
+        output({
+          result: {
+            ...base.result,
+            artifacts: [...base.result.artifacts, ...base.result.artifacts],
+          },
+        }),
+      ),
+    ).toThrow(/expected exactly one/);
+  });
 });

@@ -8,16 +8,15 @@ import type { WarmSummary, WarmUnit } from "./src/common/artifacts/warm";
 import { isNonEmptyString } from "./src/common/guards";
 import { isPlaceholderSite } from "./src/common/config/sites";
 import type { ProductConfig } from "./src/common/config/types";
-import { backwpup } from "./src/projects/backwpup/config/backwpup.config";
-import { wpRocket } from "./src/projects/wp-rocket/config/wp-rocket.config";
+import { PRODUCTS } from "./src/projects/products";
 
 /**
  * Pre-warm the APVM cache for the plugin zips a run will need, standalone — a CI
  * pre-step or local prep long before an orchestrator exists,
  * which later imports the same `warmArtifacts` before spawning cells.
  *
- * For every `(product × cell)` with real sites it plans the build requests exactly as a real
- * `--project=<cell>` run would (the parity invariant), deduplicates them, and warms each once so
+ * For every `(product × cell)` with real sites it plans the build requests exactly as a real run of
+ * that one cell would (the parity invariant), deduplicates them, and warms each once so
  * the subsequent per-cell `build()` is a cache copy. `--product`/`--cell` narrow the set; global
  * `E2E_*` overrides apply (they warm what a same-env run would then build). Placeholder-only
  * cells are skipped, so a fresh checkout warms nothing and needs no GitHub token.
@@ -26,8 +25,6 @@ import { wpRocket } from "./src/projects/wp-rocket/config/wp-rocket.config";
  * succeeded, `1` if any plan or warm failed **or** a filter named something that does not exist —
  * a typo must never look like a primed cache.
  */
-
-const PRODUCTS: readonly ProductConfig[] = [wpRocket, backwpup];
 
 const RULE = "─".repeat(72);
 
@@ -41,7 +38,7 @@ function readFlag(name: string): string | undefined {
     if (arg.startsWith(eq)) return normalize(arg.slice(eq.length));
     if (arg === `--${name}`) {
       // Space form (`--name value`): treat a following flag (or end of args) as "no value",
-      // mirroring run-context's `selectedCells`, so `--product --cell=x` never misreads the flag.
+      // mirroring run-context's `--project` parsing, so `--product --cell=x` never misreads the flag.
       const next = args[i + 1];
       return next !== undefined && !next.startsWith("-")
         ? normalize(next)
@@ -150,10 +147,23 @@ function printSummary(summary: WarmSummary): void {
       : "";
     const wantedBy = styleText(["dim"], `(${result.wantedBy.join(", ")})`);
     if (result.ok) {
-      const note = result.fromCache === true ? "already cached" : "warmed";
+      const note =
+        result.build?.fromCache === true ? "already cached" : "warmed";
       console.log(
         `  ${styleText(["green"], "✓")} ${ref}${variant} — ${note} ${wantedBy}`,
       );
+      // What a run is given to repeat exactly this build, even after `develop` moves: the pin's
+      // ref as its `_REF`, and its version, when there is one, as its `_VERSION`.
+      if (result.build !== undefined) {
+        const { pin } = result.build;
+        const version =
+          pin.version !== undefined
+            ? `, version ${pin.version}`
+            : " (no version: a release's is its tag)";
+        console.log(
+          `      ${styleText(["dim"], `pin: ref ${pin.ref}${version}`)}`,
+        );
+      }
     } else {
       console.log(
         `  ${styleText(["red", "bold"], "✗")} ${styleText(["bold"], `${ref}${variant}`)} ${wantedBy}`,

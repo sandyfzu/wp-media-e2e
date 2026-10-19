@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { loadSites } from "./sites";
+import { describeValue, loadSites } from "./sites";
 import type { SshTransport } from "./types";
 
 /**
@@ -54,6 +54,59 @@ test.beforeEach(() => {
 
 test.afterEach(() => {
   rmSync(configDir, { recursive: true, force: true });
+});
+
+test.describe("a refused value is described, never quoted — the file holds credentials", () => {
+  const PASSWORD = "S3cr3t-Pass word";
+
+  test("describeValue: a text by its length, anything else by its kind", () => {
+    expect(describeValue(PASSWORD)).toBe("a text of 16 characters");
+    expect(describeValue("naïve")).toBe("a text of 5 characters");
+    expect(describeValue(null)).toBe("null");
+    expect(describeValue(7)).toBe("a number");
+    expect(describeValue(false)).toBe("false");
+    expect(describeValue([])).toBe("a list");
+    expect(describeValue({})).toBe("an object");
+  });
+
+  test("a mode, an edition or a fileOwner holding a password is refused without it", () => {
+    const messages: string[] = [];
+    const failure = (load: () => unknown): string => {
+      try {
+        load();
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+      throw new Error("the load should fail");
+    };
+    messages.push(failure(() => loadTransport({ ...SSH, mode: PASSWORD })));
+    messages.push(
+      failure(() => loadTransport({ ...SSH, fileOwner: PASSWORD })),
+    );
+    messages.push(failure(() => loadTransport({ ...SSH, fileOwner: ["x"] })));
+    writeFileSync(
+      join(configDir, "sites.json"),
+      JSON.stringify({
+        nginx: {
+          edition: PASSWORD,
+          sites: [
+            {
+              baseURL: "https://a.test",
+              username: "u",
+              password: "p",
+              transport: SSH,
+            },
+          ],
+        },
+      }),
+    );
+    messages.push(failure(() => loadSites(configDir)));
+    for (const message of messages) {
+      expect(message).toContain("[sites]");
+      expect(message).not.toContain("S3cr3t");
+    }
+    expect(messages[0]).toContain("(got a text of 16 characters)");
+  });
 });
 
 test.describe("transport parsing — the elevation opt-out", () => {
@@ -160,5 +213,69 @@ test.describe("transport parsing — the file-ownership override", () => {
     expect(transport.stagingDir).toBe("/srv/e2e-staging");
     expect(transport.elevate).toBe(false);
     expect(transport.fileOwner).toBe("sftp_backwpup:www-data");
+  });
+});
+
+test.describe("cell names — they name folders and Playwright projects", () => {
+  const SITE = {
+    baseURL: "https://site.example.test",
+    username: "admin",
+    password: "pw",
+    transport: SSH,
+  };
+
+  /** Writes `file` with one single-site cell per name and returns the cells the folder loads as. */
+  function loadCells(names: readonly string[], file = "sites.json"): string[] {
+    writeFileSync(
+      join(configDir, file),
+      JSON.stringify(Object.fromEntries(names.map((name) => [name, [SITE]]))),
+    );
+    return Object.keys(loadSites(configDir));
+  }
+
+  test("accepts every cell name in use, and others of the same shape", () => {
+    const names = [
+      "apache",
+      "nginx",
+      "free@nginx",
+      "pro@nginx",
+      "free@apache",
+      "pro@apache",
+      "php8.3@nginx",
+      "a_b-c",
+      "0day",
+    ];
+    expect(loadCells(names)).toEqual(names);
+  });
+
+  test("refuses a name that is not one lowercase path segment, or that starts with _", () => {
+    for (const bad of [
+      "_all", // the folder of runs that target no cell
+      "_unit", // the unit tests' folder
+      "Pro@nginx", // `--project` ignores case: it would select pro@nginx too
+      "pro@NGINX",
+      "../escape",
+      "a/b",
+      "a\\b",
+      "",
+      " nginx",
+      "nginx ",
+      ".hidden",
+      "-flag",
+      "@nginx",
+      "setup:nginx", // reads as one of a cell's own projects
+      "pro*", // a `--project` wildcard
+      "naïve",
+    ]) {
+      expect(() => loadCells([bad]), JSON.stringify(bad)).toThrow(
+        `cell name ${JSON.stringify(bad)} must start with a lowercase letter or digit`,
+      );
+    }
+  });
+
+  test("names the file holding the bad name, overlays included", () => {
+    expect(() => loadCells(["Nginx"], "sites.local.json")).toThrow(
+      `[sites] ${join(configDir, "sites.local.json")}: cell name "Nginx"`,
+    );
   });
 });

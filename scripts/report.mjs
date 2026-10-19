@@ -1,26 +1,33 @@
-#!/usr/bin/env node
 // Open the Playwright HTML report from a product/cell's most recent run.
 //
-//   node scripts/report.mjs [product] [cell]
+//   npx tsx scripts/report.mjs [product] [cell]
 //
 // Reports are written per run to `reports/<product>/<cell>/<RUN_ID>/playwright` (never to the
 // default `playwright-report/`), so a bare `playwright show-report` would open the wrong (or a
 // stale) directory. This resolves the newest run — optionally filtered to one product/cell —
-// and serves it. Respects REPORT_ROOT (same as the test config) so it finds custom report roots.
+// and serves it. Respects REPORT_ROOT (same as the test config) so it finds custom report roots,
+// `.env`'s included: it loads `.env` as a run does, which is why it runs under tsx.
+import "../src/common/config/load-env";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const argv = process.argv.slice(2);
 const [product, cell] = argv.filter((arg) => !arg.startsWith("--"));
 
-const reportRoot = process.env.REPORT_ROOT || "reports";
+/** The checkout's root: a run resolves REPORT_ROOT against it, wherever it starts — so does this. */
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const reportRoot = resolve(repoRoot, process.env.REPORT_ROOT || "reports");
 
-/** Immediate subdirectory names of `dir` (empty when `dir` is absent). */
+/**
+ * Immediate subdirectory names of `dir` (empty when `dir` is absent). Hidden ones are left out: the
+ * report pruning renames a run it is removing to a hidden name first.
+ */
 function subdirs(dir) {
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
     .map((entry) => entry.name);
 }
 
@@ -50,7 +57,7 @@ if (runs.length === 0) {
   const scope = [product, cell].filter(Boolean).join("/");
   console.error(
     `No Playwright HTML report found under "${reportRoot}/"${scope ? ` for ${scope}` : ""}. ` +
-      "Run a suite first, e.g. `npm run test:wp-rocket -- --project=apache`.",
+      "Run a suite first, e.g. `E2E_CELL=apache npm run test:wp-rocket`.",
   );
   process.exit(1);
 }
@@ -62,7 +69,7 @@ const target = runs[0];
 console.log(`→ Playwright report for ${target.product}/${target.cell}`);
 console.log(`  ${target.htmlDir}`);
 
-const playwrightBin = resolve("node_modules", ".bin", "playwright");
+const playwrightBin = resolve(repoRoot, "node_modules", ".bin", "playwright");
 const shown = spawnSync(playwrightBin, ["show-report", target.htmlDir], {
   stdio: "inherit",
 });

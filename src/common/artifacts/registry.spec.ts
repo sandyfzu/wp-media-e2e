@@ -51,7 +51,7 @@ test("keys are namespaced by product and cell", () => {
 
 test("get throws an actionable error when nothing was registered", () => {
   expect(() => getArtifacts("wp-rocket", "nginx")).toThrow(
-    /no resolved artifacts registered for "wp-rocket\/nginx".*--project=<cell>/s,
+    /no resolved artifacts registered for "wp-rocket\/nginx".*E2E_CELL=<cell>/s,
   );
 });
 

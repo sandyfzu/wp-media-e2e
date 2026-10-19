@@ -100,7 +100,7 @@ export function getArtifacts(product: string, cell: string): CellArtifacts {
   if (artifacts === undefined) {
     throw new Error(
       `[artifacts] no resolved artifacts registered for "${product}/${cell}" in this process. ` +
-        "The artifacts setup project must run before they are read (run via --project=<cell>, not --no-deps).",
+        "The artifacts setup project must run before they are read (run with E2E_CELL=<cell>, not --no-deps).",
     );
   }
   return artifacts;

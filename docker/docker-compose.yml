@@ -1,4 +1,4 @@
-# Local WordPress environment for the `docker` transport (plan §7.1).
+# Local WordPress environment for the `docker` transport.
 #
 # Two INDEPENDENT installs over ONE MariaDB: Apache on :8100 and Nginx (php-fpm) on :8101.
 # Each install has its own files volume + database + a kept-alive `wp-cli` container that the

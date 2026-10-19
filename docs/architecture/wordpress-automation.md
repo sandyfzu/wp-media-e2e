@@ -120,10 +120,9 @@ per-mode dispatch and the same cached SSH connection:
   target, overwriting: `node:fs` copy (`local`), `docker cp` (`docker`, a top-level
   sub-command — see `dockerCpArgv`), SFTP `putFile` (`ssh`). It does **not** create
   the parent directory; the staging layer below does that first.
-- `isSymlink(transport, absolutePath)` — one unprivileged `test -L`. A missing path answers `false`,
-  which is the right answer for one about to be created; a transport that could not be asked throws,
-  so "could not check" is never read as "not a link". Used by the two callers that are about to
-  `chmod` as root — see [Symlinks](#symlinks).
+- `assertResolvedInsideRoot` (`paths.ts`) — resolves a target and the root (`readlink -f`, walking up
+  to the deepest existing ancestor) and refuses anything that lands outside, or cannot be resolved.
+  Called before every root `chmod`/`mkdir`/`rm` — see [Symlinks](#symlinks).
 
 ## Playwright ≥ 1.62 is a floor, not a preference
 
@@ -368,15 +367,23 @@ itself per scenario (measured on the QA cell before this existed: **6.8 GB acros
   WordPress root — and the shared `@plugin` teardown clears them after every tagged scenario. The
   hooks read the list from the per-process registry, so they never import product code.
 - `removeSiteResidue(transport, paths)` validates every path **before** removing any (so a typo
-  cannot leave the site half-cleaned), then removes each and **confirms it is gone** rather than
-  trusting `rm -rf`'s exit code. Every path is attempted even if an earlier one fails, and the
-  error names all the survivors.
+  cannot leave the site half-cleaned), then removes them and **confirms they are gone** rather than
+  trusting `rm -rf`'s exit code. Every path is attempted even if another fails, and the error names
+  all the survivors.
 - It runs in **two passes**: everything as the transport's own user, then whatever survived
   [with privileges](#elevated-housekeeping). That order is the point — a host whose permissions are
   already right never runs a privileged command, while a host where the web-server user owns the
   data still ends up clean. Before a privileged `rm -rf`, the site's `rootDir` must itself be
   plausible (absolute, not a top-level directory, and the target must resolve inside it): the
   relative half is already constrained by `normaliseResiduePath`, and this is the half it cannot see.
+- **Its cost does not grow with what it finds.** Every command is a round-trip (~0.8 s over SSH,
+  measured), and removing leftovers one at a time — ~6 commands each — once took the `@plugin`
+  teardown past its 120 s budget on a site holding 28. So the root is resolved once
+  (`assertAllResolvedInsideRoot`), a family is checked once through its parent (its members are
+  directories the parent's listing found, never links, so they lie inside the root exactly when the
+  parent does), and each pass removes everything in one `rm -rf` (chunked at 200 paths) and re-reads
+  it in one listing per family plus a `test -e` per declared path. A re-listing that fails while the
+  parent is still there counts every member as a survivor: "could not look" never reads as "gone".
 - `normaliseResiduePath` rejects anything that is not a path below the root — absolute, escaping,
   naming a directory WordPress itself owns (`wp-content/uploads` and friends) or lying inside core's
   `wp-admin`/`wp-includes`. It guards against a typo in a config file, not against a hostile one.
@@ -640,7 +647,8 @@ serves several sites and they need not agree — measured on the apache cell,
 > unelevated, on a file the scenario's own run wrote, and goes with the plugin's residue.
 
 **Linux only, deliberately.** `stat -c` and `id` are read in their GNU form; BusyBox (what the
-`wordpress:cli` container provides) implements both compatibly. Both reads are confined to one
+`wordpress:cli` container provides) implements both but differs on unmapped ids: `stat -c %U` prints
+`UNKNOWN` and `id` prints bare ids; `ownership.ts` handles both. Both reads are confined to one
 function each, so a future BSD branch stays local.
 
 ## Path guards ([`wp/paths.ts`](../../src/common/wp/paths.ts))

@@ -34,12 +34,14 @@ WP Rocket has `previous` from day one; BackWPup deliberately does not yet (see
 | `types.ts`           | The whole domain's types (roles, manifest, requests, resolution). Types only.      |
 | `manifest.ts`        | Pure accessors over a product's manifest (roles, default ref, edition → variant).  |
 | `request.ts`         | Reads the six `E2E_*` vars; **pure** `buildArtifactPlan` → one request per role.   |
-| `apvm.ts`            | Lazy `Apvm` singleton, token diagnostics, progress → console, secret redaction.    |
-| `resolve.ts`         | Wipe → build/copy per role → `resolution.json`.                                    |
+| `apvm.ts`            | Lazy `Apvm` singleton, token diagnostics, progress → console, masked (`redactSecrets`, `text.ts`). |
+| `resolve.ts`         | Wipe → build/copy per role → hash → `resolution.json`.                             |
+| `digest.ts`          | A zip's SHA-256 (`sha256File`, streamed) and its format check (`isSha256`).        |
+| `pin.ts`             | **Pure**: the full commit (`fullCommit`) and the pin that rebuilds a build (`pinOf`, `requirePin`). |
 | `verify.ts`          | Static identity preflight (`adm-zip`) + aggregated report formatting.               |
 | `consume.ts`         | Reads a role back for a test (memo → `resolution.json`), with the role guards.     |
 | `registry.ts`        | Per-process manifest + resolution registries (the `metadata.ts` idiom).            |
-| `warm.ts`            | Pre-warm: dedupe requests, prime APVM's cache serially.                            |
+| `warm.ts`            | Pre-warm: dedupe requests, prime APVM's cache serially, return each pinned build.  |
 | `artifacts.setup.ts` | The `artifacts:<cell>` setup project — thin orchestration of the above.             |
 
 ## The product manifest
@@ -113,15 +115,16 @@ An override describes *one* run unit. A serial sweep of every cell has no single
 unit to apply it to, so overrides are dropped (with a warning naming them) and
 defaults are used. The predicate is
 [`isCellTargeted(cell, projectName)`](../../src/common/config/run-context.ts),
-which is true for `--project=<cell>` and for `--project=artifacts:<cell>` (the
-way to resolve a cell's zips without running its scenarios).
+which is true for a run pinned to the cell (`E2E_CELL=<cell>`), for `--project=<cell>` and for
+`--project=artifacts:<cell>` (the way to resolve a cell's zips without running its scenarios).
 
 The setup runs in a Playwright **worker**, which is forked without the CLI argv —
 so this answer must ride the environment, not `process.argv`. See
 [execution-model.md](execution-model.md#reading-the-selection-from-a-worker); the
-matching cell name is compared **exactly**, so `--project='pro*'` runs the cell
-but reads here as a broad selection (it warns rather than applying one operator's
-override to cells they never named).
+matching cell name is compared **exactly**, so an unpinned `--project='pro*'` runs the
+cell but reads here as a broad selection (it warns rather than applying one operator's
+override to cells they never named). A pinned run holds one cell whatever `--project`
+adds, so it is always targeted.
 
 ## Resolution: wipe → resolve → verify → publish
 
@@ -132,8 +135,22 @@ override to cells they never named).
 └── resolution.json                  ← this execution's role → artifact map
 ```
 
-- The root is overridable with `ARTIFACTS_ROOT`; `<product>/<cell>` is always
-  appended, so concurrent cells never share a directory.
+- **Every resolved zip is hashed** (SHA-256, after the `chmod`) — built and provided alike, since
+  it is the one funnel both share. The digest names the artifact; a commit only names its source,
+  and two builds of one commit are different files (a build regenerates `languages/*.pot` and
+  stamps every entry's mtime). The copy in the role dir is what is hashed — the bytes this run
+  installs, as long as nothing re-resolves the cell during the run (a cell takes one run at a time:
+  the digest is taken once, at resolution, and not re-checked at each install).
+- **A build records its full commit** (40 hex), never APVM's `commitShort`, and its `pinRef` — the
+  ref that rebuilds exactly it (see [Pinning](#pre-warming)). A release download has no commit
+  (APVM reports `release-<tag>` in that field); its `pinRef` (`release:5.7.7`) is the only record
+  of the tag a `release:latest-stable` chose. The summary line shows `pin=` only for a release — a
+  commit pin repeats the commit.
+- The root is overridable with `ARTIFACTS_ROOT` — relative to the repository or absolute,
+  resolved by `cellArtifactsDir` (`consume.ts`) for the setup and the readers alike;
+  `<product>/<cell>` is always appended, so two cells never share a directory. Two runs
+  resolving one cell's zips do (a run of the cell, or `--project=artifacts:<cell>` alone): the
+  second wipes the first's zips, so a cell takes one such run at a time.
 - **Every resolved zip is normalised to mode `0644`.** A build lands `0600`, and getting it
   onto a site copies it verbatim: `docker cp` preserves the host mode _and_ numeric owner
   (meaningless inside a container), so WP-CLI there cannot open the archive and
@@ -185,7 +202,7 @@ Per resolved artifact, via `adm-zip` (read-only — central directory plus one e
    top-level directory, not the expected slug, so a wrong-edition zip still
    reports its header — two independent witnesses instead of one.
 4. Informational, reported but not asserted: header `Version:`, zip filename,
-   source, resolved commit, origin. The header's `Version:` also **becomes the
+   source, full commit, SHA-256, origin. The header's `Version:` also **becomes the
    artifact's `version`** — it is what WordPress installs and reports, and for a
    provided zip it is the only version there is (none is recorded when one is
    copied in, and a `_VERSION` override is ignored beside it). The build's own
@@ -235,7 +252,9 @@ await installPlugin(site.transport, pluginArtifact("plugin").zipPath, { activate
 
 The `pluginArtifact` fixture returns the role's
 [`ResolvedArtifact`](../../src/common/artifacts/types.ts)
-(`{ slug, zipPath, zipFilename, source, ref?, commit?, version?, origin, resolvedAt }`).
+(`{ slug, zipPath, zipFilename, source, ref?, commit?, pinRef?, version?, sha256?, origin, resolvedAt }`).
+The resolver always sets `sha256`; the parser rejects a malformed one and tolerates its absence,
+since a `resolution.json` written before it existed can still be read by a `--no-deps` run.
 
 **`slug`** is the WordPress plugin directory the artifact installs as
 (`backwpup` vs `backwpup-pro`), so a test or hook can address the plugin —
@@ -253,7 +272,7 @@ failure modes visible:
 - Requesting a role the product does not declare **throws before any file read** —
   a comparison test can never consume a role that was never resolved or verified.
 - A missing `resolution.json` throws with the fix (the setup did not run for this
-  cell — run via `--project=<cell>`, not `--no-deps`).
+  cell — run it with `E2E_CELL=<cell>`, not `--no-deps`).
 - A resolution written by a **different** `runId` warns once per cell. It stays
   non-fatal on purpose (it keeps the fast `--no-deps` edit-run loop working) but
   never silent, since the zips may be older than the refs you expect.
@@ -280,7 +299,7 @@ npm run artifacts:warm -- --product=backwpup --cell=pro@nginx   # one unit
 ```
 
 [`warmArtifacts`](../../src/common/artifacts/warm.ts) plans every unit through
-`buildArtifactPlan` with `serial: false` (the mode a real `--project=<cell>` run
+`buildArtifactPlan` with `serial: false` (the mode a real run of one cell
 plans in, so overrides apply identically), **skips** provided-zip roles (nothing
 to build), **dedupes** by the `{project, gitRef, version, variants}` tuple, then
 warms each distinct request serially. Failures are collected per request, never
@@ -291,6 +310,28 @@ values exit `1` rather than reporting a cache that was never primed.
 warmed entry is never hit. That is why there is exactly one planner. A keyword ref
 (`tag:latest-stable`) is re-resolved at both warm and run time, so a release cut
 in between means the run builds fresh — correct, just slower for that run.
+
+**Pinning.** A moving ref (`develop`, `release:latest-stable`) can change between a warm and the
+run it was for. So each successful warm returns a `WarmedBuild` (on `WarmResult.build`) — whether it
+was cached, the full commit, the version, the cached zips, the resolved ref — and its `pin`
+([`pin.ts`](../../src/common/artifacts/pin.ts)), which an orchestrator hands the run as
+`E2E_<ROLE>_REF=<pin.ref>` and, when set, `E2E_<ROLE>_VERSION=<pin.version>`:
+
+| Build | `pin.ref` | `pin.version` | The pinned run, measured with all network denied |
+| --- | --- | --- | --- |
+| Git (branch, PR, tag, commit) | `commit:<sha>` | the version built | served from the cache; APVM's commit check against GitHub fails and is tolerated |
+| Release download | `release:<tag>` | — (its tag's) | **needs network**: APVM fetches the release from GitHub's API, then copies the cached asset |
+
+- A release is checked first: pinning it to a commit would build the source, not the released zip.
+- The version is the one **built**, never "the one requested": APVM's cache is keyed by commit and
+  version, and an embedded-version product (WP Rocket) given none fetches its version file from
+  GitHub before the cache — and clones when it cannot. Given its built version, the version
+  matches its source, so nothing is rewritten — unless the warm itself overrode the version
+  (`E2E_PLUGIN_VERSION`), when a cold rebuild from the pin rewrites it again, to the same value.
+- A build that cannot be pinned — no full SHA, or a release still named by a selector (APVM matches
+  those ignoring case) — is a **failed** warm, as is one whose zips are not in the cache: APVM
+  stores a build best-effort, and a cache it could not write leaves only gone temporary paths.
+  So no run is left on a ref that moves. `artifacts:warm` prints each pin.
 
 ## Deferred obligations
 
@@ -306,7 +347,9 @@ in between means the run builds fresh — correct, just slower for that run.
   own verification. The obligation is mirrored as a comment on that manifest, and
   until it lands the fixture hard-errors.
 - **Imagify** — add a manifest (and verify its identity row from its build
-  definition) when the product is wired; everything else is data-driven.
+  definition) when the product is wired
+  ([Adding a product](../guides/authoring-tests.md#adding-a-product)); the rest of
+  the artifact flow is data-driven.
 - **Version-aware tests** — `resolution.json` already exposes the verified
   version (the zip's own header, see the preflight above) and the commit per role,
   for migration or version-gated-notice assertions. BackWPup's CLI feature already

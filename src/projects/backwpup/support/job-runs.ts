@@ -229,11 +229,12 @@ export interface StopBudgets {
 }
 
 /**
- * The budgets the shared teardown runs with.
+ * The budgets the shared `@plugin` hooks run with, before an install and after a scenario.
  *
- * Small, because the teardown hook has one fixed budget for all its duties: an abort takes effect
- * within about a second and the run records its end moments later (measured on both nginx cells),
- * so thirty seconds each is room for a slow host while leaving the removal and sweeps theirs.
+ * Small, because each hook has one fixed budget for all its duties, and the whole stop must settle
+ * within the hooks' allowance for it (`LEFT_WORK_ALLOWANCE_MS`; the spec holds these to it): an abort
+ * takes effect within about a second and the run records its end moments later (measured on both
+ * nginx cells), so thirty seconds each is room for a slow host.
  */
 export const STOP_BUDGETS: StopBudgets = {
   stopMs: 30_000,
@@ -242,11 +243,14 @@ export const STOP_BUDGETS: StopBudgets = {
   resendMs: 5_000,
 };
 
-/** What the site was still doing, in words; `undefined` when it was idle. */
+/**
+ * What the site was still doing, in words; `undefined` when it was idle. Says nothing of when, since
+ * the shared hooks ask both before a scenario and after one, and prefix which.
+ */
 function workInFlight(state: RunState): string | undefined {
   if (state.running !== undefined) {
     const job = state.running.jobId;
-    return `a backup of ${job === undefined ? "a job whose marker could not be read" : `job ${String(job)}`} was still running when the scenario ended`;
+    return `a backup of ${job === undefined ? "a job whose marker could not be read" : `job ${String(job)}`} was still running`;
   }
   const unfinished = unfinishedRuns(state);
   if (unfinished.length === 0) return undefined;
@@ -255,12 +259,12 @@ function workInFlight(state: RunState): string | undefined {
       ? "a job the history does not name"
       : `job ${String(job)}`,
   );
-  return `a run of ${jobs.join(", ")} was still recording its end when the scenario ended`;
+  return `a run of ${jobs.join(", ")} was still recording its end`;
 }
 
 /**
  * Reads the run state, absorbing up to {@link PROBE_FAILURE_TOLERANCE} failures in a row with a pause
- * between tries: the teardown polls a site that may be busy writing an archive, where one lost round
+ * between tries: the hooks poll a site that may be busy writing an archive, where one lost round
  * trip is noise rather than an answer.
  */
 async function readSteadily(
@@ -309,8 +313,8 @@ function stillRunning(
 
 /**
  * Stops any backup job still running on a site, and waits for its run to record how it ended —
- * BackWPup's `ProductConfig.stopRunningWork`, which the shared teardown calls before it removes the
- * plugin.
+ * BackWPup's `ProductConfig.stopRunningWork`, which the shared `@plugin` hooks call before each
+ * removal of the plugin: the teardown's, and the install's, which finds what a killed run left.
  *
  * A job runs in a web request, so it outlives the scenario that started it; uninstalling the plugin
  * underneath it lets that request re-create the options and table the uninstall has just removed,
@@ -325,7 +329,7 @@ function stillRunning(
  * taken as the answer.
  *
  * @param transport - the site to settle.
- * @param budgets - how long each part may take; the teardown's own by default.
+ * @param budgets - how long each part may take; the hooks' own by default.
  * @returns what it found and did, or `undefined` when there was nothing to stop.
  * @throws {@link Error} if a job was still running once the stop budget was spent, or if the site
  * could not be asked {@link PROBE_FAILURE_TOLERANCE} times in a row.

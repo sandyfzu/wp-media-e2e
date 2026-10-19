@@ -20,11 +20,13 @@ import {
   assertToken,
   createBuildReporter,
   getApvm,
-  redactSecrets,
+  redactBuildText,
+  toArtifactOrigin,
 } from "./apvm";
+import { sha256File } from "./digest";
+import { fullCommit, pinOf } from "./pin";
 import { ARTIFACT_ENV_VARS } from "./request";
 import type {
-  ArtifactOrigin,
   ArtifactRequest,
   ArtifactRole,
   BuildRequest,
@@ -32,13 +34,17 @@ import type {
   RoleOutcome,
   ZipRequest,
 } from "./types";
-import type { BuildOptions, JsProducedArtifact } from "apvm-napi";
+import type {
+  BuildOptions,
+  JsBuildOutput,
+  JsProducedArtifact,
+} from "apvm-napi";
 
 /** Inputs to {@link resolveArtifacts}. */
 export interface ResolveParams {
   /** The per-role requests from the pure planner (`buildArtifactPlan`). */
   readonly requests: readonly ArtifactRequest[];
-  /** Absolute path to the cell's artifacts dir (`REPO_ROOT` + `dirs().artifacts`); wiped here. */
+  /** Absolute path to the cell's artifacts dir (`cellArtifactsDir`); wiped here. */
   readonly artifactsDir: string;
   /**
    * The WordPress plugin slug every role of this cell must carry — the expected identity's slug
@@ -105,10 +111,10 @@ export async function resolveArtifacts(
 
 /**
  * What producing a role yields on its own: everything about the delivered zip except the cell's
- * expected {@link ResolvedArtifact.slug}, which {@link resolveRole} stamps on. Keeping the two
- * apart means neither producer has to know about identity.
+ * expected {@link ResolvedArtifact.slug} and the zip's digest, which {@link resolveRole} adds — the
+ * slug so neither producer has to know about identity, the digest so both are hashed in one place.
  */
-type ProducedArtifact = Omit<ResolvedArtifact, "slug">;
+export type ProducedArtifact = Omit<ResolvedArtifact, "slug" | "sha256">;
 
 /**
  * Mode every resolved zip is normalised to: readable by anyone, writable only by its owner.
@@ -141,12 +147,13 @@ async function resolveRole(
         ? await resolveZipRequest(request, roleDir, zipSource)
         : await resolveBuildRequest(request, roleDir);
     // One funnel for both producers, so a built zip and an operator-provided one are equally
-    // installable on every transport.
+    // installable on every transport — and equally identified by the bytes this run will install.
     await chmod(produced.zipPath, ARTIFACT_MODE);
+    const sha256 = await sha256File(produced.zipPath);
     return {
       role: request.role,
       kind: "resolved",
-      artifact: { ...produced, slug },
+      artifact: { ...produced, slug, sha256 },
     };
   } catch (error) {
     const hint = error instanceof ResolveError ? error.hint : undefined;
@@ -156,7 +163,7 @@ async function resolveRole(
       // Redact at the funnel too (idempotent): the APVM call sites already scrub their own
       // rejections, but anything else thrown in here — an `Apvm` that failed to initialise,
       // future code — reaches the aggregated report through this one path.
-      error: redactSecrets(errorMessage(error)),
+      error: redactBuildText(errorMessage(error)),
       ...(hint !== undefined ? { hint } : {}),
     };
   }
@@ -313,7 +320,33 @@ async function resolveBuildRequest(
       );
     });
 
+  return builtArtifact(request, output);
+}
+
+/**
+ * Describes the zip a build delivered for `request`, from APVM's output.
+ *
+ * Records the **full** commit, never `commitShort`: a short SHA can turn ambiguous. A release download
+ * has none — APVM reports `release-<tag>` there. Either way it records the pinned ref, the only
+ * record of the tag a `release:latest-stable` chose; a build that cannot be pinned is still
+ * delivered — this run tested what it built — just without one.
+ *
+ * @param request - the role's build request.
+ * @param output - what `apvm.build` resolved with.
+ * @throws {@link ResolveError} when the output is not the one zip the role expects.
+ */
+export function builtArtifact(
+  request: BuildRequest,
+  output: JsBuildOutput,
+): ProducedArtifact {
+  const { params } = request;
   const artifact = pickArtifact(output.result.artifacts, params.variants?.[0]);
+  const commit = fullCommit(output.commit);
+  const pin = pinOf({
+    commit: output.commit,
+    source: output.resolvedRef.source,
+    version: output.result.version,
+  });
   return {
     role: request.role,
     zipPath: artifact.path,
@@ -321,9 +354,10 @@ async function resolveBuildRequest(
       artifact.filename !== "" ? artifact.filename : basename(artifact.path),
     source: request.source,
     ref: params.gitRef,
-    commit: output.commitShort,
+    ...(commit !== undefined ? { commit } : {}),
+    ...("ref" in pin ? { pinRef: pin.ref } : {}),
     version: output.result.version,
-    origin: toOrigin(artifact.origin),
+    origin: toArtifactOrigin(artifact.origin),
     resolvedAt: new Date().toISOString(),
   };
 }
@@ -349,13 +383,6 @@ function pickArtifact(
     `APVM produced ${String(artifacts.length)} artifact(s); expected exactly one for this role` +
       `${variant !== undefined ? ` (variant "${variant}")` : ""}.`,
   );
-}
-
-/** Narrows APVM's artifact `origin` string to our {@link ArtifactOrigin}, defaulting defensively. */
-function toOrigin(origin: string): ArtifactOrigin {
-  return origin === "built" || origin === "cache" || origin === "downloaded"
-    ? origin
-    : "built";
 }
 
 // ── Persistence (the cross-process channel to worker fixtures) ───────────────────
@@ -386,7 +413,9 @@ export async function writeResolutionFile(
           source: a.source,
           ...(a.ref !== undefined ? { ref: a.ref } : {}),
           ...(a.commit !== undefined ? { commit: a.commit } : {}),
+          ...(a.pinRef !== undefined ? { pinRef: a.pinRef } : {}),
           ...(a.version !== undefined ? { version: a.version } : {}),
+          ...(a.sha256 !== undefined ? { sha256: a.sha256 } : {}),
           origin: a.origin,
           resolvedAt: a.resolvedAt,
         },

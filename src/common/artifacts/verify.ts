@@ -14,6 +14,7 @@ import { styleText } from "node:util";
 import AdmZip from "adm-zip";
 
 import { errorMessage } from "../guards";
+import { escapeRegExp } from "../text";
 import type { CheckResult } from "../setup/preflight";
 import type { Edition } from "../config/types";
 import { resolveIdentity } from "./manifest";
@@ -35,7 +36,7 @@ export interface RoleReport {
   readonly checks: readonly CheckResult[];
   /** The resolved artifact, when resolution succeeded; absent for a failed resolution. */
   readonly artifact?: ResolvedArtifact;
-  /** Informational (reported, never asserted): version, source, origin, ref, commit. */
+  /** Informational (reported, never asserted): version, source, origin, ref, commit, pin, sha256. */
   readonly info: Readonly<Record<string, string>>;
 }
 
@@ -44,6 +45,11 @@ export interface ArtifactReport {
   readonly roles: readonly RoleReport[];
   /** True iff every role resolved and passed every identity check. */
   readonly ok: boolean;
+  /**
+   * The `Plugin Name:` the cell's edition expects (`BackWPup Pro`) — the name a passing role's zip
+   * was proven to carry, which the reports print beside its version.
+   */
+  readonly pluginName: string;
   /** The successfully-resolved artifacts, for persistence (`resolution.json`) and the registry. */
   readonly resolved: readonly ResolvedArtifact[];
   /** The same artifacts keyed by role, for the in-process registry. */
@@ -103,7 +109,13 @@ export function verifyResolved(
   }
 
   const ok = roles.every(roleOk);
-  return { roles, ok, resolved, artifacts: toCellArtifacts(resolved) };
+  return {
+    roles,
+    ok,
+    pluginName: expected.pluginName,
+    resolved,
+    artifacts: toCellArtifacts(resolved),
+  };
 }
 
 // ── Single-artifact identity checks ───────────────────────────────────────────
@@ -299,11 +311,6 @@ function cleanHeaderValue(raw: string): string {
   return raw.replace(/\s*(?:\*\/|\?>).*/, "").trim();
 }
 
-/** Escapes a literal string for safe interpolation into a `RegExp` source. */
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 // ── Report formatting (failure report, success summary, JSON attachment) ────────
 
 /** Whether every check of a role passed. */
@@ -335,7 +342,13 @@ function infoFor(artifact: ResolvedArtifact): Record<string, string> {
     origin: artifact.origin,
     ...(artifact.ref !== undefined ? { ref: artifact.ref } : {}),
     ...(artifact.commit !== undefined ? { commit: artifact.commit } : {}),
+    // A commit pin only repeats the commit; a release pin names the tag a selector chose.
+    ...(artifact.pinRef !== undefined &&
+    artifact.pinRef !== `commit:${artifact.commit ?? ""}`
+      ? { pin: artifact.pinRef }
+      : {}),
     ...(artifact.version !== undefined ? { version: artifact.version } : {}),
+    ...(artifact.sha256 !== undefined ? { sha256: artifact.sha256 } : {}),
   };
 }
 
@@ -456,6 +469,7 @@ export function reportSummary(
     product,
     cell,
     ok: report.ok,
+    pluginName: report.pluginName,
     roles: report.roles.map((role) => ({
       role: role.role,
       ok: roleOk(role),

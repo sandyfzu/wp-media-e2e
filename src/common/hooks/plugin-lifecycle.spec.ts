@@ -19,12 +19,16 @@ import {
   registerSiteDataDirResolver,
   registerSiteDbResidue,
   registerSiteResidue,
+  registerStopRunningWork,
 } from "../config/metadata";
 import {
+  BEFORE_HOOK_TIMEOUT_MS,
   HOOK_TIMEOUT_MS,
+  LEFT_WORK_ALLOWANCE_MS,
   MAX_ATTACHED_LOG_CHARS,
   boundLogForAttachment,
   declaredResidue,
+  leftWorkOf,
   extendedTimeout,
   installPluginUnderTest,
   replacePluginUnderTest,
@@ -253,9 +257,18 @@ test.afterEach(() => {
 
 test.describe("extendedTimeout", () => {
   test("adds room for both hooks on top of the scenario's own budget", () => {
-    expect(extendedTimeout(30_000)).toBe(30_000 + 2 * HOOK_TIMEOUT_MS);
+    const hooks = BEFORE_HOOK_TIMEOUT_MS + HOOK_TIMEOUT_MS;
+    expect(extendedTimeout(30_000)).toBe(30_000 + hooks);
     // A scenario that asked for more keeps all of it.
-    expect(extendedTimeout(600_000)).toBe(600_000 + 2 * HOOK_TIMEOUT_MS);
+    expect(extendedTimeout(600_000)).toBe(600_000 + hooks);
+  });
+
+  // The Before hook may have to stop a killed run's work before it installs, which the install's own
+  // budget has no room for.
+  test("gives the Before hook the leftover-work allowance on top of a hook's budget", () => {
+    expect(BEFORE_HOOK_TIMEOUT_MS).toBe(
+      HOOK_TIMEOUT_MS + LEFT_WORK_ALLOWANCE_MS,
+    );
   });
 
   test("leaves 0 alone, because 0 means no timeout", () => {
@@ -328,6 +341,23 @@ test.describe("declaredResidue", () => {
     expect(
       declaredResidue("residue-spec-unregistered").resolveDataDirs,
     ).toBeUndefined();
+  });
+});
+
+test.describe("leftWorkOf", () => {
+  test("hands the install the product's registered stop with the scenario, and nothing for a product with none", () => {
+    const stop: StopRunningWork = () => Promise.resolve(undefined);
+    const report: ScenarioReport = {
+      title: "s",
+      failed: false,
+      attach: () => Promise.resolve(),
+    };
+    registerStopRunningWork("left-work-spec-product", stop);
+    expect(leftWorkOf("left-work-spec-product", report)).toEqual({
+      stop,
+      report,
+    });
+    expect(leftWorkOf("left-work-spec-unregistered", report)).toBeUndefined();
   });
 });
 
@@ -886,24 +916,24 @@ test.describe("teardownPluginUnderTest", () => {
   });
 });
 
+/** What a product's stop function saw of the site when it was called. */
+interface StopCall {
+  readonly installed: boolean;
+  readonly callsBefore: readonly string[];
+}
+
+/** A stop function that records the moment it ran, then answers `answer`. */
+function recordingStop(
+  calls: StopCall[],
+  answer: () => Promise<string | undefined>,
+): StopRunningWork {
+  return () => {
+    calls.push({ installed: isInstalled(), callsBefore: wpCalls() });
+    return answer();
+  };
+}
+
 test.describe("teardownPluginUnderTest — work the plugin left running", () => {
-  /** What a product's stop function saw of the site when it was called. */
-  interface StopCall {
-    readonly installed: boolean;
-    readonly callsBefore: readonly string[];
-  }
-
-  /** A stop function that records the moment it ran, then answers `answer`. */
-  function recordingStop(
-    calls: StopCall[],
-    answer: () => Promise<string | undefined>,
-  ): StopRunningWork {
-    return () => {
-      calls.push({ installed: isInstalled(), callsBefore: wpCalls() });
-      return answer();
-    };
-  }
-
   // The whole point of the duty: the work has to be stopped while the plugin that runs it is still
   // there, and after the log has been judged as the scenario left it.
   test("asks the product to stop its work after the log is judged and before the plugin is removed", async () => {
@@ -1011,5 +1041,117 @@ test.describe("teardownPluginUnderTest — work the plugin left running", () => 
     expect(warnings.join("\n")).toMatch(
       /could not attach the stopped-work report: reporter is gone/,
     );
+  });
+});
+
+/**
+ * A run that was killed never reached its teardown, and the work it started (a backup job, in a web
+ * request of its own) can outlive it. The next scenario's install is then the first chance to stop
+ * that work, and the install's removal of the plugin would otherwise race it.
+ */
+test.describe("installPluginUnderTest — work an earlier run left running", () => {
+  test("stops it after the log is cleared and before the stale copy is removed", async () => {
+    seedInstalled();
+    const calls: StopCall[] = [];
+    const report = reportSink();
+
+    await installPluginUnderTest(local, artifact(), files(), {
+      stop: recordingStop(calls, () => Promise.resolve(undefined)),
+      report,
+    });
+
+    expect(calls).toHaveLength(1);
+    const [call] = calls;
+    // Asked while the plugin that runs the work is still there…
+    expect(call?.installed).toBe(true);
+    // …after the log was cleared, so anything the stop makes PHP write is this scenario's to judge…
+    expect(call?.callsBefore).toHaveLength(1);
+    expect(call?.callsBefore[0]).toMatch(/^eval .*debug\.log/);
+    // …and the install still went ahead on an idle site, which says nothing.
+    expect(wpCalls().some((c) => c.startsWith("plugin uninstall"))).toBe(true);
+    expect(isActive()).toBe(true);
+    expect(report.attached.size).toBe(0);
+    // The stub site's own housekeeping warns (no ownership to read); only the hooks' lines matter.
+    expect(warnings.filter((line) => line.startsWith("[hooks]"))).toEqual([]);
+  });
+
+  // The product's probe copes with a site without the plugin (it answers "idle"), so a fresh site
+  // pays that one probe and nothing else.
+  test("asks even when the plugin is absent, and installs as usual", async () => {
+    const calls: StopCall[] = [];
+
+    await installPluginUnderTest(local, artifact(), files(), {
+      stop: recordingStop(calls, () => Promise.resolve(undefined)),
+      report: reportSink(),
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.installed).toBe(false);
+    expect(isActive()).toBe(true);
+  });
+
+  // An earlier run's work is not this scenario's fault: seen, attached, never failed.
+  test("reports what it had to stop, naming the scenario about to begin, and installs", async () => {
+    seedInstalled();
+    const report = reportSink();
+
+    await installPluginUnderTest(local, artifact(), files(), {
+      stop: () => Promise.resolve("a backup of job 3 was still running"),
+      report,
+    });
+
+    expect(warnings.join("\n")).toContain(
+      `before "${SCENARIO_TITLE}": a backup of job 3 was still running`,
+    );
+    expect(report.attached.get("stopped-running-work")).toContain(
+      `before "${SCENARIO_TITLE}"`,
+    );
+    expect(isActive()).toBe(true);
+  });
+
+  // Installing over work that is still writing to the site would hand the scenario a site nobody can
+  // vouch for, so this fails the Before hook — and touches nothing, so the teardown (which still
+  // runs) gets the site exactly as the stop left it.
+  test("fails when the work would not stop, removing and installing nothing", async () => {
+    seedInstalled();
+
+    await expect(
+      installPluginUnderTest(local, artifact(), files(), {
+        stop: () => Promise.reject(new Error("the job would not stop")),
+        report: reportSink(),
+      }),
+    ).rejects.toThrow("the job would not stop");
+
+    expect(
+      wpCalls().some(
+        (c) =>
+          c.startsWith("plugin uninstall") || c.startsWith("plugin install"),
+      ),
+    ).toBe(false);
+    expect(isInstalled()).toBe(true);
+  });
+
+  // A stop whose WP-CLI call hangs must not run the hook out of time: a timed-out hook is abandoned,
+  // and its removal would go on beside the teardown.
+  test("fails a stop that does not settle within its allowance, removing and installing nothing", async () => {
+    seedInstalled();
+
+    await expect(
+      installPluginUnderTest(local, artifact(), files(), {
+        stop: () => new Promise<never>(() => undefined),
+        report: reportSink(),
+        budgetMs: 50,
+      }),
+    ).rejects.toThrow(
+      "stopping the plugin's running work had not finished after 0.05 s",
+    );
+
+    expect(
+      wpCalls().some(
+        (c) =>
+          c.startsWith("plugin uninstall") || c.startsWith("plugin install"),
+      ),
+    ).toBe(false);
+    expect(isInstalled()).toBe(true);
   });
 });

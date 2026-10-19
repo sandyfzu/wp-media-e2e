@@ -40,7 +40,7 @@ Thumbs.db
 # Ephemeral resolved plugin artifacts (zips under test) — wiped & rebuilt each run
 /.artifacts/
 
-# Accumulating per-cell reports (pruned to newest N by report:prune, a later phase)
+# Accumulating per-cell reports (pruned as each run ends, and by npm run report:prune)
 /reports/
 
 # Allure — results + generated report live under /reports/; these cover root-level/manual runs
@@ -50,6 +50,9 @@ Thumbs.db
 
 # playwright-bdd generated specs
 /.features-gen/
+
+# The orchestrator's state: its config (secrets), lock, logs and run records
+/.orchestrator/
 
 # Per-product site pools & secrets (committed example only)
 src/projects/*/config/sites.json

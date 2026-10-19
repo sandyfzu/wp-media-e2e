@@ -17,7 +17,9 @@ import {
   getSiteDataDirResolver,
   getSiteDbResidue,
   getSiteResidue,
+  getStopRunningWork,
 } from "../config/metadata";
+import { withinBudget } from "../deadline";
 import { errorMessage } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
 import type { SiteDbResidue } from "../wp/db-residue";
@@ -36,7 +38,8 @@ import type {
  * it is unit-testable against a stub `wp`, leaving that file a thin binding to the BDD runtime.
  *
  * Two operations, mirroring the hook pair:
- *  - {@link installPluginUnderTest} — scope the log, guarantee a clean baseline, install.
+ *  - {@link installPluginUnderTest} — scope the log, stop what an earlier run left running, guarantee
+ *    a clean baseline, install.
  *  - {@link teardownPluginUnderTest} — judge what PHP wrote, then restore the baseline: stop what the
  *    plugin is still doing, remove it *and* the data it left behind, on disk and in the database.
  */
@@ -105,23 +108,47 @@ export const PLUGIN_TAG = "@plugin";
  * cost is round-trips rather than work: a product declaring many data paths pays linearly, and
  * batching the paths into single commands is the lever when the margin needs widening.
  *
+ * The leftover-files sweep pulls that lever, because what it **finds** is not bounded by any
+ * declaration: a family of runtime-named directories piles up wherever an earlier build or a killed
+ * run left them. Removing them one by one cost ~6 round-trips each (~0.8 s apiece, measured), and 28
+ * of them took a teardown past this budget. Now the sweep's commands are the same for one leftover
+ * as for thirty — the root resolved once, a family checked through its parent, one `rm` per pass.
+ *
  * The leftover-footprint sweep adds **one `wp eval` per hook** on the ordinary path — a product that
  * declares one stops after the scan that finds nothing, and one that declares none pays no
  * round-trip at all. Only a site that really is carrying a footprint pays the removal and the
  * verifying re-read, which is exactly the run that has time to spare.
  *
- * Stopping the product's running work adds **one more `wp eval` to the After hook** on an idle site.
- * One that has to act is bounded by its own budgets — BackWPup's give a stop and the run's own
- * record of its end 30 s each, about 70 s at the very worst — which still leaves the removal and the
- * sweeps their time within this one.
+ * Stopping the product's running work adds **one more `wp eval` to each hook** on an idle site.
+ * One that has to act is bounded by its own budgets — about 70 s at the very worst for BackWPup —
+ * which the After hook's ≈ 23 s leaves room for here. The Before hook's install does not (44–73 s
+ * measured, 73 s beside another run on the same server), so it gets {@link LEFT_WORK_ALLOWANCE_MS}
+ * on top of this.
  *
  * Applied per hook — so a hang is reported as a hook timeout naming the hook, rather than as an
  * opaque scenario timeout — **and** added to the scenario's own budget by {@link extendedTimeout},
  * since Playwright times a scenario and its hooks against one clock. The trade-off of raising it
- * is how long a genuinely stuck scenario takes to fail: a default 30 s scenario becomes 30 s + 2 ×
- * this.
+ * is how long a genuinely stuck scenario takes to fail: a default 30 s scenario becomes 30 s plus
+ * both hooks' budgets.
  */
 export const HOOK_TIMEOUT_MS = 120_000;
+
+/**
+ * Room the Before hook gets, on top of {@link HOOK_TIMEOUT_MS}, for stopping work a killed run left
+ * running before it installs — **the bound every `ProductConfig.stopRunningWork` must finish
+ * within.**
+ *
+ * The teardown normally leaves nothing running, so this is spent only by the run that recovers a
+ * killed one. Sized from BackWPup's stop, the one product that declares a stop: 30 s for a running
+ * job to go and 30 s for its run to record its end, plus a few probes of ~1.3 s each, is about 70 s
+ * at worst; 90 s keeps a margin for a slow link. Without it, that worst case beside the install
+ * measured above would overrun the hook, and a timed-out hook is abandoned rather than cancelled —
+ * its install would go on beside the teardown.
+ */
+export const LEFT_WORK_ALLOWANCE_MS = 90_000;
+
+/** The Before hook's budget: an install, plus stopping what a killed run left running. */
+export const BEFORE_HOOK_TIMEOUT_MS = HOOK_TIMEOUT_MS + LEFT_WORK_ALLOWANCE_MS;
 
 /**
  * Cap on the `debug.log` body attached to a report, in characters. A fatal inside a loop, or one
@@ -150,26 +177,33 @@ export function boundLogForAttachment(raw: string): string {
 
 /**
  * The scenario timeout a {@link PLUGIN_TAG} scenario needs: its own budget plus room for both
- * lifecycle hooks. Additive on purpose — a scenario that asked for more time (a slow backup job)
- * keeps every millisecond it asked for.
+ * lifecycle hooks — {@link BEFORE_HOOK_TIMEOUT_MS} and {@link HOOK_TIMEOUT_MS}. Additive on purpose:
+ * a scenario that asked for more time (a slow backup job) keeps every millisecond it asked for.
  *
  * @param current - the scenario's effective timeout, `testInfo.timeout`.
  * @returns the extended timeout, or `0` unchanged — zero means "no timeout" in Playwright, so
  * adding to it would silently impose one.
  */
 export function extendedTimeout(current: number): number {
-  return current === 0 ? 0 : current + 2 * HOOK_TIMEOUT_MS;
+  return current === 0 ? 0 : current + BEFORE_HOOK_TIMEOUT_MS + HOOK_TIMEOUT_MS;
 }
 
 /**
- * Prepares a site for a scenario that tests a plugin: clears `debug.log`, removes any existing
- * copy of the plugin, then installs and activates the resolved artifact.
+ * Prepares a site for a scenario that tests a plugin: clears `debug.log`, stops any work an earlier
+ * run left the plugin doing, removes any existing copy of the plugin, then installs and activates
+ * the resolved artifact.
  *
  * The order is deliberate. Clearing **first** scopes the log to this scenario yet still captures
- * anything the removal itself triggers — a fatal in the outgoing plugin's uninstall procedure is
+ * anything the stop and the removal trigger — a fatal in the outgoing plugin's uninstall procedure is
  * a real defect and must not be cleared away. Removing before installing is what makes the
  * install *fresh*: `ensurePluginAbsent` runs that uninstall procedure, so leftover options and
  * tables from an earlier (or crashed) run cannot leak into this scenario's assertions.
+ *
+ * Stopping comes before that removal for the reason the teardown stops first: uninstalling a plugin
+ * underneath its own running work races it. The teardown normally leaves nothing running, but a run
+ * that was killed never reached its teardown, and the job it started goes on in a web request of
+ * its own — so this is what makes recovering from a kill complete. On a site where the plugin is not
+ * there, or idle, it costs the product's one probe.
  *
  * Between the removal and the install sits the one step that copes with a site the removal could
  * not clean: the plugin's **database footprint**, swept off what is actually there rather than off
@@ -205,22 +239,67 @@ export function extendedTimeout(current: number): number {
  * nothing to a remote `wp`.
  * @param residue - what this product leaves behind, on disk and in the database. Defaults to
  * neither, so a product that declares nothing pays nothing.
- * @throws Error if the artifact's slug is unusable, if the removal, the install, asking the plugin
- * for its runtime-named directories or the directory preparation fails (an undeclared one included),
- * or {@link PluginActivationFailedError} if the plugin is not active afterwards. Ownership
- * normalisation is best-effort and never throws.
+ * @param leftWork - how the product stops work it may still be doing on the site
+ * (`ProductConfig.stopRunningWork`), and the scenario to report having had to; omitted for a
+ * product that runs nothing in the background.
+ * @throws Error if the artifact's slug is unusable, if work left running would not stop, if the
+ * removal, the install, asking the plugin for its runtime-named directories or the directory
+ * preparation fails (an undeclared one included), or {@link PluginActivationFailedError} if the
+ * plugin is not active afterwards. Ownership normalisation is best-effort and never throws.
  */
 export async function installPluginUnderTest(
   transport: Transport,
   artifact: ResolvedArtifact,
   residue: DeclaredResidue = NO_RESIDUE,
+  leftWork?: LeftWork,
 ): Promise<void> {
   // Before the first command: `stageAndInstallPlugin` validates the slug too, but by then the log
   // has been cleared and an uninstall has been attempted with it. A slug this suite cannot use is
   // our own mistake, and it should cost the site nothing.
   pluginSitePath(artifact.slug);
   await clearDebugLog(transport);
+  if (leftWork !== undefined) {
+    // Work that would not stop ends the install here, before anything is removed: unlike the
+    // teardown, there are no duties worth running anyway — installing over work still writing to the
+    // site would hand the scenario a site nobody can vouch for.
+    await stopWorkLeftRunning(
+      transport,
+      leftWork.stop,
+      leftWork.report,
+      "before",
+      leftWork.budgetMs,
+    );
+  }
   await replacePluginUnderTest(transport, artifact, residue);
+}
+
+/**
+ * What the Before hook hands {@link installPluginUnderTest}: the product's registered stop
+ * (`ProductConfig.stopRunningWork`) with the scenario to report to, or `undefined` for a product that
+ * declares none — then there is nothing to ask, and no round trip to pay.
+ *
+ * @param product - the product under test, from the project's routing metadata.
+ * @param report - the scenario's report sink.
+ */
+export function leftWorkOf(
+  product: string,
+  report: ScenarioReport,
+): LeftWork | undefined {
+  const stop = getStopRunningWork(product);
+  return stop === undefined ? undefined : { stop, report };
+}
+
+/**
+ * How a product stops its leftover work, and the scenario to report it to — see
+ * {@link installPluginUnderTest}.
+ */
+export interface LeftWork {
+  /** The product's `ProductConfig.stopRunningWork`. */
+  readonly stop: StopRunningWork;
+  /** The scenario whose Before hook found the work. */
+  readonly report: ScenarioReport;
+  /** How long the stop may take; {@link LEFT_WORK_ALLOWANCE_MS} unless a spec needs it shorter. */
+  readonly budgetMs?: number;
 }
 
 /**
@@ -391,7 +470,10 @@ export async function teardownPluginUnderTest(
     }
   };
 
-  await cleanUp(() => stopWorkLeftRunning(transport, stopRunningWork, report));
+  await cleanUp(async () => {
+    if (stopRunningWork === undefined) return;
+    await stopWorkLeftRunning(transport, stopRunningWork, report, "after");
+  });
   await cleanUp(() => ensurePluginAbsent(transport, slug));
   await cleanUp(() =>
     sweepDbResidue(transport, residue.db, "after the scenario"),
@@ -404,21 +486,40 @@ export async function teardownPluginUnderTest(
 /**
  * Has the product stop whatever it is still doing on the site, and says so when it had to.
  *
- * Ahead of the removal, because uninstalling a plugin underneath its own running work races that
+ * Ahead of a removal, because uninstalling a plugin underneath its own running work races that
  * work. Having had to stop something is **reported, not failed**: a scenario that failed midway is
- * expected to leave work behind, and one that passed while leaving work running deserves to be seen
- * without turning a clean result red. Work that *would not* stop is the product's function throwing,
- * which the caller treats like any other cleanup failure.
+ * expected to leave work behind, one that passed while leaving work running deserves to be seen
+ * without turning a clean result red, and work found *before* a scenario is an earlier run's, not
+ * this one's. Work that *would not* stop is the product's function throwing, which each caller
+ * treats as its own position demands.
+ *
+ * @param transport - the target site's transport.
+ * @param stopRunningWork - the product's `ProductConfig.stopRunningWork`.
+ * @param report - the scenario to name in the message, and to attach it to.
+ * Bounded by {@link LEFT_WORK_ALLOWANCE_MS}: a stop whose WP-CLI call hangs would otherwise run the
+ * hook out of time, and a timed-out hook is abandoned, not cancelled — its removal would then run on
+ * beside whatever comes next. Past the allowance the stop fails, as work that would not stop does;
+ * the stop itself is not cancelled (nothing can cancel a remote command), so it may still finish.
+ *
+ * @param when - whether the scenario is about to begin or has just ended, for the message.
+ * @param budgetMs - how long the stop may take.
+ * @throws whatever `stopRunningWork` throws — work that would not stop — or, past `budgetMs`, an
+ *   error saying so.
  */
 async function stopWorkLeftRunning(
   transport: Transport,
-  stopRunningWork: StopRunningWork | undefined,
+  stopRunningWork: StopRunningWork,
   report: ScenarioReport,
+  when: "before" | "after",
+  budgetMs: number = LEFT_WORK_ALLOWANCE_MS,
 ): Promise<void> {
-  if (stopRunningWork === undefined) return;
-  const stopped = await stopRunningWork(transport);
+  const stopped = await withinBudget(
+    stopRunningWork(transport),
+    budgetMs,
+    "stopping the plugin's running work",
+  );
   if (stopped === undefined) return;
-  const message = `[hooks] after "${report.title}": ${stopped}`;
+  const message = `[hooks] ${when} "${report.title}": ${stopped}`;
   console.warn(message);
   await report
     .attach("stopped-running-work", message)
