@@ -6,7 +6,7 @@ Status:
 - Phase 0, make the suite ready: done and audited, 2026-10-05 → 2026-10-12 (§6). Its
   orchestrator-side recommendations (0A.3–0A.5, 0B.2's consumption, 0C's orchestrator half) are
   design inputs for Phase 1+.
-- Phase 0.5, the minimal orchestrator: steps 0–5 done 2026-10-15; step 6 (docs) next (§7).
+- Phase 0.5, the minimal orchestrator: done 2026-10-19 (§7); its first deployment needs the runner.
 - Later phases: not planned yet.
 
 Replaces the [modernization plan](e2e-modernization-plan.md)'s orchestrator section and Phase 9.
@@ -824,7 +824,7 @@ Non-obvious failures an audit found, not stated in the docs or the code:
 ## 7. Phase 0.5 — The minimal orchestrator
 
 Detailed in the [Phase 0.5 plan](orchestrator-phase-0.5-plan.md) — findings, decisions D1–D6,
-verification rows; its step 6 writes the operator's guide `docs/guides/orchestrator.md`.
+verification rows; operating it: [`docs/guides/orchestrator.md`](../guides/orchestrator.md).
 
 The smallest orchestrator that replaces AutoE2E's BackWPup instances: one foreground command,
 `npm run orchestrator -- start`, kept in `tmux`, that cycles one or more cells (`loop` tasks only)

@@ -110,7 +110,7 @@ export const PARENT_WATCH_MS = 1_000;
 /** The scope of the orchestrator's own lines. */
 const SCOPE = "orchestrator";
 
-/** The longest refusal said in the log — a cell held elsewhere names its holder, run and way out. */
+/** The longest refusal said in the log — a site held elsewhere names its holder, run and way out. */
 const MAX_REFUSAL_LINE = 1_500;
 
 /**
@@ -204,8 +204,8 @@ export interface StartDeps {
     deps?: LockDeps,
   ) => Promise<HeldLock>;
   /**
-   * The cells' locks' folder; `cellLocksFolder(process.env)` by default —
-   * `$XDG_STATE_HOME/wp-media-e2e/cell-locks`, else under `$HOME/.local/state`.
+   * The site locks' folder; `cellLocksFolder(process.env)` by default —
+   * `$XDG_STATE_HOME/wp-media-e2e/site-locks`, else under `$HOME/.local/state`.
    */
   readonly cellLocks?: string;
   /** The orphan check's `kill` and start reader; the process's by default. */

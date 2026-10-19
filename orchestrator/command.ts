@@ -52,7 +52,7 @@ Exit codes:
   1    --once: a run did not pass; without --once: the loops ended unasked (a
        loop that broke, such as a run whose processes could not be watched);
        the start was refused (the config, --task, the lock, a run still
-       running, a cell held elsewhere); the dry run was refused (the config,
+       running, a site held elsewhere); the dry run was refused (the config,
        --task); a usage error
   130  stopped: Ctrl-C, SIGTERM or SIGHUP to the orchestrator or its process
        group; SIGINT or SIGTERM to npm's PID; or its parent (npm) ending

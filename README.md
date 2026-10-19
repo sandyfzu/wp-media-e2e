@@ -77,6 +77,24 @@ Run `npm run healthcheck:ui` for the same checks with the browser **visible on s
 (headed) — handy for watching a login happen or debugging a flaky site. It behaves
 identically otherwise.
 
+## Orchestrator (cells in loops)
+
+Runs cells on this machine in loops — a run, a cooldown, the next run — and reports each run to
+Slack and Datator. Every option goes after `--`.
+
+```bash
+mkdir -p .orchestrator && chmod 700 .orchestrator
+cp orchestrator/config.example.json .orchestrator/config.json && chmod 600 .orchestrator/config.json
+# edit it: one task per cell, the secrets, Slack's webhook, Datator's key
+npm run orchestrator -- start --dry-run              # check it; runs and writes nothing
+npm run orchestrator -- start --task <id> --once     # one run, exit 0 (passed/flaky) or 1
+tmux new -d -s orchestrator 'npm run orchestrator -- start'   # every task, until stopped
+tmux send-keys -t orchestrator C-c                   # stop: runs finish their scenario
+```
+
+Install, every config field, stopping, the files it keeps and what to do when it refuses:
+[docs/guides/orchestrator.md](docs/guides/orchestrator.md).
+
 ## Configuring sites
 
 A product's sites are declared in one or more JSON files under

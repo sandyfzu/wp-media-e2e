@@ -1,10 +1,10 @@
 # Orchestrator Phase 0.5 — The minimal orchestrator
 
-Status: steps 0–5 done (2026-10-12 to 2026-10-15); step 6, the docs, open (§7.1). After Phase 0
-(done), before Phase 1 (not planned yet).
-Reference: until `docs/guides/orchestrator.md` exists, §4 (design), §5 (code layout) and §6 (running
-it) describe the orchestrator as built, in `orchestrator/`; where they and the code differ, the code
-wins.
+Status: done — steps 0–6, 2026-10-12 to 2026-10-19; its first deployment needs the runner (§9).
+After Phase 0 (done), before Phase 1 (not planned yet).
+Reference: operating it, [`docs/guides/orchestrator.md`](../guides/orchestrator.md); §4 (design), §5
+(code layout) and §6 (running it) describe it as built, in `orchestrator/`; where they and the code
+differ, the code wins.
 Parent: the [orchestrator plan](orchestrator-plan.md) keeps the concept and lists this phase in its
 §7. Verification rows continue its numbering, from V114 (§11).
 Measured with: Node 24.21.0, npm 12.0.2, tsx 4.23.15, Playwright 1.63.0, on the macOS runner and on
@@ -17,8 +17,8 @@ The smallest orchestrator that replaces AutoE2E's BackWPup instances: one foregr
 `npm run orchestrator -- start`, kept in `tmux`, that cycles one or more cells; each run builds its
 own plugin through the suite and is reported to Slack and Datator through a one-event bus. It is the
 parent's design cut to the bone, each piece the first version of one the parent plans, in the shape
-later phases extend. Built, audited and live-checked on `bwu2`/`bwu3`; only its docs (step 6)
-remain.
+later phases extend. Built, audited, live-checked on `bwu2`/`bwu3`, soaked and documented; only its
+first deployment remains (§9).
 
 | AutoE2E today (V114–V116) | Phase 0.5 |
 | --- | --- |
@@ -875,45 +875,13 @@ Which machine is D4. On it:
 | 5F–5I | One run (`tasks/cycle.ts`), the loop, the process (`start.ts`), `--dry-run` (`dry-run.ts`, `state/inspect.ts`), the command and its script | 2026-10-14 |
 | 5J | Live checks on `bwu2`/`bwu3` (V486, V489, V491–V493) | 2026-10-14 |
 | 5K | Final audit: site locks held for a loop's life, an `unwatched` run ending its loop, cut-tail masking, `runs/` checked, stuck groups said; a quality and documentation pass; the site locks' live smoke (V534–V536) | 2026-10-15 |
+| 6 | The docs: the operator's guide (`docs/guides/orchestrator.md`), README's quick start, CLAUDE.md's pointers; the soak (`soak.spec.ts`, `npm run orchestrator:soak`, V537) | 2026-10-19 |
 
-### 7.1 Step 6 — The docs (open)
+### 7.1 Left after this phase
 
-Goal: an operator installs, configures, runs, stops and updates the orchestrator from
-`docs/guides/orchestrator.md` alone, and the repository's docs point there instead of this plan.
-Depends on: step 5 (done). Effort and difficulty: not estimated. Order: items 2–4 point at the
-guide, so they follow item 1; items 5 and 6 depend on nothing.
-
-1. Write `docs/guides/orchestrator.md` from §4–§6:
-   - §6 as copy-paste: the tools; `npm ci` without `--omit=dev`; `tmux`, never `nohup`; Ubuntu's
-     `0775` state directory and its `chmod go-w`; a container only with `--pid=host`.
-   - Options always after `--`; the options npm 11 and 12 take, and the command's refusal (§4.1).
-   - The config's fields and bounds (§4.2).
-   - Stopping: the budgets (15 min drain, 4 min interrupt, the kill, the 60 s settle), SIGTERM and
-     SIGHUP, the parent watch and launchers that exit; the exit codes (§4.1, §4.5).
-   - Orphans: the refusal, `kill -KILL -<pgid>`, a false positive marked `lost`; a `lost` run is
-     never announced (§4.4).
-   - The site locks: what they cover and their limits (§4.3).
-   - The state layout and its sensitive files, the site locks included; retention,
-     `runs.reportsKeep` and the cost of `0`; `orchestrator.log` rotated only with `copytruncate`
-     (§4.9).
-   - Datator posts only `passed`, `flaky`, `failed`; Slack every status (§4.7, §4.8).
-   - systemd's caveats (§4.1); updating by hand (D3).
-2. `README.md`: a quick start and the guide's link.
-3. `CLAUDE.md`: the documentation map's row and its "When to update" orchestrator section point at
-   the guide instead of this plan; check that the `orchestrator/` structure line and the script
-   still match.
-4. Stale wording: done 2026-10-19 (configuration.md, execution-model.md, CLAUDE.md now say what
-   is built); re-check once the guide lands.
-5. `.env.example` stays untouched: the orchestrator reads no `E2E_*` variable.
-6. A soak, for the test gaps 5K left: that many cycles leave the process's listeners and handles
-   flat, and what pruning costs as run folders accumulate. How it runs, what it measures and when it
-   passes are not yet defined: decide them before starting this item.
-
-Done when every item above is in place and the four gates pass.
-
-Left for later phases or the deployment, not step 6: §8's changes and §4.11; a systemd unit (§4.1);
-backoff after errors; a switch turning the suite's end-of-run pruning off (§8); on the runner, §6
-end to end and V121/V122 there (§9, D4); the first production Slack and Datator posts (D5, D6).
+For later phases or the deployment: §8's changes and §4.11; a systemd unit (§4.1); backoff after
+errors; a switch turning the suite's end-of-run pruning off (§8); on the runner, §6 end to end and
+V121/V122 there (§9, D4); the first production Slack and Datator posts (D5, D6).
 
 ### 7.2 Traps
 
@@ -965,7 +933,7 @@ must keep; the module each was found in documents its own case.
 Done: unit specs for every module, mutation-tested; the loop, stop, orphan and command paths against
 the fake suite with real processes and signals (§5); every Datator payload against a local Datator
 built from its own `e2e_tests` app (V385), and Slack against a local sink; the live checks on
-`bwu2`/`bwu3` (5J, V486, V489, V491–V493; the site locks, V534–V536). Open:
+`bwu2`/`bwu3` (5J, V486, V489, V491–V493; the site locks, V534–V536); the soak (V537). Open:
 
 - On the runner (D4): §6 end to end, and on its own system one Ctrl-C under `npm run` must still
   read as one (V122) and reach no run (V121). Both were measured on Ubuntu 24.04 in Docker, not on
@@ -1058,3 +1026,4 @@ Facts outside this code, and the live checks. The parent's and Phase 0's rows ar
 | V534 | The site locks live, on `bwu2`/`bwu3`: the dry run warns of nothing and writes nothing; `start --once`, both cells together — 4/4 passed each, the site locks' folder `0700` and lock files `0600` holding `v`, `pid`, `token`, `start`, `host`, `label`, `run`, removed as each loop ended; Slack `200`, Datator `201` | live 2026-10-15 | The smoke's captures and lock log |
 | V535 | A second config started during the first's cooldown is refused at its start naming the holder (PID, cell, site, run), its dry run warns the same, no `runs/` made; after Ctrl-C the first exits 130, the locks gone, and the second's `--once` runs 4/4. After a SIGKILL of the first, a start on its state directory refuses on the orphans, naming each run and its `kill -KILL -<pgid>`, before it looks at the site locks; the other config is refused by the dead holder's site lock; after `kill -KILL -<pgid>` the runs are marked `lost`, the locks taken over, 4/4 | live 2026-10-15 | The smoke's captures |
 | V536 | Sites as found after every check (only `bwu3`'s 242-byte `debug.log` removed by the suite's teardown, by design); no secret in the 284 files scanned (state directory, reports, terminal captures) | live 2026-10-15 | State snapshots; a secret scan |
+| V537 | The soak: the real `start` in one process over the fake suite, one task, a 50 ms cooldown, Slack and Datator over real sockets to a local sink; 1,000 runs capped (`reportsKeep` 20) and 1,000 uncapped, each run passed and announced (`slack ✓ · datator ✓ 201`). Listeners 15, resources 6, timers 2, descriptors 22 at every sample from run 10 to 1,000, and back after the stop; run folders held at 20; uncapped, pruning 0.35 ms a folder at 1,000 (348 ms), the heap 73 → 97 MiB (not judged). A leaked listener and descriptor per run failed it within 20 runs | measured 2026-10-19, macOS | `npm run orchestrator:soak` with `ORCHESTRATOR_SOAK_RUNS=1000` (10.3 min); a mutation of `tasks/cycle.ts` |

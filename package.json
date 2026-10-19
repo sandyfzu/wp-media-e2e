@@ -37,7 +37,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "prepare": "husky",
-    "orchestrator": "exec node --import tsx orchestrator/cli.ts"
+    "orchestrator": "exec node --import tsx orchestrator/cli.ts",
+    "orchestrator:soak": "ORCHESTRATOR_SOAK=1 playwright test --config playwright.unit.config.ts --project=orchestrator soak.spec"
   },
   "engines": {
     "node": ">=24.16.0"
