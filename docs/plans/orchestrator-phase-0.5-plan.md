@@ -1,6 +1,6 @@
 # Orchestrator Phase 0.5 — The minimal orchestrator
 
-Status: done — steps 0–6, 2026-10-12 to 2026-10-19; its first deployment needs the runner (§9).
+Status: done — steps 0–7, 2026-10-12 to 2026-10-19; its first deployment needs the runner (§9).
 After Phase 0 (done), before Phase 1 (not planned yet).
 Reference: operating it, [`docs/guides/orchestrator.md`](../guides/orchestrator.md); §4 (design), §5
 (code layout) and §6 (running it) describe it as built, in `orchestrator/`; where they and the code
@@ -154,15 +154,15 @@ As built. Module names are under `orchestrator/` (§5).
   (`process.exit` drops what a terminal has not taken, V410); the command then exits at once, every
   shutdown signal given a do-nothing handler from just before `start` until the exit, so a late
   signal cannot kill it by Node's default. Help, version, usage errors and the dry run stay blocking
-  and wait unbounded for both outputs. A closed stdout or stderr (`… | head`) is dropped: no stack,
+  and wait for both outputs without a practical limit (2³¹−1 ms, Node's longest timer). A closed stdout or stderr (`… | head`) is dropped: no stack,
   the exit code unchanged. Refusals before the log is open go to stderr, masked (§4.10); usage
   errors by shape only.
 - Terminal: one timestamped line per event, never a run's own output (runs interleave); the same
   lines go to `orchestrator.log` (§4.9):
 
   ```text
-  10:15:30 orchestrator  started · 2 tasks (bpng, bfng) · .orchestrator/ · pid 4242
-  10:15:31 bpng  bpng-12 started · backwpup pro@nginx · develop (default) · .orchestrator/runs/bpng-12/run.log
+  10:15:30 orchestrator  started · 2 tasks (bpng, bfap) · .orchestrator/ · pid 4242
+  10:15:31 bpng  bpng-12 started · backwpup pro@nginx · develop · .orchestrator/runs/bpng-12/run.log
   11:09:41 bpng  bpng-12 ⚠ flaky · 52 scenarios: 51 passed, 1 flaky · 54m 10s · reports/backwpup/pro@nginx/<RUN_ID>
   11:09:42 bpng  slack ✓ · datator ✓ 201
   11:09:42 bpng  next run 11:14:41 (cooldown 5m)
@@ -274,11 +274,15 @@ reaches the placeholder check, not "no cell".
   error, never a setting silently ignored. One `ConfigError`, one `path: problem` line per issue in
   the schema's order (`tasks[2].cell: repeats tasks[0]'s product and cell`); the uniqueness checks
   run beside any issue but an aborting one (a wrong type, a refused key), V360. Every bounded number
-  has one message, `must be a whole number from A to B`.
+  has one message, `must be a whole number from A to B`, its unit after it where it has one
+  (`… to 1440 minutes`).
 - Then against the suite (`config/check.ts`): the product is known, the cell real, every site real;
   the selected tasks' sites are keyed as the site locks key them (§4.3) and a key two selected tasks
   share is refused, naming both and the site (`--task` selecting one of them passes); a site whose
-  `baseURL` is no http(s) URL is refused. Warnings: an ignored version; every server reached by
+  `baseURL` is no http(s) URL is refused, and so is one with credentials and an `@` in its path — a
+  password holding `/` or `@` unescaped, which a parser reads as another host and a path carrying the
+  password's tail into the site key — and one whose site key is over 2,048 characters, which no lock
+  can carry. Warnings: an ignored version; every server reached by
   `serverWarningThreshold` selected tasks or more — an SSH site's host lowercased, a Docker or local
   site "this machine" — naming the server and its cells. All tasks loop at once, so that count is
   the live one. No limit per server (decided; 0A.3).
@@ -288,8 +292,10 @@ reaches the placeholder check, not "no cell".
   JSON or zod would lose — a repeated key (JSON keeps the last), `__proto__` (zod's record drops it)
   — are refused with their paths (V366).
 - No message quotes a value: the file holds the runs' secrets. Zod's messages name types and bounds;
-  a key is shown only when it is a name of ≤ 40 characters not shaped like a GitHub token, else
-  `a key of N characters` (zod quotes an unknown key raw, V360); an unknown product or cell is named
+  a key is shown only when it reads as a name — camelCase, snake_case, an uppercase word or
+  UPPER_SNAKE words with digits, ≤ 40 characters, not shaped like a GitHub token — else
+  `a key of N characters` (zod quotes an unknown key raw, V360): a pasted credential is random (a
+  legacy 40-hex token, an AWS key ID), which no such name is; an unknown product or cell is named
   by its path; a file that is not JSON by the position when Node's parser gives one in digits, never
   by `JSON.parse`'s message, which quotes the text (V361). Text fields (names, instance, product,
   cell) are one plain line: no surrounding whitespace, control, invisible or line-separator
@@ -331,13 +337,15 @@ reaches the placeholder check, not "no cell".
     `$XDG_STATE_HOME/wp-media-e2e/site-locks/<first 32 hex of the key's SHA-256>.lock`
     (`~/.local/state/…` without it; a relative `XDG_STATE_HOME` ignored; no absolute `HOME` either
     refuses the start). `wp-media-e2e` and `site-locks` are made `0700` and must be this user's real
-    folders, never links; missing folders above them get the default mode. Not under
+    folders, never links — both judged, the parent first, before anything is made or read in it;
+    missing folders above them get the default mode and are not judged. Not under
     `test-results/`, which Playwright empties.
   - A site's key (`config/site-key.ts`): its `baseURL`'s host as a URL parser writes it (lowercase,
     punycode, IPv4 in dotted decimal, IPv6 compressed) without a trailing dot; its port unless 80 or
     443 whatever the scheme, so `http` and `https` of one host are one site; its path resolved,
     escapes of unreserved characters decoded (`%7E` is `~`), the others uppercased, no trailing
-    slash; no credentials, query or fragment.
+    slash; no credentials, query or fragment. An `@` in the path of a URL with credentials is refused
+    (§4.2).
   - Each is the state directory's lock in another place (§4.9: written whole, judged in its PID
     space, a dead holder's taken over under a claim, never through a link); its owner record also
     holds the site's `key`, the holding cell (`label`) and the latest run's `run.json` (`run`).
@@ -354,7 +362,7 @@ reaches the placeholder check, not "no cell".
     by a dead one's run still running, refuses the start (`not started: …` under the task, naming
     the holder's PID, cell, site and run); `--dry-run` warns the same. A loop that then loses the
     race for its locks ends `failed` before any run, said once. A run whose locks can no longer be
-    named (removed by hand, another's, a write that failed) launches nothing, ends `error`, is
+    named (removed by hand, another's, a write that failed or threw) launches nothing, ends `error`, is
     announced once, and its loop ends `failed`.
   - Two cell names on one site exclude each other; one cell name on other sites does not.
   - Limits: another user, another machine, a run started by hand (`npm run test:<product>`), or an
@@ -395,7 +403,11 @@ reaches the placeholder check, not "no cell".
   values), each command, each exit or signal, each stop. A launch that fails before its first record
   removes the folder it made (only if empty, never through a link), so no folder is left undated.
 - Environment (`runs/environment.ts`), an allowlist — never the orchestrator's own:
-  - `PATH`, `HOME` (APVM's cache and `gh` live under it), `LANG`, `TMPDIR`, when set and not empty;
+  - `PATH`, `HOME` (APVM's cache and `gh` live under it), `LANG`, `TMPDIR`, `PLAYWRIGHT_BROWSERS_PATH`,
+    `XDG_CACHE_HOME`, the proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`, each
+    in either case; `NODE_USE_ENV_PROXY`) and CA files (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`,
+    `SSL_CERT_DIR`), when set and not empty — APVM's binary (reqwest, rustls) holds the proxy names in
+    both cases and `SSL_CERT_*` (read from it, not measured behind a proxy);
   - `E2E_LOAD_DOTENV=false`, `RUN_ID`, `E2E_CELL`, `E2E_INTERNAL_STOP_FILE`;
   - the task's plugin: `E2E_PLUGIN_REF` and `E2E_PLUGIN_VERSION` when set, and `E2E_REQUESTED_REF`
     (display; equal to the ref here; when Phase 1 pins, only `E2E_PLUGIN_REF` changes);
@@ -423,14 +435,15 @@ reaches the placeholder check, not "no cell".
   | --- | --- |
   | the orchestrator killed it | `killed` |
   | it was stopped — interrupted while it tested, or drained before it finished — by the orchestrator or by hand | `stopped` |
-  | `bddgen` failed; Playwright ended without `run.end`; a setup failed; the run's time limit (`timedout`); an error outside any test (`run.error`, even beside scenarios that ran: its results cannot be trusted as a regression); no scenario passed or failed (none matched, or all skipped); a `failed` `run.end` with no failed scenario; an exit its results do not explain (0 for a failed run, 1 for a passed one, a signal) | `error` |
+  | `bddgen` failed; `bddgen` or Playwright could not start (`<process> could not start: <code>`); Playwright ended without `run.end`; a setup failed; the run's time limit (`timedout`); an error outside any test (`run.error`, even beside scenarios that ran: its results cannot be trusted as a regression); no scenario passed or failed (none matched, or all skipped); a `failed` `run.end` with no failed scenario; an exit its results do not explain (0 for a failed run, 1 for a passed one, a signal) | `error` |
   | a scenario failed | `failed` |
   | a scenario was flaky | `flaky` |
   | otherwise | `passed` |
 
   - A stop that came too late to change anything is no stop: a drain that skipped nothing (`run.end`
     present, not interrupted, none drained), or an interrupt asked once the tests were over (not
-    sent, §4.5) while the runner still ended on its own. That run is judged by its results.
+    sent, §4.5) while the runner still ended on its own; so is a stop asked once the runner had
+    exited on its own, which the launch never takes (§4.5). That run is judged by its results.
   - "No tests found", which a filter matching nothing writes as an error, is skipped by the suite's
     own rule (`isNoTestsFound`): the run reads `no scenario ran: none matched`. The time limit is
     checked before outside errors, since Playwright also writes one for it (V377).
@@ -445,7 +458,8 @@ reaches the placeholder check, not "no cell".
   - `running`: first with `starting: <process>`, then with the process, its group and its leader's
     start — Linux `/proc/<pid>/stat` field 22 with the boot id; macOS `ps -o lstart=` under
     `LC_ALL=C TZ=UTC` (V407); unreadable, recorded as such;
-  - `ended`: how the processes ended, the stop taken, status, reason and counts — the whole event
+  - `ended`: how the processes ended (`notStarted`, the cause, for one that could not start), the stop
+    taken, status, reason and counts — the whole event
     and the Datator record live beside it (§4.9);
   - `lost`: set by a later start's orphan check on a run provably over without an `ended` record,
     with `foundAt` and why; it keeps the process. Not `ended`, which promises the exits and the
@@ -465,13 +479,16 @@ reaches the placeholder check, not "no cell".
     (`ps -o pid,user,lstart,command -g <pgid>`, or `lsof -- <run.log>`), how to end it
     (`kill -KILL -<pgid>`, only when confirmed as the run's), and how to mark a false positive over
     (set `"state"` to `"lost"` in its `run.json`);
-  - stale otherwise — its group gone, or its group id now led by another process (V402) — and
-    rewritten `lost`.
+  - stale otherwise — its group gone, its group id now led by another process (V402), or its leader
+    recorded in an earlier boot of this machine (`linux:<boot>:…`, judged by the lock's `earlierBoot`:
+    host PID namespace, same machine id and host) — and rewritten `lost`.
 
-  A run folder whose `run.json` cannot be read (`EACCES`, a link, a FIFO, over its cap, malformed,
-  naming another folder) is warned about and passed over, not refused: only tampering in the private
-  state directory reaches it, and refusing would block every start for good on a folder whose first
-  write failed (a full disk).
+  A run folder whose `run.json` is there but cannot be read (`EACCES`, a link, a FIFO, over its cap,
+  malformed, naming another folder) is an unconfirmed orphan: nothing says its run is over, and every
+  record is written atomically, so a failed write leaves none (a folder without `run.json` is passed
+  over). Its refusal says how to find its processes (`lsof -- <run.log>`) and, none found, to repair
+  the record or set it aside (`mv run.json run.json.unread`). An entry of `runs/` that is no folder is
+  warned about and passed over.
 
 ### 4.5 M5 — Stopping
 
@@ -483,7 +500,10 @@ drains first; a kill needs nothing before it. While `bddgen` runs, any stop kill
 runner is never started. No SIGINT once the results stream holds `run.end` (`runs/stream-end.ts`):
 Playwright removes its SIGINT listener once the tests are over, so a SIGINT then would end the
 runner mid-report (V399); the kill budget still guards a hang. A stop changes nothing once nothing
-runs.
+runs. Once the runner has exited on its own, its group still tearing down (`lingering`), no stop is
+taken: a drain or interrupt has nothing to reach and does nothing, and a kill SIGKILLs the leftover
+group once without being taken — so a crash still reads `error`, and a finished run keeps its
+results. `bddgen` exiting changes nothing: its group's kill still keeps the runner from starting.
 
 | Signal to the orchestrator | Effect |
 | --- | --- |
@@ -507,9 +527,13 @@ runs.
 - Runs are detached, so the terminal's Ctrl-C reaches the orchestrator alone (V121). SIGHUP covers
   an SSH session closed outside `tmux`; the closed terminal's writes then fail (`EPIPE`, `EIO`) and
   are dropped, the log keeps them.
-- The parent watch: `process.ppid` read every second (unreferenced); a changed parent — npm killed
-  by a SIGHUP, which npm does not relay (it relays SIGINT and SIGTERM, V471), or a reparent to a
-  subreaper — is said and taken as SIGHUP.
+- The parent watch (`parent.ts`): the parent's PID at boot, read as `command.ts`'s first import
+  evaluates — before the module graph, the command line and the config —, compared with
+  `process.ppid` once as `start` begins, then every second (unreferenced); a changed parent — npm
+  killed by a SIGHUP, which npm does not relay (it relays SIGINT and SIGTERM, V471), or a reparent to
+  a subreaper — is said and taken as SIGHUP. Under npm (`npm_lifecycle_event` set) a boot parent of
+  PID 1 is npm gone already. Not caught: npm gone before that first import on a host whose orphans go
+  to a subreaper.
 - The handlers are installed first, so a signal at any point counts, and removed before `start`
   returns. A signal before any run: `stopped before any run started`, exit 130.
 - The wait: the loops are awaited without a limit until the shutdown reaches `killed` (a third
@@ -523,7 +547,9 @@ runs.
   alive.
 - The exit: settle the bus (each delivery bounded by its limit), close `orchestrator.log`, release
   the lock (after the log, so the log is only ever written under it; a later line goes to stderr),
-  drain the terminal; 130. Stopped and killed runs are still announced (`run.finished`).
+  drain the terminal and standard error together (on macOS a pipe is written asynchronously and
+  `process.exit` drops what it holds, V538); 130. From the exit code on, the shutdown is disposed and
+  the parent watch stopped: a signal during the exit says nothing. Stopped and killed runs are still announced (`run.finished`).
 - A killed run leaves its site dirty until its cell's next run, whose `@plugin` Before path (0C's
   `stopRunningWork` first) recovers it (Phase 0's 0C live check L3; again in 5J, V491). The parent's
   cleanup chain after a kill comes later.
@@ -547,7 +573,7 @@ runs.
   once the loops have ended.
 - One event: `run.finished`, `v: 1` (`events/run-finished.ts`) — the parent's payload (parent §2)
   minus the dashboard link. Unknown facts are `null`, never absent, so a subscriber reads every
-  field:
+  field — but a scenario's `error`, absent when it has none:
 
   | Field | Content |
   | --- | --- |
@@ -579,10 +605,12 @@ runs.
   `channel_is_archived`, … (V120) — is logged with its status and answer, the webhook masked whole,
   by its path and by its token. No retry.
 - Text: `&`, `<`, `>` escaped as Slack requires (V120; `<!channel>` in a scenario's name would
-  otherwise ping), a lone surrogate made U+FFFD; every piece cut after escaping, never inside
-  `&amp;`, so the worst message stays under 20,000 characters, well under Slack's 40,000-character
-  truncation. Slack's own formatting (`*`, `_`, a bare link, `:emoji:`) is left to it: a run can
-  style its text, not ping or hide a link.
+  otherwise ping), a lone surrogate made U+FFFD, each run of three backticks or more written in `ˋ`
+  (U+02CB) — Slack has no backtick escape, and two such names would make the lines between them one
+  code block; every piece cut after escaping, never inside `&amp;`, so the worst message stays under
+  20,000 characters, well under Slack's 40,000-character truncation. Slack's own formatting (`*`,
+  `_`, a bare link, `:emoji:`) is left to it: a run can style its text, not ping, hide a link or
+  reach past its line.
 
   ```text
   *[AutoE2E nginx]* ❌ FAILED — BackWPup Pro · pro@nginx
@@ -633,7 +661,7 @@ runs.
   | `total_tests` / `successful_tests` / `failed_tests` | every scenario / `passed` + `flaky` / `failed`; `skipped` is in neither (D2) |
   | `git_commit` | the full commit, `null` when there is none (a `release:` build) or it is not 40 or 64 hex digits |
   | `test_duration_seconds` | the run's duration, an integer — `845.7` is refused (V118) |
-  | `website_url` | the pool's first site's `baseURL`, `null` unless Django's `URLValidator` surely accepts it: kept only when the URL parser writes it back unchanged (a trailing `/` aside) and its host is `localhost`, an IPv4 address or a DNS name with a TLD — so `http://wp-apache`, a Docker cell's host, is dropped (V385, V388, V389) |
+  | `website_url` | the pool's first site's `baseURL`, its user and password dropped (the event shows them `***@`, which would split the site's series), at most 255 once they are gone, `null` unless Django's `URLValidator` surely accepts it: kept only when the URL parser writes it back unchanged (a trailing `/` aside) and its host is `localhost`, an IPv4 address or a DNS name with a TLD — so `http://wp-apache`, a Docker cell's host, is dropped (V385, V388, V389) |
   | `test_cases` | per scenario: `feature_name` and `test_name` (prefixed with its Rule/Outline path) cut to 500 code points (501 is refused, V118), `(unnamed)` when blank after trimming; `status` `passed`, `failed` or `skipped` (`flaky` → `passed`, D2; an interrupted scenario `skipped`); `error_message` the first error, ≤ 4,000 characters |
 
 - Each refusal loses the whole run, so what Datator refuses is avoided first (V385): blank names,
@@ -653,7 +681,7 @@ runs.
   tasks/<id>.json             a task's run counter (tasks/ 0700)
   runs/                       made 0700; this user's and go-w wherever it is made or read; never a link
     <run id>/                 0700: run.log, run.json, stop (once drained); run-finished.json, datator.json (0600) once ended
-$XDG_STATE_HOME/wp-media-e2e/site-locks/   (else ~/.local/state/…) 0700; every config of this user
+$XDG_STATE_HOME/wp-media-e2e/site-locks/   (else ~/.local/state/…) both 0700, never links; every config of this user
   <32 hex>.lock               a site's lock, 0600: its holder, the site's key, the cell, the latest run.json (§4.3)
 ```
 
@@ -712,10 +740,13 @@ $XDG_STATE_HOME/wp-media-e2e/site-locks/   (else ~/.local/state/…) 0700; every
   the event, Slack, Datator — is masked by value first, then by shape (a shape matching inside a
   secret would mask only that part and leave the rest, which no value then matches):
   - by value: every secret it holds (`config/secrets.ts`, `allSecretValues`: the runs' secrets; the
-    Slack webhook whole, its path and its token; Datator's key; every task's sites' passwords and
-    storage keys, selected or not; the lowercased SSH hosts that hold a secret, as the
-    crowded-server warning shows them), each trimmed, longest first, in every form a service may
-    echo — as written, URL- and form-encoded, JSON-escaped (PHP's `\/` too);
+    Slack webhook whole, its path and its token; Datator's key; every task's sites' passwords,
+    storage keys and `baseURL` passwords (as written and decoded), selected or not; the lowercased
+    SSH hosts that hold a secret, as the crowded-server warning shows them), each trimmed and also as
+    cleaning writes it (an invisible character dropped), in every form a service may echo — as
+    written, URL- and form-encoded, JSON-escaped (PHP's `\/` too). Every occurrence of every form is
+    found first and each run of overlapping ones masked as one, so no order can leave a secret's
+    rest in clear (`maskValues`);
   - by shape: the suite's `redactSecrets` (a URL's userinfo, including a password a URL parser would
     refuse; a GitHub token; a credential URL parameter; an `Authorization` header; a WordPress login
     cookie).
@@ -729,7 +760,8 @@ $XDG_STATE_HOME/wp-media-e2e/site-locks/   (else ~/.local/state/…) 0700; every
 - A value under 8 characters is never masked by value (it would mask words); only never printing its
   field keeps it out, so no field holding a secret is printed anywhere (the dry run names them). A
   URL without `//` (`foo:user:pw@host`) matches no shape; the dry run shows a stand-in for it. An
-  answer still quoting a secret in any form is withheld:
+  answer still quoting a secret in any form — each secret trimmed, and as cleaning writes it — is
+  withheld:
   `HTTP 403 (its answer is withheld: it quotes a secret)`.
 - Network failures are our own words (`ECONNREFUSED`, the time limit, `cancelled`), never `fetch`'s
   message, so a URL never reaches a log. A site is shown by `safeSiteUrl` (`text.ts`): masked by
@@ -764,8 +796,9 @@ orchestrator/
                             counter, orphans, inspect, run-folders, runs-folder, run-retention
   log.ts, terminal.ts       a Logger (terminal + file now, pino behind it later); stdout non-blocking
   text.ts, files.ts, folders.ts, error-code.ts   masking and cuts; bounded reads; folder rules
+  soak.spec.ts              the soak: the real start over the fake suite (ORCHESTRATOR_SOAK=1)
   __fixtures__/             fake-suite, fake-start + swap-start.mjs, http-sink, import-boundary,
-                            results, run-finished, file-handle, slow-reader
+                            results, run-finished, file-handle, slow-reader, soak (+ its spec)
 ```
 
 Every module takes its clock, paths, `kill` and launch as arguments, so the fake suite (a `node -e`
@@ -833,8 +866,8 @@ real script, `cli.ts` and `command.ts` over it through `swap-start.mjs`.
 Which machine is D4. On it:
 
 1. Tools: Node ≥ 24.16 and npm; git; for BackWPup builds composer (PHP CLI) and `gulp-cli` (V123);
-   Chromium and its system libraries (`npx playwright install --with-deps chromium`, once, with
-   `sudo`); `tmux`. No X server (V126).
+   Chromium's system libraries (`npx playwright install-deps chromium`, once, with `sudo`; `npm ci`
+   installs Chromium itself); `tmux`. No X server (V126).
 2. A checkout of `develop` and `npm ci` — never `--omit=dev` nor `NODE_ENV=production`: tsx, zod and
    commander are dev dependencies. The cells' `sites.json` (`0600`), with SSH keys reaching the
    WordPress servers; `npm run healthcheck` passing for those cells — the parent's setup step.
@@ -876,6 +909,7 @@ Which machine is D4. On it:
 | 5J | Live checks on `bwu2`/`bwu3` (V486, V489, V491–V493) | 2026-10-14 |
 | 5K | Final audit: site locks held for a loop's life, an `unwatched` run ending its loop, cut-tail masking, `runs/` checked, stuck groups said; a quality and documentation pass; the site locks' live smoke (V534–V536) | 2026-10-15 |
 | 6 | The docs: the operator's guide (`docs/guides/orchestrator.md`), README's quick start, CLAUDE.md's pointers; the soak (`soak.spec.ts`, `npm run orchestrator:soak`, V537) | 2026-10-19 |
+| 7 | Full audit (V539): the parent's PID read at boot; a stop once the runner exited on its own not taken (`lingering`); a process that cannot start keeps its cause; proxy, CA and browser-path variables reach a run; an unreadable run record refuses the start, a run from an earlier boot is `lost`; the site locks' parent folder judged; credential-shaped keys, a sites file's values and a split `baseURL` password never shown; overlapping secrets masked as one; `data:` imports refused; Slack code fences broken; Datator's `website_url` without credentials; stderr drained at the exit; live on `bwu3` (V540); the soak (V541) | 2026-10-19 |
 
 ### 7.1 Left after this phase
 
@@ -913,6 +947,10 @@ must keep; the module each was found in documents its own case.
 - A spec asserting an order, a no-op or a refusal must be able to fail: four passed whatever the
   code did (a flag set after an `await` or unconditionally, a result read before the act). Prove
   each with a mutation.
+- A baseline a watch compares with is read when the process starts, never when the watch starts:
+  the parent's PID read at `listen` was already the new parent when npm died during the boot (V539).
+- Mask by finding every secret's occurrences first, then masking each overlapping run once:
+  replacing one secret at a time breaks another that overlaps it and leaves its rest in clear (V539).
 - A test of the command drives the real entry through its npm script (`swap-start.mjs`), never a
   copy of the entry's line: a copy left `cli.ts`'s exit and signal handling untested.
 
@@ -933,7 +971,7 @@ must keep; the module each was found in documents its own case.
 Done: unit specs for every module, mutation-tested; the loop, stop, orphan and command paths against
 the fake suite with real processes and signals (§5); every Datator payload against a local Datator
 built from its own `e2e_tests` app (V385), and Slack against a local sink; the live checks on
-`bwu2`/`bwu3` (5J, V486, V489, V491–V493; the site locks, V534–V536); the soak (V537). Open:
+`bwu2`/`bwu3` (5J, V486, V489, V491–V493; the site locks, V534–V536); the soak (V537); after the full audit, V539–V541. Open:
 
 - On the runner (D4): §6 end to end, and on its own system one Ctrl-C under `npm run` must still
   read as one (V122) and reach no run (V121). Both were measured on Ubuntu 24.04 in Docker, not on
@@ -1027,3 +1065,7 @@ Facts outside this code, and the live checks. The parent's and Phase 0's rows ar
 | V535 | A second config started during the first's cooldown is refused at its start naming the holder (PID, cell, site, run), its dry run warns the same, no `runs/` made; after Ctrl-C the first exits 130, the locks gone, and the second's `--once` runs 4/4. After a SIGKILL of the first, a start on its state directory refuses on the orphans, naming each run and its `kill -KILL -<pgid>`, before it looks at the site locks; the other config is refused by the dead holder's site lock; after `kill -KILL -<pgid>` the runs are marked `lost`, the locks taken over, 4/4 | live 2026-10-15 | The smoke's captures |
 | V536 | Sites as found after every check (only `bwu3`'s 242-byte `debug.log` removed by the suite's teardown, by design); no secret in the 284 files scanned (state directory, reports, terminal captures) | live 2026-10-15 | State snapshots; a secret scan |
 | V537 | The soak: the real `start` in one process over the fake suite, one task, a 50 ms cooldown, Slack and Datator over real sockets to a local sink; 1,000 runs capped (`reportsKeep` 20) and 1,000 uncapped, each run passed and announced (`slack ✓ · datator ✓ 201`). Listeners 15, resources 6, timers 2, descriptors 22 at every sample from run 10 to 1,000, and back after the stop; run folders held at 20; uncapped, pruning 0.35 ms a folder at 1,000 (348 ms), the heap 73 → 97 MiB (not judged). A leaked listener and descriptor per run failed it within 20 runs | measured 2026-10-19, macOS | `npm run orchestrator:soak` with `ORCHESTRATOR_SOAK_RUNS=1000` (10.3 min); a mutation of `tasks/cycle.ts` |
+| V538 | On macOS, 200 KB written to a piped stderr then `process.exit` delivers 65,536 bytes: a pipe is written asynchronously, so the exit waits for standard error as for the terminal | measured 2026-10-19, macOS | Node 24.21.0; `start.spec.ts`'s slow-stderr refusal test |
+| V539 | Full adversarial audit of the whole phase: six reviewers in isolated copies (the process and command; a run; state and locks; tasks, events, notifications; config, secrets and the import boundary; docs against code with 186 mutations), every finding reproduced before its fix and every fix's test shown to fail without it. Medium: npm dying while Node boots unseen (the parent read at `listen`); a runner that died on its own read `stopped` when a stop came while its group lingered; an unreadable `running` record only warned about; the site locks' parent folder unjudged; a secret holding an invisible character or two overlapping secrets left partly in clear; a credential-shaped key shown. Low: a process that could not start lost its cause; proxy, CA and browser-path variables never reached a run; a run from an earlier boot refused the start; a site key over 2,048 characters failed every loop late; a split `baseURL` password in the site key; a sites file's values quoted in its errors; `data:` imports past the boundary; Slack code fences; Datator storing `***@`; a short secret with spaces shown in an answer; a `setRun` rejection not ending its loop; stderr cut at the exit; specs not killing their process groups; 13 test gaps; docs drift and TSDoc gaps. 3,313 → 3,386 unit tests | audit 2026-10-19 | `typecheck`, `lint`, `format`, `test:unit` green |
+| V540 | Live after the audit, `bwu3` (`pro@nginx`, two scenarios): `--dry-run` no warnings; `--once` passed 2/2; then one SIGINT to npm's PID mid-scenario: `stopping` said once, the scenario finished, the other skipped, `stopped`, exit 130, the site locks released, no process left. `bwu2`'s TLS certificate expired that day (02:44 UTC): its run read `error · the auth setup failed: … ERR_CERT_DATE_INVALID`, exit 1 — the host's, not the orchestrator's. No secret in the 82 files written (state directory, reports, terminal) but the config | live 2026-10-19 | notifications off (scratch config); bpng-1, bpng-2, bfng-1 |
+| V541 | The soak after the audit: 200 runs, listeners 15, resources 6, timers 2, descriptors 22 at every sample; pruning 0.32 ms a folder at 200 | measured 2026-10-19, macOS | `npm run orchestrator:soak` (1.6 min) |

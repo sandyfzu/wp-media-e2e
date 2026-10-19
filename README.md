@@ -87,7 +87,7 @@ mkdir -p .orchestrator && chmod 700 .orchestrator
 cp orchestrator/config.example.json .orchestrator/config.json && chmod 600 .orchestrator/config.json
 # edit it: one task per cell, the secrets, Slack's webhook, Datator's key
 npm run orchestrator -- start --dry-run              # check it; runs and writes nothing
-npm run orchestrator -- start --task <id> --once     # one run, exit 0 (passed/flaky) or 1
+npm run orchestrator -- start --task <id> --once     # one run, exit 0 (passed/flaky), 1, or 130 if stopped
 tmux new -d -s orchestrator 'npm run orchestrator -- start'   # every task, until stopped
 tmux send-keys -t orchestrator C-c                   # stop: runs finish their scenario
 ```
@@ -166,7 +166,7 @@ Every run writes a layered set of reports into `reports/<product>/<cell>/<RUN_ID
 - **`allure-results/`** — raw results for **Allure**, the analytics layer (history/trends, flaky
   detection, dashboard).
 - **`results.jsonl`** — every attempt and the run's totals, one JSON line each, written as the run
-  goes: what a script or the orchestrator watches. Schema in
+  goes: what a script watches, and what the orchestrator reads once a run has ended. Schema in
   [`results-schema.ts`](src/common/reporting/results-schema.ts).
 - **`run-facts.json`** — what the run tested: the plugin (ref, full commit, zip, **SHA-256**), each
   site's WordPress, PHP, web server and database, the run's name and verdict. Rewritten as each setup
