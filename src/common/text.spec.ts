@@ -299,4 +299,29 @@ test.describe("maskValues", () => {
       ]),
     ).toBe("a *** and *** again; short abc");
   });
+
+  test("masks overlapping and touching values as one, whatever their order", () => {
+    for (const values of [
+      ["abcdefgh12", "12345678zz"],
+      ["12345678zz", "abcdefgh12"],
+    ]) {
+      expect(maskValues("<abcdefgh12345678zz>", values)).toBe("<***>");
+      expect(maskValues("abcdefgh1212345678zz", values)).toBe("***");
+    }
+    // A value inside a longer one, either first.
+    expect(
+      maskValues("a Tr0ub4dor&3-and-more b", [
+        "Tr0ub4dor&3",
+        "Tr0ub4dor&3-and-more",
+      ]),
+    ).toBe("a *** b");
+    expect(
+      maskValues("a Tr0ub4dor&3-and-more b", [
+        "Tr0ub4dor&3-and-more",
+        "Tr0ub4dor&3",
+      ]),
+    ).toBe("a *** b");
+    // A value overlapping itself.
+    expect(maskValues("[aaaaaaaaaaa]", ["aaaaaaaa"])).toBe("[***]");
+  });
 });

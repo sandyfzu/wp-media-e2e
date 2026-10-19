@@ -166,6 +166,23 @@ function mergeCellMaps(
 
 // ── Validation helpers ─────────────────────────────────────────────────────────
 
+/**
+ * A refused value as an error may describe it: its kind, and a text's length — never the text. A
+ * sites file holds credentials, and a password written one field off (or a shifted line) would
+ * otherwise be printed in a message that reaches terminals, CI logs and the orchestrator's log.
+ *
+ * @param value - the value read from the file.
+ * @returns e.g. `a text of 8 characters`, `a number`, `null`.
+ */
+export function describeValue(value: unknown): string {
+  if (typeof value === "string")
+    return `a text of ${String(Array.from(value).length)} characters`;
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "a list";
+  if (typeof value === "object") return "an object";
+  return typeof value === "boolean" ? String(value) : `a ${typeof value}`;
+}
+
 /** Returns `value` when it is a non-empty string; otherwise throws an error naming `path`. */
 function requireString(value: unknown, path: string): string {
   if (!isNonEmptyString(value)) {
@@ -218,7 +235,7 @@ function validateTransport(value: unknown, path: string): Transport {
       };
     default:
       throw new Error(
-        `[sites] ${path}.mode must be "ssh" | "docker" | "local" (got ${JSON.stringify(value.mode)}).`,
+        `[sites] ${path}.mode must be "ssh" | "docker" | "local" (got ${describeValue(value.mode)}).`,
       );
   }
 }
@@ -269,7 +286,7 @@ function optionalFileOwner(
   if (!isNonEmptyString(value)) {
     throw new Error(
       `[sites] ${path} must be ${OWNER_SPEC_RULE}, or false to opt out — got ` +
-        `${JSON.stringify(value)}.`,
+        `${describeValue(value)}.`,
     );
   }
   // Throws with the same rule the ownership layer enforces, so the two can never disagree.
@@ -361,7 +378,7 @@ function validateSite(value: unknown, path: string): SiteInput {
 function validateEdition(value: unknown, path: string): Edition | undefined {
   if (value === undefined || value === "free" || value === "pro") return value;
   throw new Error(
-    `[sites] ${path} must be "free" | "pro" (got ${JSON.stringify(value)}).`,
+    `[sites] ${path} must be "free" | "pro" (got ${describeValue(value)}).`,
   );
 }
 

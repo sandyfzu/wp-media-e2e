@@ -155,7 +155,10 @@ export const MIN_MASKED_LENGTH = 8;
 /**
  * `text` with each of `values` masked wherever it appears verbatim — for a credential no pattern can
  * tell from ordinary text, such as a legacy GitHub token, 40 hex digits like any commit. Blank and
- * short values (under {@link MIN_MASKED_LENGTH} characters) are ignored.
+ * short values (under {@link MIN_MASKED_LENGTH} characters) are ignored. Every occurrence of every
+ * value is found in `text` as given, then each run of overlapping or touching ones becomes one mask,
+ * so the order of `values` never matters: masking one value first would break another that overlaps
+ * it (`abcdefgh12` and `12345678zz` in `abcdefgh12345678zz`) and leave that one's rest in clear.
  *
  * @param text - what a tool said.
  * @param values - the secrets the process holds.
@@ -168,14 +171,27 @@ export function maskValues(
   text: string,
   values: readonly (string | undefined)[],
 ): string {
-  let masked = text;
+  // `ends[i]`: the furthest end of a value found starting at `i`.
+  const ends = new Map<number, number>();
   for (const value of values) {
     const secret = value?.trim() ?? "";
-    if (secret.length >= MIN_MASKED_LENGTH) {
-      masked = masked.split(secret).join(MASK);
-    }
+    if (secret.length < MIN_MASKED_LENGTH) continue;
+    // From the next character, not past the match: a value can overlap itself (`aaaaaaaaa`).
+    for (
+      let at = text.indexOf(secret);
+      at !== -1;
+      at = text.indexOf(secret, at + 1)
+    )
+      ends.set(at, Math.max(ends.get(at) ?? 0, at + secret.length));
   }
-  return masked;
+  let masked = "";
+  // Where the mask being built ends; -1 before the first.
+  let end = -1;
+  for (const start of [...ends.keys()].sort((a, b) => a - b)) {
+    if (start > end) masked += `${text.slice(Math.max(end, 0), start)}${MASK}`;
+    end = Math.max(end, ends.get(start) ?? start);
+  }
+  return masked + text.slice(Math.max(end, 0));
 }
 
 /**
