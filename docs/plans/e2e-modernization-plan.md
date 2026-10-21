@@ -1,4 +1,4 @@
-# E2E Modernization Plan — `wp-rocket-e2e` → `wp-media-projects-e2e`
+# E2E Modernization Plan — `wp-rocket-e2e` → `wp-media-e2e`
 
 - Status: Phases 0–5 done. Phase 6 (feature porting, BackWPup first) in progress in the [phase-6
   plan](phase-6-feature-porting-plan.md). Phases 7 and 10 open. Phase 8 dropped. Phase 9 moved to

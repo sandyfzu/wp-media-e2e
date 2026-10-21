@@ -106,10 +106,7 @@ function printHeader(
 ): void {
   console.log(styleText(["bold", "cyan"], RULE));
   console.log(
-    styleText(
-      ["bold", "cyan"],
-      "  wp-media-projects-e2e — Warm plugin artifacts",
-    ),
+    styleText(["bold", "cyan"], "  wp-media-e2e — Warm plugin artifacts"),
   );
   console.log(styleText(["bold", "cyan"], RULE));
   console.log(
