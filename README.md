@@ -1,4 +1,4 @@
-# wp-media-projects-e2e
+# wp-media-e2e
 
 End-to-end tests for WP Media products (WP Rocket, BackWPup), built on
 [Playwright](https://playwright.dev) + [playwright-bdd](https://vitalets.github.io/playwright-bdd/)

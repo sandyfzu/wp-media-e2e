@@ -315,9 +315,7 @@ function printHeader(plans: readonly ProductPlan[]): void {
   const productCount = plans.length;
 
   console.log(styleText(["bold", "cyan"], RULE));
-  console.log(
-    styleText(["bold", "cyan"], "  wp-media-projects-e2e — Health Check"),
-  );
+  console.log(styleText(["bold", "cyan"], "  wp-media-e2e — Health Check"));
   console.log(styleText(["bold", "cyan"], RULE));
   console.log(
     styleText(

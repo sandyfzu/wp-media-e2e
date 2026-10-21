@@ -1,7 +1,7 @@
 {
-  "name": "wp-media-projects-e2e",
+  "name": "wp-media-e2e",
   "version": "0.0.1",
-  "description": "Projects E2E Tests with Playwright",
+  "description": "WP Media E2E Tests with Playwright",
   "license": "UNLICENSED",
   "author": "WP Media",
   "type": "module",
