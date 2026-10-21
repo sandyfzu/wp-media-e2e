@@ -642,7 +642,7 @@ ssh). Highlights — full reference in
   place, because a copied guard is a guard that drifts. Every operation
   that builds an elevated target out of a site's `rootDir` (residue removal, data-directory
   preparation, ownership normalisation) validates through them. Those guards are **lexical**, so
-  where a path really leads is checked separately: `assertResolvedInsideRoot` resolves the target and
+  where a path really leads is checked separately: `assertResolvedInsideRoot` (`wp/exec.ts`) resolves the target and
   the root (`readlink -f`, walking up to the deepest existing ancestor) and refuses anything that
   lands outside — a symlink in _any_ parent, not just the last component, otherwise redirects a root
   `chmod`/`mkdir`/`rm -rf` out of the docroot while every string comparison agrees. A path that

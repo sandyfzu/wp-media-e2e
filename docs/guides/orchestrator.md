@@ -1,11 +1,11 @@
 # The orchestrator — operator's guide
 
-One foreground command, `npm run orchestrator -- start`, that runs E2E cells in loops on one machine
-(a run, a cooldown, the next run) and reports every run to Slack and Datator. It replaces AutoE2E's
-BackWPup instances. Each run builds its plugin through the suite (`artifacts:<cell>`, APVM) and is
-the suite's own run: `bddgen`, then Playwright, pinned to one cell.
+One foreground command, `npm run orchestrator -- start`, runs E2E cells in loops on one machine (a run,
+a cooldown, the next run) and reports each run to Slack and Datator, replacing AutoE2E's BackWPup
+instances. Each run is the suite's own (`bddgen`, then Playwright, pinned to one cell), building its
+plugin through the suite (`artifacts:<cell>`, APVM).
 
-What it does not do yet (later phases): run as a service (systemd), take commands while running
+Not yet (later phases): run as a service (systemd), take commands while running
 (`status`, `stop`, a dashboard), schedules or on-demand runs, back off after failures, build or pin
 plugins itself, warn about disk space, clean a site after a killed run (the cell's next run does).
 The config is read once: a change needs a restart.
@@ -34,10 +34,9 @@ cp orchestrator/config.example.json .orchestrator/config.json
 chmod 600 .orchestrator/config.json
 ```
 
-The config's folder is the **state directory** (runs, logs, the lock). `--config <file>` picks
-another file, and with it another state directory. The folder must be yours and closed to other
-writers: Ubuntu's default umask (`002`) makes a `mkdir`'d folder `0775`, which the start refuses,
-naming `chmod go-w`.
+The config's folder is the **state directory** (runs, logs, the lock); `--config <file>` picks another
+file, and with it another state directory. It must be yours and closed to other writers: Ubuntu's default umask
+(`002`) makes a `mkdir`'d folder `0775`, which the start refuses, naming `chmod go-w`.
 
 ```json
 {
@@ -99,9 +98,9 @@ npm run orchestrator -- start --dry-run          # check the config, print what 
 npm run orchestrator -- start --task bpng --once # one real run of one task, then exit
 ```
 
-The dry run runs, locks and writes nothing, so it is safe beside a running orchestrator. It names
-each task's cell, plugin (as the run will build it), sites and their servers, settings, the
-notifications and secrets **by name**, then every warning — what a start would refuse included:
+The dry run runs, locks and writes nothing (safe beside a running orchestrator). It names each task's
+cell, plugin (as the run will build it), sites and servers, settings, the notifications and secrets
+**by name**, then every warning, what a start would refuse included:
 
 ```text
 dry run · nothing is run · config .orchestrator/config.json · state .orchestrator/
@@ -116,8 +115,7 @@ secrets for the runs: GITHUB_TOKEN, BWP_S3_ACCESS_KEY_ID
 no warnings
 ```
 
-`--once` exits `0` when every run passed or was flaky, `130` when stopped, else `1`. It posts to Slack and Datator like
-any run.
+`--once` posts to Slack and Datator like any run ([exit codes](#the-command)).
 
 ## Run it
 
@@ -128,8 +126,8 @@ tail -f .orchestrator/orchestrator.log      # or read its log
 tmux send-keys -t orchestrator C-c          # stop: the drain (below)
 ```
 
-Use `tmux`, never `nohup` or `… &`: it stops when its terminal closes (SIGHUP) or its parent ends,
-so anything that backgrounds it and exits stops it at once. In a container, only with `--pid=host`:
+Use `tmux`, never `nohup` or `… &`: it stops when its terminal closes (SIGHUP) or its parent ends, so
+anything that backgrounds it and exits stops it at once. In a container, only with `--pid=host`:
 a container restarting into a new PID namespace reads its own lock as another's and refuses to start.
 
 One line per event; a run's own output goes to its `run.log`:
@@ -142,12 +140,11 @@ One line per event; a run's own output goes to its `run.log`:
 11:09:42 bpng  next run 11:14:41 (cooldown 5m)
 ```
 
-The `slack … · datator …` line is written once both deliveries end, so it may come before or after
-`next run`.
+The `slack … · datator …` line comes once both deliveries end, before or after `next run`; a failure
+shows `✗` with the status or our reason (`✗ 404 no_service`, `✗ no answer within 15000 ms`).
 
-Outcomes: `✔` passed, `⚠` flaky, `✘` failed or error (could not test: a failed build or setup, no
-scenario run, an error outside the tests), `■` stopped or killed. A run that could not test gives its
-reason and its log. A failing run never stops its loop: it fails and says so every cycle.
+Outcomes: `✔` passed, `⚠` flaky, `✘` failed or error (could not test — [What a run is](#what-a-run-is)), `■` stopped or killed. A run that could not test gives its
+reason and log. A failing run never stops its loop: it fails, and says so, every cycle.
 
 ## The command
 
@@ -181,7 +178,7 @@ npm run orchestrator -- start --help
 
 - Only Ctrl-C escalates, so an SSH session closing after a Ctrl-C cannot cut the drain short.
   Ctrl-Cs less than 1 s apart count as one (npm delivers one Ctrl-C twice).
-- Every step is said: `stopping: …`, `interrupting every run: …`, `killing every run: …`.
+- Each step is said: `stopping: …`, `interrupting every run: …`, `killing every run: …`.
 - After a kill it waits 60 s more for the runs to end, then names any run left behind — with its
   `kill -KILL -<pgid>` when the group is shown to be the run's, else how to check it first. Stopped and killed runs are still sent to Slack, never to Datator.
 - A killed run leaves its site dirty (the plugin installed, a backup half made) until the cell's next
@@ -225,8 +222,6 @@ npm run orchestrator -- start --help
   (`pro@nginx`, or `pro@nginx @smoke` with a `grep`); a flaky scenario counts as passed;
   `website_url` is the first site's address without its credentials. Success is `201`; anything else
   is logged, no retry.
-- One line per run says both: `slack ✓ · datator ✓ 201`, or `✗` with the status or our reason
-  (`✗ 404 no_service`, `✗ no answer within 15000 ms`).
 - Behind a proxy, set `HTTPS_PROXY` (and `NO_PROXY`) in the orchestrator's environment: runs inherit
   them, for APVM and `gh`. Set `NODE_USE_ENV_PROXY=1` too: Node's `fetch` (Slack, Datator, Node inside
   a run) ignores proxy variables otherwise. A TLS-inspecting proxy's CA: `NODE_EXTRA_CA_CERTS` (Node),
@@ -249,7 +244,7 @@ npm run orchestrator -- start --help
   Datator) — by value, URL- and JSON-encoded forms included, also with spaces around it trimmed and
   invisible characters dropped, and by shape (tokens, passwords in URLs, cookies). Still treat the state directory, `reports/` and `test-results/` like the sites files: a
   run's traces hold WordPress session cookies.
-- `orchestrator.log` is never rotated by the orchestrator (about 1 MB a day, 0.75–1.4 MB at worst)
+- `orchestrator.log` is never rotated by the orchestrator (~1–1.4 MB a day)
   and stays open: a
   `logrotate` that renames it leaves the orchestrator writing the renamed file. Use `copytruncate`,
   or no rotation.
