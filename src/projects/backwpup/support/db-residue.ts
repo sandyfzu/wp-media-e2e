@@ -10,7 +10,8 @@ import type { SiteDbResidue } from "../../../common/wp/db-residue";
  * guard skips the cleanup (measured: **26 options and the table** left behind), and a run killed
  * between the uninstall and the teardown leaves the same shape. Either way the next install reads
  * `backwpup_version`, concludes it is an upgrade rather than a first install, never sets the
- * onboarding flag, and the scenario fails blaming the product.
+ * onboarding flag, and the scenario fails blaming the product. A third, an uninstall that fails
+ * (its folder then removed by path), also leaves the roles and administrator capabilities.
  *
  * The fragments below were taken from a site, not from the source: a full install plus onboarding
  * plus a UI scenario, sampled throughout, with every matching row collected.
@@ -50,16 +51,47 @@ export const BACKUP_HISTORY_TABLE = "bwpup_backups";
 export const BACKWPUP_TABLES = [BACKUP_HISTORY_TABLE];
 
 /**
- * The footprint the shared `@plugin` hooks sweep whenever they find it.
+ * The roles the plugin registers on activation (`inc/class-install.php`), removed by its uninstall.
  *
- * Deliberately not the whole footprint. The plugin also leaves three roles, eleven administrator
- * capabilities and — once its admin notices have been seen — some user meta, none of which is
- * declared here: none of them blocks an install, activation re-establishes them idempotently, and
- * the next scenario's own uninstall removes them. Declaring them would mean reproducing the
- * plugin's role handling, a second implementation to keep in step with it, for rows that cannot
- * accumulate.
+ * Declared because activation cannot replace them: it calls `add_role()`, which leaves an existing
+ * role untouched. Measured on `pro@apache`: a `backwpup_check` left with other capabilities kept them
+ * through a fresh install, so a version that changes a role would be tested with the old one. A
+ * failed uninstall is what leaves them.
+ */
+export const BACKWPUP_ROLES = [
+  "backwpup_admin",
+  "backwpup_check",
+  "backwpup_helper",
+];
+
+/**
+ * The capabilities activation grants the `administrator` role on a single site, and its uninstall
+ * takes back. Activation re-grants each with `add_cap()`, which does overwrite; declared so one a
+ * later version stops granting cannot outlive it, and so the sweep leaves the role as WordPress made
+ * it.
+ */
+export const BACKWPUP_ADMIN_CAPABILITIES = [
+  "backwpup",
+  "backwpup_jobs",
+  "backwpup_jobs_edit",
+  "backwpup_jobs_start",
+  "backwpup_backups",
+  "backwpup_backups_download",
+  "backwpup_backups_delete",
+  "backwpup_logs",
+  "backwpup_logs_delete",
+  "backwpup_settings",
+  "backwpup_restore",
+];
+
+/**
+ * The footprint the shared `@plugin` hooks sweep whenever they find it: options, the table, roles and
+ * the administrator's capabilities. Not user meta: the admin notices that write it re-create it, no
+ * install reads it, and the next real uninstall removes it.
  */
 export const BACKWPUP_SITE_DB_RESIDUE: SiteDbResidue = {
   optionsContaining: BACKWPUP_OPTION_FRAGMENTS,
   tables: BACKWPUP_TABLES,
+  roles: BACKWPUP_ROLES,
+  capabilities: BACKWPUP_ADMIN_CAPABILITIES,
 };

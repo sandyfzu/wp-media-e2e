@@ -409,8 +409,16 @@ installed BackWPup should owe its onboarding"_ — the plugin reads its leftover
 takes it for an upgrade and never sets the onboarding flag. So the sweep keys off the **footprint**,
 never off `is-installed`.
 
-- Declared as `ProductConfig.siteDbResidue`: `optionsContaining` (option-name fragments) and `tables`
-  (unprefixed); the `@plugin` hooks sweep whatever they find, via the registry.
+- Declared as `ProductConfig.siteDbResidue`: `optionsContaining` (option-name fragments), `tables`
+  (unprefixed), `roles` and `capabilities` (exact names); the `@plugin` hooks sweep whatever they find,
+  via the registry.
+- **Roles, because activation cannot replace them**: `add_role()` returns without a change when the
+  role exists (`class-wp-roles.php`), so BackWPup's "add/overwrite roles" keeps a leftover role's
+  capabilities. Measured on `pro@apache`: a planted `backwpup_check` kept its planted capabilities
+  through a fresh install; swept, it got the artifact's. A failed uninstall leaves the three roles and
+  11 administrator capabilities. Roles go whole (`remove_role`); a declared capability is taken from
+  every other role holding it (`WP_Role::remove_cap`), read from the `<prefix>user_roles` row, not a
+  cache. A site whose roles live in code (`$wp_user_roles`) or whose row is unreadable is refused.
 - **Fragments match anywhere in a name**, since a plugin's transients are options whose names do not begin with its prefix
   (`backwpup_<jobid>_gdrive` is stored as `_site_transient_backwpup_<jobid>_gdrive`, observed). Matched
   literally (`%`, `_` escaped with `esc_like`). A fragment under three characters is refused: it would
@@ -424,8 +432,10 @@ never off `is-installed`.
   false both for "absent" and "a filter refused".
 - WordPress loads **`--skip-plugins`**, so other plugins hooking option writes cannot change the
   outcome; core (`delete_option`) is unaffected.
-- **Two guards against a wrong declaration** (not a hostile one): `PROTECTED_TABLES` refuses one of
-  WordPress's tables at declaration time; `PROTECTED_OPTIONS` is checked against what the query
+- **Guards against a wrong declaration** (not a hostile one): `PROTECTED_TABLES` refuses one of
+  WordPress's tables at declaration time; `PROTECTED_ROLES` / `PROTECTED_CAPABILITIES` (core's
+  `populate_roles()` set) refuse a core role or capability, and every role and capability must be
+  lowercase `[a-z0-9_-]` and carry one of the `optionsContaining` fragments (keeps out another plugin's); `PROTECTED_OPTIONS` is checked against what the query
   actually **matched** (only the site knows what a fragment reaches) and refuses the **whole** sweep
   before deleting anything if it reached `siteurl`, `active_plugins`, `cron`, the prefixed
   `user_roles` or the rest of that list — the same bet `PROTECTED_SITE_PATHS` makes for a privileged `rm -rf`.
@@ -435,11 +445,9 @@ never off `is-installed`.
 - **Multisite is refused**: its options live in `sitemeta` per network, and looking in the wrong table
   would call a dirty site clean.
 
-**Scope**: only options and tables, the two that _block a fresh install_ (what the plugin reads to
-decide it was installed before; what its installer tries to create). Roles, capabilities and user meta
-block nothing, activation re-establishes them idempotently and the next uninstall removes them, so they cannot
-accumulate;
-declaring them would duplicate the plugin's role handling.
+**Scope**: what makes an install land on old state — options (read to decide it was installed
+before), tables (its installer creates them again), roles and capabilities (activation keeps them).
+User meta is left: notices re-create it, no install reads it, the next uninstall removes it.
 
 ## File ownership ([`wp/ownership.ts`](../../src/common/wp/ownership.ts))
 

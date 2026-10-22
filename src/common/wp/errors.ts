@@ -17,6 +17,7 @@
  */
 
 // Type-only, so it is erased at runtime and this module stays free of a cycle with the exec layer.
+import type { CapabilityGrant, FoundDbResidue } from "./db-residue";
 import type { ElevationSupport } from "./exec";
 
 /** A plugin expected to be installed is not one WordPress lists (e.g. before a removal-under-test). */
@@ -286,7 +287,8 @@ export class SiteResidueRemovalFailedError extends Error {
  * WP-CLI connection that read the rows is the one that deleted them — so reaching here means
  * something is actively putting them back, which is what a still-installed copy of the plugin does
  * on every request. Naming every survivor at once, because the *shape* of what stayed is the clue:
- * options alone point at a filter, the table alone at a second process re-creating it.
+ * options alone point at a filter, the table alone at a second process re-creating it, roles
+ * at a roles option something else rewrites.
  */
 export class SiteDbResidueRemovalFailedError extends Error {
   /** The option names still present after removal. */
@@ -295,20 +297,32 @@ export class SiteDbResidueRemovalFailedError extends Error {
   /** The tables still present after removal, at their full prefixed names. */
   readonly tables: readonly string[];
 
-  constructor(options: readonly string[], tables: readonly string[]) {
-    const survivors = [
-      ...options.map((option) => `  option ${option}`),
-      ...tables.map((table) => `  table  ${table}`),
+  /** The declared roles still present after removal. */
+  readonly roles: readonly string[];
+
+  /** The declared capabilities still held after removal. */
+  readonly capabilities: readonly CapabilityGrant[];
+
+  constructor(survivors: FoundDbResidue) {
+    const lines = [
+      ...survivors.options.map((option) => `  option     ${option}`),
+      ...survivors.tables.map((table) => `  table      ${table}`),
+      ...survivors.roles.map((role) => `  role       ${role}`),
+      ...survivors.capabilities.map(
+        ({ role, capability }) => `  capability ${capability} (on ${role})`,
+      ),
     ];
     super(
       `A plugin's leftover database footprint could not be removed from the site; ` +
-        `${String(survivors.length)} item(s) survived:\n${survivors.join("\n")}\n` +
+        `${String(lines.length)} item(s) survived:\n${lines.join("\n")}\n` +
         "  Check that the plugin is really uninstalled — an installed copy re-creates its own " +
-        "options and tables on every request, so nothing can be swept while it is there.",
+        "options, tables and roles on every request, so nothing can be swept while it is there.",
     );
     this.name = "SiteDbResidueRemovalFailedError";
-    this.options = options;
-    this.tables = tables;
+    this.options = survivors.options;
+    this.tables = survivors.tables;
+    this.roles = survivors.roles;
+    this.capabilities = survivors.capabilities;
   }
 }
 

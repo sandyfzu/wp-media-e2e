@@ -131,9 +131,9 @@ if [ "$1" = "eval" ]; then
     *leftover-footprint*)
       if [[ "$2" == *delete_option* ]]; then rm -f "$S/db-residue"; fi
       if [ -e "$S/db-residue" ]; then
-        printf '{"prefix":"wp_","options":["backwpup_version"],"tables":["wp_bwpup_backups"]}'
+        printf '{"prefix":"wp_","options":["backwpup_version"],"tables":["wp_bwpup_backups"],"roles":[],"capabilities":[]}'
       else
-        printf '{"prefix":"wp_","options":[],"tables":[]}'
+        printf '{"prefix":"wp_","options":[],"tables":[],"roles":[],"capabilities":[]}'
       fi ;;
   esac
 fi
@@ -1598,7 +1598,12 @@ test.describe("clearedPluginDirMessage", () => {
 });
 
 test.describe("dbResidueMessage", () => {
-  const removed = { options: ["a", "b"], tables: ["wp_t"] };
+  const removed = {
+    options: ["a", "b"],
+    tables: ["wp_t"],
+    roles: [],
+    capabilities: [],
+  };
 
   test("before a scenario, blames an earlier run", () => {
     expect(dbResidueMessage(removed, "before", false)).toBe(
@@ -1620,6 +1625,26 @@ test.describe("dbResidueMessage", () => {
       "[hooks] after the scenario, cleared a leftover plugin footprint from the site: 2 option(s), " +
         "1 table(s). The plugin's own uninstall did not remove them, or a request that outlived it " +
         "re-created them.",
+    );
+  });
+
+  // A stale role is what makes a fresh install test capabilities the product no longer defines, so
+  // the line names the roles, and says which roles held the capabilities it took back.
+  test("names the roles it removed and the roles whose capabilities it took back", () => {
+    const withRoles = {
+      ...removed,
+      roles: ["myplugin_admin", "myplugin_check"],
+      capabilities: [
+        { role: "administrator", capability: "myplugin" },
+        { role: "administrator", capability: "myplugin_jobs" },
+        { role: "shop_manager", capability: "myplugin" },
+      ],
+    };
+    expect(dbResidueMessage(withRoles, "before", false)).toBe(
+      "[hooks] before installing, cleared a leftover plugin footprint from the site: 2 option(s), " +
+        "1 table(s), 2 role(s) (myplugin_admin, myplugin_check), 3 capability grant(s) on " +
+        "administrator, shop_manager. An earlier run's plugin files were removed without its " +
+        "uninstall ever running.",
     );
   });
 });

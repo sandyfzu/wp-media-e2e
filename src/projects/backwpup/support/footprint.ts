@@ -16,12 +16,12 @@ import type { Transport } from "../../../common/config/types";
  * Read **without plugins loaded** (`--skip-plugins`), so the answer is what the site has persisted
  * rather than what a running plugin would put back while being asked.
  *
- * Deliberately **broader than the `BACKWPUP_SITE_DB_RESIDUE` declaration beside it**. The sweep
- * clears only what blocks a fresh install; this reports the roles, capabilities and user meta as
- * well, because a scenario asserting that deletion cleaned up is making a claim about the
- * *product*, and the product's own `uninstall.php` promises all five. It shares the naming
- * fragments with the declaration because those are the plugin's names, not a policy either file
- * gets to choose.
+ * Deliberately **broader than the `BACKWPUP_SITE_DB_RESIDUE` declaration beside it**: it also reads
+ * user meta, which the sweep leaves, and finds roles and capabilities by the plugin's name fragments
+ * rather than by the declared names, because a scenario asserting that deletion cleaned up is making
+ * a claim about the *product*, and the product's own `uninstall.php` promises all five. It shares
+ * the naming fragments with the declaration because those are the plugin's names, not a policy
+ * either file gets to choose.
  */
 
 /** What BackWPup has left in a site's database. Every list is empty on a site it never touched. */
