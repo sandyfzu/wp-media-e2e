@@ -32,7 +32,7 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 src/
 ├── common/                 # product-agnostic, shared by every product
 │   ├── config/             # env, sites loading, run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory
-│   ├── reporting/          # the suite's reporters (cell notice, results stream, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command)
+│   ├── reporting/          # the suite's reporters (cell notice, results stream, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
 │   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin), elevation/ownership banner, site info
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
@@ -44,7 +44,7 @@ src/
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection
 │   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
@@ -181,17 +181,18 @@ use **their product's** `fixtures.ts`; shared steps and hooks use
 scenario's steps use, so they mix — but the product's `fixtures.ts` must be in its `steps` config, or
 generation fails. Shared fixtures:
 
-| Fixture                   | Scope  | Purpose                                                                                                               |
-| ------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------- |
-| `site`                    | test   | The `SiteConfig` bound to this worker; throws if no pool (tag `@noauth` instead).                                     |
-| `edition`                 | test   | The cell's `free`/`pro` edition; throws in editionless cells.                                                         |
-| `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                                                      |
-| `pluginArtifact`          | test   | `pluginArtifact(role)` → the resolved zip; `.slug` addresses the plugin, `.zipPath` feeds `stageAndInstallPlugin`.    |
-| `releaseBoundSite`        | worker | Automatic teardown: removes the site's staging area, closes SSH connections. Best-effort — never fails a passing run. |
-| `drainGate`               | test   | Automatic: once the stop file exists, skips each scenario's first attempt as `stopped`.                               |
-| `baseURL` (override)      | —      | Points navigation at the bound site.                                                                                  |
-| `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                      |
-| device options (override) | —      | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else desktop.        |
+| Fixture                   | Scope  | Purpose                                                                                                                   |
+| ------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `site`                    | test   | The `SiteConfig` bound to this worker; throws if no pool (tag `@noauth` instead).                                         |
+| `edition`                 | test   | The cell's `free`/`pro` edition; throws in editionless cells.                                                             |
+| `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                                                          |
+| `pluginArtifact`          | test   | `pluginArtifact(role)` → the resolved zip; `.slug` addresses the plugin, `.zipPath` feeds `stageAndInstallPlugin`.        |
+| `releaseBoundSite`        | worker | Automatic teardown: removes the site's staging area, closes SSH connections. Best-effort — never fails a passing run.     |
+| `drainGate`               | test   | Automatic: once the stop file exists, skips each scenario's first attempt as `stopped`.                                   |
+| `context` (override)      | —      | Watches the site's own requests; a failed scenario that lost some warns `[page-loads]` and attaches `page-load-failures`. |
+| `baseURL` (override)      | —      | Points navigation at the bound site.                                                                                      |
+| `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                          |
+| device options (override) | —      | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else desktop.            |
 
 BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds page objects and scenario state —
 what each does: [authoring-tests.md → BackWPup's
