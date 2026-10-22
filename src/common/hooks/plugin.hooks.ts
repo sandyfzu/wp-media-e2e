@@ -47,11 +47,13 @@ Before(
     // before spending any of the budget.
     $testInfo.setTimeout(extendedTimeout($testInfo.timeout));
     const { product } = readRouting($testInfo.project.metadata);
+    const report = scenarioReport($testInfo);
     await installPluginUnderTest(
       site.transport,
       pluginArtifact("plugin"),
       declaredResidue(product),
-      leftWorkOf(product, scenarioReport($testInfo)),
+      leftWorkOf(product, report),
+      report,
     );
   },
 );

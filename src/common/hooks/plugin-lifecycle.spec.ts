@@ -12,7 +12,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DebugLogFatalError, PluginActivationFailedError } from "../wp/errors";
+import {
+  DebugLogFatalError,
+  PluginActivationFailedError,
+  PluginDirRemovalFailedError,
+  PluginUninstallBrokenError,
+} from "../wp/errors";
 import { resetOwnershipCaches } from "../wp/ownership";
 import { DEFAULT_STAGING_DIR, PLUGINS_CATEGORY } from "../wp/staging";
 import {
@@ -27,6 +32,7 @@ import {
   LEFT_WORK_ALLOWANCE_MS,
   MAX_ATTACHED_LOG_CHARS,
   boundLogForAttachment,
+  clearedPluginDirMessage,
   declaredResidue,
   leftWorkOf,
   extendedTimeout,
@@ -34,6 +40,7 @@ import {
   replacePluginUnderTest,
   teardownPluginUnderTest,
 } from "./plugin-lifecycle";
+import { INSPECT_PLUGIN_DIR_BASH } from "../__fixtures__/plugin-dir-stub";
 import type { DeclaredResidue, ScenarioReport } from "./plugin-lifecycle";
 import type { ResolvedArtifact } from "../artifacts/types";
 import type { LocalTransport, StopRunningWork } from "../config/types";
@@ -63,35 +70,47 @@ let realError: typeof console.error;
 const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
 /**
- * Stub `wp` that records every invocation and keeps plugin state in marker files, so the
- * lifecycle's re-assertions (`is-installed` after `uninstall`) see the effect of the call before
- * them — exactly as they would on a real site.
+ * Stub `wp` that records every invocation and keeps plugin state where a site keeps it, so the
+ * lifecycle's re-assertions see the effect of the call before them — exactly as they would on a real
+ * site. The plugin is a real folder, `wp-content/plugins/<WP_STUB_SLUG>/`, installed while its
+ * `main.php` is there; the plugin-folder inspection reads it as the site's snippet would.
  *
  * Switches, all via the environment:
- *  - `WP_STUB_STATE_DIR` — holds the `installed` / `active` markers.
+ *  - `WP_STUB_STATE_DIR` — holds the `active` marker.
+ *  - `WP_STUB_PLUGINS` / `WP_STUB_SLUG` — the plugins folder, and the slug installs land at.
  *  - `WP_STUB_LOG` — what an `eval` debug.log read prints.
  *  - `WP_STUB_FAIL` — an argv prefix to fail (e.g. `"plugin uninstall"`), leaving state untouched.
+ *  - `WP_STUB_STUCK_ACTIVE` — deactivate exits 0 but never takes: a cleanup that cannot heal.
  *  - `WP_STUB_SILENT_ACTIVATE_FAIL` — install succeeds and exits 0, but the plugin never becomes
  *    active: the failure mode an exit code alone would miss.
  *  - a `db-residue` marker in the state dir — a leftover database footprint, which the sweep's own
  *    snippet reports until the snippet that deletes runs, exactly as a real site would.
  */
 const STUB_WP = `#!/usr/bin/env bash
+${INSPECT_PLUGIN_DIR_BASH}
 printf '%s' "$*" | tr '\n' ' ' >> "$WP_STUB_ARGV_FILE"
 printf '\n' >> "$WP_STUB_ARGV_FILE"
 if [ -n "$WP_STUB_FAIL" ] && [[ "$*" == "$WP_STUB_FAIL"* ]]; then
   echo "stub: refusing $*" >&2
   exit 1
 fi
-if [ "$1" = "--skip-plugins" ]; then shift; fi
+while [[ "$1" == --skip-* ]]; do shift; done
 S="$WP_STUB_STATE_DIR"
+P="$WP_STUB_PLUGINS"
+SLUG="$WP_STUB_SLUG"
 case "$1 $2" in
-  "plugin is-installed") [ -e "$S/installed" ] && exit 0 || exit 1 ;;
+  "plugin is-installed") [ -e "$P/$3/main.php" ] && exit 0 || exit 1 ;;
   "plugin is-active")    [ -e "$S/active" ]    && exit 0 || exit 1 ;;
-  "plugin deactivate")   rm -f "$S/active"; exit 0 ;;
-  "plugin uninstall")    rm -f "$S/installed" "$S/active"; exit 0 ;;
+  "plugin deactivate")   [ -z "$WP_STUB_STUCK_ACTIVE" ] && rm -f "$S/active"; exit 0 ;;
+  "plugin uninstall")    rm -rf "\${P:?}/$3"; rm -f "$S/active"; exit 0 ;;
   "plugin install")
-    touch "$S/installed"
+    if [ -e "$P/$SLUG" ]; then
+      echo "Warning: Destination folder already exists. \\"$P/$SLUG/\\"" >&2
+      echo "Error: No plugins installed." >&2
+      exit 1
+    fi
+    mkdir -p "$P/$SLUG"
+    echo "<?php" > "$P/$SLUG/main.php"
     if [[ "$*" == *--activate* ]] && [ -z "$WP_STUB_SILENT_ACTIVATE_FAIL" ]; then
       touch "$S/active"
     fi
@@ -99,6 +118,7 @@ case "$1 $2" in
 esac
 if [ "$1" = "eval" ]; then
   case "$2" in
+    *get_plugins*) inspect_plugin_dir "$P" "$SLUG" ;;
     *file_get_contents*) printf '%s' "$WP_STUB_LOG" ;;
     *leftover-footprint*)
       if [[ "$2" == *delete_option* ]]; then rm -f "$S/db-residue"; fi
@@ -130,15 +150,28 @@ function bothResidue(...paths: string[]): DeclaredResidue {
   };
 }
 
+/** The plugin's folder on the stub site. */
+function pluginDir(): string {
+  return join(wpRoot, "wp-content", "plugins", "backwpup-pro");
+}
+
 /** Marks the plugin as already installed and active, as a crashed earlier run would leave it. */
 function seedInstalled(): void {
-  writeFileSync(join(stateDir, "installed"), "");
+  mkdirSync(pluginDir(), { recursive: true });
+  writeFileSync(join(pluginDir(), "main.php"), "<?php");
   writeFileSync(join(stateDir, "active"), "");
+}
+
+/** Leaves what a removal stopped part-way leaves: part of the plugin, without its main file. */
+function seedOrphaned(): void {
+  mkdirSync(join(pluginDir(), "vendor", "berlindb"), { recursive: true });
+  mkdirSync(join(pluginDir(), "src"), { recursive: true });
+  writeFileSync(join(pluginDir(), "vendor", "berlindb", "Base.php"), "<?php");
 }
 
 /** True when the stub site currently has the plugin installed. */
 function isInstalled(): boolean {
-  return existsSync(join(stateDir, "installed"));
+  return existsSync(join(pluginDir(), "main.php"));
 }
 
 /** True when the stub site currently has the plugin active. */
@@ -219,6 +252,9 @@ test.beforeEach(() => {
   argvFile = join(sourceDir, "wp-argv.log");
   process.env.WP_STUB_ARGV_FILE = argvFile;
   process.env.WP_STUB_STATE_DIR = stateDir;
+  process.env.WP_STUB_PLUGINS = join(wpRoot, "wp-content", "plugins");
+  process.env.WP_STUB_SLUG = "backwpup-pro";
+  mkdirSync(process.env.WP_STUB_PLUGINS, { recursive: true });
   delete process.env.WP_STUB_LOG;
   delete process.env.WP_STUB_FAIL;
   delete process.env.WP_STUB_SILENT_ACTIVATE_FAIL;
@@ -244,8 +280,11 @@ test.afterEach(() => {
   for (const key of [
     "WP_STUB_ARGV_FILE",
     "WP_STUB_STATE_DIR",
+    "WP_STUB_PLUGINS",
+    "WP_STUB_SLUG",
     "WP_STUB_LOG",
     "WP_STUB_FAIL",
+    "WP_STUB_STUCK_ACTIVE",
     "WP_STUB_SILENT_ACTIVATE_FAIL",
   ] as const) {
     Reflect.deleteProperty(process.env, key);
@@ -637,9 +676,10 @@ test.describe("installPluginUnderTest", () => {
 
   test("fails when a stale copy cannot be removed, so no scenario runs on a dirty baseline", async () => {
     seedInstalled();
-    process.env.WP_STUB_FAIL = "plugin uninstall";
+    // A plugin that will not deactivate: a removal cleanup cannot heal, unlike a failed uninstall.
+    process.env.WP_STUB_STUCK_ACTIVE = "1";
     await expect(installPluginUnderTest(local, artifact())).rejects.toThrow(
-      /still installed after uninstall/,
+      /could not be deactivated/,
     );
   });
 
@@ -740,15 +780,17 @@ test.describe("teardownPluginUnderTest", () => {
 
   test("throws a cleanup failure when it is the only failure", async () => {
     seedInstalled();
-    process.env.WP_STUB_FAIL = "plugin uninstall";
+    // A plugin that will not deactivate: a removal cleanup cannot heal, unlike a failed uninstall.
+    process.env.WP_STUB_STUCK_ACTIVE = "1";
     await expect(
       teardownPluginUnderTest(local, "backwpup-pro", {}, files(), reportSink()),
-    ).rejects.toThrow(/still installed after uninstall/);
+    ).rejects.toThrow(/could not be deactivated/);
   });
 
   test("prefers the fatal over a cleanup failure, but logs the cleanup failure too", async () => {
     seedInstalled();
-    process.env.WP_STUB_FAIL = "plugin uninstall";
+    // A plugin that will not deactivate: a removal cleanup cannot heal, unlike a failed uninstall.
+    process.env.WP_STUB_STUCK_ACTIVE = "1";
     process.env.WP_STUB_LOG = "PHP Fatal error:  the real defect\n";
 
     await expect(
@@ -804,7 +846,8 @@ test.describe("teardownPluginUnderTest", () => {
   test("clears the footprint even when the plugin removal fails", async () => {
     seedInstalled();
     seedDbResidue();
-    process.env.WP_STUB_FAIL = "plugin uninstall";
+    // A plugin that will not deactivate: a removal cleanup cannot heal, unlike a failed uninstall.
+    process.env.WP_STUB_STUCK_ACTIVE = "1";
 
     await expect(
       teardownPluginUnderTest(
@@ -814,7 +857,7 @@ test.describe("teardownPluginUnderTest", () => {
         bothResidue(),
         reportSink(),
       ),
-    ).rejects.toThrow(/still installed/);
+    ).rejects.toThrow(/could not be deactivated/);
 
     expect(hasDbResidue()).toBe(false);
   });
@@ -823,7 +866,8 @@ test.describe("teardownPluginUnderTest", () => {
   // most likely to have left a mess, so the sweep must not be conditional on the removal.
   test("clears them even when the plugin removal fails", async () => {
     seedInstalled();
-    process.env.WP_STUB_FAIL = "plugin uninstall";
+    // A plugin that will not deactivate: a removal cleanup cannot heal, unlike a failed uninstall.
+    process.env.WP_STUB_STUCK_ACTIVE = "1";
     const leftovers = join(wpRoot, "wp-content/uploads/backwpup");
     mkdirSync(leftovers, { recursive: true });
 
@@ -835,7 +879,7 @@ test.describe("teardownPluginUnderTest", () => {
         files("wp-content/uploads/backwpup"),
         reportSink(),
       ),
-    ).rejects.toThrow(/still installed/);
+    ).rejects.toThrow(/could not be deactivated/);
 
     expect(existsSync(leftovers)).toBe(false);
   });
@@ -1153,5 +1197,332 @@ test.describe("installPluginUnderTest — work an earlier run left running", () 
       ),
     ).toBe(false);
     expect(isInstalled()).toBe(true);
+  });
+});
+
+/**
+ * What a removal stopped part-way leaves — part of the plugin at its path — costs at most the
+ * scenario that left it: cleanup removes it by path, before the install and after the scenario, and
+ * says so every time.
+ */
+test.describe("a plugin folder WordPress cannot see", () => {
+  test("is removed before the install, reported, and the install goes ahead", async () => {
+    seedOrphaned();
+    const report = reportSink();
+
+    await installPluginUnderTest(
+      local,
+      artifact(),
+      bothResidue(),
+      undefined,
+      report,
+    );
+
+    expect(isInstalled()).toBe(true);
+    const attached = report.attached.get("leftover-plugin-files") ?? "";
+    expect(attached).toContain(`before "${SCENARIO_TITLE}"`);
+    expect(attached).toContain(
+      `${pluginDir()}: a folder WordPress lists no plugin in, 4 entries (src, vendor)`,
+    );
+    expect(attached).toMatch(/PHP-FPM restart or a reboot/);
+    expect(warnings).toContain(attached);
+  });
+
+  // The folder goes before the database sweep, and both before the install: a plugin removed by path
+  // after its uninstall failed leaves exactly the rows that sweep takes.
+  test("is inspected and removed before the database sweep and the install", async () => {
+    seedOrphaned();
+    await installPluginUnderTest(local, artifact(), bothResidue());
+    const order = wpCalls().map((call) =>
+      call.includes("get_plugins")
+        ? "inspect"
+        : call.includes("leftover-footprint")
+          ? "sweep"
+          : call.startsWith("plugin install")
+            ? "install"
+            : "other",
+    );
+    const first = (step: (typeof order)[number]): number => order.indexOf(step);
+    expect(first("inspect")).toBeGreaterThanOrEqual(0);
+    expect(first("inspect")).toBeLessThan(first("sweep"));
+    expect(first("sweep")).toBeLessThan(first("install"));
+  });
+
+  test("is reported by a reinstall part-way too, which has no scenario to attach to", async () => {
+    seedOrphaned();
+    await replacePluginUnderTest(local, artifact(), files());
+    expect(isInstalled()).toBe(true);
+    expect(warnings.join("\n")).toContain(
+      "[hooks] before installing, removed a plugin folder WordPress no longer lists",
+    );
+  });
+
+  /**
+   * The copy's uninstall fatal lands in the `debug.log` the Before hook has just cleared; left there, the
+   * teardown would fail the scenario about to run for what an earlier run left behind (seen live).
+   */
+  test("clears debug.log again once a copy whose uninstall failed is healed, before the install", async () => {
+    seedInstalled();
+    process.env.WP_STUB_FAIL = "plugin uninstall";
+    await installPluginUnderTest(
+      local,
+      artifact(),
+      files(),
+      undefined,
+      reportSink(),
+    );
+    const calls = wpCalls();
+    const clears = calls.flatMap((call, i) =>
+      call.includes("@unlink") ? [i] : [],
+    );
+    expect(clears).toHaveLength(2);
+    expect(clears[1]).toBeGreaterThan(
+      calls.findIndex((call) => call.startsWith("plugin uninstall")),
+    );
+    expect(clears[1]).toBeLessThan(
+      calls.findIndex((call) => call.startsWith("plugin install")),
+    );
+  });
+
+  // Only that fatal is the earlier run's: anything else the removal logs stays for the verdict.
+  test("clears debug.log once when the old copy came off cleanly", async () => {
+    seedInstalled();
+    await installPluginUnderTest(local, artifact(), files());
+    expect(wpCalls().filter((call) => call.includes("@unlink"))).toHaveLength(
+      1,
+    );
+  });
+
+  test("is removed after the scenario and reported, without failing it", async () => {
+    seedOrphaned();
+    const report = reportSink();
+
+    await teardownPluginUnderTest(local, "backwpup-pro", {}, files(), report);
+
+    expect(existsSync(pluginDir())).toBe(false);
+    expect(report.attached.get("leftover-plugin-files")).toContain(
+      `after "${SCENARIO_TITLE}"`,
+    );
+  });
+
+  // After the scenario the copy is the artifact under test: healed, so later scenarios run, but its
+  // uninstall failing is the product's failure, and the log was judged before it could show there.
+  test("heals a plugin whose uninstall fails, and fails the scenario naming that uninstall's error", async () => {
+    seedInstalled();
+    seedDbResidue();
+    process.env.WP_STUB_FAIL = "plugin uninstall";
+    const leftovers = join(wpRoot, "wp-content/uploads/backwpup");
+    mkdirSync(leftovers, { recursive: true });
+    const report = reportSink();
+
+    const failure = await teardownPluginUnderTest(
+      local,
+      "backwpup-pro",
+      {},
+      bothResidue("wp-content/uploads/backwpup"),
+      report,
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(PluginUninstallBrokenError);
+    expect((failure as Error).message).toContain(
+      'Plugin "backwpup-pro" could not be uninstalled by WordPress: stub: refusing plugin uninstall backwpup-pro',
+    );
+    expect(existsSync(pluginDir())).toBe(false);
+    expect(isActive()).toBe(false);
+    expect(report.attached.get("leftover-plugin-files")).toContain(
+      "removed a plugin whose own uninstall failed (stub: refusing plugin uninstall backwpup-pro)",
+    );
+    // A cleanup failure like any other: the duties after it still run.
+    expect(hasDbResidue()).toBe(false);
+    expect(existsSync(leftovers)).toBe(false);
+  });
+
+  test("a fatal still outranks a failed uninstall, which is logged", async () => {
+    seedInstalled();
+    process.env.WP_STUB_FAIL = "plugin uninstall";
+    process.env.WP_STUB_LOG = "PHP Fatal error:  the real defect\n";
+    await expect(
+      teardownPluginUnderTest(local, "backwpup-pro", {}, files(), reportSink()),
+    ).rejects.toThrow(DebugLogFatalError);
+    expect(errors.join("\n")).toContain(
+      'Plugin "backwpup-pro" could not be uninstalled by WordPress',
+    );
+  });
+
+  // The copy before a scenario is an earlier run's, whose teardown already failed on it.
+  test("only reports a failed uninstall before the scenario, and installs", async () => {
+    seedInstalled();
+    process.env.WP_STUB_FAIL = "plugin uninstall";
+    const report = reportSink();
+    await installPluginUnderTest(local, artifact(), files(), undefined, report);
+    expect(isInstalled()).toBe(true);
+    expect(report.attached.get("leftover-plugin-files")).toContain(
+      "that copy is an earlier run's",
+    );
+  });
+
+  test("clears debug.log only once before installing over an orphaned folder", async () => {
+    seedOrphaned();
+    await installPluginUnderTest(local, artifact(), files());
+    expect(wpCalls().filter((call) => call.includes("@unlink"))).toHaveLength(
+      1,
+    );
+  });
+
+  test("a reporter fault while reporting a cleared folder is only a warning, before and after", async () => {
+    const failing: ScenarioReport = {
+      title: SCENARIO_TITLE,
+      failed: false,
+      attach: () => Promise.reject(new Error("reporter down")),
+    };
+    seedOrphaned();
+    await installPluginUnderTest(
+      local,
+      artifact(),
+      files(),
+      undefined,
+      failing,
+    );
+    expect(isInstalled()).toBe(true);
+    process.env.WP_STUB_FAIL = "plugin uninstall";
+    await expect(
+      teardownPluginUnderTest(local, "backwpup-pro", {}, files(), failing),
+    ).rejects.toBeInstanceOf(PluginUninstallBrokenError);
+    seedOrphaned();
+    await teardownPluginUnderTest(local, "backwpup-pro", {}, files(), failing);
+    expect(
+      warnings.filter((line) =>
+        line.includes(
+          "could not attach the leftover-plugin-files report: reporter down",
+        ),
+      ),
+    ).toHaveLength(3);
+  });
+
+  test("a folder that cannot be removed fails the install before anything is installed", async () => {
+    test.skip(isRoot, "root ignores directory permissions");
+    seedOrphaned();
+    chmodSync(join(pluginDir(), "vendor", "berlindb"), 0o555);
+    try {
+      await expect(
+        installPluginUnderTest(local, artifact(), files()),
+      ).rejects.toBeInstanceOf(PluginDirRemovalFailedError);
+      expect(wpCalls().some((call) => call.startsWith("plugin install"))).toBe(
+        false,
+      );
+    } finally {
+      chmodSync(join(pluginDir(), "vendor", "berlindb"), 0o755);
+    }
+  });
+
+  test("a folder that cannot be removed fails the teardown, every later duty still runs, and a fatal outranks it", async () => {
+    test.skip(isRoot, "root ignores directory permissions");
+    seedOrphaned();
+    seedDbResidue();
+    chmodSync(join(pluginDir(), "vendor", "berlindb"), 0o555);
+    const leftovers = join(wpRoot, "wp-content/uploads/backwpup");
+    mkdirSync(leftovers, { recursive: true });
+    const residue = bothResidue("wp-content/uploads/backwpup");
+    try {
+      await expect(
+        teardownPluginUnderTest(
+          local,
+          "backwpup-pro",
+          {},
+          residue,
+          reportSink(),
+        ),
+      ).rejects.toBeInstanceOf(PluginDirRemovalFailedError);
+      expect(hasDbResidue()).toBe(false);
+      expect(existsSync(leftovers)).toBe(false);
+
+      process.env.WP_STUB_LOG = "PHP Fatal error:  the real defect\n";
+      await expect(
+        teardownPluginUnderTest(
+          local,
+          "backwpup-pro",
+          {},
+          residue,
+          reportSink(),
+        ),
+      ).rejects.toThrow(DebugLogFatalError);
+      expect(errors.join("\n")).toContain(
+        "a cleanup step also failed, after the failure reported above: The plugin folder",
+      );
+    } finally {
+      chmodSync(join(pluginDir(), "vendor", "berlindb"), 0o755);
+    }
+  });
+
+  test("reports nothing on a site that was left clean", async () => {
+    const report = reportSink();
+    await installPluginUnderTest(local, artifact(), files(), undefined, report);
+    await teardownPluginUnderTest(local, "backwpup-pro", {}, files(), report);
+    expect(report.attached.has("leftover-plugin-files")).toBe(false);
+    expect(warnings.join("\n")).not.toContain("plugin folder");
+  });
+});
+
+test.describe("clearedPluginDirMessage", () => {
+  const dir = {
+    kind: "orphaned",
+    path: "/srv/site/wp-content/plugins/backwpup-pro",
+    type: "directory",
+    entries: 3830,
+    topLevel: 6,
+    sample: ["assets", "config", "inc", "pro", "src", "vendor"],
+    owner: "www-data",
+    ageSeconds: 7200,
+  } as const;
+
+  test("names the moment, what was there and the likely cause", () => {
+    expect(
+      clearedPluginDirMessage(
+        { dir, cause: "unlisted" },
+        "before",
+        "A backup runs",
+      ),
+    ).toBe(
+      '[hooks] before "A backup runs", removed a plugin folder WordPress no longer lists: ' +
+        "/srv/site/wp-content/plugins/backwpup-pro: a folder WordPress lists no plugin in, 3830 " +
+        "entries (assets, config, inc, pro, src, vendor); owner www-data; last changed 2 h ago. " +
+        "Likely cause: a removal stopped part-way — e.g. by a PHP-FPM restart or a reboot — leaves " +
+        "part of a plugin; left there, it would have blocked every later install.",
+    );
+  });
+
+  test("says why WordPress's own uninstall could not do it, and whose failure it is", () => {
+    const cleared = {
+      dir: { ...dir, kind: "recognised" },
+      cause: "uninstall-failed",
+      uninstallError: "PHP Fatal error:  x",
+    } as const;
+    const after = clearedPluginDirMessage(cleared, "after");
+    expect(after).toMatch(
+      /^\[hooks\] after the scenario, removed a plugin whose own uninstall failed \(PHP Fatal error: {2}x\)/,
+    );
+    expect(after).toContain(
+      "its uninstall cannot load what is gone; the scenario fails on it. Its database footprint is " +
+        "swept next.",
+    );
+    expect(clearedPluginDirMessage(cleared, "before")).toContain(
+      "cannot load what is gone — that copy is an earlier run's, whose teardown answers for it. Its " +
+        "database footprint is swept next.",
+    );
+  });
+
+  // Not a removal stopped part-way: the uninstall just run is what left it.
+  test("says the plugin's own uninstall left what it removed, when it did", () => {
+    const message = clearedPluginDirMessage(
+      { dir, cause: "uninstall-left" },
+      "after",
+      "A backup runs",
+    );
+    expect(message).toMatch(
+      /^\[hooks\] after "A backup runs", removed what the plugin's own uninstall left at its path, which WordPress no longer lists: \/srv/,
+    );
+    expect(message).toContain(
+      "Likely cause: files the uninstall could not delete, or a removal stopped part-way",
+    );
   });
 });

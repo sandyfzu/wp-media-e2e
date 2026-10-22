@@ -106,6 +106,11 @@ export interface EvalPhpOptions {
    * as it really runs.
    */
   readonly skipPlugins?: boolean;
+  /**
+   * Boot WordPress **without its active theme** (`--skip-themes`) — for the same kind of snippet, when
+   * a theme's own code could stop it from running at all.
+   */
+  readonly skipThemes?: boolean;
 }
 
 /**
@@ -130,11 +135,14 @@ export async function evalPhp(
   scope = "wp/php",
   options: EvalPhpOptions = {},
 ): Promise<string> {
-  // The flag leads the argv: WP-CLI reads global parameters before it dispatches the subcommand,
+  // The flags lead the argv: WP-CLI reads global parameters before it dispatches the subcommand,
   // and one placed after the snippet would be handed to `eval` as another positional argument.
-  const argv = options.skipPlugins
-    ? ["--skip-plugins", "eval", php]
-    : ["eval", php];
+  const argv = [
+    ...(options.skipPlugins === true ? ["--skip-plugins"] : []),
+    ...(options.skipThemes === true ? ["--skip-themes"] : []),
+    "eval",
+    php,
+  ];
   const { stdout, stderr, exitCode } = await wpCli(transport, argv);
   if (exitCode !== 0) {
     throw new Error(

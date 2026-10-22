@@ -1,9 +1,20 @@
 import { test, expect } from "@playwright/test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { verifyPool, verifySite, warnAboutElevation } from "./preflight";
+import {
+  verifyPool,
+  verifySite,
+  warnAboutElevation,
+  warnAboutPluginDirs,
+} from "./preflight";
 import { resetOwnershipCaches } from "../wp/ownership";
 import type { CheckResult } from "./preflight";
 import type { SiteConfig } from "../config/types";
@@ -21,7 +32,16 @@ import type { SiteConfig } from "../config/types";
 //        fail   → exit 1                    (could not be evaluated)
 //        unset  → en_US                     (the English default)
 //        other  → that locale               (e.g. fr_FR, to exercise the failure path)
+//   $WP_STUB_PLUGIN_DIRS  <json> | unset      → the plugin-folder inspection (`--skip-plugins … eval`):
+//        unset  → exit 1                    (could not be inspected)
+//        json   → printed as the reply
 const STUB_WP = `#!/usr/bin/env bash
+if [ "$1" = "--skip-plugins" ]; then
+  [ -n "$WP_STUB_LOG_CALLS" ] && echo "inspect" >> "$WP_STUB_LOG_CALLS"
+  [ -z "$WP_STUB_PLUGIN_DIRS" ] && { echo "Error: stub has no reply" >&2; exit 1; }
+  printf '%s' "$WP_STUB_PLUGIN_DIRS"
+  exit 0
+fi
 if [ "$1" = "--info" ]; then
   [ "$WP_STUB_INFO" = "fail" ] && { echo "wp: not found" >&2; exit 1; }
   echo "WP-CLI version: 2.10.0"
@@ -520,6 +540,144 @@ test.describe("verifySite → warnAboutElevation — the wiring the banner depen
       (message) => printed.push(message),
     );
 
+    expect(printed).toEqual([]);
+  });
+});
+
+/**
+ * The leftover plugin folders, end to end: the inspection, the always-passing check, the value the
+ * run-level banner reads, and both call sites that print it.
+ */
+test.describe("verifySite — leftover plugin folders", () => {
+  const orphaned = {
+    kind: "orphaned",
+    path: "/srv/site/wp-content/plugins/backwpup-pro",
+    type: "directory",
+    owner: "www-data",
+    age: 7200,
+    sample: ["src", "vendor"],
+    entries: 3830,
+    top: 2,
+  };
+  const reply = (pro: object): string =>
+    JSON.stringify({
+      backwpup: {
+        kind: "absent",
+        path: "/srv/site/wp-content/plugins/backwpup",
+      },
+      "backwpup-pro": pro,
+    });
+  const SLUGS = ["backwpup", "backwpup-pro"];
+  let callLog: string;
+
+  test.beforeEach(() => {
+    delete process.env.WP_STUB_INFO;
+    delete process.env.WP_STUB_LOCALE;
+    process.env.WP_STUB_INSTALLED = "yes";
+    callLog = join(wpRoot, "inspections.log");
+    process.env.WP_STUB_LOG_CALLS = callLog;
+  });
+
+  test.afterEach(() => {
+    delete process.env.WP_STUB_PLUGIN_DIRS;
+    delete process.env.WP_STUB_LOG_CALLS;
+    rmSync(callLog, { force: true });
+  });
+
+  const check = (result: {
+    checks: readonly CheckResult[];
+  }): CheckResult | undefined =>
+    result.checks.find((entry) => entry.name === "Plugin folders");
+
+  test("asks nothing when no slugs are given", async () => {
+    const result = await verifySite(localSite(), 0);
+    expect(check(result)).toBeUndefined();
+    expect(result).not.toHaveProperty("leftoverPluginDirs");
+    expect(existsSync(callLog)).toBe(false);
+  });
+
+  test("passes a site with nothing left over, naming the slugs it looked at", async () => {
+    process.env.WP_STUB_PLUGIN_DIRS = reply({ kind: "absent", path: "/x" });
+    const result = await verifySite(localSite(), 0, SLUGS);
+    expect(check(result)).toEqual({
+      name: "Plugin folders",
+      ok: true,
+      detail: "Nothing WordPress cannot see at backwpup, backwpup-pro.",
+    });
+    expect(result.leftoverPluginDirs).toEqual([]);
+  });
+
+  test("reports a folder WordPress lists no plugin in, without failing the site", async () => {
+    process.env.WP_STUB_PLUGIN_DIRS = reply(orphaned);
+    const result = await verifySite(localSite(), 0, SLUGS);
+    expect(check(result)?.ok).toBe(true);
+    expect(check(result)?.detail).toContain(
+      "the next @plugin scenario removes it",
+    );
+    expect(result.leftoverPluginDirs).toEqual([
+      "/srv/site/wp-content/plugins/backwpup-pro: a folder WordPress lists no plugin in, 3830 " +
+        "entries (src, vendor); owner www-data; last changed 2 h ago",
+    ]);
+    expect(result.checks.every((entry) => entry.ok)).toBe(true);
+  });
+
+  // An installed plugin is the next scenario's to uninstall as usual — nothing to warn about.
+  test("does not report a plugin WordPress lists", async () => {
+    process.env.WP_STUB_PLUGIN_DIRS = reply({
+      ...orphaned,
+      kind: "recognised",
+    });
+    expect(
+      (await verifySite(localSite(), 0, SLUGS)).leftoverPluginDirs,
+    ).toEqual([]);
+  });
+
+  test("says when the folders could not be inspected, still passing", async () => {
+    const result = await verifySite(localSite(), 0, SLUGS);
+    expect(check(result)?.ok).toBe(true);
+    expect(check(result)?.detail).toMatch(
+      /^Could not be inspected: .*stub has no reply/,
+    );
+  });
+
+  test("and pool verification prints the banner for it", async () => {
+    process.env.WP_STUB_PLUGIN_DIRS = reply(orphaned);
+    const printed: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]): void => {
+      printed.push(args.map(String).join(" "));
+    };
+    try {
+      await verifyPool([localSite()], "backwpup", "local", SLUGS);
+    } finally {
+      console.warn = realWarn;
+    }
+    expect(printed.join("\n")).toContain("LEFTOVER PLUGIN FOLDERS");
+    expect(printed.join("\n")).toContain(
+      "backwpup-pro: a folder WordPress lists no plugin in",
+    );
+  });
+
+  test("prints nothing for sites with nothing left over", () => {
+    const printed: string[] = [];
+    warnAboutPluginDirs(
+      [
+        {
+          index: 0,
+          baseURL: "http://clean.test",
+          transport: { mode: "local", rootDir: "/var/www/clean" },
+          checks: [],
+          leftoverPluginDirs: [],
+        },
+        {
+          index: 1,
+          baseURL: "http://unasked.test",
+          transport: { mode: "local", rootDir: "/var/www/unasked" },
+          checks: [],
+        },
+      ],
+      (message) => printed.push(message),
+    );
     expect(printed).toEqual([]);
   });
 });

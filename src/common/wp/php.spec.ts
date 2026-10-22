@@ -1,6 +1,15 @@
 import { test, expect } from "@playwright/test";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { phpLiteral } from "./php";
+import { evalPhp, phpLiteral } from "./php";
 
 /**
  * `phpLiteral` is pure, so it is tested directly rather than through a stub `wp`: what matters is
@@ -95,4 +104,49 @@ test.describe("phpLiteral", () => {
     expect(() => phpLiteral(() => 1)).toThrow(/no JSON form/);
     expect(() => phpLiteral(Symbol("s"))).toThrow(/no JSON form/);
   });
+});
+
+/**
+ * `evalPhp`'s argv, through a stub `wp` that records every argument it was given: WP-CLI reads global
+ * flags only before the subcommand, and anything after the snippet would be handed to `eval`.
+ */
+test.describe("evalPhp's command", () => {
+  let binDir: string;
+  let pathBefore: string;
+
+  test.beforeEach(() => {
+    binDir = mkdtempSync(join(tmpdir(), "wp-php-argv-"));
+    writeFileSync(
+      join(binDir, "wp"),
+      `#!/usr/bin/env bash\nprintf '%s\\0' "$@" > "${join(binDir, "argv")}"\n`,
+    );
+    chmodSync(join(binDir, "wp"), 0o755);
+    pathBefore = process.env.PATH ?? "";
+    process.env.PATH = `${binDir}:${pathBefore}`;
+  });
+
+  test.afterEach(() => {
+    process.env.PATH = pathBefore;
+    rmSync(binDir, { recursive: true, force: true });
+  });
+
+  /** The arguments the stub was last given. */
+  const argv = (): string[] =>
+    readFileSync(join(binDir, "argv"), "utf8").split("\0").slice(0, -1);
+
+  for (const [options, flags] of [
+    [{}, []],
+    [{ skipPlugins: true }, ["--skip-plugins"]],
+    [{ skipThemes: true }, ["--skip-themes"]],
+    [
+      { skipPlugins: true, skipThemes: true },
+      ["--skip-plugins", "--skip-themes"],
+    ],
+  ] as const) {
+    test(`leads with ${flags.join(" ") || "no flag"}, then eval and the snippet, nothing after`, async () => {
+      const local = { mode: "local", rootDir: binDir } as const;
+      await evalPhp(local, "echo 1;", "probing", "wp/php", options);
+      expect(argv()).toEqual([...flags, "eval", "echo 1;"]);
+    });
+  }
 });

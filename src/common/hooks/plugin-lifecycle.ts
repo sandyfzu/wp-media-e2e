@@ -1,11 +1,13 @@
 import {
   DebugLogFatalError,
   PluginActivationFailedError,
+  PluginUninstallBrokenError,
   SiteResidueRemovalFailedError,
 } from "../wp/errors";
 import { isEmptyDbResidue, removeSiteDbResidue } from "../wp/db-residue";
 import { clearDebugLog, scanDebugLog } from "../wp/log";
 import { ensurePluginAbsent, isPluginActive } from "../wp/plugin";
+import { describePluginDir } from "../wp/plugin-dir";
 import {
   prepareResolvedDataDirs,
   prepareSiteDataDirs,
@@ -22,6 +24,7 @@ import {
 import { withinBudget } from "../deadline";
 import { errorMessage } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
+import type { ClearedPluginDir } from "../wp/plugin";
 import type { SiteDbResidue } from "../wp/db-residue";
 import type { TestInfo } from "@playwright/test";
 import type { ResolvedArtifact } from "../artifacts/types";
@@ -190,12 +193,15 @@ export function extendedTimeout(current: number): number {
 
 /**
  * Prepares a site for a scenario that tests a plugin: clears `debug.log`, stops any work an earlier
- * run left the plugin doing, removes any existing copy of the plugin, then installs and activates
- * the resolved artifact.
+ * run left the plugin doing, removes any existing copy of the plugin — part of one WordPress no longer
+ * lists included, reported when found — then installs and activates the resolved artifact.
  *
  * The order is deliberate. Clearing **first** scopes the log to this scenario yet still captures
  * anything the stop and the removal trigger — a fatal in the outgoing plugin's uninstall procedure is
- * a real defect and must not be cleared away. Removing before installing is what makes the
+ * a real defect and must not be cleared away. The one exception is an uninstall that fails outright:
+ * its copy is removed by path and reported (`leftover-plugin-files`), and its fatal — what an earlier
+ * run left behind, not this scenario's doing — is cleared with it; that run's teardown failed on it
+ * already. Removing before installing is what makes the
  * install *fresh*: `ensurePluginAbsent` runs that uninstall procedure, so leftover options and
  * tables from an earlier (or crashed) run cannot leak into this scenario's assertions.
  *
@@ -207,9 +213,9 @@ export function extendedTimeout(current: number): number {
  *
  * Between the removal and the install sits the one step that copes with a site the removal could
  * not clean: the plugin's **database footprint**, swept off what is actually there rather than off
- * whether the plugin is installed. `ensurePluginAbsent` is gated on a file test, so a site whose
- * plugin directory has gone while its rows remain is skipped as already-clean and the install lands
- * on top of a previous run's state — see {@link removeSiteDbResidue} for what that costs. It runs
+ * whether the plugin is installed. A site whose plugin directory has gone while its rows remain has
+ * no uninstall left for `ensurePluginAbsent` to run — nor does one whose uninstall failed and whose
+ * folder it removed by path — and the install would land on top of a previous run's state — see {@link removeSiteDbResidue} for what that costs. It runs
  * *after* the removal on purpose: a still-installed plugin re-creates its own rows on the next
  * request, so sweeping before that point would achieve nothing.
  *
@@ -242,6 +248,8 @@ export function extendedTimeout(current: number): number {
  * @param leftWork - how the product stops work it may still be doing on the site
  * (`ProductConfig.stopRunningWork`), and the scenario to report having had to; omitted for a
  * product that runs nothing in the background.
+ * @param report - the scenario to attach a cleared plugin folder's report to; without it, the report
+ * is only printed.
  * @throws Error if the artifact's slug is unusable, if work left running would not stop, if the
  * removal, the install, asking the plugin for its runtime-named directories or the directory
  * preparation fails (an undeclared one included), or {@link PluginActivationFailedError} if the
@@ -252,6 +260,7 @@ export async function installPluginUnderTest(
   artifact: ResolvedArtifact,
   residue: DeclaredResidue = NO_RESIDUE,
   leftWork?: LeftWork,
+  report?: ScenarioReport,
 ): Promise<void> {
   // Before the first command: `stageAndInstallPlugin` validates the slug too, but by then the log
   // has been cleared and an uninstall has been attempted with it. A slug this suite cannot use is
@@ -270,7 +279,11 @@ export async function installPluginUnderTest(
       leftWork.budgetMs,
     );
   }
-  await replacePluginUnderTest(transport, artifact, residue);
+  const cleared = await removeOldCopy(transport, artifact.slug, report);
+  // A copy whose uninstall failed wrote that failure to the log just cleared. It is reported above,
+  // and it belongs to the run that left the copy behind — never to this scenario, which has not begun.
+  if (cleared?.cause === "uninstall-failed") await clearDebugLog(transport);
+  await installFresh(transport, artifact, residue);
 }
 
 /**
@@ -310,15 +323,55 @@ export interface LeftWork {
  * @param transport - the target site's transport.
  * @param artifact - the resolved artifact under test.
  * @param residue - what this product leaves behind, on disk and in the database.
+ * @param report - the scenario to attach a cleared plugin folder's report to.
  * @throws what {@link installPluginUnderTest} throws, bar the log reset's own failures.
  */
 export async function replacePluginUnderTest(
   transport: Transport,
   artifact: ResolvedArtifact,
   residue: DeclaredResidue = NO_RESIDUE,
+  report?: ScenarioReport,
 ): Promise<void> {
   pluginSitePath(artifact.slug);
-  await ensurePluginAbsent(transport, artifact.slug);
+  await removeOldCopy(transport, artifact.slug, report);
+  await installFresh(transport, artifact, residue);
+}
+
+/**
+ * Removes whatever copy of the plugin is on the site — what is left at its path included — and
+ * reports what had to go by path.
+ *
+ * @param transport - the target site's transport.
+ * @param slug - the plugin's slug.
+ * @param report - the scenario to attach the report to, when there is one.
+ * @returns what was removed by path, or `undefined`.
+ * @throws what {@link ensurePluginAbsent} throws.
+ */
+async function removeOldCopy(
+  transport: Transport,
+  slug: string,
+  report?: ScenarioReport,
+): Promise<ClearedPluginDir | undefined> {
+  const cleared = await ensurePluginAbsent(transport, slug);
+  await reportClearedPluginDir(cleared, "before", report);
+  return cleared;
+}
+
+/**
+ * The install on a site the old copy has left: sweep its database footprint, install and activate
+ * the artifact, then prepare its data directories — see {@link installPluginUnderTest}.
+ *
+ * @param transport - the target site's transport.
+ * @param artifact - the resolved artifact under test.
+ * @param residue - what this product leaves behind, on disk and in the database.
+ */
+async function installFresh(
+  transport: Transport,
+  artifact: ResolvedArtifact,
+  residue: DeclaredResidue,
+): Promise<void> {
+  // After the old copy's removal: a plugin removed by path after its uninstall failed leaves exactly
+  // the rows this sweep takes.
   await sweepDbResidue(transport, residue.db, "before installing");
   await stageAndInstallPlugin(transport, artifact.zipPath, {
     activate: true,
@@ -338,6 +391,84 @@ export async function replacePluginUnderTest(
   // first. See `prepareSiteDataDirs` for the failure this prevents.
   await prepareSiteDataDirs(transport, residue.files);
   await prepareResolvedDataDirs(transport, resolved, residue.files);
+}
+
+/**
+ * The report for a plugin folder cleanup had to remove by path — what was there, and its likely cause
+ * in one sentence, which depends on how it came to be there ({@link ClearedPluginDir}). Pure, so its
+ * wording is pinned without a site.
+ *
+ * @param cleared - what {@link ensurePluginAbsent} removed by path.
+ * @param when - whether the scenario is about to begin or has just ended.
+ * @param title - the scenario's title, when known.
+ */
+export function clearedPluginDirMessage(
+  cleared: ClearedPluginDir,
+  when: "before" | "after",
+  title?: string,
+): string {
+  const moment =
+    title === undefined
+      ? when === "before"
+        ? "before installing"
+        : "after the scenario"
+      : `${when} "${title}"`;
+  const what = describePluginDir(cleared.dir);
+  const stopped =
+    "a removal stopped part-way — e.g. by a PHP-FPM restart or a reboot — leaves part of a plugin";
+  switch (cleared.cause) {
+    case "unlisted":
+      return (
+        `[hooks] ${moment}, removed a plugin folder WordPress no longer lists: ${what}. Likely ` +
+        `cause: ${stopped}; left there, it would have blocked every later install.`
+      );
+    case "uninstall-left":
+      return (
+        `[hooks] ${moment}, removed what the plugin's own uninstall left at its path, which WordPress ` +
+        `no longer lists: ${what}. Likely cause: files the uninstall could not delete, or ${stopped}; ` +
+        "left there, it would have blocked every later install."
+      );
+    case "uninstall-failed":
+      return (
+        `[hooks] ${moment}, removed a plugin whose own uninstall failed (${cleared.uninstallError}): ` +
+        `${what}. Likely cause: ${stopped}, and its uninstall cannot load what is gone` +
+        (when === "before"
+          ? " — that copy is an earlier run's, whose teardown answers for it"
+          : "; the scenario fails on it") +
+        ". Its database footprint is swept next."
+      );
+    default: {
+      const exhaustive: never = cleared;
+      throw new Error(`unsupported cleared folder: ${String(exhaustive)}`);
+    }
+  }
+}
+
+/**
+ * Says a plugin folder was removed by path, when one was: a warning, and an attachment on the
+ * scenario. Reporting never fails — before a scenario, what is there is an earlier run's, and the one
+ * about to run would otherwise inherit its failure; the teardown alone fails on a failed uninstall,
+ * after this. The attachment is best-effort, like every report here.
+ *
+ * @param cleared - what {@link ensurePluginAbsent} removed by path; `undefined` reports nothing.
+ * @param when - whether the scenario is about to begin or has just ended.
+ * @param report - the scenario to name and attach to, when there is one.
+ */
+async function reportClearedPluginDir(
+  cleared: ClearedPluginDir | undefined,
+  when: "before" | "after",
+  report?: ScenarioReport,
+): Promise<void> {
+  if (cleared === undefined) return;
+  const message = clearedPluginDirMessage(cleared, when, report?.title);
+  console.warn(message);
+  await report
+    ?.attach("leftover-plugin-files", message)
+    .catch((attachError: unknown) => {
+      console.warn(
+        `[hooks] could not attach the leftover-plugin-files report: ${errorMessage(attachError)}`,
+      );
+    });
 }
 
 /**
@@ -420,7 +551,10 @@ export function scenarioReport(
  * swallowed though — the first is thrown when no fatal claimed the verdict (a site left with a
  * half-removed plugin breaks later scenarios for a reason none of them can explain), and logged when
  * one did. The exception is leftover data the transport's user is not *permitted* to remove, which
- * is reported rather than thrown — see {@link sweepResidue}.
+ * is reported rather than thrown — see {@link sweepResidue}. One cleanup failure is about the product:
+ * the plugin's own uninstall failing. Its folder is still removed by path, so later scenarios run, and
+ * the failure is thrown ({@link PluginUninstallBrokenError}) — the log was judged before it, so this
+ * is the only place it shows.
  *
  * The log is judged **as the scenario left it**, before any cleanup, so the verdict is about the
  * scenario and not about this hook's own work. A removal the scenario itself performs is a step, so
@@ -435,9 +569,10 @@ export function scenarioReport(
  * @param stopRunningWork - how the product stops work it may still be doing on the site
  * (`ProductConfig.stopRunningWork`); omitted for a product that runs nothing in the background.
  * @throws {@link DebugLogFatalError} when PHP logged a fatal, else the first cleanup failure — work
- * that would not stop, then {@link ensurePluginAbsent}, the database sweep (a footprint that
- * survived removal, or a declaration the site refuses), or a residue path that is not a usable
- * declaration.
+ * that would not stop, then {@link ensurePluginAbsent} or {@link PluginUninstallBrokenError} (the
+ * plugin's own uninstall failed and its folder was removed by path: the site is clean, the plugin is
+ * not), the database sweep (a footprint that survived removal, or a declaration the site refuses), or
+ * a residue path that is not a usable declaration.
  */
 export async function teardownPluginUnderTest(
   transport: Transport,
@@ -474,7 +609,15 @@ export async function teardownPluginUnderTest(
     if (stopRunningWork === undefined) return;
     await stopWorkLeftRunning(transport, stopRunningWork, report, "after");
   });
-  await cleanUp(() => ensurePluginAbsent(transport, slug));
+  await cleanUp(async () => {
+    const cleared = await ensurePluginAbsent(transport, slug);
+    await reportClearedPluginDir(cleared, "after", report);
+    // This copy is the artifact under test: healed, so later scenarios run, but WordPress could not
+    // uninstall it — which a user's WordPress could not either.
+    if (cleared?.cause === "uninstall-failed") {
+      throw new PluginUninstallBrokenError(slug, cleared.uninstallError);
+    }
+  });
   await cleanUp(() =>
     sweepDbResidue(transport, residue.db, "after the scenario"),
   );

@@ -7,8 +7,13 @@ import { elevationSupport, exec } from "../wp/exec";
 import type { ElevationSupport, ExecResult } from "../wp/exec";
 import { planOwnership } from "../wp/ownership";
 import type { OwnershipPlan } from "../wp/ownership";
-import { renderElevationWarning } from "./elevation-report";
+import { describePluginDir, inspectPluginDirs } from "../wp/plugin-dir";
+import {
+  renderElevationWarning,
+  renderPluginDirWarning,
+} from "./elevation-report";
 import type { SiteElevation } from "./elevation-report";
+import { errorMessage } from "../guards";
 import { isPlaceholderSite } from "../config/sites";
 import { maskSiteUrl } from "../text";
 import type {
@@ -81,6 +86,12 @@ export interface SitePreflightResult {
    * {@link elevation}, and for the same reason.
    */
   readonly ownershipPending?: boolean;
+  /**
+   * Each folder at the cell's slug that WordPress lists no plugin in, described — for the run-level
+   * warning ({@link renderPluginDirWarning}). Absent when no slug was given or a gating check failed
+   * first; empty when nothing is left, or the folder could not be inspected (its check says so).
+   */
+  readonly leftoverPluginDirs?: readonly string[];
 }
 
 // ── Transport label (used in error output) ─────────────────────────────────────
@@ -714,16 +725,65 @@ function elevationCheck(
   }
 }
 
+// ── Leftover plugin folders (informational) ───────────────────────────────────
+
+/**
+ * Whether the cell's plugin slug holds a folder WordPress lists no plugin in — part of a plugin a
+ * removal stopped part-way left, which blocks every install of it.
+ *
+ * **Never fails**: the cell's next `@plugin` scenario removes such a folder and says so, so this only
+ * makes the cause visible before a scenario pays for it. Only the slug the cell installs is looked at
+ * — the one its scenarios clear; another edition's folder, or another team's, is not this cell's to
+ * judge or remove. A folder WordPress *does* list is an installed plugin, which the next scenario
+ * uninstalls as usual, so it is not reported.
+ *
+ * @param transport - the site's transport.
+ * @param slugs - the slug(s) the cell installs as.
+ * @returns the check, and each leftover folder described for the run-level warning.
+ */
+export async function checkPluginDirs(
+  transport: Transport,
+  slugs: readonly string[],
+): Promise<{ check: CheckResult; leftovers: string[] }> {
+  const name = "Plugin folders";
+  try {
+    const states = await inspectPluginDirs(transport, slugs);
+    const leftovers = [...states.values()].flatMap((state) =>
+      state.kind === "orphaned" ? [describePluginDir(state)] : [],
+    );
+    const detail =
+      leftovers.length === 0
+        ? `Nothing WordPress cannot see at ${slugs.join(", ")}.`
+        : `${String(leftovers.length)} folder(s) WordPress lists no plugin in, each blocking every ` +
+          `install of its plugin; the next @plugin scenario removes it: ${leftovers.join("; ")}`;
+    return { check: { name, ok: true, detail }, leftovers };
+  } catch (error) {
+    return {
+      check: {
+        name,
+        ok: true,
+        detail: `Could not be inspected: ${errorMessage(error)}`,
+      },
+      leftovers: [],
+    };
+  }
+}
+
 // ── Per-site dispatcher ───────────────────────────────────────────────────────
 
 /**
  * Runs the transport + WordPress checks for one site. Exported so callers other than
  * {@link verifyPool} (e.g. the standalone `healthcheck.ts`) can run and report per-site
  * results without throwing. Takes a bare {@link SiteInput} — it never reads `storageState`.
+ *
+ * @param site - the site to check.
+ * @param index - its position in its pool.
+ * @param slugs - the slug(s) the cell installs as, for {@link checkPluginDirs}; none skips that check.
  */
 export async function verifySite(
   site: SiteInput,
   index: number,
+  slugs: readonly string[] = [],
 ): Promise<SitePreflightResult> {
   let checks: CheckResult[];
   switch (site.transport.mode) {
@@ -755,6 +815,11 @@ export async function verifySite(
   const plan = await planOwnership(site.transport);
   checks.push(checkFileOwnership(plan, elevation));
   checks.push(elevationCheck(elevation, plan));
+  const pluginDirs =
+    slugs.length === 0
+      ? undefined
+      : await checkPluginDirs(site.transport, slugs);
+  if (pluginDirs !== undefined) checks.push(pluginDirs.check);
 
   return {
     index,
@@ -763,6 +828,9 @@ export async function verifySite(
     checks,
     elevation,
     ownershipPending: plan.kind === "grant",
+    ...(pluginDirs === undefined
+      ? {}
+      : { leftoverPluginDirs: pluginDirs.leftovers }),
   };
 }
 
@@ -776,11 +844,17 @@ export async function verifySite(
  *
  * Call this in the auth setup project before the authentication loop. Placeholder
  * sites (example.test hostnames) are silently skipped — they have no real transport.
+ *
+ * @param pool - the cell's sites.
+ * @param product - the product, for the report.
+ * @param cell - the cell, for the report.
+ * @param slugs - the slug(s) the cell installs as, for {@link checkPluginDirs}.
  */
 export async function verifyPool(
   pool: readonly SiteConfig[],
   product: string,
   cell: string,
+  slugs: readonly string[] = [],
 ): Promise<void> {
   const real = pool
     .map((site, i) => ({ site, i }))
@@ -789,12 +863,13 @@ export async function verifyPool(
   if (real.length === 0) return;
 
   const results = await Promise.all(
-    real.map(({ site, i }) => verifySite(site, i)),
+    real.map(({ site, i }) => verifySite(site, i, slugs)),
   );
 
   // Printed before the early return below, because a *passing* pool prints nothing otherwise — and a
   // pool that cannot elevate passes. Never throws and never changes a verdict: it warns.
   warnAboutElevation(results);
+  warnAboutPluginDirs(results);
 
   const failed = results.filter((r) => r.checks.some((c) => !c.ok));
   if (failed.length === 0) return;
@@ -836,6 +911,27 @@ export function warnAboutElevation(
             },
           ],
     ),
+  );
+  if (banner !== undefined) print(banner);
+}
+
+/**
+ * Prints the run-level warning for leftover plugin folders, if any site holds one — shared with the
+ * healthcheck, as {@link warnAboutElevation} is.
+ *
+ * @param results - every site verified in this run.
+ * @param print - where to send it; see {@link warnAboutElevation}.
+ */
+export function warnAboutPluginDirs(
+  results: readonly SitePreflightResult[],
+  print: (message: string) => void = console.warn,
+): void {
+  const banner = renderPluginDirWarning(
+    results.map((result) => ({
+      baseURL: result.baseURL,
+      transport: transportLabel(result.transport),
+      leftovers: result.leftoverPluginDirs ?? [],
+    })),
   );
   if (banner !== undefined) print(banner);
 }

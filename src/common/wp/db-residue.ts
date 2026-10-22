@@ -12,8 +12,8 @@ import type { Transport } from "../config/types";
  * uninstall *does* clear its database footprint, but that cleanup lives in the plugin's own
  * `uninstall.php` — so it only ever runs while the plugin's **files are still there**.
  *
- * That is the whole gap. `ensurePluginAbsent` is gated on `wp plugin is-installed`, a *file* test, so
- * a site whose plugin directory has gone while its rows remain looks already-clean and is skipped.
+ * That is the whole gap. `ensurePluginAbsent` can only ask WordPress to uninstall a plugin whose files
+ * are there, so a site whose plugin directory has gone while its rows remain has nothing to run.
  * Measured on a real cell: `wp plugin uninstall <slug> --deactivate` — the one call this suite
  * forbids, precisely because the plugin's own guard then skips its cleanup — deletes the files and
  * leaves **26 options and the plugin's table** behind. The next run installs on top of that, the
@@ -27,7 +27,8 @@ import type { Transport } from "../config/types";
  * on a cell: sweeping while the plugin is active does work, and the very next WordPress request puts
  * all 26 options and the table straight back — the plugin re-creates its own footprint on `init`.
  * Both callers therefore run it immediately after `ensurePluginAbsent`, which throws rather than
- * return with the plugin still installed.
+ * return with anything still at the plugin's path — and which, when the plugin's own uninstall
+ * fails, removes its folder without it, leaving exactly the rows this takes.
  */
 
 /**

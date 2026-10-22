@@ -1,5 +1,7 @@
 import { test as setup } from "@playwright/test";
 
+import { resolveIdentity } from "../artifacts/manifest";
+import { getManifest } from "../artifacts/registry";
 import { getPool, readRouting } from "../config/metadata";
 import { isPlaceholderSite } from "../config/sites";
 import { verifyPool } from "../setup/preflight";
@@ -38,7 +40,7 @@ keepSecretsOutOfFailureSnapshots(setup);
 const saved = endSessionsWhenSetupFails(setup);
 
 setup("authenticate site pool", async ({ browser }, testInfo) => {
-  const { product, cell } = readRouting(testInfo.project.metadata);
+  const { product, cell, edition } = readRouting(testInfo.project.metadata);
   const pool = getPool(product, cell);
   const real = pool.filter((site) => !isPlaceholderSite(site));
 
@@ -60,7 +62,9 @@ setup("authenticate site pool", async ({ browser }, testInfo) => {
   // Verify every site's transport before attempting authentication. A failure here
   // throws a formatted report, which Playwright surfaces as a setup error and uses
   // to skip the dependent BDD project — preventing cascading failures.
-  await verifyPool(pool, product, cell);
+  // The folder checked is the one this cell installs, which its @plugin scenarios clear.
+  const { slug } = resolveIdentity(getManifest(product), edition);
+  await verifyPool(pool, product, cell, [slug]);
 
   await authenticatePool(browser, real, testInfo, undefined, saved);
 });

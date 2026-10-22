@@ -1,6 +1,9 @@
 import { test, expect } from "@playwright/test";
 
-import { renderElevationWarning } from "./elevation-report";
+import {
+  renderElevationWarning,
+  renderPluginDirWarning,
+} from "./elevation-report";
 import type { SiteElevation } from "./elevation-report";
 
 /**
@@ -170,4 +173,47 @@ test("names each site by maskSiteUrl: credentials ***@, a baseURL that is no URL
   expect(banner).toContain("(not a valid http(s) URL)  [ssh: ubuntu@bad]");
   for (const secret of ["pw-0001", "ss-word9", "k=v"])
     expect(banner).not.toContain(secret);
+});
+
+test.describe("renderPluginDirWarning", () => {
+  const sites = (leftovers: readonly string[][]) =>
+    leftovers.map((dirs, i) => ({
+      baseURL: `https://site${String(i)}.test`,
+      transport: `ssh: ubuntu@site${String(i)}.test`,
+      leftovers: dirs,
+    }));
+
+  test("says nothing when no site holds a leftover folder", () => {
+    expect(renderPluginDirWarning(sites([[], []]))).toBeUndefined();
+    expect(renderPluginDirWarning([])).toBeUndefined();
+  });
+
+  test("names only the affected sites, each folder, the cause and what happens next", () => {
+    const banner = (
+      renderPluginDirWarning(sites([[], ["/p/backwpup-pro: a folder …"]])) ?? ""
+    ).replace(ANSI, "");
+    expect(banner).toContain("LEFTOVER PLUGIN FOLDERS");
+    expect(banner).toContain("on 1 site(s)");
+    expect(banner).not.toContain("site0.test");
+    expect(banner).toContain("https://site1.test  [ssh: ubuntu@site1.test]");
+    expect(banner).toContain("• /p/backwpup-pro: a folder …");
+    expect(banner).toContain("PHP-FPM restart, a reboot");
+    expect(banner).toContain(
+      "The next @plugin scenario on the site removes it",
+    );
+    // Padded like the elevation banner, so it cannot be lost in packed output.
+    expect(banner.startsWith("\n")).toBe(true);
+    expect(banner.endsWith("\n")).toBe(true);
+  });
+
+  test("masks credentials in a site's address", () => {
+    const banner = renderPluginDirWarning([
+      {
+        baseURL: "https://user:secret@site.test",
+        transport: "local",
+        leftovers: ["x"],
+      },
+    ]);
+    expect(banner).not.toContain("secret");
+  });
 });

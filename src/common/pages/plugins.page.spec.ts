@@ -1,11 +1,34 @@
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import { PluginsPage } from "./plugins.page";
+import { PluginsPage, deletionAnswerProblem } from "./plugins.page";
 import {
   PluginDeactivationFailedError,
+  PluginDeletionFailedError,
   PluginNotInstalledError,
 } from "../wp/errors";
+
+/** How the stand-in admin-ajax answers a `delete-plugin` request. */
+interface AjaxAnswer {
+  readonly status: number;
+  readonly contentType: string;
+  readonly body: string;
+}
+
+/** What `wp_ajax_delete_plugin` answers when the plugin's files are gone. */
+const DELETED: AjaxAnswer = {
+  status: 200,
+  contentType: "application/json",
+  body: JSON.stringify({
+    success: true,
+    data: {
+      delete: "plugin",
+      slug: "demo",
+      plugin: "demo/demo.php",
+      pluginName: "Demo",
+    },
+  }),
+};
 
 // Fixtures mirroring wp-admin's per-row action-link ids. `active-demo` shows only Deactivate
 // (installed + active); `inactive-demo` shows Activate + Delete. The links are inert, so the
@@ -91,12 +114,19 @@ function servedPluginsHtml(gone: boolean, coverMs: number): string {
 }
 
 test.describe("PluginsPage — the delete click", () => {
-  /** Serves the stand-in screen, flipping to "deleted" once the AJAX has been received. */
-  async function serve(page: Page, coverMs: number): Promise<void> {
+  /**
+   * Serves the stand-in screen, flipping to "deleted" once the AJAX has been received — whatever it
+   * answers, as a deletion WordPress could not finish can still take the row off the screen.
+   */
+  async function serve(
+    page: Page,
+    coverMs: number,
+    answer: AjaxAnswer = DELETED,
+  ): Promise<void> {
     let gone = false;
     await page.route("**/admin-ajax.php", async (route) => {
       gone = true;
-      await route.fulfill({ contentType: "application/json", body: "{}" });
+      await route.fulfill(answer);
     });
     await page.route("**/plugins.php*", async (route) => {
       await route.fulfill({
@@ -137,6 +167,115 @@ test.describe("PluginsPage — the delete click", () => {
     await serve(page, 0);
     await new PluginsPage(page).delete("demo", { timeout: 10_000 });
     expect(await page.evaluate(() => window.confirm("unrelated"))).toBe(false);
+  });
+
+  /**
+   * WordPress removes a plugin entry by entry and answers `success: false` when it could not finish,
+   * in its own words — while the screen, reloaded, may no longer list the half-removed plugin.
+   */
+  test("fails on WordPress's own refusal, quoting it, though the row is gone", async ({
+    page,
+  }) => {
+    await serve(page, 0, {
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        success: false,
+        data: {
+          delete: "plugin",
+          slug: "demo",
+          errorCode: "could_not_remove_plugin",
+          errorMessage: "Could not fully remove the plugin(s) Demo.",
+        },
+      }),
+    });
+    const failure = await new PluginsPage(page)
+      .delete("demo", { timeout: 10_000 })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(PluginDeletionFailedError);
+    expect((failure as Error).message).toContain(
+      "WordPress answered: Could not fully remove the plugin(s) Demo.",
+    );
+  });
+
+  /** A PHP-FPM restart mid-request: the web server answers, WordPress never does. */
+  test("fails on a gateway's error page, naming its status", async ({
+    page,
+  }) => {
+    await serve(page, 0, {
+      status: 502,
+      contentType: "text/html",
+      body: "<html><head><title>502 Bad Gateway</title></head><body><center><h1>502 Bad Gateway</h1></center><hr><center>nginx</center></body></html>",
+    });
+    await expect(
+      new PluginsPage(page).delete("demo", { timeout: 10_000 }),
+    ).rejects.toThrow(
+      /answered HTTP 502 with no answer from WordPress: 502 Bad Gateway 502 Bad Gateway nginx/,
+    );
+  });
+});
+
+test.describe("deletionAnswerProblem", () => {
+  test("accepts WordPress's success", () => {
+    expect(deletionAnswerProblem(200, DELETED.body)).toBeUndefined();
+  });
+
+  test("quotes WordPress's reason for a failure, or says it gave none", () => {
+    expect(
+      deletionAnswerProblem(
+        200,
+        '{"success":false,"data":{"errorMessage":"Plugin file does not exist."}}',
+      ),
+    ).toBe("WordPress answered: Plugin file does not exist.");
+    expect(deletionAnswerProblem(200, '{"success":false}')).toBe(
+      "WordPress answered: WordPress gave no reason",
+    );
+  });
+
+  test("calls anything else no answer from WordPress", () => {
+    expect(deletionAnswerProblem(200, "{}")).toBe(
+      "the delete-plugin request answered HTTP 200 with no answer from WordPress: {}",
+    );
+    expect(deletionAnswerProblem(500, "")).toContain("HTTP 500");
+    expect(deletionAnswerProblem(200, "0")).toContain("HTTP 200");
+    expect(deletionAnswerProblem(200, undefined)).toBe(
+      "the delete-plugin request answered HTTP 200 with no answer from WordPress (its body could not be read)",
+    );
+  });
+
+  // Only WordPress's own `true` is success: `1`, `"true"` or any other truthy value is not its answer.
+  test("takes nothing but success: true for success", () => {
+    for (const success of ["1", '"true"', '"yes"']) {
+      expect(deletionAnswerProblem(200, `{"success":${success}}`)).toBe(
+        "WordPress answered: WordPress gave no reason",
+      );
+    }
+  });
+
+  test("gives no reason for an errorMessage that is not text", () => {
+    expect(
+      deletionAnswerProblem(
+        200,
+        '{"success":false,"data":{"errorMessage":42}}',
+      ),
+    ).toBe("WordPress answered: WordPress gave no reason");
+    expect(
+      deletionAnswerProblem(200, '{"success":false,"data":"Plugin gone"}'),
+    ).toBe("WordPress answered: WordPress gave no reason");
+  });
+
+  test("says an empty or blank body is empty", () => {
+    for (const body of ["", " \n ", "<p> </p>"]) {
+      expect(deletionAnswerProblem(502, body)).toBe(
+        "the delete-plugin request answered HTTP 502 with no answer from WordPress: (empty body)",
+      );
+    }
+  });
+
+  test("cuts a long error page to one short line", () => {
+    const problem = deletionAnswerProblem(502, `<p>${"x ".repeat(500)}</p>`);
+    expect(problem?.length).toBeLessThan(300);
+    expect(problem).not.toContain("<p>");
   });
 });
 
@@ -184,7 +323,7 @@ test.describe("PluginsPage — deactivating before the delete", () => {
     });
     await page.route("**/admin-ajax.php", async (route) => {
       gone = true;
-      await route.fulfill({ contentType: "application/json", body: "{}" });
+      await route.fulfill(DELETED);
     });
     await page.route("**/plugins.php*", async (route) => {
       if (route.request().url().includes("action=deactivate")) active = false;

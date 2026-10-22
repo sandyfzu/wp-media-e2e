@@ -1,6 +1,8 @@
 import { test, expect } from "@playwright/test";
 import {
   chmodSync,
+  existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -12,85 +14,103 @@ import { join } from "node:path";
 import {
   ensurePluginAbsent,
   ensurePluginDeactivated,
+  existingDestination,
+  firstError,
+  installPlugin,
   isPluginActive,
   isPluginInstalled,
   uninstallPlugin,
 } from "./plugin";
 import {
   PluginDeactivationFailedError,
+  PluginDestinationExistsError,
   PluginNotInstalledError,
   PluginUninstallFailedError,
 } from "./errors";
+import { INSPECT_PLUGIN_DIR_BASH } from "../__fixtures__/plugin-dir-stub";
 import type { LocalTransport } from "../config/types";
 
-// A stub `wp` on PATH exercises plugin.ts + the real exec layer with deterministic exit codes —
-// no WordPress. Behavior is chosen per test via $WP_STUB_MODE. Two independent markers track
-// install-state and active-state separately, so a test can observe deactivate flipping
-// active → false while the plugin stays installed, ahead of a later, separate uninstall call.
+/**
+ * The plugin lifecycle over a stub `wp` on PATH and a **real plugin folder**: the plugin is
+ * `wp-content/plugins/x/`, "installed" while its `main.php` is there, and the stub's commands change
+ * that folder as WordPress would — so "absent" is judged by the path, exactly as on a site. Active
+ * state is a marker beside it.
+ *
+ * Switches, via the environment: `WP_STUB_UNINSTALL` — what `plugin uninstall` does: `removes` (the
+ * default), `fatal` (dies, as an `uninstall.php` whose `vendor` is half gone does, keeping it all),
+ * `partial` (removes the main file and nothing else); `WP_STUB_STUCK_ACTIVE` — deactivate never
+ * takes; `WP_STUB_BROKEN` — the copy cannot boot: without `--skip-plugins`, `is-active` dies on its
+ * fatal at exit 1 and `deactivate` at exit 255, as measured on a cell; `WP_STUB_IS_ACTIVE_EXIT` — what
+ * `--skip-plugins plugin is-active` exits with instead; `WP_STUB_CACHE_FAIL` — `cache flush` refuses;
+ * `WP_STUB_REINSTALLED` — a copy lands at the path right after the first inspection; `WP_STUB_EVAL_BROKEN`
+ * — the inspection answers with a warning, not JSON. For an install in the way: `WP_STUB_DEST` — the
+ * folder WP-CLI names; `WP_STUB_DEST_STDOUT` — named on standard output; `WP_STUB_DEST_VANISHES` — gone
+ * right after.
+ */
 const STUB_WP = `#!/usr/bin/env bash
-# $WP_STUB_MODE: absent | stuck | stuck-inactive | stuck-active | vanishes
-#   absent         → 'plugin is-installed'/'is-active' exit 1 (not installed, so not active either)
-#   stuck          → 'plugin is-installed' exits 0 (uninstall never removes it); is-active exits 0
-#   stuck-inactive → like 'stuck', but already inactive, so deactivate is a no-op
-#   stuck-active   → 'plugin is-active' exits 0 always (deactivate never takes effect)
-#   vanishes     → installed+active until 'plugin deactivate'/'plugin uninstall' record their
-#                  effect via $WP_STUB_ACTIVE_MARKER / $WP_STUB_MARKER
+${INSPECT_PLUGIN_DIR_BASH}
 [ -n "$WP_STUB_LOG" ] && printf '%s\\n' "$*" >> "$WP_STUB_LOG"
-sub="$1 $2"
-# $WP_STUB_CACHE_FAIL makes 'cache flush' refuse, in every mode — the flush is housekeeping that
-# must never fail a removal, so it needs to be failable independently of the plugin's own state.
-if [ "$sub" = "cache flush" ] && [ -n "$WP_STUB_CACHE_FAIL" ]; then
-  echo "Error: The object cache could not be flushed." >&2
-  exit 1
+SKIP=""
+while [[ "$1" == --skip-* ]]; do [ "$1" = --skip-plugins ] && SKIP=1; shift; done
+P="$WP_STUB_PLUGINS"
+A="$WP_STUB_ACTIVE"
+FATAL="Fatal error: Uncaught Error: Class BerlinDB not found"
+if [ "$1" = "eval" ]; then
+  if [ -n "$WP_STUB_EVAL_BROKEN" ]; then echo "PHP Warning:  x"; exit 0; fi
+  inspect_plugin_dir "$P" x
+  # WP_STUB_REINSTALLED: a copy lands at the path right after the first inspection, as a concurrent install would.
+  if [ -n "$WP_STUB_REINSTALLED" ] && [ ! -e "$P/x/main.php" ]; then echo "<?php" > "$P/x/main.php"; fi
+  exit 0
 fi
-case "$WP_STUB_MODE" in
-  absent)
-    [ "$sub" = "plugin is-installed" ] && exit 1
-    [ "$sub" = "plugin is-active" ] && exit 1 ;;
-  stuck)
-    [ "$sub" = "plugin is-installed" ] && exit 0 ;;
-  stuck-inactive)
-    [ "$sub" = "plugin is-installed" ] && exit 0
-    [ "$sub" = "plugin is-active" ] && exit 1 ;;
-  stuck-active)
-    [ "$sub" = "plugin is-installed" ] && exit 0
-    [ "$sub" = "plugin is-active" ] && exit 0 ;;
-  vanishes)
-    if [ "$sub" = "plugin is-installed" ]; then
-      [ -f "$WP_STUB_MARKER" ] && exit 1 || exit 0
+case "$1 $2" in
+  "cache flush")
+    if [ -n "$WP_STUB_CACHE_FAIL" ]; then
+      echo "Error: The object cache could not be flushed." >&2
+      exit 1
     fi
-    if [ "$sub" = "plugin is-active" ]; then
-      [ -f "$WP_STUB_ACTIVE_MARKER" ] && exit 1 || exit 0
+    exit 0 ;;
+  "plugin is-installed") [ -e "$P/$3/main.php" ] && exit 0 || exit 1 ;;
+  "plugin is-active")
+    if [ -n "$WP_STUB_BROKEN" ] && [ -z "$SKIP" ]; then echo "$FATAL" >&2; exit 1; fi
+    if [ -n "$SKIP" ] && [ -n "$WP_STUB_IS_ACTIVE_EXIT" ]; then exit "$WP_STUB_IS_ACTIVE_EXIT"; fi
+    [ -e "$A" ] && exit 0 || exit 1 ;;
+  "plugin deactivate")
+    if [ -n "$WP_STUB_BROKEN" ] && [ -z "$SKIP" ]; then echo "$FATAL" >&2; exit 255; fi
+    [ -z "$WP_STUB_STUCK_ACTIVE" ] && rm -f "$A"; exit 0 ;;
+  "plugin uninstall")
+    case "\${WP_STUB_UNINSTALL:-removes}" in
+      removes) rm -rf "\${P:?}/$3"; exit 0 ;;
+      partial) rm -f "$P/$3/main.php"; exit 0 ;;
+      fatal)
+        echo "PHP Warning:  require_once(vendor/berlindb/Base.php): Failed to open stream" >&2
+        echo "PHP Fatal error:  Uncaught Error: Failed opening required 'vendor/berlindb/Base.php'" >&2
+        echo "Stack trace:" >&2
+        exit 255 ;;
+    esac ;;
+  "plugin install")
+    if [ -e "$P/x" ] || [ -n "$WP_STUB_DEST" ]; then
+      msg="Warning: Destination folder already exists. \\"\${WP_STUB_DEST:-$P/x/}\\""
+      if [ -n "$WP_STUB_DEST_STDOUT" ]; then echo "$msg"; else echo "$msg" >&2; fi
+      [ -n "$WP_STUB_DEST_VANISHES" ] && rm -rf "\${P:?}/x"
+      echo "Error: No plugins installed." >&2
+      exit 1
     fi
-    if [ "$sub" = "plugin deactivate" ]; then
-      : > "$WP_STUB_ACTIVE_MARKER"
-      exit 0
-    fi
-    if [ "$sub" = "plugin uninstall" ]; then
-      : > "$WP_STUB_MARKER"
-      exit 0
-    fi ;;
+    echo "Error: other" >&2
+    exit 1 ;;
 esac
 exit 0
 `;
 
-let local: LocalTransport;
 let stubDir: string;
+let root: string;
+let plugins: string;
+let local: LocalTransport;
 let originalPath: string;
-let markerSeq = 0;
-
-/** A unique, not-yet-existing marker path for a `vanishes`-mode test. */
-function freshMarker(): string {
-  markerSeq += 1;
-  return join(stubDir, `marker-${String(markerSeq)}`);
-}
 
 test.beforeAll(() => {
   stubDir = mkdtempSync(join(tmpdir(), "wp-stub-"));
   writeFileSync(join(stubDir, "wp"), STUB_WP);
   chmodSync(join(stubDir, "wp"), 0o755);
-  // The stub `wp` ignores cwd; rootDir just needs to be a real directory for the exec layer.
-  local = { mode: "local", rootDir: stubDir };
   originalPath = process.env.PATH ?? "";
   process.env.PATH = `${stubDir}:${originalPath}`;
 });
@@ -101,129 +121,258 @@ test.afterAll(() => {
 });
 
 test.beforeEach(() => {
-  delete process.env.WP_STUB_LOG;
-  delete process.env.WP_STUB_CACHE_FAIL;
+  root = mkdtempSync(join(tmpdir(), "wp-plugin-root-"));
+  plugins = join(root, "wp-content", "plugins");
+  mkdirSync(plugins, { recursive: true });
+  // `elevate: false`: a unit run must never reach for the machine's real `sudo`.
+  local = { mode: "local", rootDir: root, elevate: false };
+  process.env.WP_STUB_PLUGINS = plugins;
+  process.env.WP_STUB_ACTIVE = join(root, "active");
+  process.env.WP_STUB_LOG = join(root, "calls.log");
 });
 
-test.describe("plugin lifecycle over a stub wp", () => {
-  test("isPluginInstalled / isPluginActive reflect the exit code", async () => {
-    process.env.WP_STUB_MODE = "absent";
+test.afterEach(() => {
+  for (const key of [
+    "WP_STUB_PLUGINS",
+    "WP_STUB_ACTIVE",
+    "WP_STUB_LOG",
+    "WP_STUB_UNINSTALL",
+    "WP_STUB_STUCK_ACTIVE",
+    "WP_STUB_BROKEN",
+    "WP_STUB_IS_ACTIVE_EXIT",
+    "WP_STUB_CACHE_FAIL",
+    "WP_STUB_REINSTALLED",
+    "WP_STUB_EVAL_BROKEN",
+    "WP_STUB_DEST",
+    "WP_STUB_DEST_STDOUT",
+    "WP_STUB_DEST_VANISHES",
+  ]) {
+    Reflect.deleteProperty(process.env, key);
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
+/** Installs the plugin: its folder with a main file and a `vendor`, active unless told otherwise. */
+function seedInstalled(active = true): void {
+  mkdirSync(join(plugins, "x", "vendor"), { recursive: true });
+  writeFileSync(join(plugins, "x", "main.php"), "<?php");
+  writeFileSync(join(plugins, "x", "vendor", "autoload.php"), "<?php");
+  if (active) writeFileSync(join(root, "active"), "");
+}
+
+/** What a removal stopped part-way leaves: the folder without its main file. */
+function seedOrphaned(): void {
+  mkdirSync(join(plugins, "x", "vendor"), { recursive: true });
+  writeFileSync(join(plugins, "x", "vendor", "autoload.php"), "<?php");
+}
+
+/** Every `wp` call so far, as its argv. */
+function calls(): string[] {
+  const log = join(root, "calls.log");
+  return existsSync(log)
+    ? readFileSync(log, "utf8").split("\n").filter(Boolean)
+    : [];
+}
+
+/** Whether anything is at the plugin's path. */
+function folderThere(): boolean {
+  return existsSync(join(plugins, "x"));
+}
+
+/** The calls that change the plugin, in order. */
+function pluginCalls(): string[] {
+  return calls().filter((call) => /^plugin (deactivate|uninstall)/.test(call));
+}
+
+test.describe("isPluginInstalled / isPluginActive", () => {
+  test("reflect the exit code", async () => {
     expect(await isPluginInstalled(local, "x")).toBe(false);
-    process.env.WP_STUB_MODE = "stuck"; // is-installed → 0
+    expect(await isPluginActive(local, "x")).toBe(false);
+    seedInstalled();
     expect(await isPluginInstalled(local, "x")).toBe(true);
     expect(await isPluginActive(local, "x")).toBe(true);
   });
+});
 
-  test("ensurePluginDeactivated is a no-op when already inactive", async () => {
-    process.env.WP_STUB_MODE = "absent"; // is-active → 1 (not installed ⇒ not active)
-    await expect(ensurePluginDeactivated(local, "x")).resolves.toBeUndefined();
+test.describe("ensurePluginDeactivated", () => {
+  test("is a no-op when already inactive", async () => {
+    seedInstalled(false);
+    await ensurePluginDeactivated(local, "x");
+    expect(pluginCalls()).toEqual([]);
   });
 
-  test("ensurePluginDeactivated deactivates an active plugin, then verifies it inactive", async () => {
-    process.env.WP_STUB_MODE = "vanishes";
-    process.env.WP_STUB_MARKER = freshMarker();
-    process.env.WP_STUB_ACTIVE_MARKER = freshMarker();
-    expect(await isPluginActive(local, "x")).toBe(true);
-    await expect(ensurePluginDeactivated(local, "x")).resolves.toBeUndefined();
+  test("deactivates an active plugin, then verifies it inactive", async () => {
+    seedInstalled();
+    await ensurePluginDeactivated(local, "x");
     expect(await isPluginActive(local, "x")).toBe(false);
   });
 
-  test("ensurePluginDeactivated throws PluginDeactivationFailedError when deactivate has no effect", async () => {
-    process.env.WP_STUB_MODE = "stuck-active"; // is-active stays 0 after deactivate
+  test("throws PluginDeactivationFailedError when deactivate has no effect", async () => {
+    seedInstalled();
+    process.env.WP_STUB_STUCK_ACTIVE = "1";
     await expect(ensurePluginDeactivated(local, "x")).rejects.toBeInstanceOf(
       PluginDeactivationFailedError,
     );
   });
+});
 
-  test("ensurePluginAbsent is a no-op when already gone", async () => {
-    process.env.WP_STUB_MODE = "absent";
-    await expect(ensurePluginAbsent(local, "x")).resolves.toBeUndefined();
+test.describe("ensurePluginAbsent", () => {
+  test("is a no-op when nothing is at the plugin's path", async () => {
+    expect(await ensurePluginAbsent(local, "x")).toBeUndefined();
+    expect(pluginCalls()).toEqual([]);
   });
 
-  test("ensurePluginAbsent uninstalls a present plugin, then verifies it gone", async () => {
-    process.env.WP_STUB_MODE = "vanishes";
-    process.env.WP_STUB_MARKER = freshMarker();
-    process.env.WP_STUB_ACTIVE_MARKER = freshMarker();
-    await expect(ensurePluginAbsent(local, "x")).resolves.toBeUndefined();
+  test("uninstalls a listed plugin through WordPress, deactivating it first as its own call", async () => {
+    seedInstalled();
+    expect(await ensurePluginAbsent(local, "x")).toBeUndefined();
+    expect(folderThere()).toBe(false);
+    // `--deactivate` must never reach `plugin uninstall` — see plugin.ts's module doc.
+    expect(pluginCalls()).toEqual([
+      "plugin deactivate x",
+      "plugin uninstall x",
+    ]);
   });
 
-  test("uninstallPlugin on an absent plugin throws PluginNotInstalledError", async () => {
-    process.env.WP_STUB_MODE = "absent";
-    await expect(uninstallPlugin(local, "x")).rejects.toBeInstanceOf(
-      PluginNotInstalledError,
+  test("removes a folder WordPress does not list by path, without asking WordPress to uninstall it", async () => {
+    seedOrphaned();
+    const cleared = await ensurePluginAbsent(local, "x");
+    expect(folderThere()).toBe(false);
+    expect(pluginCalls()).toEqual([]);
+    expect(cleared).toEqual({
+      dir: expect.objectContaining({
+        kind: "orphaned",
+        sample: ["vendor"],
+      }) as unknown,
+      cause: "unlisted",
+    });
+  });
+
+  test("removes a listed plugin by path only once its uninstall was tried and failed", async () => {
+    seedInstalled(false);
+    process.env.WP_STUB_UNINSTALL = "fatal";
+    const cleared = await ensurePluginAbsent(local, "x");
+    expect(folderThere()).toBe(false);
+    expect(pluginCalls()).toEqual(["plugin uninstall x"]);
+    expect(cleared?.dir.kind).toBe("recognised");
+    // The uninstall's own words, its fatal rather than the warning before it.
+    expect(cleared).toMatchObject({
+      cause: "uninstall-failed",
+      uninstallError:
+        "PHP Fatal error:  Uncaught Error: Failed opening required 'vendor/berlindb/Base.php'",
+    });
+  });
+
+  /**
+   * A copy that cannot boot reads "inactive" to `is-active` (its fatal, at exit 1 — measured), so the
+   * ordinary deactivation skips it; left in `active_plugins`, the next `install --activate` finds it
+   * "already active" and never runs its activation (measured on a cell).
+   */
+  test("takes a broken copy whose uninstall failed off active_plugins, without loading it, before removing it", async () => {
+    seedInstalled();
+    process.env.WP_STUB_UNINSTALL = "fatal";
+    process.env.WP_STUB_BROKEN = "1";
+    const cleared = await ensurePluginAbsent(local, "x");
+    expect(cleared?.cause).toBe("uninstall-failed");
+    expect(existsSync(join(root, "active"))).toBe(false);
+    expect(folderThere()).toBe(false);
+    const all = calls();
+    const deactivate = all.indexOf("--skip-plugins plugin deactivate x");
+    expect(deactivate).toBeGreaterThan(all.indexOf("plugin uninstall x"));
+    expect(all[deactivate + 1]).toBe("--skip-plugins plugin is-active x");
+    // Then the removal by path, which inspects first.
+    expect(all[deactivate + 2]).toMatch(/^--skip-plugins --skip-themes eval /);
+  });
+
+  test("removes nothing when a broken copy whose uninstall failed stays active", async () => {
+    seedInstalled();
+    process.env.WP_STUB_UNINSTALL = "fatal";
+    process.env.WP_STUB_BROKEN = "1";
+    process.env.WP_STUB_STUCK_ACTIVE = "1";
+    const failure = await ensurePluginAbsent(local, "x").catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(PluginDeactivationFailedError);
+    expect((failure as Error).message).toBe(
+      'Plugin "x" could not be deactivated: still active after `wp --skip-plugins plugin deactivate`, ' +
+        "with its uninstall failed",
+    );
+    expect(existsSync(join(plugins, "x", "main.php"))).toBe(true);
+  });
+
+  test("removes nothing when whether a broken copy is active cannot be read", async () => {
+    seedInstalled();
+    process.env.WP_STUB_UNINSTALL = "fatal";
+    process.env.WP_STUB_IS_ACTIVE_EXIT = "255";
+    await expect(ensurePluginAbsent(local, "x")).rejects.toThrow(
+      "whether it is still active could not be read (`wp --skip-plugins plugin is-active` exit 255)",
+    );
+    expect(existsSync(join(plugins, "x", "main.php"))).toBe(true);
+  });
+
+  // The ordinary path keeps the ordinary deactivation, which runs the plugin's own deactivation hook.
+  test("never deactivates without loading the plugin when its uninstall did not fail", async () => {
+    seedInstalled();
+    await ensurePluginAbsent(local, "x");
+    process.env.WP_STUB_UNINSTALL = "partial";
+    seedInstalled();
+    await ensurePluginAbsent(local, "x");
+    expect(calls().some((call) => call.includes("--skip-plugins plugin"))).toBe(
+      false,
     );
   });
 
-  test("uninstallPlugin that does not take effect throws PluginUninstallFailedError", async () => {
-    process.env.WP_STUB_MODE = "stuck-inactive"; // already inactive; is-installed stays 0 after uninstall
-    await expect(uninstallPlugin(local, "x")).rejects.toBeInstanceOf(
-      PluginUninstallFailedError,
+  test("removes what an uninstall left behind, reporting it without an uninstall failure", async () => {
+    seedInstalled(false);
+    process.env.WP_STUB_UNINSTALL = "partial";
+    const cleared = await ensurePluginAbsent(local, "x");
+    expect(folderThere()).toBe(false);
+    expect(cleared?.dir.kind).toBe("orphaned");
+    // What this uninstall left, not what an earlier removal did.
+    expect(cleared?.cause).toBe("uninstall-left");
+    expect(cleared).not.toHaveProperty("uninstallError");
+  });
+
+  // Removal by path is told a listed plugin may go only once its uninstall failed — so a copy that
+  // lands between the two inspections is refused, never removed without its uninstall being tried.
+  test("refuses to remove by path a listed plugin whose uninstall it never tried", async () => {
+    seedOrphaned();
+    process.env.WP_STUB_REINSTALLED = "1";
+    await expect(ensurePluginAbsent(local, "x")).rejects.toThrow(
+      /WordPress lists a plugin there/,
     );
+    expect(existsSync(join(plugins, "x", "main.php"))).toBe(true);
   });
 
-  test("uninstallPlugin succeeds when the plugin is present then removed", async () => {
-    process.env.WP_STUB_MODE = "vanishes";
-    process.env.WP_STUB_MARKER = freshMarker();
-    process.env.WP_STUB_ACTIVE_MARKER = freshMarker();
-    await expect(uninstallPlugin(local, "x")).resolves.toBeUndefined();
+  test("still throws when a listed plugin will not deactivate, removing nothing", async () => {
+    seedInstalled();
+    process.env.WP_STUB_STUCK_ACTIVE = "1";
+    await expect(ensurePluginAbsent(local, "x")).rejects.toBeInstanceOf(
+      PluginDeactivationFailedError,
+    );
+    expect(existsSync(join(plugins, "x", "main.php"))).toBe(true);
   });
 
-  test("uninstallPlugin deactivates as its own call, before an `uninstall` with no --deactivate", async () => {
-    // Pins down the actual bug fix: `--deactivate` must never reach `plugin uninstall`, because
-    // WP-CLI would then deactivate and uninstall in the same PHP process, where the plugin's
-    // main class is still loaded from that process's bootstrap — see plugin.ts's module doc.
-    process.env.WP_STUB_MODE = "vanishes";
-    process.env.WP_STUB_MARKER = freshMarker();
-    process.env.WP_STUB_ACTIVE_MARKER = freshMarker();
-    process.env.WP_STUB_LOG = freshMarker();
-    await uninstallPlugin(local, "x");
-
-    const calls = readFileSync(process.env.WP_STUB_LOG, "utf8")
-      .split("\n")
-      .filter((line) => line.startsWith("plugin "));
-    const deactivateIndex = calls.indexOf("plugin deactivate x");
-    const uninstallIndex = calls.indexOf("plugin uninstall x");
-
-    expect(deactivateIndex).toBeGreaterThanOrEqual(0);
-    expect(uninstallIndex).toBeGreaterThan(deactivateIndex);
-    expect(calls).not.toContain("plugin uninstall x --deactivate");
-  });
-
-  test("ensurePluginAbsent flushes the object cache after removing the plugin", async () => {
+  test("flushes the object cache after removing the plugin", async () => {
     // "Absent" has to mean absent to WordPress too: a plugin that clears its options with raw SQL
     // leaves a persistent cache serving rows that no longer exist. See wp/cache.ts.
-    process.env.WP_STUB_MODE = "vanishes";
-    process.env.WP_STUB_MARKER = freshMarker();
-    process.env.WP_STUB_ACTIVE_MARKER = freshMarker();
-    process.env.WP_STUB_LOG = freshMarker();
+    seedInstalled();
     await ensurePluginAbsent(local, "x");
-
-    const calls = readFileSync(process.env.WP_STUB_LOG, "utf8")
-      .split("\n")
-      .filter((line) => line !== "");
-    expect(calls).toContain("cache flush");
-    expect(calls.indexOf("cache flush")).toBeGreaterThan(
-      calls.indexOf("plugin uninstall x"),
+    const all = calls();
+    expect(all.indexOf("cache flush")).toBeGreaterThan(
+      all.indexOf("plugin uninstall x"),
     );
   });
 
-  test("ensurePluginAbsent flushes even when the plugin was already gone", async () => {
+  test("flushes even when the plugin was already gone", async () => {
     // The cheap path must not skip it: state that outlives a removal was not necessarily written by
     // *this* call's removal — a run killed before teardown leaves exactly that.
-    process.env.WP_STUB_MODE = "absent";
-    process.env.WP_STUB_LOG = freshMarker();
-    await expect(ensurePluginAbsent(local, "x")).resolves.toBeUndefined();
-
-    const calls = readFileSync(process.env.WP_STUB_LOG, "utf8").split("\n");
-    expect(calls).toContain("cache flush");
-    expect(calls).not.toContain("plugin uninstall x");
+    await ensurePluginAbsent(local, "x");
+    expect(calls()).toContain("cache flush");
   });
 
-  test("ensurePluginAbsent still succeeds when the object cache refuses to flush", async () => {
+  test("still succeeds when the object cache refuses to flush", async () => {
     // The whole point of the flush being best-effort: housekeeping must never turn a removal red.
-    process.env.WP_STUB_MODE = "vanishes";
-    process.env.WP_STUB_MARKER = freshMarker();
-    process.env.WP_STUB_ACTIVE_MARKER = freshMarker();
+    seedInstalled();
     process.env.WP_STUB_CACHE_FAIL = "1";
     const originalWarn = console.warn;
     const warnings: string[] = [];
@@ -237,5 +386,254 @@ test.describe("plugin lifecycle over a stub wp", () => {
     }
     // Stepped over, but never silently: an operator has to be able to see which cell did this.
     expect(warnings.some((line) => line.includes("[wp/cache]"))).toBe(true);
+  });
+});
+
+test.describe("uninstallPlugin", () => {
+  test("throws PluginNotInstalledError on an absent plugin", async () => {
+    const failure = await uninstallPlugin(local, "x").catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(PluginNotInstalledError);
+    expect((failure as Error).message).toBe(
+      'Plugin "x" was expected to be installed, but is absent.',
+    );
+  });
+
+  test("names what is at the path when WordPress lists no plugin there", async () => {
+    seedOrphaned();
+    const failure = await uninstallPlugin(local, "x").catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(PluginNotInstalledError);
+    expect((failure as Error).message).toContain(
+      `WordPress lists no plugin there; at its path: ${join(plugins, "x")}: a folder WordPress ` +
+        "lists no plugin in, 2 entries (vendor)",
+    );
+    expect(pluginCalls()).toEqual([]);
+  });
+
+  test("says so when what is at the path cannot be inspected", async () => {
+    seedOrphaned();
+    process.env.WP_STUB_EVAL_BROKEN = "1";
+    await expect(uninstallPlugin(local, "x")).rejects.toThrow(
+      /at its path: its path could not be inspected \(\[wp\/plugin-dir\] the inspection did not come back as JSON/,
+    );
+  });
+
+  test("succeeds when nothing is left at the plugin's path", async () => {
+    seedInstalled();
+    await uninstallPlugin(local, "x");
+    expect(folderThere()).toBe(false);
+    expect(pluginCalls()).toEqual([
+      "plugin deactivate x",
+      "plugin uninstall x",
+    ]);
+  });
+
+  test("fails on a folder WordPress no longer lists, naming it, and never sweeps it", async () => {
+    seedInstalled();
+    process.env.WP_STUB_UNINSTALL = "partial";
+    const failure = await uninstallPlugin(local, "x").catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(PluginUninstallFailedError);
+    expect((failure as Error).message).toContain(
+      `${join(plugins, "x")}: a folder WordPress lists no plugin in`,
+    );
+    // Removal under test judges; the cleanup after it heals.
+    expect(existsSync(join(plugins, "x", "vendor"))).toBe(true);
+  });
+
+  test("fails when the plugin is still listed after its uninstall", async () => {
+    seedInstalled(false);
+    process.env.WP_STUB_UNINSTALL = "fatal";
+    await expect(uninstallPlugin(local, "x")).rejects.toThrow(
+      /WordPress lists a plugin in/,
+    );
+    expect(existsSync(join(plugins, "x", "main.php"))).toBe(true);
+  });
+});
+
+test.describe("installPlugin", () => {
+  test("says a folder in the way is one WordPress does not list", async () => {
+    seedOrphaned();
+    const failure = await installPlugin(local, "/stage/x.zip").catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(PluginDestinationExistsError);
+    expect(failure).toMatchObject({
+      path: `${join(plugins, "x")}/`,
+      verdict: "orphaned",
+    });
+  });
+
+  test("says a folder in the way holds a plugin WordPress lists", async () => {
+    seedInstalled();
+    await expect(installPlugin(local, "/stage/x.zip")).rejects.toMatchObject({
+      verdict: "recognised",
+    });
+  });
+
+  for (const [verdict, seen] of [
+    [
+      "orphaned",
+      "WordPress lists no plugin there: part of a plugin is left, as a removal stopped part-way (a " +
+        "PHP-FPM restart, a reboot) leaves it.",
+    ],
+    [
+      "recognised",
+      "WordPress lists a plugin there: an earlier copy was never removed.",
+    ],
+  ] as const) {
+    test(`words a ${verdict} folder in the way`, async () => {
+      if (verdict === "orphaned") seedOrphaned();
+      else seedInstalled();
+      await expect(installPlugin(local, "/stage/x.zip")).rejects.toThrow(
+        `Plugin install refused: the destination folder "${join(plugins, "x")}/" already exists; ${seen}`,
+      );
+    });
+  }
+
+  test("reads the folder WP-CLI names on standard output too", async () => {
+    seedOrphaned();
+    process.env.WP_STUB_DEST_STDOUT = "1";
+    await expect(installPlugin(local, "/stage/x.zip")).rejects.toMatchObject({
+      verdict: "orphaned",
+    });
+  });
+
+  test("says the folder is gone when it went right after the install refused", async () => {
+    seedOrphaned();
+    process.env.WP_STUB_DEST_VANISHES = "1";
+    await expect(installPlugin(local, "/stage/x.zip")).rejects.toMatchObject({
+      verdict: "absent",
+      message: expect.stringContaining(
+        "nothing is there any more, so something removed it right after the install refused.",
+      ),
+    });
+  });
+
+  test("says the folder could not be inspected when the inspection fails", async () => {
+    seedOrphaned();
+    process.env.WP_STUB_EVAL_BROKEN = "1";
+    await expect(installPlugin(local, "/stage/x.zip")).rejects.toMatchObject({
+      verdict: "unknown",
+      message: expect.stringContaining(
+        "already exists; the folder could not be inspected.",
+      ),
+    });
+  });
+
+  test("asks the site nothing about a folder whose name is no plugin slug", async () => {
+    process.env.WP_STUB_DEST = "/";
+    await expect(installPlugin(local, "/stage/x.zip")).rejects.toMatchObject({
+      path: "/",
+      verdict: "unknown",
+    });
+    expect(calls().some((call) => call.includes(" eval "))).toBe(false);
+  });
+
+  test("keeps the plain failure for any other refusal", async () => {
+    await expect(installPlugin(local, "/stage/x.zip")).rejects.toThrow(
+      /install "\/stage\/x\.zip" failed \(exit 1\): Error: other/,
+    );
+  });
+});
+
+test.describe("existingDestination", () => {
+  test("reads the folder from WP-CLI's warning", () => {
+    expect(
+      existingDestination(
+        'Warning: Destination folder already exists. "/srv/site/wp-content/plugins/backwpup-pro/"\nError: No plugins installed.',
+      ),
+    ).toBe("/srv/site/wp-content/plugins/backwpup-pro/");
+  });
+
+  test("reads it with no space before the quote, and only the first quoted path", () => {
+    expect(
+      existingDestination('Destination folder already exists."/p/x/"'),
+    ).toBe("/p/x/");
+    expect(
+      existingDestination(
+        'Warning: Destination folder already exists. "/p/x/" (see "/p/y/")',
+      ),
+    ).toBe("/p/x/");
+  });
+
+  test("finds nothing in any other failure", () => {
+    expect(existingDestination("Error: No plugins installed.")).toBeUndefined();
+  });
+});
+
+test.describe("firstError", () => {
+  test("prefers a PHP fatal over the warnings before it", () => {
+    expect(
+      firstError({
+        exitCode: 255,
+        stdout: "",
+        stderr: "PHP Warning:  a\nPHP Fatal error:  b\nStack trace:",
+      }),
+    ).toBe("PHP Fatal error:  b");
+  });
+
+  test("takes WP-CLI's own Error line", () => {
+    expect(
+      firstError({
+        exitCode: 1,
+        stdout: "",
+        stderr: "Warning: x\nError: No plugins uninstalled.",
+      }),
+    ).toBe("Error: No plugins uninstalled.");
+  });
+
+  test("takes only a line that starts with Error:, not one that merely mentions it", () => {
+    expect(
+      firstError({
+        exitCode: 1,
+        stdout: "",
+        stderr: "Warning: saw Error: earlier\nError: the real one",
+      }),
+    ).toBe("Error: the real one");
+  });
+
+  test("reads standard error before standard output", () => {
+    expect(
+      firstError({ exitCode: 1, stdout: "Error: out", stderr: "Error: err" }),
+    ).toBe("Error: err");
+  });
+
+  test("finds an indented Error line, trimmed", () => {
+    expect(
+      firstError({
+        exitCode: 1,
+        stdout: "first\n   Error: indented  ",
+        stderr: "",
+      }),
+    ).toBe("Error: indented");
+  });
+
+  test("falls back to the first line, then to the exit code", () => {
+    expect(firstError({ exitCode: 1, stdout: "odd\n", stderr: "" })).toBe(
+      "odd",
+    );
+    expect(firstError({ exitCode: 7, stdout: "", stderr: "" })).toBe(
+      "exit 7, no output",
+    );
+  });
+
+  test("bounds a long line", () => {
+    const line = firstError({
+      exitCode: 1,
+      stdout: "",
+      stderr: `Error: ${"x".repeat(1000)}`,
+    });
+    expect(line).toHaveLength(301);
+    expect(line.endsWith("…")).toBe(true);
+  });
+
+  test("keeps a line of exactly 300 characters whole", () => {
+    const exact = `Error: ${"x".repeat(293)}`;
+    expect(firstError({ exitCode: 1, stdout: "", stderr: exact })).toBe(exact);
   });
 });

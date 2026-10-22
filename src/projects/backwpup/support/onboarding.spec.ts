@@ -1,5 +1,12 @@
 import { test, expect } from "@playwright/test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,6 +29,16 @@ import type { LocalTransport } from "../../../common/config/types";
 // `deleted` is WP-CLI's own wording once onboarding completes and the row is removed. The job list
 // answers from its own variable, so a test controls the flag and the jobs independently.
 const STUB_WP = `#!/usr/bin/env bash
+# WP_STUB_PLUGIN_DIR: the plugin-folder inspection answers from that folder — orphaned while it is
+# there, absent once it is not.
+if [ -n "$WP_STUB_PLUGIN_DIR" ] && [[ "$*" == *get_plugins* ]]; then
+  if [ -e "$WP_STUB_PLUGIN_DIR" ]; then
+    printf '{"backwpup-pro":{"kind":"orphaned","path":"%s","type":"directory","owner":"x","age":1,"sample":[]}}' "$WP_STUB_PLUGIN_DIR"
+  else
+    printf '{"backwpup-pro":{"kind":"absent","path":"%s"}}' "$WP_STUB_PLUGIN_DIR"
+  fi
+  exit 0
+fi
 # Running WordPress always succeeds; only the option reads vary, which is what lets a test make
 # the activation routine run and still control what it left behind.
 if [ "$1" = "eval" ]; then exit 0; fi
@@ -75,13 +92,27 @@ function budget(
   timeout: number;
   setTimeout(value: number): void;
   project: { metadata: Record<string, unknown> };
+  title: string;
+  status: "passed";
+  expectedStatus: "passed";
+  attach(name: string, options: { body?: string | Buffer }): Promise<void>;
+  attached: Map<string, string>;
 } {
+  const attached = new Map<string, string>();
   return {
     timeout,
     setTimeout(value) {
       this.timeout = value;
     },
     project: { metadata },
+    title: "A scenario",
+    status: "passed",
+    expectedStatus: "passed",
+    attached,
+    attach(name, options) {
+      attached.set(name, String(options.body));
+      return Promise.resolve();
+    },
   };
 }
 
@@ -483,6 +514,33 @@ test.describe("reinstallPlugin", () => {
       reinstallPlugin(local(), unusable, testInfo)(),
     ).rejects.toThrow(/not a usable plugin slug/);
     expect(testInfo.timeout).toBe(0);
+  });
+
+  test("reports a plugin folder it had to clear by path on the scenario", async () => {
+    const dir = join(rootDir, "wp-content", "plugins", "backwpup-pro");
+    mkdirSync(join(dir, "vendor"), { recursive: true });
+    process.env.WP_STUB_PLUGIN_DIR = dir;
+    const testInfo = budget(90_000);
+    // The report is also printed; this keeps the test's output to its own.
+    const warn = console.warn;
+    console.warn = (): void => undefined;
+    try {
+      // The zip is not there, so the install fails — after the folder was cleared and reported.
+      await expect(
+        reinstallPlugin(
+          { ...local(), elevate: false },
+          { ...unusable, slug: "backwpup-pro" },
+          testInfo,
+        )(),
+      ).rejects.toThrow(/nonexistent/);
+    } finally {
+      delete process.env.WP_STUB_PLUGIN_DIR;
+      console.warn = warn;
+    }
+    expect(existsSync(dir)).toBe(false);
+    expect(testInfo.attached.get("leftover-plugin-files")).toContain(
+      'before "A scenario", removed a plugin folder WordPress no longer lists',
+    );
   });
 
   // The product names the residue the hook's own install sweeps, so it is read the hook's way.

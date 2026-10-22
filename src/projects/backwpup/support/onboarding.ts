@@ -9,6 +9,7 @@ import {
   HOOK_TIMEOUT_MS,
   declaredResidue,
   replacePluginUnderTest,
+  scenarioReport,
 } from "../../../common/hooks/plugin-lifecycle";
 import {
   JOB_CONTENTS,
@@ -199,12 +200,16 @@ async function runActivation(transport: Transport): Promise<ActivationOutcome> {
  *
  * @param transport - the scenario's site.
  * @param artifact - the plugin under test, as the `pluginArtifact` fixture resolves it.
- * @param testInfo - the scenario's own test info; its project names the product.
+ * @param testInfo - the scenario's own test info; its project names the product, and a plugin folder
+ * the reinstall had to clear by path is reported on it.
  */
 export function reinstallPlugin(
   transport: Transport,
   artifact: ResolvedArtifact,
-  testInfo: Pick<TestInfo, "timeout" | "setTimeout"> & {
+  testInfo: Pick<
+    TestInfo,
+    "timeout" | "setTimeout" | "title" | "status" | "expectedStatus" | "attach"
+  > & {
     readonly project: Pick<TestInfo["project"], "metadata">;
   },
 ): () => Promise<void> {
@@ -213,7 +218,12 @@ export function reinstallPlugin(
       testInfo.setTimeout(testInfo.timeout + HOOK_TIMEOUT_MS);
     }
     const { product } = readRouting(testInfo.project.metadata);
-    await replacePluginUnderTest(transport, artifact, declaredResidue(product));
+    await replacePluginUnderTest(
+      transport,
+      artifact,
+      declaredResidue(product),
+      scenarioReport(testInfo),
+    );
   };
 }
 

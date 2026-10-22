@@ -196,6 +196,25 @@ test.describe("removeSiteResidue", () => {
     }
   });
 
+  // `test -e` follows a link, so a dangling one nobody could unlink would read as removed.
+  test("reports a dangling link it could not unlink as a survivor", async () => {
+    test.skip(isRoot, "root ignores directory permissions, so rm -rf succeeds");
+    const parent = join(wpRoot, "wp-content/uploads");
+    mkdirSync(parent, { recursive: true });
+    const link = join(parent, "backwpup");
+    symlinkSync(join(parent, "gone"), link);
+    chmodSync(parent, 0o500);
+    try {
+      const failure = await removeSiteResidue(unprivileged(), [
+        "wp-content/uploads/backwpup",
+      ]).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(SiteResidueRemovalFailedError);
+      expect((failure as SiteResidueRemovalFailedError).paths).toEqual([link]);
+    } finally {
+      chmodSync(parent, 0o700);
+    }
+  });
+
   // One stubborn path must not shield the rest: the disk fills up either way.
   test("still removes the other paths when one cannot be removed", async () => {
     test.skip(isRoot, "root ignores directory permissions, so rm -rf succeeds");

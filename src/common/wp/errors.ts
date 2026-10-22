@@ -7,19 +7,32 @@
  * see ../pages/plugins.page.ts). {@link PluginActivationFailedError} and
  * {@link PluginDeactivationFailedError} each cover both paths: the admin-UI actions
  * (../pages/plugins.page.ts) and WP-CLI's own (./plugin.ts).
+ * {@link PluginUninstallBrokenError} is an uninstall that failed after cleanup healed what it left.
  * {@link DebugLogFatalError} is the one that is not about a plugin action at all: PHP wrote a
  * fatal to `debug.log` while the scenario ran (see ./log.ts), and
  * {@link SiteResidueRemovalFailedError} is about what a plugin left on the *filesystem* after it
- * was removed (see ./residue.ts).
+ * was removed (see ./residue.ts). {@link PluginDirRemovalFailedError} and
+ * {@link PluginDestinationExistsError} are about the plugin's own folder when WordPress no longer
+ * sees a plugin in it (see ./plugin-dir.ts).
  */
 
 // Type-only, so it is erased at runtime and this module stays free of a cycle with the exec layer.
 import type { ElevationSupport } from "./exec";
 
-/** A plugin expected to be installed is absent (e.g. before a removal-under-test). */
+/** A plugin expected to be installed is not one WordPress lists (e.g. before a removal-under-test). */
 export class PluginNotInstalledError extends Error {
-  constructor(slug: string) {
-    super(`Plugin "${slug}" was expected to be installed, but is absent.`);
+  /**
+   * @param slug - the plugin's slug.
+   * @param left - what is at its path nonetheless, already described — a folder WordPress lists no
+   * plugin in; omitted when nothing is there, or nothing was asked.
+   */
+  constructor(slug: string, left?: string) {
+    super(
+      left === undefined
+        ? `Plugin "${slug}" was expected to be installed, but is absent.`
+        : `Plugin "${slug}" was expected to be installed, but WordPress lists no plugin there; ` +
+            `at its path: ${left}`,
+    );
     this.name = "PluginNotInstalledError";
   }
 }
@@ -39,27 +52,148 @@ export class PluginActivationFailedError extends Error {
 
 /** A plugin could not be deactivated (admin UI or WP-CLI). */
 export class PluginDeactivationFailedError extends Error {
-  constructor(slug: string) {
-    super(`Plugin "${slug}" could not be deactivated.`);
+  /**
+   * @param slug - the plugin's slug.
+   * @param reason - what was seen, when more than "still active" is known.
+   */
+  constructor(slug: string, reason?: string) {
+    super(
+      `Plugin "${slug}" could not be deactivated${reason === undefined ? "." : `: ${reason}`}`,
+    );
     this.name = "PluginDeactivationFailedError";
   }
 }
 
-/** A plugin is still installed after a WP-CLI `plugin uninstall` — a genuine uninstall failure. */
+/**
+ * Something is still at a plugin's path after a WP-CLI `plugin uninstall` — a genuine uninstall
+ * failure, whether WordPress still lists the plugin or only part of its folder survived.
+ */
 export class PluginUninstallFailedError extends Error {
-  constructor(slug: string) {
+  /**
+   * @param slug - the plugin's slug.
+   * @param left - what is still at the plugin's path, already described; omitted when only
+   * WordPress's own answer is known.
+   */
+  constructor(slug: string, left?: string) {
     super(
-      `Plugin "${slug}" is still installed after uninstall; uninstall FAILED.`,
+      left === undefined
+        ? `Plugin "${slug}" is still installed after uninstall; uninstall FAILED.`
+        : `Plugin "${slug}" was not removed by its uninstall; uninstall FAILED. Still at its path: ${left}`,
     );
     this.name = "PluginUninstallFailedError";
   }
 }
 
-/** A plugin is still installed after the admin-UI Delete action — a genuine deletion failure. */
+/**
+ * A plugin's own uninstall failed, and cleanup removed it by path instead — so the site is clean, but
+ * WordPress could not uninstall the plugin, as a user's could not either. Raised after a scenario,
+ * where the copy is the artifact under test (see `../hooks/plugin-lifecycle.ts`).
+ */
+export class PluginUninstallBrokenError extends Error {
+  /** The uninstall's first error line, as `firstError` (./plugin.ts) picks it. */
+  readonly uninstallError: string;
+
+  /**
+   * @param slug - the plugin's slug.
+   * @param uninstallError - the uninstall's first error line.
+   */
+  constructor(slug: string, uninstallError: string) {
+    super(
+      `Plugin "${slug}" could not be uninstalled by WordPress: ${uninstallError}\n  Cleanup removed ` +
+        "its folder by path and sweeps its database footprint, so the next scenario starts clean; " +
+        "the uninstall itself is what failed.",
+    );
+    this.name = "PluginUninstallBrokenError";
+    this.uninstallError = uninstallError;
+  }
+}
+
+/**
+ * The admin-UI Delete action did not remove a plugin — WordPress answered that it could not, the
+ * request never landed or failed, or the plugin is still listed afterwards.
+ */
 export class PluginDeletionFailedError extends Error {
-  constructor(slug: string) {
-    super(`Plugin "${slug}" is still installed after delete; deletion FAILED.`);
+  /**
+   * @param slug - the plugin's slug.
+   * @param reason - what went wrong, in WordPress's words where it gave any; omitted when the plugin
+   * is simply still listed.
+   */
+  constructor(slug: string, reason?: string) {
+    super(
+      reason === undefined
+        ? `Plugin "${slug}" is still installed after delete; deletion FAILED.`
+        : `Plugin "${slug}" could not be deleted; deletion FAILED: ${reason}`,
+    );
     this.name = "PluginDeletionFailedError";
+  }
+}
+
+/**
+ * A plugin's folder is still there after cleanup removed it by path (see ./plugin-dir.ts). Thrown,
+ * unlike {@link SiteResidueRemovalFailedError}: the next install of the plugin cannot succeed with
+ * anything at its path.
+ */
+export class PluginDirRemovalFailedError extends Error {
+  /** The folder's absolute path on the site. */
+  readonly path: string;
+
+  /**
+   * @param path - the folder's absolute path on the site.
+   * @param left - what is still there, already described.
+   * @param elevation - how far privileges could go, when the removal got as far as asking; omitted
+   * when every pass reported the folder gone and it was found there again.
+   */
+  constructor(path: string, left: string, elevation?: ElevationSupport) {
+    super(
+      `The plugin folder "${path}" could not be removed from the site; still there: ${left}\n  ` +
+        (elevation === undefined
+          ? "Every removal pass reported it gone, so something re-created it — look for a request or " +
+            "process still installing the plugin."
+          : residueAdvice(elevation)),
+    );
+    this.name = "PluginDirRemovalFailedError";
+    this.path = path;
+  }
+}
+
+/** What WordPress makes of a folder in the way of an install — see {@link PluginDestinationExistsError}. */
+export type DestinationVerdict =
+  "recognised" | "orphaned" | "absent" | "unknown";
+
+/**
+ * An install stopped on WP-CLI's "Destination folder already exists": something is at the plugin's
+ * path. Names whether WordPress lists a plugin there, because the two need different fixes — a listed
+ * one was never removed, an unlisted one is what a removal stopped part-way leaves.
+ */
+export class PluginDestinationExistsError extends Error {
+  /** The folder's path, as WP-CLI named it. */
+  readonly path: string;
+
+  /** Whether WordPress lists a plugin there, looked at right after the install refused. */
+  readonly verdict: DestinationVerdict;
+
+  /**
+   * @param path - the folder, as WP-CLI named it.
+   * @param verdict - what an inspection right after the refusal found there; `unknown` when it could
+   * not be inspected (an unusable name, a failed read).
+   */
+  constructor(path: string, verdict: DestinationVerdict) {
+    const seen: Record<DestinationVerdict, string> = {
+      recognised:
+        "WordPress lists a plugin there: an earlier copy was never removed.",
+      orphaned:
+        "WordPress lists no plugin there: part of a plugin is left, as a removal stopped part-way " +
+        "(a PHP-FPM restart, a reboot) leaves it.",
+      absent:
+        "nothing is there any more, so something removed it right after the install refused.",
+      unknown: "the folder could not be inspected.",
+    };
+    super(
+      `Plugin install refused: the destination folder "${path}" already exists; ${seen[verdict]}`,
+    );
+    this.name = "PluginDestinationExistsError";
+    this.path = path;
+    this.verdict = verdict;
   }
 }
 
