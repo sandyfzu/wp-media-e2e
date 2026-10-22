@@ -5,9 +5,9 @@ import {
   blameCellPlugin,
   healFailedCheck,
   healedCheck,
-  isSkippableSlug,
   reportedCheck,
 } from "./cell-plugin";
+import { isSkippableSlug } from "../wp/plugin";
 
 const BROKEN = {
   slug: "backwpup-pro",

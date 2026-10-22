@@ -221,6 +221,42 @@ async function deactivateUnloaded(
 }
 
 /**
+ * Whether a slug can be named in `--skip-plugins=<slug>`: one path segment, and no comma, which
+ * WP-CLI reads as a list — `a,b` would skip a plugin that is not this one.
+ *
+ * @param slug - the plugin's slug.
+ */
+export function isSkippableSlug(slug: string): boolean {
+  return isPathSegment(slug) && !slug.includes(",");
+}
+
+/**
+ * Why WordPress cannot boot with this plugin loaded, when it boots without it — the shape a removal
+ * cut short leaves (main file kept, part of `vendor` gone): every request that loads it dies.
+ * Asked only once something has failed: a boot that loads such a copy writes its fatal to
+ * `debug.log`.
+ *
+ * @param transport - the site.
+ * @param slug - the plugin's slug.
+ * @returns the line the boot died on, or `undefined` when the plugin is not what stops WordPress
+ * booting (it boots with it, or not even without it), or the slug cannot be skipped alone.
+ */
+export async function pluginBreaksBoot(
+  transport: Transport,
+  slug: string,
+): Promise<string | undefined> {
+  if (!isSkippableSlug(slug)) return undefined;
+  const without = await wpCli(transport, [
+    `--skip-plugins=${slug}`,
+    "eval",
+    "echo 1;",
+  ]);
+  if (without.exitCode !== 0) return undefined;
+  const loaded = await wpCli(transport, ["eval", "echo 1;"]);
+  return loaded.exitCode === 0 ? undefined : firstError(loaded);
+}
+
+/**
  * The line that says why a WP-CLI command failed: its first PHP fatal or `Error:`, else its first
  * line of output — bounded, since a fatal carries a stack trace.
  *

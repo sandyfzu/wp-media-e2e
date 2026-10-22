@@ -29,6 +29,15 @@ import type { Transport } from "../config/types";
 
 // Run inside WP via `wp eval`; WP_CONTENT_DIR is resolved by WordPress itself.
 
+/**
+ * How every snippet here boots WordPress: **no plugin, no theme**. Reading or removing a file needs
+ * neither, and `WP_CONTENT_DIR` comes from `wp-config.php`, which loads either way. A plugin that
+ * cannot boot — a half-removed copy of the one under test — would otherwise kill the read on its
+ * fatal and, through `WP_DEBUG_LOG`, write that fatal into the very log being judged (measured on a
+ * cell), blaming the scenario for the read itself.
+ */
+const BOOT_BARE = ["--skip-plugins", "--skip-themes", "eval"] as const;
+
 /** What {@link CLEAR_DEBUG_LOG} prints when the log is genuinely gone. */
 const CLEARED = "cleared";
 
@@ -132,7 +141,7 @@ async function debugLogExists(
  * than returned as silence.
  */
 export async function readDebugLog(transport: Transport): Promise<string> {
-  const viaCli = await wpCli(transport, ["eval", READ_DEBUG_LOG]);
+  const viaCli = await wpCli(transport, [...BOOT_BARE, READ_DEBUG_LOG]);
   if (viaCli.exitCode === 0) {
     return viaCli.stdout;
   }
@@ -164,7 +173,7 @@ export async function readDebugLog(transport: Transport): Promise<string> {
  * @throws {@link Error} if the log is still there after both attempts.
  */
 export async function clearDebugLog(transport: Transport): Promise<void> {
-  const viaCli = await wpCli(transport, ["eval", CLEAR_DEBUG_LOG]);
+  const viaCli = await wpCli(transport, [...BOOT_BARE, CLEAR_DEBUG_LOG]);
   if (viaCli.exitCode === 0 && viaCli.stdout.trim().endsWith(CLEARED)) {
     return;
   }

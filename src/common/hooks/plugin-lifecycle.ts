@@ -6,7 +6,11 @@ import {
 } from "../wp/errors";
 import { isEmptyDbResidue, removeSiteDbResidue } from "../wp/db-residue";
 import { clearDebugLog, scanDebugLog } from "../wp/log";
-import { ensurePluginAbsent, isPluginActive } from "../wp/plugin";
+import {
+  ensurePluginAbsent,
+  isPluginActive,
+  pluginBreaksBoot,
+} from "../wp/plugin";
 import { describePluginDir } from "../wp/plugin-dir";
 import {
   prepareResolvedDataDirs,
@@ -25,7 +29,7 @@ import { withinBudget } from "../deadline";
 import { errorMessage } from "../guards";
 import type { ScanDebugLogOptions } from "../wp/log";
 import type { ClearedPluginDir } from "../wp/plugin";
-import type { SiteDbResidue } from "../wp/db-residue";
+import type { FoundDbResidue, SiteDbResidue } from "../wp/db-residue";
 import type { TestInfo } from "@playwright/test";
 import type { ResolvedArtifact } from "../artifacts/types";
 import type {
@@ -273,6 +277,7 @@ export async function installPluginUnderTest(
     // site would hand the scenario a site nobody can vouch for.
     await stopWorkLeftRunning(
       transport,
+      artifact.slug,
       leftWork.stop,
       leftWork.report,
       "before",
@@ -372,7 +377,7 @@ async function installFresh(
 ): Promise<void> {
   // After the old copy's removal: a plugin removed by path after its uninstall failed leaves exactly
   // the rows this sweep takes.
-  await sweepDbResidue(transport, residue.db, "before installing");
+  await sweepDbResidue(transport, residue.db, "before");
   await stageAndInstallPlugin(transport, artifact.zipPath, {
     activate: true,
     slug: artifact.slug,
@@ -429,14 +434,15 @@ export function clearedPluginDirMessage(
         "left there, it would have blocked every later install."
       );
     case "uninstall-failed":
-      return (
-        `[hooks] ${moment}, removed a plugin whose own uninstall failed (${cleared.uninstallError}): ` +
-        `${what}. Likely cause: ${stopped}, and its uninstall cannot load what is gone` +
-        (when === "before"
-          ? " — that copy is an earlier run's, whose teardown answers for it"
-          : "; the scenario fails on it") +
-        ". Its database footprint is swept next."
-      );
+      // After the scenario, the copy is the artifact this scenario installed: its own uninstall is what
+      // failed, here and now — no earlier removal is to blame.
+      return when === "after"
+        ? `[hooks] ${moment}, the plugin's own uninstall failed in this scenario's teardown ` +
+            `(${cleared.uninstallError}), so it was removed by path: ${what}. The scenario fails on ` +
+            "it; its database footprint is swept next."
+        : `[hooks] ${moment}, removed a plugin whose own uninstall failed (${cleared.uninstallError}): ` +
+            `${what}. Likely cause: ${stopped}, and its uninstall cannot load what is gone — that copy ` +
+            "is an earlier run's, whose teardown answers for it. Its database footprint is swept next.";
     default: {
       const exhaustive: never = cleared;
       throw new Error(`unsupported cleared folder: ${String(exhaustive)}`);
@@ -475,25 +481,51 @@ async function reportClearedPluginDir(
  * Clears a leftover database footprint and says so when there was one.
  *
  * Silent on the common path — a site that was left clean has nothing to report, and a line per
- * scenario would train everyone to ignore it. When it *does* fire, something abnormal happened to
- * the previous run and the counts are the evidence, so they are printed rather than swallowed.
+ * scenario would train everyone to ignore it. When it *does* fire, something abnormal happened — to
+ * an earlier run, or to this teardown's uninstall — and the counts are the evidence, so they are
+ * printed rather than swallowed ({@link dbResidueMessage}).
  *
  * @param transport - the target site's transport.
  * @param db - the product's declared footprint.
- * @param when - where in the lifecycle this ran, for the message.
+ * @param when - whether the scenario is about to begin or has just ended.
+ * @param uninstallFailed - whether this teardown's own uninstall of the plugin failed just before.
  * @throws whatever {@link removeSiteDbResidue} throws; the caller decides what that means.
  */
 async function sweepDbResidue(
   transport: Transport,
   db: SiteDbResidue,
-  when: string,
+  when: "before" | "after",
+  uninstallFailed = false,
 ): Promise<void> {
   const removed = await removeSiteDbResidue(transport, db);
   if (isEmptyDbResidue(removed)) return;
-  console.warn(
-    `[hooks] ${when}, cleared a leftover plugin footprint from the site: ` +
-      `${String(removed.options.length)} option(s), ${String(removed.tables.length)} table(s). ` +
-      "An earlier run's plugin files were removed without its uninstall ever running.",
+  console.warn(dbResidueMessage(removed, when, uninstallFailed));
+}
+
+/**
+ * The line for a footprint the sweep had to clear, with how it came to be there, which depends on
+ * when: before a scenario it is an earlier run's; after one, this teardown's own uninstall failed, or
+ * did not take it all. Pure, so its wording is pinned without a site.
+ *
+ * @param removed - what the sweep removed.
+ * @param when - whether the scenario is about to begin or has just ended.
+ * @param uninstallFailed - whether this teardown's own uninstall of the plugin failed just before.
+ */
+export function dbResidueMessage(
+  removed: FoundDbResidue,
+  when: "before" | "after",
+  uninstallFailed: boolean,
+): string {
+  const cause =
+    when === "before"
+      ? "An earlier run's plugin files were removed without its uninstall ever running."
+      : uninstallFailed
+        ? "The plugin's own uninstall failed in this scenario's teardown, so it could not remove them."
+        : "The plugin's own uninstall did not remove them, or a request that outlived it re-created them.";
+  return (
+    `[hooks] ${when === "before" ? "before installing" : "after the scenario"}, cleared a leftover ` +
+    `plugin footprint from the site: ${String(removed.options.length)} option(s), ` +
+    `${String(removed.tables.length)} table(s). ${cause}`
   );
 }
 
@@ -607,19 +639,27 @@ export async function teardownPluginUnderTest(
 
   await cleanUp(async () => {
     if (stopRunningWork === undefined) return;
-    await stopWorkLeftRunning(transport, stopRunningWork, report, "after");
+    await stopWorkLeftRunning(
+      transport,
+      slug,
+      stopRunningWork,
+      report,
+      "after",
+    );
   });
+  let uninstallFailed = false;
   await cleanUp(async () => {
     const cleared = await ensurePluginAbsent(transport, slug);
     await reportClearedPluginDir(cleared, "after", report);
     // This copy is the artifact under test: healed, so later scenarios run, but WordPress could not
     // uninstall it — which a user's WordPress could not either.
     if (cleared?.cause === "uninstall-failed") {
+      uninstallFailed = true;
       throw new PluginUninstallBrokenError(slug, cleared.uninstallError);
     }
   });
   await cleanUp(() =>
-    sweepDbResidue(transport, residue.db, "after the scenario"),
+    sweepDbResidue(transport, residue.db, "after", uninstallFailed),
   );
   await cleanUp(() => sweepResidue(transport, residue.files, report));
 
@@ -634,9 +674,12 @@ export async function teardownPluginUnderTest(
  * expected to leave work behind, one that passed while leaving work running deserves to be seen
  * without turning a clean result red, and work found *before* a scenario is an earlier run's, not
  * this one's. Work that *would not* stop is the product's function throwing, which each caller
- * treats as its own position demands.
+ * treats as its own position demands — unless the plugin cannot even boot
+ * ({@link pluginBreaksBoot}): a product's stop asks the plugin itself, and a copy every request dies
+ * on can run nothing, so that is reported and the removal goes ahead to heal it.
  *
  * @param transport - the target site's transport.
+ * @param slug - the plugin under test, whose boot is judged when its stop fails.
  * @param stopRunningWork - the product's `ProductConfig.stopRunningWork`.
  * @param report - the scenario to name in the message, and to attach it to.
  * Bounded by {@link LEFT_WORK_ALLOWANCE_MS}: a stop whose WP-CLI call hangs would otherwise run the
@@ -651,16 +694,26 @@ export async function teardownPluginUnderTest(
  */
 async function stopWorkLeftRunning(
   transport: Transport,
+  slug: string,
   stopRunningWork: StopRunningWork,
   report: ScenarioReport,
   when: "before" | "after",
   budgetMs: number = LEFT_WORK_ALLOWANCE_MS,
 ): Promise<void> {
-  const stopped = await withinBudget(
-    stopRunningWork(transport),
-    budgetMs,
-    "stopping the plugin's running work",
-  );
+  let stopped: string | undefined;
+  try {
+    stopped = await withinBudget(
+      stopRunningWork(transport),
+      budgetMs,
+      "stopping the plugin's running work",
+    );
+  } catch (error) {
+    const boot = await pluginBreaksBoot(transport, slug);
+    if (boot === undefined) throw error;
+    stopped =
+      `its running work could not be asked about, and none can run: WordPress cannot boot with ` +
+      `"${slug}" loaded (${boot}), and boots without it. The plugin is removed next.`;
+  }
   if (stopped === undefined) return;
   const message = `[hooks] ${when} "${report.title}": ${stopped}`;
   console.warn(message);

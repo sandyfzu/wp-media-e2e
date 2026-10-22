@@ -33,6 +33,7 @@ import {
   MAX_ATTACHED_LOG_CHARS,
   boundLogForAttachment,
   clearedPluginDirMessage,
+  dbResidueMessage,
   declaredResidue,
   leftWorkOf,
   extendedTimeout,
@@ -81,6 +82,8 @@ const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
  *  - `WP_STUB_LOG` — what an `eval` debug.log read prints.
  *  - `WP_STUB_FAIL` — an argv prefix to fail (e.g. `"plugin uninstall"`), leaving state untouched.
  *  - `WP_STUB_STUCK_ACTIVE` — deactivate exits 0 but never takes: a cleanup that cannot heal.
+ *  - `WP_STUB_UNBOOTABLE` — the plugin cannot boot: an `eval` that loads plugins dies on its fatal,
+ *    one with `--skip-plugins…` runs.
  *  - `WP_STUB_SILENT_ACTIVATE_FAIL` — install succeeds and exits 0, but the plugin never becomes
  *    active: the failure mode an exit code alone would miss.
  *  - a `db-residue` marker in the state dir — a leftover database footprint, which the sweep's own
@@ -94,7 +97,12 @@ if [ -n "$WP_STUB_FAIL" ] && [[ "$*" == "$WP_STUB_FAIL"* ]]; then
   echo "stub: refusing $*" >&2
   exit 1
 fi
-while [[ "$1" == --skip-* ]]; do shift; done
+SKIPPED=""
+while [[ "$1" == --skip-* ]]; do SKIPPED="$SKIPPED $1"; shift; done
+if [ "$1" = "eval" ] && [ -n "$WP_STUB_UNBOOTABLE" ] && [[ "$SKIPPED" != *--skip-plugins* ]]; then
+  echo "Fatal error: Uncaught Error: Class BerlinDB not found" >&2
+  exit 1
+fi
 S="$WP_STUB_STATE_DIR"
 P="$WP_STUB_PLUGINS"
 SLUG="$WP_STUB_SLUG"
@@ -284,6 +292,7 @@ test.afterEach(() => {
     "WP_STUB_SLUG",
     "WP_STUB_LOG",
     "WP_STUB_FAIL",
+    "WP_STUB_UNBOOTABLE",
     "WP_STUB_STUCK_ACTIVE",
     "WP_STUB_SILENT_ACTIVATE_FAIL",
   ] as const) {
@@ -420,7 +429,7 @@ test.describe("installPluginUnderTest", () => {
     // Clearing first scopes the log to this scenario yet still records the removal's own output.
     // Matched on what the call is *for*, not on the PHP it happens to run — that snippet belongs to
     // `wp/log.ts` and is pinned by its own spec.
-    expect(calls[0]).toMatch(/^eval .*debug\.log/);
+    expect(calls[0]).toMatch(/^--skip-plugins --skip-themes eval .*debug\.log/);
     const removed = calls.findIndex((c) => c.startsWith("plugin uninstall "));
     const installed = calls.findIndex((c) => c.startsWith("plugin install "));
     expect(removed).toBeGreaterThan(0);
@@ -978,6 +987,47 @@ function recordingStop(
 }
 
 test.describe("teardownPluginUnderTest — work the plugin left running", () => {
+  // A product's stop asks the plugin itself; a copy every boot dies on can run nothing, so its stop
+  // failing must not claim the verdict from the uninstall the copy is really failing.
+  test("reports a stop that fails on a copy WordPress cannot boot, then heals and fails on its uninstall", async () => {
+    seedInstalled();
+    process.env.WP_STUB_UNBOOTABLE = "1";
+    process.env.WP_STUB_FAIL = "plugin uninstall";
+    const report = reportSink();
+
+    const failure = await teardownPluginUnderTest(
+      local,
+      "backwpup-pro",
+      {},
+      files(),
+      report,
+      () =>
+        Promise.reject(new Error("reading what BackWPup is running failed")),
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(PluginUninstallBrokenError);
+    expect(report.attached.get("stopped-running-work")).toBe(
+      `[hooks] after "${SCENARIO_TITLE}": its running work could not be asked about, and none can ` +
+        'run: WordPress cannot boot with "backwpup-pro" loaded (Fatal error: Uncaught Error: Class ' +
+        "BerlinDB not found), and boots without it. The plugin is removed next.",
+    );
+    expect(existsSync(pluginDir())).toBe(false);
+  });
+
+  test("keeps a stop that fails on a WordPress that boots as the teardown's failure", async () => {
+    seedInstalled();
+    const report = reportSink();
+
+    await expect(
+      teardownPluginUnderTest(local, "backwpup-pro", {}, files(), report, () =>
+        Promise.reject(new Error("reading what BackWPup is running failed")),
+      ),
+    ).rejects.toThrow("reading what BackWPup is running failed");
+    expect(report.attached.has("stopped-running-work")).toBe(false);
+    // The removal still ran: every duty does.
+    expect(existsSync(pluginDir())).toBe(false);
+  });
+
   // The whole point of the duty: the work has to be stopped while the plugin that runs it is still
   // there, and after the log has been judged as the scenario left it.
   test("asks the product to stop its work after the log is judged and before the plugin is removed", async () => {
@@ -997,9 +1047,11 @@ test.describe("teardownPluginUnderTest — work the plugin left running", () => 
     expect(calls).toHaveLength(1);
     const [call] = calls;
     expect(call?.installed).toBe(true);
-    expect(call?.callsBefore.some((line) => line.startsWith("eval"))).toBe(
-      true,
-    );
+    expect(
+      call?.callsBefore.some((line) =>
+        /^--skip-plugins --skip-themes eval .*debug\.log/.test(line),
+      ),
+    ).toBe(true);
     expect(
       call?.callsBefore.some((line) => line.startsWith("plugin uninstall")),
     ).toBe(false);
@@ -1110,7 +1162,9 @@ test.describe("installPluginUnderTest — work an earlier run left running", () 
     expect(call?.installed).toBe(true);
     // …after the log was cleared, so anything the stop makes PHP write is this scenario's to judge…
     expect(call?.callsBefore).toHaveLength(1);
-    expect(call?.callsBefore[0]).toMatch(/^eval .*debug\.log/);
+    expect(call?.callsBefore[0]).toMatch(
+      /^--skip-plugins --skip-themes eval .*debug\.log/,
+    );
     // …and the install still went ahead on an idle site, which says nothing.
     expect(wpCalls().some((c) => c.startsWith("plugin uninstall"))).toBe(true);
     expect(isActive()).toBe(true);
@@ -1314,6 +1368,11 @@ test.describe("a plugin folder WordPress cannot see", () => {
     const leftovers = join(wpRoot, "wp-content/uploads/backwpup");
     mkdirSync(leftovers, { recursive: true });
     const report = reportSink();
+    const warned: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]): void => {
+      warned.push(args.map(String).join(" "));
+    };
 
     const failure = await teardownPluginUnderTest(
       local,
@@ -1321,7 +1380,11 @@ test.describe("a plugin folder WordPress cannot see", () => {
       {},
       bothResidue("wp-content/uploads/backwpup"),
       report,
-    ).catch((error: unknown) => error);
+    )
+      .catch((error: unknown) => error)
+      .finally(() => {
+        console.warn = realWarn;
+      });
 
     expect(failure).toBeInstanceOf(PluginUninstallBrokenError);
     expect((failure as Error).message).toContain(
@@ -1329,9 +1392,16 @@ test.describe("a plugin folder WordPress cannot see", () => {
     );
     expect(existsSync(pluginDir())).toBe(false);
     expect(isActive()).toBe(false);
+    // What happened is said as it happened: this teardown's uninstall failed, no earlier removal.
     expect(report.attached.get("leftover-plugin-files")).toContain(
-      "removed a plugin whose own uninstall failed (stub: refusing plugin uninstall backwpup-pro)",
+      `after "${SCENARIO_TITLE}", the plugin's own uninstall failed in this scenario's teardown ` +
+        "(stub: refusing plugin uninstall backwpup-pro), so it was removed by path:",
     );
+    expect(warned.join("\n")).toMatch(
+      /\[hooks\] after the scenario, cleared a leftover plugin footprint from the site: \d+ option\(s\), \d+ table\(s\)\. The plugin's own uninstall failed in this scenario's teardown, so it could not remove them\./,
+    );
+    expect(warned.join("\n")).not.toContain("earlier run");
+    expect(warned.join("\n")).not.toContain("stopped part-way");
     // A cleanup failure like any other: the duties after it still run.
     expect(hasDbResidue()).toBe(false);
     expect(existsSync(leftovers)).toBe(false);
@@ -1497,12 +1567,12 @@ test.describe("clearedPluginDirMessage", () => {
       cause: "uninstall-failed",
       uninstallError: "PHP Fatal error:  x",
     } as const;
-    const after = clearedPluginDirMessage(cleared, "after");
-    expect(after).toMatch(
-      /^\[hooks\] after the scenario, removed a plugin whose own uninstall failed \(PHP Fatal error: {2}x\)/,
-    );
-    expect(after).toContain(
-      "its uninstall cannot load what is gone; the scenario fails on it. Its database footprint is " +
+    // After the scenario the copy is the one this scenario installed: its own uninstall failed now.
+    expect(clearedPluginDirMessage(cleared, "after")).toBe(
+      "[hooks] after the scenario, the plugin's own uninstall failed in this scenario's teardown " +
+        "(PHP Fatal error:  x), so it was removed by path: /srv/site/wp-content/plugins/backwpup-pro: " +
+        "a folder WordPress lists a plugin in, 3830 entries (assets, config, inc, pro, src, vendor); " +
+        "owner www-data; last changed 2 h ago. The scenario fails on it; its database footprint is " +
         "swept next.",
     );
     expect(clearedPluginDirMessage(cleared, "before")).toContain(
@@ -1523,6 +1593,33 @@ test.describe("clearedPluginDirMessage", () => {
     );
     expect(message).toContain(
       "Likely cause: files the uninstall could not delete, or a removal stopped part-way",
+    );
+  });
+});
+
+test.describe("dbResidueMessage", () => {
+  const removed = { options: ["a", "b"], tables: ["wp_t"] };
+
+  test("before a scenario, blames an earlier run", () => {
+    expect(dbResidueMessage(removed, "before", false)).toBe(
+      "[hooks] before installing, cleared a leftover plugin footprint from the site: 2 option(s), " +
+        "1 table(s). An earlier run's plugin files were removed without its uninstall ever running.",
+    );
+  });
+
+  test("after one whose teardown's uninstall failed, says that uninstall could not remove them", () => {
+    expect(dbResidueMessage(removed, "after", true)).toBe(
+      "[hooks] after the scenario, cleared a leftover plugin footprint from the site: 2 option(s), " +
+        "1 table(s). The plugin's own uninstall failed in this scenario's teardown, so it could not " +
+        "remove them.",
+    );
+  });
+
+  test("after one whose uninstall ran, says it left them or something re-created them", () => {
+    expect(dbResidueMessage(removed, "after", false)).toBe(
+      "[hooks] after the scenario, cleared a leftover plugin footprint from the site: 2 option(s), " +
+        "1 table(s). The plugin's own uninstall did not remove them, or a request that outlived it " +
+        "re-created them.",
     );
   });
 });

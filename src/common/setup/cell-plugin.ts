@@ -1,5 +1,5 @@
+import { isSkippableSlug } from "../wp/plugin";
 import { describePluginDir } from "../wp/plugin-dir";
-import { isPathSegment } from "../wp/paths";
 import type { ClearedPluginDir } from "../wp/plugin";
 import type { Transport } from "../config/types";
 import type { CheckResult } from "./preflight";
@@ -30,16 +30,6 @@ export type HealCellPlugin = (
 export interface BrokenCellPlugin {
   readonly slug: string;
   readonly error: string;
-}
-
-/**
- * Whether a slug can be named in `--skip-plugins=<slug>`: one path segment, and no comma, which
- * WP-CLI reads as a list — `a,b` would skip a plugin that is not the cell's.
- *
- * @param slug - the cell's plugin slug.
- */
-export function isSkippableSlug(slug: string): boolean {
-  return isPathSegment(slug) && !slug.includes(",");
 }
 
 /**

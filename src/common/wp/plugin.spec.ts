@@ -20,6 +20,7 @@ import {
   uncreatedDestination,
   installPlugin,
   isPluginActive,
+  pluginBreaksBoot,
   isPluginInstalled,
   uninstallPlugin,
 } from "./plugin";
@@ -43,7 +44,9 @@ import type { LocalTransport } from "../config/types";
  * default), `fatal` (dies, as an `uninstall.php` whose `vendor` is half gone does, keeping it all),
  * `partial` (removes the main file and nothing else); `WP_STUB_STUCK_ACTIVE` — deactivate never
  * takes; `WP_STUB_BROKEN` — the copy cannot boot: without `--skip-plugins`, `is-active` dies on its
- * fatal at exit 1 and `deactivate` at exit 255, as measured on a cell; `WP_STUB_IS_ACTIVE_EXIT` — what
+ * fatal at exit 1, `deactivate` at exit 255 and `eval` at exit 1, as measured on a cell (any
+ * `--skip-plugins…` form skips it); `WP_STUB_DOWN` — every `eval` fails, as with no database;
+ * `WP_STUB_IS_ACTIVE_EXIT` — what
  * `--skip-plugins plugin is-active` exits with instead; `WP_STUB_CACHE_FAIL` — `cache flush` refuses;
  * `WP_STUB_REINSTALLED` — a copy lands at the path right after the first inspection; `WP_STUB_EVAL_BROKEN`
  * — the inspection answers with a warning, not JSON. For an install in the way: `WP_STUB_DEST` — the
@@ -54,11 +57,13 @@ const STUB_WP = `#!/usr/bin/env bash
 ${INSPECT_PLUGIN_DIR_BASH}
 [ -n "$WP_STUB_LOG" ] && printf '%s\\n' "$*" >> "$WP_STUB_LOG"
 SKIP=""
-while [[ "$1" == --skip-* ]]; do [ "$1" = --skip-plugins ] && SKIP=1; shift; done
+while [[ "$1" == --skip-* ]]; do [[ "$1" == --skip-plugins* ]] && SKIP=1; shift; done
 P="$WP_STUB_PLUGINS"
 A="$WP_STUB_ACTIVE"
 FATAL="Fatal error: Uncaught Error: Class BerlinDB not found"
 if [ "$1" = "eval" ]; then
+  if [ -n "$WP_STUB_DOWN" ]; then echo "Error: Error establishing a database connection." >&2; exit 1; fi
+  if [ -n "$WP_STUB_BROKEN" ] && [ -z "$SKIP" ]; then echo "$FATAL" >&2; exit 1; fi
   if [ -n "$WP_STUB_EVAL_BROKEN" ]; then echo "PHP Warning:  x"; exit 0; fi
   inspect_plugin_dir "$P" x
   # WP_STUB_REINSTALLED: a copy lands at the path right after the first inspection, as a concurrent install would.
@@ -161,6 +166,7 @@ test.afterEach(() => {
     "WP_STUB_DEST_STDOUT",
     "WP_STUB_DEST_VANISHES",
     "WP_STUB_UNCREATED",
+    "WP_STUB_DOWN",
   ]) {
     Reflect.deleteProperty(process.env, key);
   }
@@ -707,5 +713,30 @@ test.describe("firstError", () => {
   test("keeps a line of exactly 300 characters whole", () => {
     const exact = `Error: ${"x".repeat(293)}`;
     expect(firstError({ exitCode: 1, stdout: "", stderr: exact })).toBe(exact);
+  });
+});
+
+test.describe("pluginBreaksBoot", () => {
+  test("names the fatal when WordPress boots only with the plugin skipped", async () => {
+    process.env.WP_STUB_BROKEN = "1";
+    expect(await pluginBreaksBoot(local, "x")).toBe(
+      "Fatal error: Uncaught Error: Class BerlinDB not found",
+    );
+    expect(calls()).toEqual(["--skip-plugins=x eval echo 1;", "eval echo 1;"]);
+  });
+
+  test("blames nothing when WordPress boots with the plugin loaded", async () => {
+    expect(await pluginBreaksBoot(local, "x")).toBeUndefined();
+  });
+
+  test("blames nothing, and loads no plugin, when WordPress does not boot even without it", async () => {
+    process.env.WP_STUB_DOWN = "1";
+    expect(await pluginBreaksBoot(local, "x")).toBeUndefined();
+    expect(calls()).toEqual(["--skip-plugins=x eval echo 1;"]);
+  });
+
+  test("asks nothing for a slug --skip-plugins would read as more than one plugin", async () => {
+    expect(await pluginBreaksBoot(local, "x,y")).toBeUndefined();
+    expect(calls()).toEqual([]);
   });
 });

@@ -205,7 +205,8 @@ trusted. **"Absent" means nothing at the plugin's path**, never "WordPress lists
   is at the path, if anything.
 
 Also: `isPluginInstalled` / `isPluginActive` (WordPress's view), `ensurePluginDeactivated`
-(idempotent), `activatePlugin`, and `installPlugin(transport, source, opts?)` — a slug, a zip path
+(idempotent), `pluginBreaksBoot` (the fatal WordPress dies on with the plugin loaded, when it boots
+with `--skip-plugins=<slug>`; asked only after a failure, since that boot logs the fatal), `activatePlugin`, and `installPlugin(transport, source, opts?)` — a slug, a zip path
 **on the site**, or a URL ([`InstallPluginOptions`](../../src/common/wp/plugin.ts)
 `{ activate?, force? }`); a runner zip goes through `stageAndInstallPlugin`. "Destination folder
 already exists" becomes `PluginDestinationExistsError`, saying whether WordPress lists a plugin in the
@@ -273,9 +274,11 @@ Distinct classes so steps and reports tell failure modes apart:
 
 Reads and categorises `wp-content/debug.log` to catch PHP errors a UI assertion misses.
 
-- Reads and clears via `wp eval` (resolves a custom `WP_CONTENT_DIR`). That needs WordPress to boot —
-  exactly what a fatal breaks — so a non-zero exit logs and **falls back** to a direct file
-  read/removal.
+- Reads and clears via `wp --skip-plugins --skip-themes eval` (resolves a custom `WP_CONTENT_DIR`,
+  which `wp-config.php` sets; core sets up `WP_DEBUG_LOG` before any plugin loads). No plugin is
+  loaded: a copy that cannot boot would kill the read and, through `WP_DEBUG_LOG`, write its fatal
+  into the log being judged (measured). A boot that still fails logs and **falls back** to a direct
+  file read/removal.
 - **`wp eval` exits 0 even when its PHP failed** (a denied write to the web server's `debug.log` is
   only a warning), so each snippet reports its own outcome: the clear prints `cleared`/`kept`, and a
   read that cannot open an existing log exits non-zero instead of returning `""`. A log that never

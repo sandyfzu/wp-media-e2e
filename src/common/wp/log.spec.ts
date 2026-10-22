@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -15,8 +16,19 @@ import type { LocalTransport } from "../config/types";
 
 // Stub `wp`: `eval` echoes $WP_STUB_EVAL_OUT (exit 0), or simulates a broken WordPress bootstrap
 // (exit 255) when $WP_STUB_EVAL=fail. `cat`/`rm` are NOT stubbed — the fallback uses the real
-// ones — so a failing `eval` forces log.ts down its direct-file path.
+// ones — so a failing `eval` forces log.ts down its direct-file path. Leading `--skip-*` flags are
+// read off first, as WP-CLI reads global flags; with $WP_STUB_BROKEN_PLUGIN, a boot that loads
+// plugins dies on that plugin's fatal and — as WP_DEBUG_LOG does on a real site (measured) — writes it
+// into the very log being read. $WP_STUB_CALLS records each call's argv.
 const STUB_WP = `#!/usr/bin/env bash
+[ -n "$WP_STUB_CALLS" ] && printf '%s\\n' "$*" >> "$WP_STUB_CALLS"
+SKIPPED=""
+while [[ "$1" == --skip-* ]]; do SKIPPED="$SKIPPED $1"; shift; done
+if [ "$1" = "eval" ] && [ -n "$WP_STUB_BROKEN_PLUGIN" ] && [[ "$SKIPPED" != *--skip-plugins* ]]; then
+  echo "PHP Fatal error:  Uncaught Error: Class BerlinDB not found in broken-plugin.php:12" >> wp-content/debug.log
+  echo "Fatal error: Uncaught Error: Class BerlinDB not found" >&2
+  exit 1
+fi
 if [ "$1" = "eval" ]; then
   if [ "$WP_STUB_EVAL" = "fail" ]; then
     echo "PHP Fatal error: simulated bootstrap failure" >&2
@@ -300,5 +312,54 @@ test.describe("debug.log — escalating when the web-server user's permissions d
     expect(warnings.some((w) => w.includes("CANNOT fail a scenario"))).toBe(
       true,
     );
+  });
+});
+
+/**
+ * A plugin that cannot boot — a half-removed copy of the one under test — must not decide what the
+ * log says: reading or clearing a file needs no plugin, and a boot that loads it writes its fatal into
+ * the log being judged, which would then blame the scenario for the read itself.
+ */
+test.describe("debug.log — never through a WordPress that loads plugins or themes", () => {
+  let callLog: string;
+
+  test.beforeEach(() => {
+    callLog = join(wpRoot, "calls.log");
+    process.env.WP_STUB_CALLS = callLog;
+    process.env.WP_STUB_BROKEN_PLUGIN = "1";
+    process.env.WP_STUB_EVAL = "ok";
+    rmSync(debugLogPath(), { force: true });
+  });
+
+  test.afterEach(() => {
+    delete process.env.WP_STUB_CALLS;
+    delete process.env.WP_STUB_BROKEN_PLUGIN;
+    rmSync(callLog, { force: true });
+    rmSync(debugLogPath(), { force: true });
+  });
+
+  const evalCalls = (): string[] =>
+    existsSync(callLog)
+      ? readFileSync(callLog, "utf8")
+          .split("\n")
+          .filter((line) => / eval |^eval /.test(` ${line}`))
+      : [];
+
+  test("a scan of a clean log finds no fatal, and writes none into it", async () => {
+    process.env.WP_STUB_EVAL_OUT = "";
+    const scan = await scanDebugLog(local);
+
+    expect(scan.fatals).toEqual([]);
+    expect(existsSync(debugLogPath())).toBe(false);
+    expect(evalCalls()).toHaveLength(1);
+    expect(evalCalls()[0]).toMatch(/^--skip-plugins --skip-themes eval /);
+  });
+
+  test("clearing it boots with plugins and themes skipped", async () => {
+    process.env.WP_STUB_EVAL_OUT = "cleared";
+    await clearDebugLog(local);
+
+    expect(evalCalls()).toHaveLength(1);
+    expect(evalCalls()[0]).toMatch(/^--skip-plugins --skip-themes eval /);
   });
 });

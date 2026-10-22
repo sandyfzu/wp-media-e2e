@@ -227,7 +227,8 @@ lives in a sibling module, unit-testable without it.
 **`@plugin`** ([`plugin.hooks.ts`](src/common/hooks/plugin.hooks.ts)):
 
 - **Before**, in order: clear `debug.log`; stop work the plugin still runs (a killed run's job —
-  `ProductConfig.stopRunningWork`; reported, a failure only if it won't stop); uninstall any
+  `ProductConfig.stopRunningWork`; reported, a failure only if it won't stop — a stop that fails on a
+  copy WordPress boots only without, `pluginBreaksBoot`, is reported: such a copy runs nothing); uninstall any
   existing copy (so the install is fresh, DB footprint included) and remove by path what is left
   there — a folder WordPress no longer lists, or a listed copy whose uninstall fails (taken off
   `active_plugins` with no plugin loaded first, or `install --activate` skips its activation); a
@@ -438,7 +439,8 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   survived elevated; `transport.elevate: false` refuses elevation) and `ProductConfig.siteDbResidue`
   (rows, `wp/db-residue.ts`; never elevated, multisite refused). Both verified by re-reading.
 - **Debug log** ([`wp/log.ts`](src/common/wp/log.ts)): `clearDebugLog` in a `Before`, `scanDebugLog`
-  (`{ raw, fatals, warnings, notices }`, falls back to a direct read when WordPress can't boot) in an
+  (`{ raw, fatals, warnings, notices }`; WordPress booted with no plugin or theme, so a broken one
+  cannot write into the log it reads; a direct read when even that fails) in an
   `After`. Presets in `support/debug-log.ts`: `*_LOG_OPTIONS` scans everything, `*_OWN_LOG_OPTIONS` that
   plugin only.
 
