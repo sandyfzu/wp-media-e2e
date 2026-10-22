@@ -198,6 +198,31 @@ export class PluginDestinationExistsError extends Error {
 }
 
 /**
+ * An install failed on WP-CLI's "Could not create directory" for the plugin's own path, where
+ * something that is no folder stands — a file, or a link WordPress cannot follow (a dangling one).
+ * WordPress takes only a folder for one in the way, so it neither refuses with "Destination folder
+ * already exists" nor offers to replace it ({@link PluginDestinationExistsError}).
+ */
+export class PluginDestinationBlockedError extends Error {
+  /** The folder WordPress could not create, as WP-CLI named it. */
+  readonly path: string;
+
+  /**
+   * @param path - the folder, as WP-CLI named it.
+   * @param found - what stands at it, described (`describePluginDir`).
+   */
+  constructor(path: string, found: string) {
+    super(
+      `Plugin install failed: WordPress could not create the plugin's folder "${path}", because ` +
+        `something that is no folder is there — ${found}. Remove it (or point a link at a real ` +
+        "folder), then install again.",
+    );
+    this.name = "PluginDestinationBlockedError";
+    this.path = path;
+  }
+}
+
+/**
  * The operator's next step after residue survived, which depends entirely on how far privileges
  * reached — "make it writable" is useless advice if the delete already ran as root, and misleading
  * if elevation was switched off.

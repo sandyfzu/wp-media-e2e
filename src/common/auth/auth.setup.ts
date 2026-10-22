@@ -5,6 +5,7 @@ import { getManifest } from "../artifacts/registry";
 import { getPool, readRouting } from "../config/metadata";
 import { isPlaceholderSite } from "../config/sites";
 import { verifyPool } from "../setup/preflight";
+import { ensurePluginAbsent } from "../wp/plugin";
 import {
   BEST_EFFORT_ALLOWANCE_PER_SITE_MS,
   authenticatePool,
@@ -15,7 +16,9 @@ import {
 /**
  * Authentication setup project (plain Playwright, not BDD). For each real site in the
  * cell's pool it:
- *   1. Verifies the site's transport (SSH/Docker/local) is reachable and functional.
+ *   1. Verifies the site's transport (SSH/Docker/local) is reachable and functional — removing a
+ *      broken copy of the cell's own plugin when WordPress boots only without it (see
+ *      setup/cell-plugin.ts), which would otherwise fail every login before a scenario could heal it.
  *   2. Ends the WordPress session the cell's previous run saved, so a cookie in an older report's
  *      trace is dead (see session.ts).
  *   3. Logs in once through the WordPress UI and saves the session to that site's
@@ -62,9 +65,10 @@ setup("authenticate site pool", async ({ browser }, testInfo) => {
   // Verify every site's transport before attempting authentication. A failure here
   // throws a formatted report, which Playwright surfaces as a setup error and uses
   // to skip the dependent BDD project — preventing cascading failures.
-  // The folder checked is the one this cell installs, which its @plugin scenarios clear.
+  // The folder checked is the one this cell installs, which its @plugin scenarios clear — and the one
+  // plugin this setup may remove, the same cleanup they run.
   const { slug } = resolveIdentity(getManifest(product), edition);
-  await verifyPool(pool, product, cell, [slug]);
+  await verifyPool(pool, product, cell, [slug], ensurePluginAbsent);
 
   await authenticatePool(browser, real, testInfo, undefined, saved);
 });

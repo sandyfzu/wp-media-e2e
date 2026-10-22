@@ -7,7 +7,15 @@ import { elevationSupport, exec } from "../wp/exec";
 import type { ElevationSupport, ExecResult } from "../wp/exec";
 import { planOwnership } from "../wp/ownership";
 import type { OwnershipPlan } from "../wp/ownership";
+import { firstError } from "../wp/plugin";
 import { describePluginDir, inspectPluginDirs } from "../wp/plugin-dir";
+import {
+  blameCellPlugin,
+  healFailedCheck,
+  healedCheck,
+  reportedCheck,
+} from "./cell-plugin";
+import type { HealCellPlugin } from "./cell-plugin";
 import {
   renderElevationWarning,
   renderPluginDirWarning,
@@ -92,6 +100,11 @@ export interface SitePreflightResult {
    * first; empty when nothing is left, or the folder could not be inspected (its check says so).
    */
   readonly leftoverPluginDirs?: readonly string[];
+  /**
+   * What was said on removing a broken copy of the cell's plugin that stopped WordPress booting
+   * (`./cell-plugin.ts`), for {@link verifyPool} to print; absent when none was removed.
+   */
+  readonly healedCellPlugin?: string;
 }
 
 // ── Transport label (used in error output) ─────────────────────────────────────
@@ -259,6 +272,29 @@ const ENGLISH_LOCALES = new Set([
   "en_ZA",
 ]);
 
+/** {@link checkAdminLocale}'s check, and — when its `wp eval` ran and failed — the line it died on. */
+type LocaleCheck = CheckResult & { readonly bootError?: string };
+
+/**
+ * Runs `determine_locale()` as the user, with every plugin loaded unless one is skipped.
+ *
+ * @param transport - the site.
+ * @param username - the user whose admin language counts.
+ * @param skipped - a plugin slug to leave out (`--skip-plugins=<slug>`), already checked usable.
+ */
+function readAdminLocale(
+  transport: Transport,
+  username: string,
+  skipped?: string,
+): Promise<ExecResult> {
+  return exec(transport, "wp", [
+    ...(skipped === undefined ? [] : [`--skip-plugins=${skipped}`]),
+    "eval",
+    "echo determine_locale();",
+    `--user=${username}`,
+  ]);
+}
+
 /**
  * Confirms the site's admin UI is in English.
  *
@@ -277,18 +313,16 @@ const ENGLISH_LOCALES = new Set([
  *
  * The PHP is a fixed, read-only literal; the only interpolated value is the username, passed as a
  * separate argument that the exec layer escapes.
+ *
+ * @returns the check, with the line WordPress died on when the command ran and failed.
  */
 async function checkAdminLocale(
   transport: Transport,
   username: string,
-): Promise<CheckResult> {
+): Promise<LocaleCheck> {
   const name = "Admin locale is English";
   try {
-    const result = await exec(transport, "wp", [
-      "eval",
-      "echo determine_locale();",
-      `--user=${username}`,
-    ]);
+    const result = await readAdminLocale(transport, username);
     if (result.exitCode !== 0) {
       return {
         name,
@@ -297,6 +331,7 @@ async function checkAdminLocale(
           `Could not read the admin locale (exit ${String(result.exitCode)})` +
           (result.stderr.trim() ? `: ${result.stderr.trim()}` : "."),
         hint: `Check that the user "${username}" exists on this site.`,
+        bootError: firstError(result),
       };
     }
     const locale = result.stdout.trim();
@@ -778,12 +813,16 @@ export async function checkPluginDirs(
  *
  * @param site - the site to check.
  * @param index - its position in its pool.
- * @param slugs - the slug(s) the cell installs as, for {@link checkPluginDirs}; none skips that check.
+ * @param slugs - the slug(s) the cell installs as, for {@link checkPluginDirs} and for blaming a
+ * WordPress that cannot boot; none skips both.
+ * @param heal - removes a broken copy of the cell's plugin that stops WordPress booting — the auth
+ * setup's; omitted, it is only reported (the healthcheck changes nothing).
  */
 export async function verifySite(
   site: SiteInput,
   index: number,
   slugs: readonly string[] = [],
+  heal?: HealCellPlugin,
 ): Promise<SitePreflightResult> {
   let checks: CheckResult[];
   switch (site.transport.mode) {
@@ -804,7 +843,8 @@ export async function verifySite(
   if (!checks.every((check) => check.ok)) {
     return { index, baseURL: site.baseURL, transport: site.transport, checks };
   }
-  checks.push(await checkAdminLocale(site.transport, site.username));
+  const boot = await checkBootAndLocale(site, slugs, heal);
+  checks.push(...boot.checks);
 
   // Same gate, and for a stronger reason: both of these run commands on the site, so asking a
   // transport that has already failed would only produce a second way of saying so. Neither can fail
@@ -831,6 +871,57 @@ export async function verifySite(
     ...(pluginDirs === undefined
       ? {}
       : { leftoverPluginDirs: pluginDirs.leftovers }),
+    ...(boot.healed === undefined ? {} : { healedCellPlugin: boot.healed }),
+  };
+}
+
+/**
+ * The admin locale check, and — when WordPress could not boot for it — whether the cell's own plugin
+ * is why ({@link blameCellPlugin}): then that copy is removed with `heal` and the locale asked again, or,
+ * with no `heal`, reported in place of the locale check, one failure for one cause.
+ *
+ * @param site - the site, its transport verified.
+ * @param slugs - the slug(s) the cell installs as.
+ * @param heal - how to remove the cell's plugin; omitted where nothing may change.
+ * @returns the checks to add, and — when a broken copy was removed — what was said about it.
+ */
+async function checkBootAndLocale(
+  site: SiteInput,
+  slugs: readonly string[],
+  heal: HealCellPlugin | undefined,
+): Promise<{ checks: CheckResult[]; healed?: string }> {
+  const { transport, username } = site;
+  const askLocale = async (): Promise<{
+    check: CheckResult;
+    bootError?: string;
+  }> => {
+    const { bootError, ...check } = await checkAdminLocale(transport, username);
+    return bootError === undefined ? { check } : { check, bootError };
+  };
+  const locale = await askLocale();
+  if (locale.bootError === undefined) return { checks: [locale.check] };
+  const slug = await blameCellPlugin(slugs, async (candidate) => {
+    try {
+      return (
+        (await readAdminLocale(transport, username, candidate)).exitCode === 0
+      );
+    } catch {
+      return false;
+    }
+  });
+  if (slug === undefined) return { checks: [locale.check] };
+
+  const broken = { slug, error: locale.bootError };
+  if (heal === undefined) return { checks: [reportedCheck(broken)] };
+  let healed: CheckResult;
+  try {
+    healed = healedCheck(broken, await heal(transport, slug));
+  } catch (error) {
+    return { checks: [healFailedCheck(broken, errorMessage(error))] };
+  }
+  return {
+    checks: [healed, (await askLocale()).check],
+    healed: healed.detail,
   };
 }
 
@@ -848,13 +939,15 @@ export async function verifySite(
  * @param pool - the cell's sites.
  * @param product - the product, for the report.
  * @param cell - the cell, for the report.
- * @param slugs - the slug(s) the cell installs as, for {@link checkPluginDirs}.
+ * @param slugs - the slug(s) the cell installs as, for {@link verifySite}.
+ * @param heal - see {@link verifySite}.
  */
 export async function verifyPool(
   pool: readonly SiteConfig[],
   product: string,
   cell: string,
   slugs: readonly string[] = [],
+  heal?: HealCellPlugin,
 ): Promise<void> {
   const real = pool
     .map((site, i) => ({ site, i }))
@@ -863,8 +956,15 @@ export async function verifyPool(
   if (real.length === 0) return;
 
   const results = await Promise.all(
-    real.map(({ site, i }) => verifySite(site, i, slugs)),
+    real.map(({ site, i }) => verifySite(site, i, slugs, heal)),
   );
+
+  // Changed a site before any scenario: always said, on a passing pool too.
+  for (const { baseURL, healedCellPlugin } of results) {
+    if (healedCellPlugin !== undefined) {
+      console.warn(`[preflight] ${maskSiteUrl(baseURL)}: ${healedCellPlugin}`);
+    }
+  }
 
   // Printed before the early return below, because a *passing* pool prints nothing otherwise — and a
   // pool that cannot elevate passes. Never throws and never changes a verdict: it warns.

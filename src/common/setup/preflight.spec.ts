@@ -3,6 +3,7 @@ import {
   chmodSync,
   existsSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -17,6 +18,8 @@ import {
 } from "./preflight";
 import { resetOwnershipCaches } from "../wp/ownership";
 import type { CheckResult } from "./preflight";
+import type { HealCellPlugin } from "./cell-plugin";
+import type { ClearedPluginDir } from "../wp/plugin";
 import type { SiteConfig } from "../config/types";
 
 // A stub `wp` on PATH exercises the real exec layer + preflight with deterministic exit codes —
@@ -32,10 +35,20 @@ import type { SiteConfig } from "../config/types";
 //        fail   → exit 1                    (could not be evaluated)
 //        unset  → en_US                     (the English default)
 //        other  → that locale               (e.g. fr_FR, to exercise the failure path)
+//        fatal  → exit 1, a plugin's fatal on stderr (WordPress cannot boot — measured wording)
 //   $WP_STUB_PLUGIN_DIRS  <json> | unset      → the plugin-folder inspection (`--skip-plugins … eval`):
 //        unset  → exit 1                    (could not be inspected)
 //        json   → printed as the reply
+//   $WP_STUB_BOOTS_WITHOUT  <slug> | unset  → `wp --skip-plugins=<slug> eval …`: en_US for that slug,
+//        else the fatal again (skipping that plugin does not help)
 const STUB_WP = `#!/usr/bin/env bash
+case "$1" in
+  --skip-plugins=*)
+    [ -n "$WP_STUB_LOG_CALLS" ] && echo "$1" >> "$WP_STUB_LOG_CALLS"
+    if [ "$1" = "--skip-plugins=$WP_STUB_BOOTS_WITHOUT" ]; then printf en_US; exit 0; fi
+    echo "Fatal error: Uncaught Error: still broken" >&2
+    exit 1 ;;
+esac
 if [ "$1" = "--skip-plugins" ]; then
   [ -n "$WP_STUB_LOG_CALLS" ] && echo "inspect" >> "$WP_STUB_LOG_CALLS"
   [ -z "$WP_STUB_PLUGIN_DIRS" ] && { echo "Error: stub has no reply" >&2; exit 1; }
@@ -57,6 +70,12 @@ if [ "$1 $2" = "core is-installed" ]; then
 fi
 if [ "$1" = "eval" ]; then
   [ "$WP_STUB_LOCALE" = "fail" ] && exit 1
+  if [ "$WP_STUB_LOCALE" = "fatal" ]; then
+    echo 'Fatal error: Uncaught Error: Class "WPMedia\\BackWPup\\Dependencies\\BerlinDB\\Database\\Table" not found in /srv/site/wp-content/plugins/backwpup-pro/src/Common/Database/Tables/AbstractTable.php:12' >&2
+    echo 'Stack trace:' >&2
+    echo 'Error: There has been a critical error on this website.' >&2
+    exit 1
+  fi
   printf '%s' "\${WP_STUB_LOCALE:-en_US}"
   exit 0
 fi
@@ -679,5 +698,150 @@ test.describe("verifySite — leftover plugin folders", () => {
       (message) => printed.push(message),
     );
     expect(printed).toEqual([]);
+  });
+});
+
+/**
+ * A broken copy of the cell's own plugin that stops WordPress booting: blamed only when WordPress boots
+ * with that slug skipped, removed only through the `heal` the auth setup passes, reported otherwise.
+ */
+test.describe("verifySite — a broken copy of the cell's plugin", () => {
+  const SLUG = "backwpup-pro";
+  const cleared: ClearedPluginDir = {
+    cause: "uninstall-failed",
+    uninstallError: "PHP Fatal error:  Uncaught Error: Class not found",
+    dir: {
+      kind: "recognised",
+      path: "/srv/site/wp-content/plugins/backwpup-pro",
+      type: "directory",
+      owner: "www-data",
+      ageSeconds: 60,
+      sample: ["backwpup.php", "src", "vendor"],
+      entries: 5000,
+      topLevel: 3,
+    },
+  };
+  let callLog: string;
+  let healed: string[];
+
+  /** A heal that removes the copy as the real one would: WordPress boots again afterwards. */
+  const heal: HealCellPlugin = (_transport, slug) => {
+    healed.push(slug);
+    delete process.env.WP_STUB_LOCALE;
+    return Promise.resolve(cleared);
+  };
+  const names = (result: { checks: readonly CheckResult[] }): string[] =>
+    result.checks.map((check) => `${check.ok ? "✓" : "✗"} ${check.name}`);
+  const probes = (): string[] =>
+    existsSync(callLog)
+      ? readFileSync(callLog, "utf8").trim().split("\n").filter(Boolean)
+      : [];
+
+  test.beforeEach(() => {
+    delete process.env.WP_STUB_INFO;
+    process.env.WP_STUB_INSTALLED = "yes";
+    process.env.WP_STUB_LOCALE = "fatal";
+    process.env.WP_STUB_BOOTS_WITHOUT = SLUG;
+    callLog = join(wpRoot, "skips.log");
+    process.env.WP_STUB_LOG_CALLS = callLog;
+    healed = [];
+  });
+
+  test.afterEach(() => {
+    delete process.env.WP_STUB_LOCALE;
+    delete process.env.WP_STUB_BOOTS_WITHOUT;
+    delete process.env.WP_STUB_LOG_CALLS;
+    rmSync(callLog, { force: true });
+  });
+
+  test("removes it with heal, then asks the locale again: the site passes", async () => {
+    const result = await verifySite(localSite(), 0, [SLUG], heal);
+
+    expect(healed).toEqual([SLUG]);
+    expect(probes()).toContain(`--skip-plugins=${SLUG}`);
+    expect(names(result).slice(3, 5)).toEqual([
+      "✓ Plugin under test",
+      "✓ Admin locale is English",
+    ]);
+    expect(result.checks.every((check) => check.ok)).toBe(true);
+    const detail = result.checks[3]?.detail ?? "";
+    expect(detail).toContain(
+      `WordPress cannot boot with the cell's plugin "${SLUG}" loaded (Fatal error: Uncaught Error: Class`,
+    );
+    expect(detail).toContain(
+      "removed /srv/site/wp-content/plugins/backwpup-pro: a folder WordPress lists a plugin in",
+    );
+    expect(result.healedCellPlugin).toBe(detail);
+  });
+
+  test("without heal, only reports it, in place of the locale check, and changes nothing", async () => {
+    const result = await verifySite(localSite(), 0, [SLUG]);
+
+    expect(healed).toEqual([]);
+    expect(names(result)).toContain("✗ Plugin under test");
+    expect(names(result).join("\n")).not.toContain("Admin locale");
+    expect(result).not.toHaveProperty("healedCellPlugin");
+    const check = result.checks.find((c) => c.name === "Plugin under test");
+    expect(check?.hint).toContain(
+      `\`wp --skip-plugins plugin deactivate ${SLUG}\``,
+    );
+  });
+
+  test("a site that does not boot with the slug skipped either fails as before, untouched", async () => {
+    process.env.WP_STUB_BOOTS_WITHOUT = "some-other-plugin";
+    const result = await verifySite(localSite(), 0, [SLUG], heal);
+
+    expect(healed).toEqual([]);
+    expect(probes()).toContain(`--skip-plugins=${SLUG}`);
+    const locale = result.checks.find(
+      (c) => c.name === "Admin locale is English",
+    );
+    expect(locale?.ok).toBe(false);
+    expect(locale?.detail).toContain("Fatal error: Uncaught Error: Class");
+    expect(names(result).join("\n")).not.toContain("Plugin under test");
+  });
+
+  test("a heal that fails fails the site, naming why and how to remove it by hand", async () => {
+    const failing: HealCellPlugin = () =>
+      Promise.reject(new Error("PluginDirRemovalFailedError: still there"));
+    const result = await verifySite(localSite(), 0, [SLUG], failing);
+
+    const check = result.checks.find((c) => c.name === "Plugin under test");
+    expect(check?.ok).toBe(false);
+    expect(check?.detail).toMatch(
+      /, and removing it failed: PluginDirRemovalFailedError: still there$/,
+    );
+    expect(check?.hint).toContain(`wp-content/plugins/${SLUG}`);
+    expect(names(result).join("\n")).not.toContain("Admin locale");
+  });
+
+  test("asks nothing with the slug skipped when the locale was read, or no slug is given", async () => {
+    process.env.WP_STUB_LOCALE = "fr_FR";
+    await verifySite(localSite(), 0, [SLUG], heal);
+    process.env.WP_STUB_LOCALE = "fatal";
+    await verifySite(localSite(), 0, [], heal);
+
+    expect(
+      probes().filter((line) => line.startsWith("--skip-plugins=")),
+    ).toEqual([]);
+    expect(healed).toEqual([]);
+  });
+
+  test("and pool verification says it removed it, on a passing pool", async () => {
+    const printed: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]): void => {
+      printed.push(args.map(String).join(" "));
+    };
+    try {
+      await expect(
+        verifyPool([localSite()], "backwpup", "local", [SLUG], heal),
+      ).resolves.toBeUndefined();
+    } finally {
+      console.warn = realWarn;
+    }
+    expect(printed.join("\n")).toMatch(
+      /\[preflight\] http:\/\/localhost:8100: WordPress cannot boot with the cell's plugin "backwpup-pro"/,
+    );
   });
 });

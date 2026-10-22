@@ -34,7 +34,7 @@ src/
 │   ├── config/             # env, sites loading, run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory
 │   ├── reporting/          # the suite's reporters (cell notice, results stream, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
-│   ├── setup/              # the auth setup's preflight, elevation/ownership banner, site info
+│   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin), elevation/ownership banner, site info
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── guards.ts           # type guards for narrowing `unknown`
 │   ├── text.ts             # string helpers: escapeRegExp, escapeHtml, redactSecrets/maskValues (credentials), maskSiteUrl (a baseURL shown safely), plain
@@ -313,8 +313,12 @@ before the scenarios, in three steps:
 is-installed` passes — a WordPress that cannot boot (old PHP, DB down, a fatal) is reported as
    that, never as "not installed". Then the **admin UI is English** (`determine_locale()` for the
    configured user, so per-user setting, site option, `WPLANG` and filters all count): page objects
-   match English names, and a translated site would otherwise fail as many locator timeouts. A gate
-   failure throws a formatted report and skips the scenarios. Three **reports, never gates**: **File
+   match English names, and a translated site would otherwise fail as many locator timeouts. When
+   WordPress cannot boot for that check but boots with the cell's own slug skipped
+   (`--skip-plugins=<slug>`), the cell's plugin is a broken copy every login would die on: the setup
+   removes it (`ensurePluginAbsent`, as the `@plugin` hooks would) and says so, a **Plugin under test**
+   line; the healthcheck only reports it ([`setup/cell-plugin.ts`](src/common/setup/cell-plugin.ts)). A
+   gate failure throws a formatted report and skips the scenarios. Three **reports, never gates**: **File
    ownership** (the same `planOwnership` decision `normalizeOwnership` acts on, so report and action
    agree), **Elevation** (passwordless `sudo`?) and **Plugin folders** (a folder WordPress lists no
    plugin in at the slug the cell installs, which its next `@plugin` scenario removes). No report fails a site for a property of

@@ -2,6 +2,7 @@ import { posix } from "node:path";
 
 import {
   PluginDeactivationFailedError,
+  PluginDestinationBlockedError,
   PluginDestinationExistsError,
   PluginNotInstalledError,
   PluginUninstallFailedError,
@@ -291,8 +292,10 @@ export interface InstallPluginOptions {
 /**
  * Installs a plugin from a source (slug, local zip path, or URL).
  *
- * @throws {@link PluginDestinationExistsError} when something is already at the plugin's path, saying
- * whether WordPress lists a plugin there; else Error on any other non-zero exit.
+ * @throws {@link PluginDestinationExistsError} when a folder is already at the plugin's path, saying
+ * whether WordPress lists a plugin there; {@link PluginDestinationBlockedError} when WordPress could
+ * not create the plugin's folder because something that is no folder — a file, a dangling link — is
+ * at that path; else Error on any other non-zero exit.
  */
 export async function installPlugin(
   transport: Transport,
@@ -304,12 +307,19 @@ export async function installPlugin(
   if (options.activate) args.push("--activate");
   const { exitCode, stdout, stderr } = await wpCli(transport, args);
   if (exitCode === 0) return;
-  const destination = existingDestination(`${stderr}\n${stdout}`);
+  const output = `${stderr}\n${stdout}`;
+  const destination = existingDestination(output);
   if (destination !== undefined) {
     throw new PluginDestinationExistsError(
       destination,
       await destinationVerdict(transport, destination),
     );
+  }
+  const blocked = uncreatedDestination(output);
+  const found =
+    blocked === undefined ? undefined : await blockerAt(transport, blocked);
+  if (blocked !== undefined && found !== undefined) {
+    throw new PluginDestinationBlockedError(blocked, describePluginDir(found));
   }
   throw new Error(
     `[wp/plugin] install "${source}" failed (exit ${String(exitCode)}): ${stderr.trim()}`,
@@ -324,6 +334,42 @@ export async function installPlugin(
  */
 export function existingDestination(output: string): string | undefined {
   return /Destination folder already exists\.\s*"([^"]+)"/.exec(output)?.[1];
+}
+
+/**
+ * The folder WordPress's installer could not create, from its own words —
+ * `Could not create directory. "<path>"` — or `undefined` when the output says nothing of it. WordPress
+ * takes only a folder for one in the way (`is_dir`), so a file or a dangling link at the plugin's path
+ * ends here, not on "Destination folder already exists" (measured: WP-CLI exit 1, that warning on
+ * standard error). So does a plugins folder it may not write in, with nothing at the path.
+ *
+ * @param output - the install's standard error and output.
+ */
+export function uncreatedDestination(output: string): string | undefined {
+  return /Could not create directory\.\s*"([^"]+)"/.exec(output)?.[1];
+}
+
+/**
+ * What stands at the plugin's own path when WordPress could not create its folder — `undefined` when
+ * nothing does, the path is not `WP_PLUGIN_DIR/<slug>` itself (a folder deeper in the copy), or it
+ * cannot be inspected. Never throws: the install's failure is the verdict, and this only sharpens it.
+ *
+ * @param transport - the site.
+ * @param destination - the folder, as WP-CLI named it.
+ */
+async function blockerAt(
+  transport: Transport,
+  destination: string,
+): Promise<PresentPluginDir | undefined> {
+  const path = destination.replace(/\/+$/, "");
+  const slug = posix.basename(path);
+  if (!isPathSegment(slug)) return undefined;
+  try {
+    const found = await inspectPluginDir(transport, slug);
+    return found.kind !== "absent" && found.path === path ? found : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

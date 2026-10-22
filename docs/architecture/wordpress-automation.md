@@ -209,7 +209,10 @@ Also: `isPluginInstalled` / `isPluginActive` (WordPress's view), `ensurePluginDe
 **on the site**, or a URL ([`InstallPluginOptions`](../../src/common/wp/plugin.ts)
 `{ activate?, force? }`); a runner zip goes through `stageAndInstallPlugin`. "Destination folder
 already exists" becomes `PluginDestinationExistsError`, saying whether WordPress lists a plugin in the
-folder. The asserted wp-admin flow lives in [`PluginsPage`](../../src/common/pages/plugins.page.ts)
+folder. WordPress takes only a folder for one in the way, so a file or a dangling link at the path
+fails as `Warning: Could not create directory. "<path>/"`, exit 1 (measured), which becomes
+`PluginDestinationBlockedError` naming what is there — only when the path is the plugin's own and
+something is at it (an unwritable plugins folder fails the same way with nothing there). The asserted wp-admin flow lives in [`PluginsPage`](../../src/common/pages/plugins.page.ts)
 ([authoring-tests.md](../guides/authoring-tests.md)); its `delete` reads WordPress's `delete-plugin`
 answer — `success: false` fails `PluginDeletionFailedError` quoting its `errorMessage`, a non-JSON
 answer (a killed request's gateway page) fails naming its status.
@@ -241,6 +244,12 @@ on the QA servers by SIGTERM-ing core's `delete_plugins()`:
 - Only the slug the cell installs is inspected (pre-flight: `resolveIdentity` of the manifest and the
   cell's edition): shared sites hold other teams' unlisted folders, and another edition's is not the
   cell's to clear.
+- An **active** copy of the second shape kills every request that loads it (measured on apache: `wp
+  eval` exit 1 on its fatal, `wp-login.php` HTTP 500; `core is-installed` still exit 0), so the auth
+  setup failed before any `@plugin` hook could heal it. The pre-flight blames the cell's plugin only
+  when WordPress boots with that slug skipped, then removes it with `ensurePluginAbsent` before
+  logging in; the healthcheck reports it and changes nothing
+  ([`setup/cell-plugin.ts`](../../src/common/setup/cell-plugin.ts)).
 
 ## Error types ([`wp/errors.ts`](../../src/common/wp/errors.ts))
 
@@ -256,6 +265,7 @@ Distinct classes so steps and reports tell failure modes apart:
 - `PluginDirRemovalFailedError` — cleanup could not remove what is at a plugin's path, named, with
   advice for the site's elevation state.
 - `PluginDestinationExistsError` — an install met a folder at the plugin's path.
+- `PluginDestinationBlockedError` — an install met a file or a dangling link at the plugin's path.
 - `DebugLogFatalError` — PHP wrote a fatal to `debug.log` during a scenario; carries every fatal and
   quotes the first few, so the reporter alone diagnoses it.
 

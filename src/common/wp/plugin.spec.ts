@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,6 +17,7 @@ import {
   ensurePluginDeactivated,
   existingDestination,
   firstError,
+  uncreatedDestination,
   installPlugin,
   isPluginActive,
   isPluginInstalled,
@@ -23,6 +25,7 @@ import {
 } from "./plugin";
 import {
   PluginDeactivationFailedError,
+  PluginDestinationBlockedError,
   PluginDestinationExistsError,
   PluginNotInstalledError,
   PluginUninstallFailedError,
@@ -88,6 +91,17 @@ case "$1 $2" in
         exit 255 ;;
     esac ;;
   "plugin install")
+    # WordPress takes only a folder for one in the way (is_dir): a file or a dangling link at the path
+    # fails its mkdir instead — WP-CLI's words as measured on a cell, WP_STUB_UNCREATED naming another folder.
+    if { { [ -e "$P/x" ] || [ -L "$P/x" ]; } && [ ! -d "$P/x" ]; } || [ -n "$WP_STUB_UNCREATED" ]; then
+      echo "Unpacking the package..."
+      echo "Installing the plugin..."
+      echo "Plugin installation failed."
+      echo "Warning: Could not create directory. \\"\${WP_STUB_UNCREATED:-$P/x/}\\"" >&2
+      echo "Warning: The '/stage/x.zip' plugin could not be found." >&2
+      echo "Error: No plugins installed." >&2
+      exit 1
+    fi
     if [ -e "$P/x" ] || [ -n "$WP_STUB_DEST" ]; then
       msg="Warning: Destination folder already exists. \\"\${WP_STUB_DEST:-$P/x/}\\""
       if [ -n "$WP_STUB_DEST_STDOUT" ]; then echo "$msg"; else echo "$msg" >&2; fi
@@ -146,6 +160,7 @@ test.afterEach(() => {
     "WP_STUB_DEST",
     "WP_STUB_DEST_STDOUT",
     "WP_STUB_DEST_VANISHES",
+    "WP_STUB_UNCREATED",
   ]) {
     Reflect.deleteProperty(process.env, key);
   }
@@ -534,10 +549,67 @@ test.describe("installPlugin", () => {
     expect(calls().some((call) => call.includes(" eval "))).toBe(false);
   });
 
+  test("names a dangling link at the plugin's path, which WordPress could not create its folder over", async () => {
+    symlinkSync("/nonexistent-e2e-target", join(plugins, "x"));
+    const failure = await installPlugin(local, "/stage/x.zip").catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(PluginDestinationBlockedError);
+    expect(failure).toMatchObject({ path: `${join(plugins, "x")}/` });
+    expect((failure as Error).message).toBe(
+      `Plugin install failed: WordPress could not create the plugin's folder "${join(plugins, "x")}/", ` +
+        `because something that is no folder is there — ${join(plugins, "x")}: a link to ` +
+        '"/nonexistent-e2e-target" (WordPress lists no plugin in it); owner tester; last changed 60 s ' +
+        "ago. Remove it (or point a link at a real folder), then install again.",
+    );
+  });
+
+  test("names a file at the plugin's path", async () => {
+    writeFileSync(join(plugins, "x"), "not a folder");
+    await expect(installPlugin(local, "/stage/x.zip")).rejects.toThrow(
+      `${join(plugins, "x")}: a file, not a folder; owner tester`,
+    );
+  });
+
+  test("keeps the plain failure when nothing is at the folder WordPress could not create", async () => {
+    // A plugins folder WordPress may not write in fails the same way, with nothing in the way.
+    process.env.WP_STUB_UNCREATED = `${join(plugins, "x")}/`;
+    await expect(installPlugin(local, "/stage/x.zip")).rejects.toThrow(
+      /install "\/stage\/x\.zip" failed \(exit 1\): Warning: Could not create directory\./,
+    );
+  });
+
+  test("keeps the plain failure when the folder WordPress could not create lies deeper than the plugin's path", async () => {
+    // A file named like a folder deeper in the copy must never pass for the plugin's own path.
+    symlinkSync("/nonexistent-e2e-target", join(plugins, "x"));
+    process.env.WP_STUB_UNCREATED = `${join(plugins, "x", "vendor", "x")}/`;
+    await expect(installPlugin(local, "/stage/x.zip")).rejects.toThrow(
+      /install "\/stage\/x\.zip" failed \(exit 1\)/,
+    );
+  });
+
   test("keeps the plain failure for any other refusal", async () => {
     await expect(installPlugin(local, "/stage/x.zip")).rejects.toThrow(
       /install "\/stage\/x\.zip" failed \(exit 1\): Error: other/,
     );
+  });
+});
+
+test.describe("uncreatedDestination", () => {
+  test("reads the folder from WP-CLI's warning, as measured on a cell", () => {
+    expect(
+      uncreatedDestination(
+        'Warning: Could not create directory. "/var/www/site/public/wp-content/plugins/backwpup-pro/"\n' +
+          "Warning: The '/var/www/site/public/.e2e_temp/plugins/x.zip' plugin could not be found.\n" +
+          "Error: No plugins installed.",
+      ),
+    ).toBe("/var/www/site/public/wp-content/plugins/backwpup-pro/");
+  });
+
+  test("finds nothing in any other failure", () => {
+    expect(
+      uncreatedDestination('Destination folder already exists. "/p/x/"'),
+    ).toBeUndefined();
   });
 });
 
