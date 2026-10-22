@@ -31,30 +31,21 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
 
-  # Two named jobs, not a matrix: the gate reads each result by name, and `fail-fast` cannot cancel
-  # the other shard. Playwright shards by file (no `fullyParallel`), so each job runs its own share of
-  # the files on its own runner. Keep the two jobs identical except for the shard and artifact name.
+  # Named jobs, not a matrix: the gate reads each result by name, and `fail-fast` cannot cancel
+  # another shard. Keep them identical except for the shard and artifact name. Playwright shards by
+  # file (no `fullyParallel`), balanced by test count in file order, not duration, so more shards
+  # can make the slowest one slower: orchestrator/cli.spec.ts (~100 s) dominates the one it lands in.
+  # Browser-backed specs (page objects, login, site info, visual A/B, real-runner `*.run.spec.ts`)
+  # need Chromium even though these are unit tests with no external environment.
   unit-1:
     name: Unit tests (shard 1/2)
     runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - run: npm ci --ignore-scripts
-      - name: Cache Playwright browsers
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            playwright-${{ runner.os }}-
-      # src/common/pages + src/common/visual specs render via a real page (page.setContent), so
-      # Chromium must be installed even though these are "unit" tests with no external environment.
-      - run: npx playwright install --with-deps chromium
+      # A stalled download fails here, not at the job's limit.
+      - uses: ./.github/actions/setup-chromium
+        timeout-minutes: 5
       - run: npm run test:unit -- --shard=1/2
       - name: Upload report on failure
         if: ${{ failure() }}
@@ -71,19 +62,9 @@ jobs:
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - run: npm ci --ignore-scripts
-      - name: Cache Playwright browsers
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            playwright-${{ runner.os }}-
-      - run: npx playwright install --with-deps chromium
+      # A stalled download fails here, not at the job's limit.
+      - uses: ./.github/actions/setup-chromium
+        timeout-minutes: 5
       - run: npm run test:unit -- --shard=2/2
       - name: Upload report on failure
         if: ${{ failure() }}
@@ -100,19 +81,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - run: npm ci --ignore-scripts
-      - name: Cache Playwright browsers
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            playwright-${{ runner.os }}-
-      - run: npx playwright install --with-deps chromium
+      - uses: ./.github/actions/setup-chromium
+        timeout-minutes: 5
       # No sites.json in CI → the example placeholders are used, so only scenarios that need no
       # WordPress can run. `--grep @noauth` states that explicitly instead of relying on every
       # scenario in the repo happening to be tagged that way: scenarios that drive a real site

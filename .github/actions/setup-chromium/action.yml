@@ -1,0 +1,36 @@
+name: Node, packages and Chromium
+description: >-
+  Node from .nvmrc, the locked packages, and Playwright's Chromium, cached. Runs after
+  actions/checkout (a local action is read from the checkout).
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v6
+      with:
+        node-version-file: .nvmrc
+        cache: npm
+    # --ignore-scripts: no browser postinstall, no husky; Chromium is installed below.
+    - run: npm ci --ignore-scripts
+      shell: bash
+    - name: Cache Playwright browsers
+      uses: actions/cache@v6
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+        restore-keys: |
+          playwright-${{ runner.os }}-
+    # Not `install --with-deps`: the runner image already ships every library Chromium needs, and
+    # that flag runs apt on every job only to add 21 MB of fonts no test uses — when Ubuntu's mirror
+    # crawls, it stalls the job until its time limit. apt runs only if Chromium cannot start.
+    # `--only-shell`: every CI run is headless, which launches chromium-headless-shell; the full
+    # Chrome for Testing build is only for headed runs (healthcheck:ui, --headed), never run here.
+    - name: Install Chromium
+      shell: bash
+      run: |
+        npx playwright install --only-shell chromium
+        launch() { node --input-type=module -e 'import { chromium } from "@playwright/test"; await (await chromium.launch()).close();'; }
+        if ! launch; then
+          echo "::warning::Chromium does not start on this runner image; installing its system libraries with apt."
+          npx playwright install-deps chromium
+          launch
+        fi
