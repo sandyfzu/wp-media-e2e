@@ -968,6 +968,7 @@ must keep; the module each was found in documents its own case.
 | Tasks in a JSON file, read once | The task store (SQLite), edited through the API | The task fields and ids — imported as they are |
 | The run builds its plugin | The orchestrator builds and pins (`E2E_PLUGIN_REF=commit:<sha>`) | Everything else the run is given |
 | The suite prunes reports per cell | The orchestrator prunes per task, the suite's end-of-run pruning off — by a switch still to add (`E2E_REPORTS_KEEP=0` lifts only the cap; Phase 0's 0F) | 0F's planner |
+| Raw report folders; Slack points at the folder | Allure generated at run end and a prepared `report.tar.gz` ([plan](orchestrator-report-delivery-plan.md)) | The three reports and the run facts |
 | `start` in the foreground, in `tmux` | The same process under systemd; the command talks to it over the socket | Signals, stop, loop |
 | One event, two subscribers | More events; dashboard, `watch` | The bus and `run.finished` v1 |
 | Run records as JSON | Rows in the store | The record's fields |

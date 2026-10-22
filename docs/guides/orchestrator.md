@@ -7,8 +7,10 @@ plugin through the suite (`artifacts:<cell>`, APVM).
 
 Not yet (later phases): run as a service (systemd), take commands while running
 (`status`, `stop`, a dashboard), schedules or on-demand runs, back off after failures, build or pin
-plugins itself, warn about disk space, clean a site after a killed run (the cell's next run does).
-The config is read once: a change needs a restart.
+plugins itself, warn about disk space, clean a site after a killed run (the cell's next run does),
+generate Allure at run end and prepare a one-file `report.tar.gz`
+([plan](../plans/orchestrator-report-delivery-plan.md)). The config is read once: a change needs a
+restart.
 
 Design and the decisions behind it: [`docs/plans/orchestrator-phase-0.5-plan.md`](../plans/orchestrator-phase-0.5-plan.md).
 
