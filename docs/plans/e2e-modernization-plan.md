@@ -1,8 +1,9 @@
 # E2E Modernization Plan — `wp-rocket-e2e` → `wp-media-e2e`
 
-- Status: Phases 0–5 done. Phase 6 (feature porting, BackWPup first) in progress in the [phase-6
-  plan](phase-6-feature-porting-plan.md). Phases 7 and 10 open. Phase 8 dropped. Phase 9 moved to
-  the [orchestrator plan](orchestrator-plan.md). WP Rocket's port starts after Phase 10.
+- Status: Phases 0–5 done. **Next: Phase 7 — terminal output** (decided 2026-10-22), ahead of the
+  rest of Phase 6 (6H–6K); Phase 6 (feature porting, BackWPup first) is in progress in the [phase-6
+  plan](phase-6-feature-porting-plan.md). Phase 10 open. Phase 8 dropped. Phase 9 moved to the
+  [orchestrator plan](orchestrator-plan.md). WP Rocket's port starts after Phase 10.
 - Merged in, both done: plugin artifacts (§7) and site file ownership (§8), formerly plans of their
   own.
 - Baseline (reference only): `wp-rocket-e2e`, the legacy suite being superseded. Target: this repo.
@@ -24,8 +25,8 @@
   metadata.
 - The plugin zips under test are resolved, built through APVM and identity-verified per run (§7);
   files the suite installs on a site are handed back to the site's own owner (§8).
-- Open: Phase 7 (live terminal progress), Phase 10 (dependency check, cleanup), then WP Rocket's
-  port, which uses the parity matrix (§4).
+- Next: Phase 7 — terminal output for the suite and the orchestrator (below). Then Phase 6 resumes at
+  6H; Phase 10 (dependency check, cleanup) and WP Rocket's port (parity matrix, §4) follow.
 
 ## 1. Core decisions
 
@@ -302,13 +303,13 @@ Open, for WP Rocket's port:
 | 4 Reporting | done | README, "Reporting"; `allurerc.mjs`, `scripts/allure.mjs` |
 | 5 Visual regression | done | §2.12 |
 | 6 Feature porting | in progress | phase-6 plan (supersedes this phase; BackWPup only) |
-| 7 Tests output | open | below |
+| 7 Terminal output | next | below |
 | 8 CI on real cells | dropped | below |
 | 9 Orchestrator | moved | orchestrator plan |
 | 10 Cleanup & validation | open | below |
 | WP Rocket port | after Phase 10 | phase-6 plan, "After Phase 10 — WP Rocket" |
 
-Phases 7 and 10 state no dependencies, effort or parallelism; Phase 7 states no definition of done.
+Phase 10 states no dependencies, effort or parallelism; Phase 7's sub-phases state theirs below.
 
 Phase 6: the three install-hook obligations this plan set (consume `pluginArtifact`, stage the zip
 for `ssh`/`docker`, clean the staging area in worker teardown) are done (6A; `releaseBoundSite`).
@@ -318,15 +319,137 @@ acted on: 2 retries everywhere, local runs included, `E2E_RETRIES` overriding
 judge. Acceptance this plan set, beyond 6A's and still open: a review checklist confirms no 1:1
 carry-over from the baseline (WP Rocket's port included).
 
-Phase 7 — Tests output (open).
+Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orchestrator.
 
-- Goal: display very good progress in the terminal while tests run — how many tests ran, how many
-  remain, how many passed, how many failed, etc. Every time a test/scenario fails, display its name
-  and the failed step in the terminal (if not the default by Playwright).
-- Today: `list` prints a line per test; `results.jsonl` streams every event as it happens; the run
-  summary prints the verdict and counts only at the end (`src/common/reporting/`).
-- Pairs with the orchestrator's live progress, built from the same results stream (orchestrator
-  plan, "Output and logs").
+- Goal: on a terminal, a run and the orchestrator are easy to scan: a short header, live progress
+  (done/remaining, passed/failed/flaky), one aligned line per scenario, a failure block naming the
+  scenario, the failed step and where to look, and a summary with the report paths. Piped, redirected,
+  `CI`, `NO_COLOR`, `TERM=dumb` and narrow or non-UTF-8 terminals get the same information as plain,
+  stable lines. No styling ever reaches a log, a report or `results.jsonl`.
+- Today: the suite's `list` reporter interleaves Playwright's lines; `run-summary.ts` prints one
+  aligned block at the end and already uses Node's `styleText`; the orchestrator prints one
+  timestamped line per event (`orchestrator/log.ts`), with no color and no live state. Nothing shows
+  a failed step while it happens.
+- Decisions:
+  - One renderer, two front ends: a side-effect-free `src/common/terminal/` (capabilities, palette,
+    layout, live region) used by the suite's reporter and by the orchestrator's logger. Add its
+    modules to `orchestrator/suite-imports.json`; `import-boundary.spec.ts` must stay green.
+  - Style is a sink, never data: build strings once, then style; every external string (test titles,
+    error messages, paths, URLs, logs) goes through `plain`/masking and is cut by visible width, so
+    it can inject neither ANSI nor a secret. The file sinks (`orchestrator.log`, `run.log`,
+    `results.jsonl`, reports) stay byte-plain; tests assert no `\x1b` in them.
+  - Color: Node's `node:util` `styleText` (no dependency; honors `NO_COLOR`, `NODE_DISABLE_COLORS`,
+    `FORCE_COLOR` and the terminal's capability). Named ANSI colors and bold/dim only — no
+    256/truecolor, no background fills — so the terminal's own light/dark theme keeps contrast.
+    Semantic tokens: `ok` green, `fail` red, `warn`/`stop` yellow, `id` cyan, `dim` metadata and
+    paths, `command` bold. Every status also has a symbol and a word, never color alone.
+  - Symbols: `✔ ✘ ⚠ ■ · │ ├ └ ─`; ASCII fallback (`OK`, `x`, `!`, `#`, `.`, `|`, `+`, `-`) when
+    `TERM=dumb`, the locale is not UTF-8, or output is forced plain.
+  - `E2E_OUTPUT=auto|plain|fancy` (default `auto`): `auto` = fancy on a TTY, plain otherwise;
+    `plain` = no color, no cursor movement, ASCII; `fancy` = color/live when the stream can take it,
+    but still no cursor movement without a TTY.
+  - Live region: only on a TTY, throttled to ≤ 2 redraws/s, capped at the terminal height, cleared
+    before every permanent line and on exit/stop (cursor restored). Implemented in ~80 lines over
+    `\x1b[2K`/`\x1b[1A`; `log-update@8` rejected because it writes ANSI even when the stream is not
+    a TTY (read in its `index.js`, 2026-10-22) and its diff engine is more than needed.
+  - Width: `process.stdout.columns`/`COLUMNS`, floor 40, cap 120; `resize` redraw. Layout is
+    ANSI-aware with `string-width@8.3.0`, `slice-ansi@9.0.1` and `wrap-ansi@10.0.2` (all ESM,
+    Node ≥ 20/22; latest verified on npm 2026-10-22). No `chalk`, `ora`, `listr2`, `boxen` or
+    `cli-table3`: one palette, no spinners in CI, no box-drawing dependency.
+  - `CI` turns the live region off (log lines only); color still follows `FORCE_COLOR` and the
+    stream. `--reporter` keeps Playwright's meaning: it replaces our reporter, so the suite's output
+    is the chosen reporter's.
+- Suite (7.2):
+  - Replace `list` in `reporters()` with `src/common/reporting/terminal.reporter.ts`; the results
+    stream, run facts, HTML, Cucumber, Allure and `run-summary.ts` entries stay in the same order.
+  - Header: product · cell, run id/name, plugin ref/version, site and versions, workers, report path.
+  - Live block: `23/52 · ███████░░░ 44% · 12 passed · 1 failed · 3 running · 4m 12s`, plus at most
+    one current line per worker (`▸ feature › scenario`), refreshed in place.
+  - One line per scenario: status mark, duration (right-aligned), `feature › scenario`, a
+    `retry n/m` tag, and a dim project/cell tag when more than one is selected.
+  - Failure block, printed as it happens (not only at the end): scenario and feature, failed step
+    (`result.steps`, the deepest step with an `error`; else the test error's location), first error
+    line, screenshot/trace/attachment paths, and a copy-paste rerun command built from the run's
+    product, cell and title. `TestResult.steps` and `test.titlePath()` exist in the installed
+    Playwright 1.63.0 types; a real failing `@noauth` run proves the step.
+  - End: restyle `run-summary.ts` (same facts, counts, report paths, prune line) as a block with a
+    rule, aligned labels and one blank line before it; keep its last line plain for the shell prompt.
+  - Plain mode: one line per scenario event and failures as indented blocks, no cursor codes, stable
+    enough for CI logs and `grep`; no `list`-style overwriting. `--list` keeps its one-line-per-test
+    output and `--ui` keeps its own terminal; the live block is for `test` runs only.
+- Orchestrator (7.3):
+  - `orchestrator/log.ts` splits rendering: the file keeps today's `ISO <scope>  <text>`; the
+    terminal gets the shared palette, a fixed time column, a scope column colored per task, a mark
+    and the message; continuation lines align under the message.
+  - Permanent events become small blocks where a block helps (start, run end, stop sequence, error)
+    and stay one line otherwise (`slack ✓ · datator ✓ 201`, `next run 11:14:41`); no blank line
+    between every line.
+  - Live table on a TTY (only while tasks run): one row per task — id, run id, cell, progress counts
+    and bar, elapsed, state (`building`, `running`, `stopping`); at most 5 rows plus `and N more`;
+    redrawn ≤ 1/s. Counts and the current scenario come from a tail of the run's `results.jsonl`
+    (incremental reader over `results-reader.ts`, offset + partial line), never from stdout; it has
+    no effect on events, `run.finished` or the log.
+  - The table is cleared before every permanent line and on every stop path (drain, interrupt, kill,
+    `--once`), and the cursor is restored; a paused terminal stays bounded by the logger's existing
+    1 MiB backlog. `--dry-run`, `--help` and refusals use the same renderer; plain when piped (the
+    current specs compare those lines, so they stay stable).
+  - Run logs stay plain: the run's environment gets `NO_COLOR=1`/`FORCE_COLOR=0` (verify both), and
+    captured output is stripped of VT codes before it is appended; `run.log` is for `grep` and for
+    Slack's tail, not for a terminal.
+- Shape (TTY, abbreviated):
+
+  ```text
+  ━━ BackWPup · pro@nginx ━━ bpng-42 · develop @ af1ab5c ━━━━━━━━━━━━━━━━━━━━━
+    Site     bwu3.example · WordPress 7.1.2 · PHP 8.5.10
+    Workers  4 · report reports/backwpup/pro@nginx/bpng-42
+    ███████░░░ 23/52 · 44% · 12 passed · 1 failed · 3 running · 4m 12s
+    ✔ 18.4s  Backups › Create a backup from the dashboard
+    ✘  8.1s  Backups › Restore an archive                    retry 1/2
+      at restore.feature:42 · expected 200, got 500
+      Screenshot …/test-failed-1.png · Trace …/trace.zip
+  ```
+
+  ```text
+  TASK  RUN      CELL       PROGRESS                     ELAPSED  STATE
+  bpng  bpng-12  pro@nginx  ███████░░░ 38/52 · 1 failed   18m 04s  running
+  bfap  bfap-07  pro@nginx  ██░░░░░░░░  9/52 · 0 failed    4m 31s  running
+
+  10:15:30  orchestrator  started · 2 tasks (bpng, bfap) · .orchestrator/ · pid 4242
+  10:15:31  bpng   run bpng-12 started · backwpup pro@nginx · develop
+  10:15:31  bpng   build  BackWPup Pro 9.99.99 @ af1ab5c · APVM cache hit
+  11:09:41  bpng   run bpng-12 ✔ passed · 52 scenarios: 51 passed, 1 flaky · 54m 10s
+  11:09:42  bpng   slack ✓ · datator ✓ 201 · next run 11:14:41
+  ```
+
+- Compatibility contract:
+
+  | Sink                                     | Color                                                | Live/cursor    | Symbols                  |
+  | ---------------------------------------- | ---------------------------------------------------- | -------------- | ------------------------ |
+  | TTY, `TERM` not `dumb`, UTF-8            | yes, unless `NO_COLOR`/`NODE_DISABLE_COLORS`         | yes, unless CI | Unicode                  |
+  | TTY, `NO_COLOR` set                      | no                                                   | yes, unless CI | Unicode                  |
+  | Pipe/file/CI                             | no, unless `FORCE_COLOR`                             | no             | Unicode if UTF-8, else ASCII |
+  | `TERM=dumb`, non-UTF-8 locale, or plain  | no                                                   | no             | ASCII                    |
+
+  `NO_COLOR` follows no-color.org (present and not empty, whatever its value); `FORCE_COLOR=0`
+  disables and `1`/`2`/`3` enable. Measure `styleText`'s precedence for `NO_COLOR` + `FORCE_COLOR` in
+  7.1 and encode it once in `detectCapabilities`, not in scattered checks. `FORCE_COLOR` in CI colors
+  lines but never turns on the live region.
+- Sub-phases:
+
+  | #   | Delivers                                                                                                                       | Depends  | Parallel | Effort | Done when                                                                                                                                                                                                                       |
+  | --- | ------------------------------------------------------------------------------------------------------------------------------ | -------- | -------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | 7.1 | `src/common/terminal/`: capability detection (env, stream, width, locale), palette, ANSI-aware layout, `LiveRegion`; allowlist + boundary; unit specs. No output changes. | —        | —        | S, 1 d | Every capability branch tested against fake streams; `styleText` precedence measured; `import-boundary` green; no visible change.                                                                                                |
+  | 7.2 | Suite reporter: header, live block, per-scenario line, failure block, summary restyle; plain mode.                              | 7.1      | 7.3      | M, 2–3 d | A real `@noauth` run shows the expected screen on a TTY; `\| cat`, `NO_COLOR=1`, `CI=1`, `TERM=dumb` and `COLUMNS=40` are plain and complete; `results.jsonl` schema unchanged; a failing scenario names its step when it fails. |
+  | 7.3 | Orchestrator renderer: styled permanent lines, task blocks, live table from the results tail; plain logs.                      | 7.1      | 7.2      | M, 2–3 d | `--dry-run`, `--once` and a loop on the fake suite render correctly on a TTY and as a pipe; `orchestrator.log` and `run.log` contain no `\x1b`; the table is cleared on SIGINT/stop; no event or exit-code change.                |
+  | 7.4 | Compatibility pass, docs, screenshots, regression tests.                                                                       | 7.2, 7.3 | —        | S/M, 1–2 d | The matrix above is covered by tests; README/CLAUDE/the orchestrator guide document `E2E_OUTPUT` and the plain guarantees; lint, typecheck, format and unit tests green.                                                          |
+- Tests: pure unit specs for capabilities (TTY/non-TTY, `NO_COLOR`, `FORCE_COLOR`, `NODE_DISABLE_COLORS`,
+  `TERM=dumb`, `CI`, `COLUMNS`, `LANG`), layout (wide/emoji/combining/ANSI input, truncation, wrapping,
+  no split escapes) and the reporters with fake Playwright events; byte-level assertions that file
+  sinks stay plain; pty smoke via `script -q`/`script -qec` (macOS/Linux) for a real terminal; the
+  orchestrator's fake suite for stop/exit. No new test dependency for the pty.
+- Out: the dashboard's UI, a web progress view, log coloring, CI annotations, interactive prompts,
+  animations/spinners in CI, and changing `results.jsonl` or events.
+- Effort: 6–9 engineer-days, medium difficulty; no dependency on Phase 6, so it can run before 6H.
 
 Phase 8 — CI on real cells (dropped). It planned a CI matrix of real cells (one job per product ×
 cell). Real-cell runs, PRs included, belong to the orchestrator; CI keeps its quality, unit and

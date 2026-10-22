@@ -181,7 +181,9 @@ Output and logs
   per run and streams live: follow it while the run goes (`logs -f`, the dashboard), read it after.
 - The orchestrator's own log — triggers, queue, starts, stops, errors.
 - Live progress comes from the suite's results stream (0E); live counts and `run.finished` are
-  both built from it. It pairs with modernization Phase 7's progress output.
+  both built from it. The terminal rendering — live table, colors, plain fallback — is modernization
+  Phase 7 (next): its shared renderer styles this process too. The orchestrator's log and each run's
+  log stay plain text, with no ANSI, for `grep`, Slack tails and the dashboard's log view.
 - Tasks, groups (with whose turn it is), run records, logs and provided zips live in one state
   directory, so a restart loses nothing.
 
