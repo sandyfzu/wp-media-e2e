@@ -1,8 +1,8 @@
 # Phase 6 — Feature porting: BackWPup first
 
-Status: paused after 6H.0 for modernization Phase 7 — terminal output (decided 2026-10-22); resumes
-at 6H. Done: 6A–6F, 6G.0, 6G and 6G.1 (shipped inside 6G, 2026-10-05), 6H.0 (2026-10-21). Deferred:
-6H.2 (needs storage credentials).
+Status: paused after 6H.0 for modernization Phase 7 — terminal output (decided 2026-10-22), then
+Phase 11 — shared SSH server profiles; resumes at 6H. Done: 6A–6F, 6G.0, 6G and 6G.1 (shipped inside
+6G, 2026-10-05), 6H.0 (2026-10-21). Deferred: 6H.2 (needs storage credentials).
 
 Parent: [e2e-modernization-plan.md](e2e-modernization-plan.md), Phase 6 — this plan supersedes that
 phase's summary. WP Rocket's port comes after Phase 10 (§6).
@@ -24,13 +24,14 @@ in [authoring-tests.md](../guides/authoring-tests.md) and `CLAUDE.md`.
   (6E.0: the leftover-footprint sweep); 6F the WP-CLI surface (6F.0–6F.4); 6G.0 errors that never
   quote an argv; 6G restore (6G.1: hashed restore directories); 6H.0 a half-removed plugin folder
   costs one scenario, never all later ones.
-- Next: modernization Phase 7 — terminal output for the suite and the orchestrator — before 6H
-  (decided 2026-10-22). It touches reporting, not the port.
+- Next: modernization Phase 7 — terminal output for the suite and the orchestrator — then Phase 11 —
+  shared SSH server profiles — before 6H (decided 2026-10-22). Neither touches the port.
 - Open: 6H (storage config and skip gate), 6I (Free upsell scenario, parity gate), 6J (shared: keep the
   staging area off the web), 6K (restore `.zip` and `.tar.gz`). 6H.2, the storage round-trips, waits
   for credentials and blocks nothing.
 - Order: 6A → 6B → 6C → 6D → 6E → 6F (6F.0 → 6F.4) → 6G.0 → 6G (with 6G.1) → 6H.0 → 6H → 6I → 6J →
-  6K → later 6H.2. 6J depends on nothing and may be pulled forward. 6K needs only 6G.
+  6K → later 6H.2. 6J depends on nothing and may be pulled forward. 6K needs only 6G. Modernization
+  Phase 11 runs before 6H and touches configuration, not the port.
 - Editions: Free and Pro ship byte-identical UI templates (V1), so one page-object set serves both;
   five of the six baseline storage suites are not Pro-only (V2), so they run on both editions; the
   restore entry path diverges (V13) — Pro restores from the archive already on the server, Free

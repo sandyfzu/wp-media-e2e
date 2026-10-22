@@ -253,6 +253,10 @@ commander 15, croner 10, pino 10, react 19.3, vite 8.3, tailwindcss 4.3).
   then stops its runs gracefully (0C); systemd SIGKILLs what is left after `TimeoutStopSec` (V13).
 - One instance at a time, plus an optional cap on concurrent runs (each run already uses
   `pool.length` workers).
+- Shared SSH server profiles (modernization plan, Phase 11): a site's `transport` may omit `host`,
+  `username`, `privateKeyPath` and `port`; they resolve from the product's `ssh.servers.json`
+  profiles or `E2E_SSH_*`. `loadSites` resolves them for the orchestrator too, and a run's
+  environment forwards the four variables; no config schema change.
 - The command — on the server only, over SSH: tasks (add, edit, pause, resume, remove, run
   once), groups (the same, plus add, move, remove and reorder their tasks), runs (list, status, logs
   and live output, results, stop, kill), reports (list, paths, remove), provided zips (add, list,

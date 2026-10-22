@@ -1,9 +1,9 @@
 # E2E Modernization Plan — `wp-rocket-e2e` → `wp-media-e2e`
 
-- Status: Phases 0–5 done. **Next: Phase 7 — terminal output** (decided 2026-10-22), ahead of the
-  rest of Phase 6 (6H–6K); Phase 6 (feature porting, BackWPup first) is in progress in the [phase-6
-  plan](phase-6-feature-porting-plan.md). Phase 10 open. Phase 8 dropped. Phase 9 moved to the
-  [orchestrator plan](orchestrator-plan.md). WP Rocket's port starts after Phase 10.
+- Status: Phases 0–5 done. **Next: Phase 7 — terminal output** (decided 2026-10-22), then **Phase 11
+  — shared SSH server profiles** (open; scheduled after 7). The rest of Phase 6 (6H–6K) follows in
+  the [phase-6 plan](phase-6-feature-porting-plan.md). Phase 10 open. Phase 8 dropped. Phase 9 moved
+  to the [orchestrator plan](orchestrator-plan.md). WP Rocket's port starts after Phase 10.
 - Merged in, both done: plugin artifacts (§7) and site file ownership (§8), formerly plans of their
   own.
 - Baseline (reference only): `wp-rocket-e2e`, the legacy suite being superseded. Target: this repo.
@@ -25,8 +25,10 @@
   metadata.
 - The plugin zips under test are resolved, built through APVM and identity-verified per run (§7);
   files the suite installs on a site are handed back to the site's own owner (§8).
-- Next: Phase 7 — terminal output for the suite and the orchestrator (below). Then Phase 6 resumes at
-  6H; Phase 10 (dependency check, cleanup) and WP Rocket's port (parity matrix, §4) follow.
+- Next: Phase 7 — terminal output for the suite and the orchestrator (below), then Phase 11 — shared
+  SSH server profiles: a site may omit `host`, `username`, `privateKeyPath` and `port`, while
+  `rootDir` stays per site. Phase 6 resumes at 6H after both; Phase 10 (dependency check, cleanup)
+  and WP Rocket's port (parity matrix, §4) follow.
 
 ## 1. Core decisions
 
@@ -215,6 +217,9 @@ As built: README, "Reporting"; `src/common/config/reporting.ts`.
 | `local` | execa, on the host | the user's own install | whatever the user runs |
 
 - The mode decides how WP-CLI is dispatched; it is orthogonal to which sites run.
+- Planned sharing: an `ssh` site may declare only `mode` and `rootDir`; `host`, `username`,
+  `privateKeyPath` and `port` resolve from a named profile in the product's `ssh.servers.json`, its
+  `default` profile, or `E2E_SSH_*` (Phase 11). A field the site declares still wins.
 - `@wordpress/env` is Apache-only (verified in its installed source: `FROM wordpress${phpVersion}`,
   `APACHE_RUN_*`, no Nginx path), so a custom compose provides both over one MariaDB: Apache from
   `wordpress:php8.x-apache`; Nginx = `wordpress:php8.x-fpm` with no published host port (Docker
@@ -307,9 +312,10 @@ Open, for WP Rocket's port:
 | 8 CI on real cells | dropped | below |
 | 9 Orchestrator | moved | orchestrator plan |
 | 10 Cleanup & validation | open | below |
+| 11 Shared SSH server profiles | open — after Phase 7 | below |
 | WP Rocket port | after Phase 10 | phase-6 plan, "After Phase 10 — WP Rocket" |
 
-Phase 10 states no dependencies, effort or parallelism; Phase 7's sub-phases state theirs below.
+Phase 10 states no dependencies, effort or parallelism; Phases 7 and 11 state theirs below.
 
 Phase 6: the three install-hook obligations this plan set (consume `pluginArtifact`, stage the zip
 for `ssh`/`docker`, clean the staging area in worker teardown) are done (6A; `releaseBoundSite`).
@@ -464,6 +470,126 @@ Phase 10 — Cleanup & validation (open).
 - No dependency on §5's drop list reappears.
 - `lint`, `typecheck` and `format:check` green; the reports generate.
 - Remove every mention of plan phases from code comments (CLAUDE.md forbids citing plans in code).
+
+Phase 11 — Shared SSH server profiles (open; scheduled after Phase 7). Configuration and transport;
+depends on nothing (independent of Phase 6 and Phase 10; may run beside 7.2–7.4 or 6H). Stack:
+existing TypeScript on Node 24, `node-ssh` as already used, the repo's Playwright unit runner, and
+`node:fs`/`node:path`; no new dependency.
+
+- Goal: stop repeating what belongs to the server. A site's `transport` still says `"mode": "ssh"`,
+  and `rootDir` stays required on every site, but `host`, `username`, `privateKeyPath` and `port`
+  may come from a named profile, the `default` profile, or environment variables. A field the site
+  declares wins. Existing sites files that declare everything keep loading unchanged.
+- Today: every SSH site repeats `host`, `username` and `privateKeyPath` in its sites file, and
+  [`sites.ts`](../../src/common/config/sites.ts) requires all three; `port` is not configurable
+  (node-ssh's 22), and `rootDir` is the only transport path a site must give. `loadSites` is shared
+  by manual runs, the healthcheck and the orchestrator, so a file-based default reaches all three;
+  the orchestrator sets `E2E_LOAD_DOTENV=false`, so `.env` alone cannot reach its runs.
+- Shared file: `src/projects/<product>/config/ssh.servers.json`, a sibling of the sites files,
+  git-ignored; `ssh.servers.example.json` is committed. It is optional. One file per product keeps
+  D2's isolation and needs no new path resolution; `findSitesFiles` never reads it (it is not a
+  `sites.*.json` name). A repo-wide file can later layer over it without changing the site schema.
+- Shape:
+
+  ```jsonc
+  // src/projects/<product>/config/ssh.servers.json
+  {
+    "default": {
+      "host": "203.0.113.10",
+      "username": "ubuntu",
+      "privateKeyPath": "/home/runner/.ssh/id_ed25519"
+    },
+    "apache": { "host": "203.0.113.20" }
+  }
+  ```
+
+  ```jsonc
+  // a site in sites.json — profile omitted means "default"
+  { "mode": "ssh", "profile": "apache", "rootDir": "/var/www/html/site" }
+  ```
+
+  `default` is reserved and optional. Every profile resolves field by field over `default`, so
+  `apache` above supplies only its host; a profile may also be complete. Unknown keys, wrong types,
+  empty strings, ports outside 1–65535, arrays/null and bad profile names are load errors naming
+  the file and path, never quoting a value. A profile cannot carry `rootDir`, `stagingDir`,
+  `elevate` or `fileOwner`.
+- Site selector: `transport.profile` is an optional safe single token
+  (`[a-z][a-z0-9_-]{0,31}`, 1–32 characters); omitted selects `default` when present. A named
+  profile that is not defined is a hard error, never a silent fallback to `default`. Site fields
+  win over the profile, so a one-off host or key stays possible.
+- Precedence, field by field: site value → selected profile, merged over `default` → `default` →
+  env → error (`port` falls back to 22). Blank env is unset; a malformed env value is an error only
+  when that field is needed. A blank site field is refused, never treated as absent.
+- Env fallback: `E2E_SSH_HOST`, `E2E_SSH_USERNAME`, `E2E_SSH_PRIVATE_KEY_PATH`, `E2E_SSH_PORT`.
+  Add all four to the orchestrator's `INHERITED_VARIABLES`, so a run gets them when the operator
+  uses env instead of the file; nothing else about the run contract changes.
+- Required per site: `mode` (`"ssh"`; never inferred) and `rootDir`; `baseURL` and the WordPress
+  login stay per site too. `stagingDir`, `elevate` and `fileOwner` stay per-site (staging keeps its
+  existing `E2E_SITE_STAGING_DIR` fallback): they are policy/ownership, not connection details.
+- Port: `SshTransport.port` is a resolved number (1–65535, default 22). [`exec.ts`](../../src/common/wp/exec.ts)
+  passes it to node-ssh and includes it in `connectionKey`/`targetKey`; [`preflight.ts`](../../src/common/setup/preflight.ts)
+  names it in the connection hint and adds `-p` to the sample `ssh` command. Out: passphrases and
+  encrypted keys, `ssh-agent`, `ProxyJump`/`ProxyCommand`, `~/.ssh/config` discovery, key contents,
+  and any non-SSH transport change.
+- Security: the file holds endpoint metadata and a key *path*, never key material; it is
+  git-ignored and documented `chmod 600`. No error, warning or log quotes a sites value, a profile
+  value or an env value — messages name the file, the site path, the field and the env var. The
+  existing secret masking is untouched.
+- Orchestrator: no config schema change. It already loads cells through `loadSites`, so resolved
+  hosts feed the crowded-server warning and the site locks unchanged; every process of a run
+  resolves the same file. Only the environment allowlist changes.
+- Implementation:
+  - `src/common/config/ssh-servers.ts`: types, `loadSshServers` (missing = empty, malformed = hard
+    error), `resolveSshEndpoint` (pure: site transport, profiles, env → resolved fields), and
+    validation.
+  - `sites.ts`: reads `join(configDir, "ssh.servers.json")` once per load and passes it plus the env
+    source into the ssh branch; keep the `[sites]` error style and the no-values rule. Move the
+    shared `describeValue`/string/number helpers to a small module if needed to avoid a
+    `sites.ts` ↔ `ssh-servers.ts` cycle; re-export `describeValue` from `sites.ts` for its specs.
+  - `types.ts`: `SshTransport` gains `port: number`; `profile` is config-only and dropped after
+    resolution.
+  - `exec.ts`, `preflight.ts`: port end-to-end.
+  - `orchestrator/runs/environment.ts`: the four env names in `INHERITED_VARIABLES`.
+- Tests:
+  - `ssh-servers.spec.ts`: missing/empty/malformed file; default; inheritance; complete profile;
+    unknown profile; unknown key; wrong types; blank strings; port bounds; profile-name bounds; no
+    quoted values; precedence for every field; env fallback, blank and malformed env; site
+    override; `rootDir`/`stagingDir`/`elevate`/`fileOwner` refused in a profile.
+  - `sites.spec.ts`: `{ mode, rootDir }` resolves; full transports unchanged (plus the default port
+    once 11.2 lands); `profile` dropped; a missing field names the site and env var; a sibling
+    `ssh.servers.json` in the temp config dir is read; overlays and the example fallback unaffected.
+  - `exec.spec.ts`/`exec.ssh.spec.ts`: port reaches node-ssh; two ports do not share a pooled
+    connection; preflight hints use the port. Update every fixture that constructs an `SshTransport`
+    (the orchestrator's included) with `port: 22` once the field is required.
+  - `orchestrator/runs/environment.spec.ts`: the four vars pass when set; other vars still do not.
+  - Live: a cell configured with only `mode` + `rootDir` (profile `default`) passes
+    `npm run healthcheck` and one `@noauth`/`@smoke` run; the orchestrator's once path passes the
+    same resolved transport.
+- Docs: [configuration.md](../guides/configuration.md) (new "SSH server profiles" section,
+  precedence table, env fallback, `rootDir` stays per site),
+  [wordpress-automation.md](../architecture/wordpress-automation.md) (transport fields, port,
+  cache), `.env.example`, `ssh.servers.example.json`, README's sites-files paragraph, CLAUDE.md's
+  configuration mechanism, the [orchestrator guide](../guides/orchestrator.md) (profiles on the
+  runner; `.env` still not reaching runs). Keep `sites.example.json` self-contained (full
+  transports) so a fresh checkout loads without a global file; document profile-only sites in
+  configuration.md. Code never cites a plan phase.
+- Definition of done: a site with only `mode` + `rootDir` passes the healthcheck and a real run; an
+  existing full transport behaves identically (same endpoint, port 22); a missing field fails at
+  load naming the fix; an orchestrator run gets env-only profiles; all gates and docs are green.
+- Sub-phases:
+
+  | #    | Delivers                                                                                                         | Depends     | Parallel | Effort     | Done when                                                                                                                                                                  |
+  | ---- | ---------------------------------------------------------------------------------------------------------------- | ----------- | -------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | 11.1 | `ssh-servers.ts`, sibling file, optional `host`/`username`/`privateKeyPath`, `profile` selector; no port yet.   | —           | —        | S/M, 1–2 d | A `{ mode, rootDir }` site resolves from `default`; every precedence and error case is a unit test; existing full transports load identically.                              |
+  | 11.2 | `port` end-to-end: site/profile, `SshTransport`, exec, cache key, preflight.                                    | 11.1        | —        | S, 0.5 d   | Profile `port: 2222` reaches node-ssh; two ports do not share a connection; hints show `-p`.                                                                                |
+  | 11.3 | Env fallback (`E2E_SSH_*`) and orchestrator allowlist.                                                          | 11.1, 11.2  | —        | S, 0.5 d   | Without a file, env-only resolves; a run started by the orchestrator receives the four vars when set; blank/malformed cases covered.                                        |
+  | 11.4 | Docs, examples, live check, full gates.                                                                         | 11.1–11.3   | —        | S, 0.5–1 d | The live cell passes; docs and examples describe the shipped behaviour; typecheck, lint, format and unit tests green.                                                       |
+
+- Out: a repo-wide profile file, profiles for `local`/`docker`, global
+  `rootDir`/`stagingDir`/`elevate`/`fileOwner`, passphrases/agents/jump hosts, auto-importing
+  `~/.ssh/config`, and changing the orchestrator config schema.
+- Effort: 2–4 engineer-days, low/medium difficulty; no dependency on Phase 6 or Phase 10, so it can
+  start beside 7.2–7.4 and finish before 6H.
 
 ## 4. Feature-parity matrix
 
