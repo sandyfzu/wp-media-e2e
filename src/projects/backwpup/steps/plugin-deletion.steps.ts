@@ -8,16 +8,21 @@ import {
   readBackwpupFootprint,
 } from "../support/footprint";
 import { isPluginInstalled } from "../../../common/wp/plugin";
+import {
+  describePluginDir,
+  inspectPluginDir,
+} from "../../../common/wp/plugin-dir";
 
 /**
  * Steps for removing the plugin through wp-admin, and for what that removal leaves behind.
  *
  * Two conventions, both about not believing the screen that performed the action:
  *
- *  - **The removal is asserted from WP-CLI, not from the DOM.** The page object already re-reads
+ *  - **The removal is asserted from the site, not from the DOM.** The page object already re-reads
  *    the reloaded plugins screen before it returns, so a `Then` repeating that would only prove the
- *    same query twice. Asking the site instead is a genuinely independent witness, and it is the one
- *    that notices a row disappearing from a screen while the directory is still there.
+ *    same query twice. Asking the site what is at the plugin's path is a genuinely independent
+ *    witness, and the one that notices a row disappearing from a screen while part of the folder is
+ *    still there — what a deletion stopped part-way leaves, and WordPress no longer lists.
  *  - **What deletion cleared is read with the plugin's own code gone.** `readBackwpupFootprint`
  *    loads WordPress without plugins, so what comes back is what the site has persisted rather than
  *    what something still running would put back while being asked.
@@ -59,14 +64,24 @@ When(
   },
 );
 
-/** The site's own answer, independent of the screen that just claimed to remove it. */
+/**
+ * The site's own answer, independent of the screen that just claimed to remove it: nothing at the
+ * plugin's path — not merely no plugin WordPress lists. What is left is named and left for the
+ * `@plugin` teardown to clear; a removal under test never sweeps.
+ */
 Then(
   "BackWPup is no longer installed on the site",
   async ({ site, pluginArtifact }) => {
+    const left = await inspectPluginDir(
+      site.transport,
+      pluginArtifact("plugin").slug,
+    );
     expect(
-      await isPluginInstalled(site.transport, pluginArtifact("plugin").slug),
-      "the plugin's files should be gone from the site",
-    ).toBe(false);
+      left.kind,
+      `the plugin's files should be gone from the site, but something is still at its path — ${
+        left.kind === "absent" ? left.path : describePluginDir(left)
+      }`,
+    ).toBe("absent");
   },
 );
 

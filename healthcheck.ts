@@ -17,7 +17,9 @@ import {
   transportLabel,
   verifySite,
   warnAboutElevation,
+  warnAboutPluginDirs,
 } from "./src/common/setup/preflight";
+import { resolveIdentity } from "./src/common/artifacts/manifest";
 import type { CheckResult } from "./src/common/setup/preflight";
 import type { ElevationSupport } from "./src/common/wp/exec";
 import { disposeConnections } from "./src/common/wp/exec";
@@ -80,6 +82,8 @@ interface SiteTask {
   readonly cell: string;
   readonly site: SiteInput;
   readonly index: number;
+  /** The slug the cell installs as — whose folder the check looks at, and its @plugin scenarios clear. */
+  readonly slugs: readonly string[];
 }
 
 /** A cell that has no real sites to check (placeholder-only, or the product declares no cells). */
@@ -126,8 +130,12 @@ function discover(products: readonly ProductConfig[]): ProductPlan[] {
         continue;
       }
 
+      const { slug } = resolveIdentity(
+        product.artifacts,
+        product.sites[cell]?.edition,
+      );
       for (const { site, index } of real) {
-        tasks.push({ product: product.name, cell, site, index });
+        tasks.push({ product: product.name, cell, site, index, slugs: [slug] });
       }
     }
 
@@ -161,6 +169,8 @@ interface SiteResult {
    * none of them.
    */
   readonly ownershipPending?: boolean;
+  /** Folders at the cell's slug that WordPress lists no plugin in, for the closing warning. */
+  readonly leftoverPluginDirs?: readonly string[];
 }
 
 /** Logs in through the WordPress UI in a throwaway browser context; never persists state. */
@@ -202,7 +212,7 @@ async function checkSite(
   task: SiteTask,
 ): Promise<SiteResult> {
   const start = Date.now();
-  const preflight = await verifySite(task.site, task.index);
+  const preflight = await verifySite(task.site, task.index, task.slugs);
   const checks: CheckResult[] = [...preflight.checks];
 
   if (checks.every((c) => c.ok)) {
@@ -229,6 +239,9 @@ async function checkSite(
       : {}),
     ...(preflight.ownershipPending !== undefined
       ? { ownershipPending: preflight.ownershipPending }
+      : {}),
+    ...(preflight.leftoverPluginDirs !== undefined
+      ? { leftoverPluginDirs: preflight.leftoverPluginDirs }
       : {}),
   };
 }
@@ -538,6 +551,7 @@ async function main(): Promise<void> {
     // and a run can never disagree — but sent to **stdout**, because unlike a suite run this
     // program's entire output is the report, and `healthcheck > fleet.log` must not drop it.
     warnAboutElevation(allResults, console.log);
+    warnAboutPluginDirs(allResults, console.log);
   } finally {
     if (browser !== null) await browser.close();
     disposeConnections();

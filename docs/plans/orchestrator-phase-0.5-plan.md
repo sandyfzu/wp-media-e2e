@@ -883,6 +883,13 @@ Which machine is D4. On it:
    into a new PID namespace reads its own lock as another's (§4.9).
 5. Stop AutoE2E's instance for those cells first — the sites are dedicated (parent §1). AutoE2E's WP
    Rocket instances stay: this suite has only WP Rocket's three scaffolding scenarios (V125).
+   **Open, deferred by the user (2026-10-21):** `auto-e2e-backwpup`'s vhost serves HTTP/3 with
+   `listen 443 quic` and no `reuseport` over 4 nginx workers, losing 12.9% of static requests after
+   idle gaps (phase-6 plan V293: 1 failed, 4 flaky). Before a loop runs there, its operator turns
+   HTTP/3 off or sets it up per nginx's QUIC docs; then the probe — Chromium with default QUIC, 8
+   rounds × 3 bursts of 120 static fetches, 10 s idle gaps — must lose 0:
+   `node ~/.local/share/wp-media-e2e/probes/h3burst.mjs https://auto-e2e-backwpup.rocketlabsqa.ovh 8 10000 120`
+   (on the dev machine; `NOQUIC=1` is the control).
 6. Start, detached: `tmux new -d -s orchestrator 'npm run orchestrator -- start'`. Watch:
    `tmux attach -t orchestrator` (leave with Ctrl-b d), or `tail -f .orchestrator/orchestrator.log`.
    Stop: `tmux send-keys -t orchestrator C-c` (the drain, §4.5), or attach and Ctrl-C. Use `tmux`,
@@ -979,6 +986,7 @@ built from its own `e2e_tests` app (V385), and Slack against a local sink; the l
   one) and the command's signal tests (V121).
 - Production receives its first Datator post, and AutoE2E's Slack webhook its first message, from
   the first real run (D5, D6).
+- `auto-e2e-backwpup`'s HTTP/3 fixed and the probe at 0 lost (§6 step 5).
 
 ## 10. Decisions
 

@@ -10,15 +10,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  PROTECTED_CAPABILITIES,
   PROTECTED_OPTIONS,
+  PROTECTED_ROLES,
   PROTECTED_TABLES,
   assertNoProtectedOptions,
   findSiteDbResidue,
   isEmptyDbResidue,
   normaliseOptionFragment,
+  normaliseResidueCapability,
+  normaliseResidueRole,
   normaliseResidueTable,
   removeSiteDbResidue,
 } from "./db-residue";
+import type { CapabilityGrant } from "./db-residue";
 import { SiteDbResidueRemovalFailedError } from "./errors";
 import type { LocalTransport } from "../config/types";
 
@@ -85,8 +90,19 @@ function replies(...docs: string[]): void {
 }
 
 /** A scan reply in the shape the snippet emits. */
-function found(options: string[] = [], tables: string[] = []): string {
-  return JSON.stringify({ prefix: "wp_", options, tables });
+function found(
+  options: string[] = [],
+  tables: string[] = [],
+  roles: string[] = [],
+  capabilities: CapabilityGrant[] = [],
+): string {
+  return JSON.stringify({
+    prefix: "wp_",
+    options,
+    tables,
+    roles,
+    capabilities,
+  });
 }
 
 /** Every `wp` invocation so far, as the stub recorded it. */
@@ -97,6 +113,23 @@ function calls(): string[] {
 }
 
 const BACKWPUP = { optionsContaining: ["backwpup"], tables: ["bwpup_backups"] };
+
+/** A declaration with a role and a capability, for the cases about the roles option. */
+const WITH_ROLES = {
+  ...BACKWPUP,
+  roles: ["backwpup_check"],
+  capabilities: ["backwpup_jobs"],
+};
+
+/** A capability BackWPup grants a role it does not own, as the scan reports it. */
+const ADMIN_GRANT = { role: "administrator", capability: "backwpup_jobs" };
+
+/** The values a snippet carries as base64 literals, decoded — how a declaration reaches the PHP. */
+function decodedLiterals(call: string): string[] {
+  return [...call.matchAll(/base64_decode\( '([^']+)' \)/g)].map((match) =>
+    Buffer.from(match[1] ?? "", "base64").toString("utf8"),
+  );
+}
 
 test.describe("normaliseOptionFragment", () => {
   test("accepts a plugin-shaped fragment and trims it", () => {
@@ -150,6 +183,78 @@ test.describe("normaliseResidueTable", () => {
   });
 });
 
+test.describe("normaliseResidueRole", () => {
+  const fragments = ["backwpup", "bwpup"];
+
+  test("accepts a role carrying one of the product's names and trims it", () => {
+    expect(normaliseResidueRole(" backwpup_check ", fragments)).toBe(
+      "backwpup_check",
+    );
+  });
+
+  // Removing a core role strands every user holding it; `administrator` locks the site out.
+  test("refuses each of WordPress's own roles", () => {
+    for (const role of PROTECTED_ROLES) {
+      expect(() => normaliseResidueRole(role, [role])).toThrow(
+        /one of WordPress's own roles/,
+      );
+    }
+    expect(PROTECTED_ROLES).toContain("administrator");
+  });
+
+  // Another plugin's role, or a site's own, carries none of the product's names.
+  test("refuses a role that carries none of the product's names", () => {
+    expect(() => normaliseResidueRole("shop_manager", fragments)).toThrow(
+      /carries none of the product's names \(backwpup, bwpup\)/,
+    );
+  });
+
+  test("refuses a role when the declaration names no fragment at all", () => {
+    expect(() => normaliseResidueRole("backwpup_check", [])).toThrow(
+      /names no `optionsContaining` fragment/,
+    );
+  });
+
+  // WordPress keys roles case-sensitively, so `Administrator` would be a different role; lowercase
+  // only keeps a case variant of a core name from slipping past the protected list.
+  test("refuses anything but lowercase letters, digits, underscore and hyphen", () => {
+    for (const role of ["Backwpup_check", "backwpup check", "backwpup'x", ""]) {
+      expect(() => normaliseResidueRole(role, fragments)).toThrow(
+        /only lowercase letters/,
+      );
+    }
+  });
+});
+
+test.describe("normaliseResidueCapability", () => {
+  const fragments = ["backwpup"];
+
+  test("accepts a capability carrying one of the product's names", () => {
+    expect(normaliseResidueCapability("backwpup_jobs", fragments)).toBe(
+      "backwpup_jobs",
+    );
+  });
+
+  // Removed from every role, so a core capability would leave nobody able to administer the site —
+  // refused even when a careless fragment would admit it.
+  test("refuses each of WordPress's own capabilities", () => {
+    for (const capability of PROTECTED_CAPABILITIES) {
+      expect(() =>
+        normaliseResidueCapability(capability, [capability]),
+      ).toThrow(/one of WordPress's own capabilities/);
+    }
+    expect(PROTECTED_CAPABILITIES).toEqual(
+      expect.arrayContaining(["manage_options", "activate_plugins", "read"]),
+    );
+  });
+
+  test("refuses another plugin's capability", () => {
+    expect(() =>
+      normaliseResidueCapability("manage_woocommerce", fragments),
+    ).toThrow(/carries none of the product's names/);
+  });
+});
+
 test.describe("assertNoProtectedOptions", () => {
   /** The guard under test, wrapped so a void call can be handed to `toThrow`. */
   const check =
@@ -188,6 +293,8 @@ test.describe("findSiteDbResidue", () => {
     expect(await findSiteDbResidue(local(), {})).toEqual({
       options: [],
       tables: [],
+      roles: [],
+      capabilities: [],
     });
     expect(calls()).toEqual([]);
   });
@@ -197,7 +304,57 @@ test.describe("findSiteDbResidue", () => {
     expect(await findSiteDbResidue(local(), BACKWPUP)).toEqual({
       options: ["backwpup_version"],
       tables: ["wp_bwpup_backups"],
+      roles: [],
+      capabilities: [],
     });
+  });
+
+  test("reports the declared roles and capabilities the site holds", async () => {
+    replies(found([], [], ["backwpup_check"], [ADMIN_GRANT]));
+    expect(await findSiteDbResidue(local(), WITH_ROLES)).toEqual({
+      options: [],
+      tables: [],
+      roles: ["backwpup_check"],
+      capabilities: [ADMIN_GRANT],
+    });
+  });
+
+  test("carries the declared roles and capabilities into the snippet", async () => {
+    replies(found());
+    await findSiteDbResidue(local(), WITH_ROLES);
+    expect(decodedLiterals(calls()[0] ?? "")).toEqual(
+      expect.arrayContaining(['["backwpup_check"]', '["backwpup_jobs"]']),
+    );
+  });
+
+  // Every kind is required in the reply: a site that left one out must not read as holding none.
+  test("refuses a reply missing roles or carrying a malformed capability", async () => {
+    for (const missing of ["roles", "capabilities"]) {
+      const reply: Record<string, unknown> = {
+        prefix: "wp_",
+        options: [],
+        tables: [],
+        roles: [],
+        capabilities: [],
+      };
+      Reflect.deleteProperty(reply, missing);
+      replies(JSON.stringify(reply));
+      await expect(findSiteDbResidue(local(), WITH_ROLES)).rejects.toThrow(
+        /did not describe a footprint/,
+      );
+    }
+    replies(
+      JSON.stringify({
+        prefix: "wp_",
+        options: [],
+        tables: [],
+        roles: [],
+        capabilities: [{ role: "administrator" }],
+      }),
+    );
+    await expect(findSiteDbResidue(local(), WITH_ROLES)).rejects.toThrow(
+      /did not describe a footprint/,
+    );
   });
 
   // Plugins stay out of the request: the product's own plugin re-creates its footprint on `init`,
@@ -213,12 +370,7 @@ test.describe("findSiteDbResidue", () => {
   test("carries the declared fragments and tables into the snippet", async () => {
     replies(found());
     await findSiteDbResidue(local(), BACKWPUP);
-    const encoded = [
-      ...(calls()[0] ?? "").matchAll(/base64_decode\( '([^']+)' \)/g),
-    ];
-    const decoded = encoded.map((match) =>
-      Buffer.from(match[1] ?? "", "base64").toString("utf8"),
-    );
+    const decoded = decodedLiterals(calls()[0] ?? "");
     expect(decoded).toContain('["backwpup"]');
     expect(decoded).toContain('["bwpup_backups"]');
   });
@@ -249,6 +401,8 @@ test.describe("removeSiteDbResidue", () => {
     expect(await removeSiteDbResidue(local(), {})).toEqual({
       options: [],
       tables: [],
+      roles: [],
+      capabilities: [],
     });
     expect(calls()).toEqual([]);
   });
@@ -272,6 +426,8 @@ test.describe("removeSiteDbResidue", () => {
     expect(await removeSiteDbResidue(local(), BACKWPUP)).toEqual({
       options: ["backwpup_version"],
       tables: ["wp_bwpup_backups"],
+      roles: [],
+      capabilities: [],
     });
     // Scan, remove, verify — and the middle one is the only call that deletes.
     expect(calls()).toHaveLength(3);
@@ -296,6 +452,56 @@ test.describe("removeSiteDbResidue", () => {
       "backwpup_version",
     ]);
     expect((error as Error).message).toMatch(/re-creates its own/);
+  });
+
+  test("removes the roles and capabilities it found and reports them", async () => {
+    replies(found([], [], ["backwpup_check"], [ADMIN_GRANT]), found(), found());
+    expect(await removeSiteDbResidue(local(), WITH_ROLES)).toEqual({
+      options: [],
+      tables: [],
+      roles: ["backwpup_check"],
+      capabilities: [ADMIN_GRANT],
+    });
+    expect(calls()).toHaveLength(3);
+    expect(calls()[1]).toContain("remove_role( $role )");
+    expect(calls()[1]).toContain("->remove_cap( $grant['capability'] )");
+    expect(calls()[2]).not.toContain("remove_role");
+  });
+
+  // The roles option is rewritten through the role API, and only a re-read proves it took.
+  test("fails naming a role or capability that survived the removal", async () => {
+    replies(
+      found([], [], ["backwpup_check"], [ADMIN_GRANT]),
+      found(),
+      found([], [], ["backwpup_check"], [ADMIN_GRANT]),
+    );
+    const error = await removeSiteDbResidue(local(), WITH_ROLES).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(SiteDbResidueRemovalFailedError);
+    expect((error as SiteDbResidueRemovalFailedError).roles).toEqual([
+      "backwpup_check",
+    ]);
+    expect((error as SiteDbResidueRemovalFailedError).capabilities).toEqual([
+      ADMIN_GRANT,
+    ]);
+    expect((error as Error).message).toMatch(/role {7}backwpup_check/);
+    expect((error as Error).message).toMatch(
+      /capability backwpup_jobs \(on administrator\)/,
+    );
+  });
+
+  test("refuses a core role or capability without asking the site anything", async () => {
+    await expect(
+      removeSiteDbResidue(local(), { ...BACKWPUP, roles: ["administrator"] }),
+    ).rejects.toThrow(/one of WordPress's own roles/);
+    await expect(
+      removeSiteDbResidue(local(), {
+        ...BACKWPUP,
+        capabilities: ["manage_options"],
+      }),
+    ).rejects.toThrow(/one of WordPress's own capabilities/);
+    expect(calls()).toEqual([]);
   });
 
   // The guard has to fire *before* anything is deleted, or it is only a nicer way to describe a

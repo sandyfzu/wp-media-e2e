@@ -4,7 +4,8 @@ import { maskSiteUrl } from "../text";
 import type { ElevationSupport } from "../wp/exec";
 
 /**
- * The run-level warning for sites that cannot run a privileged housekeeping command.
+ * The run-level warnings: sites that cannot run a privileged housekeeping command, and sites holding a
+ * plugin folder WordPress no longer lists ({@link renderPluginDirWarning}).
  *
  * Elevation is otherwise a **silent** dependency: it is probed lazily, deep inside a teardown, and a
  * host without it degrades quietly — leftover plugin data is never removed, `debug.log` may not be
@@ -131,6 +132,60 @@ export function renderElevationWarning(
     `     ${styleText(["yellow"], "→")} or accept it deliberately: set \`transport.elevate: false\` on the site to`,
   );
   lines.push("       silence this warning and keep the suite unprivileged.");
+  lines.push("");
+  return lines.join("\n");
+}
+
+/** One site's plugin folders WordPress lists no plugin in, as the banner names them. */
+export interface SitePluginDirs {
+  /** The site's base URL, as reports identify it. */
+  readonly baseURL: string;
+  /** The site's transport, already rendered (e.g. `ssh: ubuntu@203.0.113.10`). */
+  readonly transport: string;
+  /** Each leftover folder, already described (`describePluginDir`). */
+  readonly leftovers: readonly string[];
+}
+
+/**
+ * Renders the warning for sites holding part of a plugin WordPress no longer lists, at the slug their
+ * cell installs as — what a removal stopped part-way leaves, and what blocks every install of that
+ * plugin until it goes.
+ *
+ * A **warning, not a failure**: the cell's next `@plugin` scenario on the site removes it and says so. Shown
+ * at the start of a run — and by the fleet healthcheck — so the cause is visible before a scenario
+ * pays for it.
+ *
+ * @param sites - every real site checked in this run, with its leftover folders.
+ * @returns the banner, padded like {@link renderElevationWarning}'s, or `undefined` when no site
+ * holds one.
+ */
+export function renderPluginDirWarning(
+  sites: readonly SitePluginDirs[],
+): string | undefined {
+  const affected = sites.filter((site) => site.leftovers.length > 0);
+  if (affected.length === 0) return undefined;
+
+  const lines: string[] = [""];
+  lines.push(
+    styleText(
+      ["bold", "yellow"],
+      `  ⚠  LEFTOVER PLUGIN FOLDERS — WordPress lists no plugin in them, on ${String(affected.length)} site(s)`,
+    ),
+  );
+  lines.push("");
+  for (const site of affected) {
+    lines.push(`     ${maskSiteUrl(site.baseURL)}  [${site.transport}]`);
+    for (const leftover of site.leftovers) {
+      lines.push(`       • ${leftover}`);
+    }
+  }
+  lines.push("");
+  lines.push(
+    "     A removal stopped part-way — a PHP-FPM restart, a reboot — leaves these, and each blocks",
+  );
+  lines.push(
+    "     every install of its plugin. The next @plugin scenario on the site removes it and says so.",
+  );
   lines.push("");
   return lines.join("\n");
 }

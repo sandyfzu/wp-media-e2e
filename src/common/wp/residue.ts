@@ -18,7 +18,7 @@ import {
 } from "./paths";
 import { SiteResidueRemovalFailedError } from "./errors";
 import { errorMessage } from "../guards";
-import type { ExecResult } from "./exec";
+import type { ElevationSupport, ExecResult } from "./exec";
 import type { SiteResidue, Transport } from "../config/types";
 
 /**
@@ -649,8 +649,8 @@ function allTargets(targets: RemovalTargets): string[] {
  * Removal is verified rather than inferred: `rm -rf` reports success for a path it never had to
  * touch. The re-read runs at the **same privilege** as the removal: a family by listing its parent
  * again — a listing that fails while the parent is still there counts every member as a survivor,
- * because "could not look" must never read as "gone" — and a declared path by `test -e` (`test`
- * takes no `--`; the path is absolute, so it cannot be read as an option).
+ * because "could not look" must never read as "gone" — and a declared path by {@link stillThere},
+ * which sees a dangling link too.
  *
  * @param targets - what this pass removes.
  * @param run - how to run one command, at the privilege this pass uses.
@@ -665,7 +665,7 @@ async function removeAll(
   }
   const paths: string[] = [];
   for (const path of targets.paths) {
-    if ((await run("test", ["-e", path])).exitCode === 0) paths.push(path);
+    if (await stillThere(path, run)) paths.push(path);
   }
   const families = new Map<string, readonly string[]>();
   for (const [parent, members] of targets.families) {
@@ -673,6 +673,20 @@ async function removeAll(
     if (left.length > 0) families.set(parent, left);
   }
   return { paths, families };
+}
+
+/**
+ * Whether anything is still at `path`, a link included — dangling or not. `test -e` alone follows a
+ * link, so a dangling one the transport's user could not unlink would read as gone and never be
+ * retried with privileges. One command (`-o`, which GNU, BusyBox and BSD `test` all take), so the
+ * check costs no extra round-trip; `test` takes no `--`, and the path is absolute, so it cannot be
+ * read as an operator.
+ *
+ * @param path - the absolute path removal acted on.
+ * @param run - how to run one command, at the privilege this pass uses.
+ */
+async function stillThere(path: string, run: Runner): Promise<boolean> {
+  return (await run("test", ["-e", path, "-o", "-L", path])).exitCode === 0;
 }
 
 /**
@@ -824,15 +838,70 @@ async function removeFound(
     describeRemoval(root),
   );
 
+  const removal = await removeTargetsEscalating(transport, root, targets);
+  if (removal.kind === "left") {
+    throw new SiteResidueRemovalFailedError(removal.paths, removal.elevation);
+  }
+}
+
+/** What an escalating removal ended with — see {@link removeEscalating}. */
+export type EscalatedRemoval =
+  | { readonly kind: "removed" }
+  | {
+      readonly kind: "left";
+      /** The targets still present, absolute. */
+      readonly paths: readonly string[];
+      /** How far privileges could go on this site — what makes advice about the survivors actionable. */
+      readonly elevation: ElevationSupport;
+    };
+
+/**
+ * `rm -rf`s absolute paths on the site: every one as the transport's user first, then only the
+ * survivors with privileges — the order {@link removeSiteResidue} explains — and says what is left.
+ *
+ * Shared by everything that removes what the web server wrote, so the escalation and its guards live
+ * once. **The caller has already checked that each target really resolves inside `root`**
+ * (`assertAllResolvedInsideRoot`, or its parent's, for a link removed as a link): this only refuses a
+ * root that is no plausible site root before going privileged.
+ *
+ * @param transport - the target site's transport.
+ * @param root - the site's resolved WordPress root.
+ * @param paths - the absolute paths to remove; a link is removed as a link, never followed.
+ * @returns `removed`, or the survivors and the elevation that could not clear them.
+ * @throws Error if the root or a target is unusable for a privileged removal.
+ */
+export async function removeEscalating(
+  transport: Transport,
+  root: string,
+  paths: readonly string[],
+): Promise<EscalatedRemoval> {
+  return removeTargetsEscalating(transport, root, {
+    paths,
+    families: new Map(),
+  });
+}
+
+/**
+ * {@link removeEscalating} over a pass's targets, family members included.
+ *
+ * @param transport - the target site's transport.
+ * @param root - the site's resolved WordPress root.
+ * @param targets - what to remove, each already shown to resolve inside `root`.
+ */
+async function removeTargetsEscalating(
+  transport: Transport,
+  root: string,
+  targets: RemovalTargets,
+): Promise<EscalatedRemoval> {
   const survivors = await removeAll(targets, (file, args) =>
     exec(transport, file, args),
   );
-  if (allTargets(survivors).length === 0) return;
+  if (allTargets(survivors).length === 0) return { kind: "removed" };
 
   // Probed only now: a clean cell should not pay a round-trip asking about privileges it never needs.
   const elevation = await elevationSupport(transport);
   if (elevation !== "available") {
-    throw new SiteResidueRemovalFailedError(allTargets(survivors), elevation);
+    return { kind: "left", paths: allTargets(survivors), elevation };
   }
 
   for (const target of allTargets(survivors)) {
@@ -841,7 +910,7 @@ async function removeFound(
   const stubborn = await removeAll(survivors, (file, args) =>
     execElevated(transport, file, args),
   );
-  if (allTargets(stubborn).length > 0) {
-    throw new SiteResidueRemovalFailedError(allTargets(stubborn), elevation);
-  }
+  return allTargets(stubborn).length === 0
+    ? { kind: "removed" }
+    : { kind: "left", paths: allTargets(stubborn), elevation };
 }

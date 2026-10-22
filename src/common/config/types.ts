@@ -281,8 +281,8 @@ export interface ProductConfig {
    * The filesystem counterpart above exists because a plugin's uninstall keeps the files it wrote.
    * This one exists because that uninstall lives in the plugin's own `uninstall.php`, so it only
    * runs while the plugin's files are still there: a site whose plugin directory has gone while its
-   * rows remain looks already-clean to `wp plugin is-installed` and is skipped, and the next
-   * install then reads the leftover rows as evidence that it is an upgrade. Swept off the
+   * rows remain has no uninstall left to run, and the next install then reads the leftover rows as
+   * evidence that it is an upgrade. Swept off the
    * footprint, never off whether the plugin is installed — see {@link SiteDbResidue}.
    *
    * Omit when a product's uninstall is the only cleanup its database needs.

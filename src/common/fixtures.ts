@@ -13,6 +13,11 @@ import {
   stopFileFromEnv,
 } from "./config/drain";
 import { releaseSite } from "./wp/teardown";
+import {
+  reportPageLoads,
+  siteOrigin,
+  watchPageLoads,
+} from "./reporting/page-loads";
 import type { Edition, SiteConfig } from "./config/types";
 
 /**
@@ -143,6 +148,21 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
   pluginArtifact: async ({}, use, testInfo) => {
     const { product, cell } = readRouting(testInfo.project.metadata);
     await use((role) => readResolvedArtifact(product, cell, role));
+  },
+
+  // Override: the browser context, watched for the site's own requests that never arrived. A
+  // scenario that fails after a page lost its scripts or styles says so in one warning line and a
+  // `page-load-failures` attachment instead of only a locator timeout (see `reporting/page-loads.ts`).
+  // Wrapping `context` rather than adding an automatic fixture keeps scenarios without a browser free
+  // of one; the report runs before Playwright closes the context, and can never fail the scenario.
+  context: async ({ context, baseURL }, use, testInfo) => {
+    const origin = siteOrigin(baseURL);
+    const watch =
+      origin === undefined ? undefined : watchPageLoads(context, origin);
+    await use(context);
+    if (watch === undefined) return;
+    watch.stop();
+    await reportPageLoads(watch.log, testInfo);
   },
 
   // Override: point Playwright's baseURL at the bound site, so relative navigations target it.

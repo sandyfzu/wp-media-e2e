@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import type { Dialog, Locator, Page } from "@playwright/test";
+import type { Dialog, Locator, Page, Response } from "@playwright/test";
 
 import {
   PluginActivationFailedError,
@@ -104,16 +104,20 @@ export class PluginsPage {
    *    ordinary click waits for that check to pass and then works first time, dialog and AJAX
    *    included. A stall now fails with Playwright's actionability log, which says what the
    *    element was doing; "no response arrived" never could;
-   *  - the slug-specific `delete-plugin` response is awaited only as a barrier: its arrival
-   *    proves the request was issued (a missing one ⇒ failure) and stops the reload below from
-   *    racing the in-flight AJAX — the body is not parsed. Success is then asserted
-   *    authoritatively after a reload (WordPress's in-place row removal does not reliably fire
-   *    under automation), by requiring the plugin's action links to be gone.
+   *  - the slug-specific `delete-plugin` response is awaited: its arrival proves the request was
+   *    issued (a missing one ⇒ failure) and stops the reload below from racing the in-flight AJAX.
+   *    **Its answer is read** ({@link deletionAnswerProblem}): WordPress removes a plugin entry by
+   *    entry, so a deletion it could not finish answers `success: false` with "Could not fully
+   *    remove the plugin(s) …", and a request killed mid-way (a PHP-FPM restart) answers with a
+   *    gateway's error page — while either can leave the row gone from the screen. Success is then
+   *    asserted after a reload (WordPress's in-place row removal does not reliably fire under
+   *    automation), by requiring the plugin's action links to be gone. Whether anything is left at
+   *    the plugin's path is the site's to answer, not this screen's.
    *
    * @throws {@link PluginNotInstalledError} if the plugin is absent before deletion.
    * @throws {@link PluginDeactivationFailedError} if an active plugin cannot be deactivated first.
-   * @throws {@link PluginDeletionFailedError} if the deletion request never lands or the plugin is
-   *   still present after `timeout` ms.
+   * @throws {@link PluginDeletionFailedError} if the deletion request never lands, WordPress answers
+   *   that it failed, or the plugin is still present after `timeout` ms.
    */
   async delete(
     slug: string,
@@ -157,8 +161,9 @@ export class PluginsPage {
     try {
       // Trigger the delete and wait for ITS AJAX request to land, so the reload below cannot
       // race the in-flight call. A missing response (timeout) is a deletion failure.
+      let answer: Response;
       try {
-        await Promise.all([
+        [answer] = await Promise.all([
           this.page.waitForResponse(
             (response) => {
               const body = response.request().postData();
@@ -178,6 +183,13 @@ export class PluginsPage {
         ]);
       } catch {
         throw new PluginDeletionFailedError(slug);
+      }
+      const problem = deletionAnswerProblem(
+        answer.status(),
+        await answer.text().catch(() => undefined),
+      );
+      if (problem !== undefined) {
+        throw new PluginDeletionFailedError(slug, problem);
       }
 
       // Confirm authoritatively against reloaded, server-backed DOM.
@@ -208,4 +220,55 @@ export class PluginsPage {
   private actionLinks(slug: string): Locator {
     return this.page.locator(`#activate-${slug}, #deactivate-${slug}`);
   }
+}
+
+/**
+ * What is wrong with WordPress's answer to a `delete-plugin` request, or `undefined` when it reports
+ * success.
+ *
+ * `wp_ajax_delete_plugin` answers `{"success":true,…}`, or `{"success":false,"data":{…,"errorMessage":
+ * "…"}}` — in its own words, which are what an operator needs. Anything else is no answer from
+ * WordPress at all: a request killed part-way comes back as the web server's error page.
+ *
+ * @param status - the response's HTTP status.
+ * @param body - its body, or `undefined` when it could not be read.
+ */
+export function deletionAnswerProblem(
+  status: number,
+  body: string | undefined,
+): string | undefined {
+  let answer: unknown;
+  try {
+    answer = body === undefined ? undefined : JSON.parse(body);
+  } catch {
+    answer = undefined;
+  }
+  if (typeof answer !== "object" || answer === null || !("success" in answer)) {
+    return (
+      `the delete-plugin request answered HTTP ${String(status)} with no answer from WordPress` +
+      (body === undefined
+        ? " (its body could not be read)"
+        : `: ${oneLine(body)}`)
+    );
+  }
+  if (answer.success === true) return undefined;
+  const data = "data" in answer ? answer.data : undefined;
+  const message =
+    typeof data === "object" &&
+    data !== null &&
+    "errorMessage" in data &&
+    typeof data.errorMessage === "string"
+      ? data.errorMessage
+      : "WordPress gave no reason";
+  return `WordPress answered: ${message}`;
+}
+
+/** A response body cut to one short line, so an HTML error page cannot flood a report. */
+function oneLine(body: string): string {
+  const flat = body
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (flat === "") return "(empty body)";
+  return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
 }

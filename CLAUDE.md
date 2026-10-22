@@ -32,9 +32,9 @@ End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (
 src/
 ├── common/                 # product-agnostic, shared by every product
 │   ├── config/             # env, sites loading, run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory
-│   ├── reporting/          # the suite's reporters (cell notice, results stream, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command)
+│   ├── reporting/          # the suite's reporters (cell notice, results stream, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command), page-loads.ts (a failed scenario's lost requests)
 │   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
-│   ├── setup/              # the auth setup's preflight, elevation/ownership banner, site info
+│   ├── setup/              # the auth setup's preflight (+ cell-plugin.ts: a broken copy of the cell's plugin), elevation/ownership banner, site info
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
 │   ├── guards.ts           # type guards for narrowing `unknown`
 │   ├── text.ts             # string helpers: escapeRegExp, escapeHtml, redactSecrets/maskValues (credentials), maskSiteUrl (a baseURL shown safely), plain
@@ -44,8 +44,8 @@ src/
 │   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
-│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain scenarios, the no-credential canary, mock WordPress
-│   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain and page-loads scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection
+│   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
     └── <product>/
@@ -181,17 +181,18 @@ use **their product's** `fixtures.ts`; shared steps and hooks use
 scenario's steps use, so they mix — but the product's `fixtures.ts` must be in its `steps` config, or
 generation fails. Shared fixtures:
 
-| Fixture                   | Scope  | Purpose                                                                                                               |
-| ------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------- |
-| `site`                    | test   | The `SiteConfig` bound to this worker; throws if no pool (tag `@noauth` instead).                                     |
-| `edition`                 | test   | The cell's `free`/`pro` edition; throws in editionless cells.                                                         |
-| `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                                                      |
-| `pluginArtifact`          | test   | `pluginArtifact(role)` → the resolved zip; `.slug` addresses the plugin, `.zipPath` feeds `stageAndInstallPlugin`.    |
-| `releaseBoundSite`        | worker | Automatic teardown: removes the site's staging area, closes SSH connections. Best-effort — never fails a passing run. |
-| `drainGate`               | test   | Automatic: once the stop file exists, skips each scenario's first attempt as `stopped`.                               |
-| `baseURL` (override)      | —      | Points navigation at the bound site.                                                                                  |
-| `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                      |
-| device options (override) | —      | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else desktop.        |
+| Fixture                   | Scope  | Purpose                                                                                                                   |
+| ------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `site`                    | test   | The `SiteConfig` bound to this worker; throws if no pool (tag `@noauth` instead).                                         |
+| `edition`                 | test   | The cell's `free`/`pro` edition; throws in editionless cells.                                                             |
+| `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                                                          |
+| `pluginArtifact`          | test   | `pluginArtifact(role)` → the resolved zip; `.slug` addresses the plugin, `.zipPath` feeds `stageAndInstallPlugin`.        |
+| `releaseBoundSite`        | worker | Automatic teardown: removes the site's staging area, closes SSH connections. Best-effort — never fails a passing run.     |
+| `drainGate`               | test   | Automatic: once the stop file exists, skips each scenario's first attempt as `stopped`.                                   |
+| `context` (override)      | —      | Watches the site's own requests; a failed scenario that lost some warns `[page-loads]` and attaches `page-load-failures`. |
+| `baseURL` (override)      | —      | Points navigation at the bound site.                                                                                      |
+| `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                          |
+| device options (override) | —      | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else desktop.            |
 
 BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds page objects and scenario state —
 what each does: [authoring-tests.md → BackWPup's
@@ -227,10 +228,16 @@ lives in a sibling module, unit-testable without it.
 **`@plugin`** ([`plugin.hooks.ts`](src/common/hooks/plugin.hooks.ts)):
 
 - **Before**, in order: clear `debug.log`; stop work the plugin still runs (a killed run's job —
-  `ProductConfig.stopRunningWork`; reported, a failure only if it won't stop); uninstall any
-  existing copy (so the install is fresh, DB footprint included); sweep its leftover **database
-  footprint** (`ProductConfig.siteDbResidue` — keyed off what is on the site, never off whether the
-  plugin is installed); stage and install the cell's artifact with `--activate`, its files handed to
+  `ProductConfig.stopRunningWork`; reported, a failure only if it won't stop — a stop that fails on a
+  copy WordPress boots only without, `pluginBreaksBoot`, is reported: such a copy runs nothing); uninstall any
+  existing copy (so the install is fresh, DB footprint included) and remove by path what is left
+  there — a folder WordPress no longer lists, or a listed copy whose uninstall fails (taken off
+  `active_plugins` with no plugin loaded first, or `install --activate` skips its activation); a
+  removal cut short leaves these (`wp/plugin-dir.ts`; a warning plus a `leftover-plugin-files`
+  attachment; after a failed uninstall `debug.log` is cleared again, that fatal is an earlier run's); sweep its leftover **database
+  footprint** (`ProductConfig.siteDbResidue`: options, tables, roles, capabilities — keyed off what is
+  on the site, never off whether the plugin is installed; activation's `add_role()` keeps a leftover
+  role as it is); stage and install the cell's artifact with `--activate`, its files handed to
   the **site's** ownership; **re-assert the active state**, never inferred from the exit code;
   create the declared data directories (`ProductConfig.siteResidue`, and `resolveSiteDataDirs` for
   names the plugin picks at runtime, e.g. BackWPup's `uploads/backwpup-restore-<20 hex>`), open to
@@ -240,7 +247,8 @@ lives in a sibling module, unit-testable without it.
   `declaredResidue`.
 - **After**: scan `debug.log` with the product's preset — a **PHP fatal fails the scenario**
   (`DebugLogFatalError`, log attached), warnings/notices are logged; stop running work (a BackWPup
-  job runs in a web request and would outlive the uninstall); remove the plugin; sweep its database
+  job runs in a web request and would outlive the uninstall); remove the plugin, healing what is left at its path as above — a
+  failed uninstall still **fails the scenario** (`PluginUninstallBrokenError`); sweep its database
   footprint; clear the **files it left** (an uninstall keeps its data, and per-scenario reinstalls
   would fill the disk). All five always run, independently; the log verdict wins and other failures
   are logged. Having to stop work is reported; work that _won't_ stop is a failure. Leftovers the
@@ -308,14 +316,20 @@ before the scenarios, in three steps:
 is-installed` passes — a WordPress that cannot boot (old PHP, DB down, a fatal) is reported as
    that, never as "not installed". Then the **admin UI is English** (`determine_locale()` for the
    configured user, so per-user setting, site option, `WPLANG` and filters all count): page objects
-   match English names, and a translated site would otherwise fail as many locator timeouts. A gate
-   failure throws a formatted report and skips the scenarios. Two **reports, never gates**: **File
+   match English names, and a translated site would otherwise fail as many locator timeouts. When
+   WordPress cannot boot for that check but boots with the cell's own slug skipped
+   (`--skip-plugins=<slug>`), the cell's plugin is a broken copy every login would die on: the setup
+   removes it (`ensurePluginAbsent`, as the `@plugin` hooks would) and says so, a **Plugin under test**
+   line; the healthcheck only reports it ([`setup/cell-plugin.ts`](src/common/setup/cell-plugin.ts)). A
+   gate failure throws a formatted report and skips the scenarios. Three **reports, never gates**: **File
    ownership** (the same `planOwnership` decision `normalizeOwnership` acts on, so report and action
-   agree) and **Elevation** (passwordless `sudo`?). Neither report fails a site for a property of
+   agree), **Elevation** (passwordless `sudo`?) and **Plugin folders** (a folder WordPress lists no
+   plugin in at the slug the cell installs, which its next `@plugin` scenario removes). No report fails a site for a property of
    the host; the one exception is an unparsable `transport.fileOwner` (our config, unreadable).
    Reports fold into one banner per run
    ([`setup/elevation-report.ts`](src/common/setup/elevation-report.ts)), silent when every site can
-   elevate or opted out, naming the ownership cost only where a handover was needed.
+   elevate or opted out, naming the ownership cost only where a handover was needed; a second names
+   each leftover plugin folder.
 2. **Authentication** ([`authenticate.ts`](src/common/auth/authenticate.ts)), per real site: end the
    session the cell's previous run saved (`auth/session.ts`: that token only, that host only, via
    `WP_Session_Tokens`), log in once through the UI, save `storageState`. A failing or timed-out
@@ -401,7 +415,10 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   `E2E_SITE_STAGING_DIR`).
 - Idempotent cleanup (`ensurePluginAbsent`) and asserted removal under test (`uninstallPlugin`) both
   deactivate as their own call, then plain `wp plugin uninstall` — **never `uninstall --deactivate`**,
-  which makes the plugin's cleanup skip itself. Typed errors in `wp/errors.ts`.
+  which makes the plugin's cleanup skip itself. Typed errors in `wp/errors.ts`. **"Absent" means
+  nothing at the plugin's path** (`wp/plugin-dir.ts`), not "WordPress lists none": cleanup removes
+  what is left by path and returns it to report; removal under test fails naming it, never sweeps.
+  Only the cell's own slug is inspected.
 - **Every `wp eval` goes through [`wp/php.ts`](src/common/wp/php.ts)**; **any value from outside this
   codebase (site, scenario, fixture) is embedded with `phpLiteral`** — the injection boundary, no
   exceptions.
@@ -422,9 +439,11 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   the docroot, or one it cannot resolve.
 - Leftovers: `ProductConfig.siteResidue` (files, `wp/residue.ts`; unprivileged first, then only what
   survived elevated; `transport.elevate: false` refuses elevation) and `ProductConfig.siteDbResidue`
-  (rows, `wp/db-residue.ts`; never elevated, multisite refused). Both verified by re-reading.
+  (options, tables, roles, capabilities, `wp/db-residue.ts`; never elevated, multisite refused). Both
+  verified by re-reading.
 - **Debug log** ([`wp/log.ts`](src/common/wp/log.ts)): `clearDebugLog` in a `Before`, `scanDebugLog`
-  (`{ raw, fatals, warnings, notices }`, falls back to a direct read when WordPress can't boot) in an
+  (`{ raw, fatals, warnings, notices }`; WordPress booted with no plugin or theme, so a broken one
+  cannot write into the log it reads; a direct read when even that fails) in an
   `After`. Presets in `support/debug-log.ts`: `*_LOG_OPTIONS` scans everything, `*_OWN_LOG_OPTIONS` that
   plugin only.
 
@@ -564,13 +583,14 @@ this file goes in the right `docs/` file, linked from the [Documentation map](#d
 
 - Transports (`local`, `docker`, `ssh`), the `exec`/`wpCli` API, the transfer primitives (`wpRootDir`,
   `copyIntoTarget`), staging (`staging.ts`, `E2E_SITE_STAGING_DIR`, `transport.stagingDir`).
-- Plugin lifecycle functions and their error types.
+- Plugin lifecycle functions and their error types; plugin-folder inspection/removal (`plugin-dir.ts`).
 - The debug-log API (`readDebugLog`, `clearDebugLog`, `scanDebugLog`, `ScanDebugLogOptions`).
 - Ownership (`ownership.ts`: `planOwnership`, `normalizeOwnership`, the grant rule,
   `transport.fileOwner`) and path guards (`paths.ts`, `pathInsideRoot`).
 - Residue (`residue.ts`: `parseResidueDeclaration`, `SiteResidueFamily`, `resolveSiteResidue`,
   `prepareResolvedDataDirs`, `isDeclaredResidue`) and the footprint sweep (`db-residue.ts`:
-  `SiteDbResidue`, `findSiteDbResidue`, `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`).
+  `SiteDbResidue`, `findSiteDbResidue`, `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`,
+  `PROTECTED_ROLES`, `PROTECTED_CAPABILITIES`).
 - Cron (`nextScheduled`, `triggerScheduledEvent`), the PHP bridge (`phpLiteral`, `evalPhp`,
   `EvalPhpOptions`), file readers (`fileChecksum`, `listFiles`, `listLocatedFiles`, `FILE_LIST_PHP`,
   `backdateFile`, `pathFromWorkingDir`, `locateFromWorkingDir`), archives (`findArchiveEntries`,
