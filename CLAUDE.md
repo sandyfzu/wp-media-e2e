@@ -1,33 +1,28 @@
 # CLAUDE.md
 
-Operating guide for AI agents (and humans) working in this repository. Read this
-first, then follow the links into [`docs/`](docs/) for depth. Keep it accurate —
-see [When to update these docs](#when-to-update-these-docs).
+Operating guide for AI agents (and humans) in this repository. Read it first, then follow the links into
+[`docs/`](docs/). Keep it accurate — see [When to update these docs](#when-to-update-these-docs).
 
 ## Project Overview
 
-This repository contains end-to-end (E2E) tests for WP Media plugins like WP Rocket
-(a WordPress performance optimization plugin), BackWPup (a backup plugin) and
-Imagify (an image optimization plugin). The test suite uses **Playwright** for
-browser automation and **Cucumber** for behavior-driven development (BDD) testing.
+End-to-end (E2E) tests for WP Media plugins: WP Rocket (performance), BackWPup (backups) and Imagify
+(image optimization), on **Playwright** (browser) and **Cucumber** (BDD).
 
-> **Current state:** the scaffolded, runnable products are **WP Rocket** and
-> **BackWPup**. Imagify is a planned product and not yet wired up — add it as a new
-> product under `src/projects/` when work begins (see
-> [authoring-tests.md → Adding a product](docs/guides/authoring-tests.md#adding-a-product)).
+> **Current state:** WP Rocket and BackWPup run. Imagify is planned, not wired up — add it under
+> `src/projects/` when work begins
+> ([authoring-tests.md → Adding a product](docs/guides/authoring-tests.md#adding-a-product)).
 
 ## Key technologies
 
 | Area               | Tech                                                                                                                                                            |
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Runtime            | **Node ≥ 24.16** (see `.nvmrc`), **ESM** (`"type": "module"`)                                                                                                   |
-| Language           | **TypeScript 6**, strict (`tsc` for type-checking only — Playwright transpiles via esbuild)                                                                     |
+| Runtime            | **Node ≥ 24.16** (`engines`; `.nvmrc` pins 24), **ESM** (`"type": "module"`)                                                                                    |
+| Language           | **TypeScript 6**, strict (`tsc` type-checks only — Playwright transpiles via esbuild)                                                                           |
 | Browser automation | **Playwright ≥ 1.62** (`@playwright/test`), Chromium only — the floor is load-bearing, see [wordpress-automation.md](docs/architecture/wordpress-automation.md) |
 | BDD                | **Cucumber/Gherkin** via **`playwright-bdd`** (`bddgen` generates specs)                                                                                        |
 | WP-CLI transport   | **execa** (local/docker), **node-ssh** (ssh)                                                                                                                    |
 | Visual diff        | **pixelmatch** + **pngjs**                                                                                                                                      |
-| Config validation  | **zod 4** (the orchestrator's config)                                                                                                                           |
-| Command line       | **commander 15** (the orchestrator's `start`)                                                                                                                   |
+| Orchestrator       | **zod 4** (its config), **commander 15** (its `start`)                                                                                                          |
 | Reporting          | Playwright HTML, Cucumber HTML, **Allure** (`allure`, `allure-playwright`)                                                                                      |
 | Quality            | **ESLint** (typescript-eslint, strict + type-checked), **Prettier**, **husky** + **lint-staged**                                                                |
 
@@ -36,30 +31,41 @@ browser automation and **Cucumber** for behavior-driven development (BDD) testin
 ```text
 src/
 ├── common/                 # product-agnostic, shared by every product
-│   ├── config/             # env, sites loading, run-context (+ run-id.ts: RUN_ID's formatter/parser, a run's report folder; run-env.ts: the run-setting variables' names), the cell pin, the drain, metadata, devices, file-owner rule, the config factory
-│   ├── reporting/          # the suite's own reporters: cell-notice.ts, results-stream.ts (results.jsonl), run-facts.reporter.ts (run-facts.json, report titles), run-summary.ts; their pure parts (results.ts, setup-facts.ts, run-facts.ts, report-files.ts) and the stream's schema + reader; report retention (retention.ts, report-tree.ts, run-pruning.ts, prune-command.ts)
-│   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ending a saved login's session)
+│   ├── config/             # env, sites loading, run-context, run-id.ts (RUN_ID, a run's report folder), run-env.ts (run-setting variable names), cell pin, drain, metadata, devices, file-owner rule, config factory
+│   ├── reporting/          # the suite's reporters (cell notice, results stream, run facts, summary), their pure parts, report retention (retention, report-tree, run-pruning, prune-command)
+│   ├── auth/               # auth.setup.ts → authenticate.ts (login → storageState, site versions); login, session (ends a saved login)
+│   ├── setup/              # the auth setup's preflight, elevation/ownership banner, site info
 │   ├── fixtures.ts         # the extended test instance + Given/When/Then
-│   ├── text.ts             # small shared string helpers (escapeRegExp, escapeHtml, redactSecrets/maskValues — masking credentials, a URL's password a parser would refuse included, maskSiteUrl — a site's baseURL shown parsed, credentials `***@`, a stand-in when it is no http(s) URL, plain — one line of plain text)
+│   ├── guards.ts           # type guards for narrowing `unknown`
+│   ├── text.ts             # string helpers: escapeRegExp, escapeHtml, redactSecrets/maskValues (credentials), maskSiteUrl (a baseURL shown safely), plain
 │   ├── deadline.ts         # withinBudget: a time limit for a best-effort step
 │   ├── steps/              # generic step definitions
 │   ├── hooks/              # shared scenario hooks (*.hooks.ts) + their policy modules
-│   ├── pages/              # cross-product Page Object Model (plugins.page.ts, site-health.page.ts) + secret-field.ts (typing a secret no report records)
+│   ├── pages/              # cross-product page objects (plugins, site-health) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
-│   ├── __fixtures__/       # spec helpers (temp-dir.ts: removeTempDir — a spec's temporary folder removed only when it is one; child-node.ts: run code in a fresh Node; import-probe.ts: what importing a module does to the process; import-scan.ts: every module a file loads, resolved, and what that reaches; report-tree.ts: fake report trees; drain/: the drain spec's scenarios; secret-scan.ts + secrets/: the no-credential canary; mock-wordpress.ts: wp-login and Site Health served locally; plugin-dir-stub.ts: a stub `wp`'s plugin-folder inspection, answered from a real folder)
-│   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
+│   ├── __fixtures__/       # spec helpers: temp dirs, a fresh Node, import probe/scan, fake report trees, drain scenarios, the no-credential canary, mock WordPress, a stub `wp`'s plugin-folder inspection
+│   └── wp/                 # WordPress over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
     └── <product>/
         ├── config/         # <product>.config.ts + sites.json / sites.*.json / sites.example.json
         ├── fixtures.ts     # this product's test instance: common's + its page objects
         ├── features/       # *.feature (Gherkin)
-        ├── pages/          # this product's page objects (+ locator-contract specs)
+        ├── pages/          # page objects (+ locator-contract specs)
         ├── steps/          # product-specific steps
         └── support/        # debug-log presets, leftover declarations (files + database), REST barriers, WP-CLI readers, the CLI-under-test runner, running-job probes and stop, site setup
 
-orchestrator/               # the orchestrator: suite-imports.json, the suite modules it may import, + its import-boundary spec; config.example.json; cli.ts (the command's entry, run by the `orchestrator` script as `exec node --import tsx` — never the `tsx` CLI, and no shell left between npm and Node: `process.exit(await runCommand(…))`, the boundary probe's one exclusion); command.ts (commander: `start [--config] [--task <id…>] [--once] [--dry-run]`, help, version; refuses when npm took one of its options for itself (no `--`: `npm_config_dry_run`, and on npm 11 `_once`, `_task`, `_config`, set while the option is missing); a failing standard output or error dropped, no crash; a relative `--config` from `INIT_CWD`; an option value starting with `-` a usage error; `start`'s code returned untouched, the shutdown signals given do-nothing handlers until the exit; every other path's outputs drained, without a practical limit; the dry run on stdout, 0 whatever its warnings, a refusal masked on stderr, 1; usage errors 1); start.ts (the process: config, lock, orphan check, the selected cells' locks, bus and senders, every selected task's loop at once; SIGINT/SIGTERM/SIGHUP stop every loop through shutdown.ts, and so does its parent ending (npm killed by a SIGHUP it does not relay, any launcher that exits: `process.ppid` against its value at boot, `parent.ts`); once runs are killed, waits 60 s more, then names each run it began and left behind — `kill -KILL -<pgid>` only for a group shown to be the run's (`classifyRunning`); settles, closes the log, then releases the lock (the log is written only under it), drains the terminal and standard error and returns the exit code — 0/1 with `--once`, 130 once signalled, 1 on a refusal — for the command to `process.exit` with; `prepareStart`: everything before the lock, `--dry-run`'s seam); parent.ts (the parent's PID at boot, read by `command.ts`'s first import; `parentGone`, `watchParent`); start-lines.ts (`--task`'s selection, its lines, the exit code, pure); dry-run.ts (`--dry-run`'s report, pure: each selected task, the plugin it builds (the suite's own planner, `artifacts/request.ts`), its sites and their servers as written, the runs' settings, the notifications and secrets by name, the warnings, the state directory's first — never a field holding a secret, every value masked by all the orchestrator's secrets before it is normalised, a site's address by `safeSiteUrl`); config/ (product-list.ts: the product list loaded as a config error, errors.ts: ConfigError; its config file: schema.ts (zod), parse.ts (messages; keys shown only as names), json-keys.ts (keys JSON would lose), check.ts (against the suite's products and cells; a server's load counted over the tasks `--task` selects; two selected tasks on one site refused, a site with no http(s) `baseURL` too, or one holding credentials and an `@` past its host, or too long to lock), site-key.ts (a site's key: what the site locks and that check compare), load.ts, secrets.ts (every secret value, for masking — the config's, its sites' passwords, storage keys and `baseURL` passwords, an SSH host holding one lowercased, and the proxy URLs' passwords the runs inherit)); runs/ (identity.ts: a run's id, RUN_ID and paths; environment.ts: its allowlisted environment (proxy, CA and browser-path variables included); commands.ts: bddgen's and the runner's commands; launch.ts: both spawned detached into a new run folder and run.log (the folder removed again when it fails before the first record), waited for until their process group is empty (process-group.ts), no SIGINT once the tests are over (stream-end.ts); stop.ts: one run's stop machine — drain, one SIGINT, SIGKILL of the group; nothing taken once the runner exited on its own (`lingering`: a kill only clears its group); shutdown.ts: the orchestrator's signals and budgets; end.ts: what it left, read within caps (results.ts, facts.ts: checked field by field), then outcome.ts: its status and reason, and its run.finished; record.ts: run.json — one reader for every state (running, ended, lost), a process recorded as starting before it is spawned, and a writer that keeps its writes in order; leader.ts: the start time that tells a run's process from a reused id); state/ (atomic.ts: a state file written atomically and durably; read.ts, errors.ts: StateError; lock.ts: orchestrator.lock, judged in the PID space it was written in (lock-owner.ts, pid-space.ts), its leftovers swept (leftovers.ts; a linked state directory where it leads); cell-lock.ts: the same lock per site, a cell's taken together, for every orchestrator of this user on the machine (see Core concepts); inspect.ts: the state directory, its lock, the runs an earlier start left running and the selected cells' locks judged as a start would, writing nothing (`--dry-run`); runs-folder.ts: `runs/` never a link nor open to other writers, wherever it is made or read; counter.ts: a task's run numbers, never below its run folders; orphans.ts: a run still alive — or not provably over — from an earlier start refuses the start (a record that cannot be read too), a dead one's — or one from an earlier boot — becomes `lost`; run-folders.ts: the run folders' running records and those that cannot be read, never through a link — the orphan check's and the start's one reader; run-retention.ts: a task's run folders pruned by the reports' policy); events/ (bus.ts: the event bus; run-finished.ts: `run.finished` v1 and its builder); tasks/ (cycle.ts: one run of a task — its number, launch, records, end (`run-finished.json` and `datator.json` beside a small `ended` record, never parsed back), outcome line, `run.finished` and run-folder pruning, every dependency's failure a masked line, a stop before `bddgen` spawns nothing and reads `stopped`; the run named in its cell's site locks before the launch (no longer this orchestrator's: `error`, nothing launched, no report or log pointed at); a run that could not be watched to its end flagged `unwatched`; a group that will not empty after its SIGKILL said every 5 minutes; `onRunBegun` tells each run's id and task as it begins — handed out as `{ stop(level, why), done }`; run-lines.ts: its lines and fallbacks, pure; loop.ts: a task's loop — the cycle, then the cooldown from the run's end (`next run HH:MM:SS (cooldown Nm)`), again until stopped or once with `--once`; a stop reaches the run in flight or one being created, ends a cooldown at once (no timer left) and starts no run; a cooldown outside the config's bounds ends it `failed` before any run, and so does an `unwatched` run, with no next run; the cell's site locks held from the loop's start to its end (refused: the loop ends `failed` before any run, said once), kept after an `unwatched` run; `--once`'s verdict and exit code (0, 1, 130)); notify/ (post.ts: one bounded JSON POST that never rejects; slack.ts, datator.ts: each one's message or record from `run.finished`, and its sender; subscribe.ts: both on the bus, one `slack ✓ · datator ✓ 201` line per run, and the Datator record a run keeps, frozen); text.ts (cut; safe line and block: masked by shape and by value — as written, URL- or form-encoded, JSON-escaped —, cleaned; safeSiteUrl: a site's address masked by value, then by `maskSiteUrl`; textOf, failureLine: any thrown value as text, total); log.ts (the terminal's and orchestrator.log's lines, the file's dated); terminal.ts (stdout made non-blocking, so a paused terminal cannot freeze the process; drained, bounded, before `process.exit`); files.ts (a file read within a cap, never blocking, links optionally refused); folders.ts (a folder judged by owner and mode: the state directory's rule, a private folder's); error-code.ts; __fixtures__/ (spec helpers: fake-suite.ts — a stand-in `bddgen` and runner, real processes and signals, no site; fake-start.ts + swap-start.mjs — the real `orchestrator` script, `cli.ts` and `command.ts` over the fake suite; http-sink.ts — a local Slack/Datator; import-boundary.ts — the boundary spec's functions; results.ts, run-finished.ts — stream lines and events; file-handle.ts — a file failing on cue; slow-reader.ts — a terminal that does not keep up; soak.ts — the soak's samples and verdicts); soak.spec.ts (the soak: the real `start` over the fake suite for hundreds of runs — listeners, handles, timers and descriptors flat, run folders at the cap, pruning under 1 ms a folder; skipped unless `ORCHESTRATOR_SOAK=1`, `npm run orchestrator:soak`)
+orchestrator/               # runs cells in loops. Layout and design: docs/plans/orchestrator-phase-0.5-plan.md §5, §4
+│                           # suite-imports.json (suite modules it may import) + import-boundary.spec.ts; config.example.json
+│                           # cli.ts (entry: `exec node --import tsx`, never the `tsx` CLI; `process.exit(await runCommand(…))`)
+│                           # command.ts (commander `start [--config] [--task <id…>] [--once] [--dry-run]`; refuses options npm took)
+│                           # start.ts (config, lock, orphan check, site locks, every task's loop; signals or the parent ending stop it; prepareStart = --dry-run's seam)
+│                           # parent.ts (the parent's PID at boot: command.ts's first import); start-lines.ts, dry-run.ts (pure); text.ts (masking, safeSiteUrl); log.ts, terminal.ts (non-blocking stdout), files.ts, folders.ts, error-code.ts
+│                           # config/ (zod schema, parse, check, site-key, load, product-list, secrets) · runs/ (identity, environment, commands, launch, stop, shutdown, end, outcome, run.json record)
+│                           # state/ (atomic writes, orchestrator.lock, site locks, inspect, orphans, counter, run folders + retention) · events/ (bus, run.finished v1)
+│                           # tasks/ (cycle: one run; loop: cycle + cooldown, --once) · notify/ (bounded POST, Slack, Datator) · __fixtures__/ (fake suite, fake start, HTTP sink)
+│                           # soak.spec.ts (hundreds of runs over the fake suite; ORCHESTRATOR_SOAK=1, npm run orchestrator:soak)
 docker/                     # local WordPress for the `docker` transport
 docs/                       # architecture & guides (linked below)
 playwright*.config.ts       # entry configs (default, per-product, unit)
@@ -67,735 +73,440 @@ playwright*.config.ts       # entry configs (default, per-product, unit)
 
 ### Core concepts: products, cells, pools, runs
 
-- **Product** — a plugin under test (`wp-rocket`, `backwpup`); owns its features,
-  steps, sites, and optional service credentials.
-- **Cell** — a named environment (`apache`, `nginx`, `pro@nginx`). Cells are
-  data-driven: the merged top-level keys of a product's sites files
-  (`sites.json` + any `sites.*.json` overlays — see Configuration below). A name is
-  lowercase `a-z0-9@._-`, never `_`-prefixed, checked at load: it names folders and projects.
-- **Output folders** — Playwright empties a selected project's output folder as a run starts,
-  so only a run targeting a cell writes in `test-results/<product>/<cell>`; any other run
-  writes in `<product>/_all/<cell>`, unit runs in `_unit` (`outputDirFor`). Reports and
-  logins are absolute paths in the checkout, wherever a run starts.
-- **Pool** — the interchangeable WordPress sites under a cell; each worker binds to
-  one site by `parallelIndex`.
-- **Run unit** — one `(product × cell)`. **Run exactly one cell per invocation**; selecting
-  two at once fails fast — a cell named beside another that `--project` reaches by Playwright's own
-  matching (any case, `*`, its `setup:`) included. **Pin it with `E2E_CELL=<cell>`**: the config then holds that cell
-  alone, so `bddgen` regenerates only its specs and two cells of one product can run side by
-  side. `--project=<cell>` still works, but `bddgen` then regenerates every cell's specs, which
-  breaks another run of the product started beside it. An unknown pin, or a `--project` the pin
-  cannot satisfy, fails naming `E2E_CELL`; so does a pinned run that inherited another run's
-  `PLAYWRIGHT_BDD_CONFIGS`. Each run prints a `[cell]` line saying which it is (unless a
-  command-line `--reporter` replaces the configured reporters).
-- **Stopping a run** — the **drain**: creating the stop file `E2E_INTERNAL_STOP_FILE` names
-  (absolute, in a folder that exists and is kept for the run's lifetime, the file itself **not** there
-  yet — both checked as the run starts; set by the orchestrator) skips each scenario's first attempt
-  as `stopped` while the one in flight finishes (`config/drain.ts`, the
-  `drainGate` fixture, which `storageState` depends on so it runs first). Escalate with **one**
-  SIGINT to the runner, then SIGKILL to its process group — never SIGTERM, never a second SIGINT.
-- **Watching a run** — every run streams its results to `<report dir>/results.jsonl`, one JSON line
-  per event (`run.begin`, `setup.end`, `scenario.begin`/`retry`/`end`, `run.error`, `run.end`; schema
-  v1, `reporting/results-schema.ts`) as it happens, silently; no `run.end` means the runner died. The
-  terminal ends with a summary (`reporting/run-summary.ts`): the verdict — `INTERRUPTED`, then
-  `COULD NOT TEST` when a setup failed, `STOPPED` when the drain skipped a scenario (counted as
-  `drained` in `run.end`), `NO TESTS` only when no error came from outside a test (a spec that would
-  not load is `FAILED`, its error on an `Error` line) — the counts, the plugin and sites tested, and
-  where the reports are. Both judge a
-  scenario by its result, never by a step's error (a skip carries one); predict a retry by the
-  dispatcher's rule and settle, as the run ends, one that never ran (`retryNotRun`); and never write a
-  step's parameters, a Playwright API step's title or a call log — the stream is still as sensitive as
-  the reports. Every credential a message quotes is masked by its shape (`redactSecrets`, `text.ts`:
-  a URL's userinfo, a GitHub token, a credential URL parameter, an `Authorization` header, a WordPress
-  login cookie), in the stream, the summary and the run facts alike; one with no shape (a legacy
-  40-hex token, a bare password) only by its value (`maskValues` — APVM's output, against the
-  process's `GITHUB_TOKEN`/`GH_TOKEN`).
-- **One cell, one orchestrator run** — the orchestrator locks the **sites** a cell runs on, one lock per
-  site keyed by its `baseURL` (`config/site-key.ts`: host as a URL parser writes it, no trailing dot;
-  port, none for 80 or 443; path normalised, unreserved escapes decoded, no trailing slash), in
-  `$XDG_STATE_HOME/wp-media-e2e/site-locks/<hash of the key>.lock` (else under `~/.local/state`; our two
-  folders `0700`, never a link; the file holds the key, the holding cell and its latest run;
-  `orchestrator/state/cell-lock.ts`), shared by every orchestrator of this user on this machine
-  whatever its config or checkout. A task's loop takes all its cell's sites, sorted, all-or-nothing, as
-  it starts, names each run in them before its launch, and gives them back as it ends — kept while a
-  run's processes may live —, so two orchestrators never take turns on a site. Two selected tasks of one
-  config on one site are refused by the config's check (start and `--dry-run` alike); a site held by a live
-  orchestrator refuses the start (warned by `--dry-run`), or the task's loop once, as it starts; a dead
-  holder's lock is taken over only once the run it names is over. Two cell names on one site exclude
-  each other; a reused name on other sites does not. **Not covered:** other users, other machines, runs
-  started by hand (`npm run test:<product>`), and one site under two addresses (a host and its IP, two
-  names for one server, a path differing only in case) — those take or see no lock.
-- **What a run tested, up front** — the run-facts reporter (`reporting/run-facts.reporter.ts`, before
-  the reports) says it in one line — product, cell, plugin version, ref and commit, WordPress and PHP,
-  the run's name (`E2E_RUN_NAME`, display only; `E2E_REQUESTED_REF` shows the ref asked for) — as the
-  HTML report's title, a banner on the Cucumber report and the Allure report's name; every fact (the
-  zip's SHA-256 included) in their metadata and in `<report dir>/run-facts.json`, rewritten as each setup
-  ends. A missing fact says why, never blank; only whitelisted values (of the sites file, `baseURL`);
-  everything caught, so it can never fail a run. `captureGitInfo` is set **off** in the config factory:
-  left unset, Playwright turns it on under CI and the HTML report carries authors' emails and a diff.
-- **Report retention** — each run prunes **its own cell's** report folder as it ends (the summary's
-  `onExit`, `reporting/run-pruning.ts`; a `Pruned` line says what went): at most `E2E_REPORTS_KEEP`
-  (20; `0` lifts the cap, not the age rules), none older than 30 days except the newest complete
-  report (up to 182 days); an empty run (`--list`, no tests) never counts; the run in progress is never
-  removed. A run is a folder named by a RUN_ID or holding a `run.begin` stream — never dated by mtime.
-  `npm run report:prune` does every cell. Removal renames to a hidden `.pruning-…` folder first, never
-  follows a link, and never fails a run (`reporting/retention.ts`).
+Full detail: **[execution-model.md](docs/architecture/execution-model.md)**.
 
-Full detail — the `parallelIndex` invariant, the config factory, the credential
-registry, and artifact lifecycle — is in
-**[docs/architecture/execution-model.md](docs/architecture/execution-model.md)**.
+- **Product** — a plugin under test (`wp-rocket`, `backwpup`): its features, steps, sites, optional
+  service credentials.
+- **Cell** — a named environment (`apache`, `nginx`, `pro@nginx`): the merged top-level keys of a
+  product's sites files. Lowercase `a-z0-9@._-`, never `_`-prefixed (it names folders and projects).
+- **Pool** — a cell's interchangeable sites; each worker binds to one by `parallelIndex`.
+- **Run unit** — one `(product × cell)`. **One cell per invocation**, pinned with **`E2E_CELL=<cell>`**:
+  `bddgen` then regenerates only that cell's specs, so cells of one product run side by side.
+  `--project=<cell>` works but regenerates every cell's specs, breaking a run beside it. Two cells
+  fail fast — counting what `--project` reaches by Playwright's own matching (any case, `*`, `setup:`).
+  Each run prints a `[cell]` line.
+- **Output folders** — only a run targeting a cell writes `test-results/<product>/<cell>`; others
+  `<product>/_all/<cell>`, unit runs `_unit` (`outputDirFor`). Reports and logins are absolute paths
+  in the checkout.
+- **Stopping a run** — the **drain**: creating the file `E2E_INTERNAL_STOP_FILE` names skips each
+  scenario's first attempt as `stopped` (`drainGate`). Escalate with **one** SIGINT to the runner,
+  then SIGKILL its process group — never SIGTERM, never a second SIGINT.
+- **Watching a run** — `<report dir>/results.jsonl` streams every event (schema v1,
+  `reporting/results-schema.ts`); no `run.end` means the runner died. The terminal ends with a
+  summary and verdict. Every credential a message quotes is masked by its shape (`redactSecrets`);
+  APVM's output also by value (`maskValues`, against `GITHUB_TOKEN`/`GH_TOKEN`).
+- **What a run tested** — one facts line as the reports' title/banner/name, every fact in
+  `<report dir>/run-facts.json`. `captureGitInfo` is **off**: Playwright would turn it on under CI and
+  put authors' emails and a diff in the report.
+- **Report retention** — each run prunes its own cell's reports as it ends (`E2E_REPORTS_KEEP`, 20;
+  30 days; the newest complete one up to 182); `npm run report:prune` does every cell.
+- **One cell, one orchestrator run** — a lock per site, keyed by `baseURL`, shared by every
+  orchestrator of this user on the machine; held for a task's whole loop and kept while a run's
+  processes may live. Not covered: other users, other machines, runs started by hand, one site under
+  two addresses ([orchestrator.md](docs/guides/orchestrator.md#one-run-per-site)).
 
 ## NPM commands
 
 ```bash
 # Testing
-npm run test                       # default product, bddgen + run
-E2E_CELL=<cell> npm run test:wp-rocket       # one product, one cell (safe beside other cells)
+npm run test                                        # default product, bddgen + run
+E2E_CELL=<cell> npm run test:wp-rocket              # one product, one cell (safe beside other cells)
 E2E_CELL=<cell> npm run test:backwpup
 E2E_CELL=apache npm run test:wp-rocket -- --grep @smoke   # filter by tag
-npm run test:backwpup -- --project=<cell>     # also one cell, but regenerates every cell's specs:
-                                              # never beside another run of the same product
-npm run test:ui                    # Playwright UI mode
-npm run test:headed                # headed browser
-npm run test:unit                  # unit/integration specs (src/**/*.spec.ts, orchestrator/**/*.spec.ts)
+npm run test:backwpup -- --project=<cell>           # one cell, but regenerates every cell's specs:
+                                                    # never beside another run of the same product
+npm run test:ui                                     # Playwright UI mode
+npm run test:headed                                 # headed browser
+npm run test:unit                                   # unit/integration specs (src/**, orchestrator/** *.spec.ts)
 npm run test:unit:ui
 
 # Fleet health check
-npm run healthcheck                # preflight + login across every product/cell/site
-npm run healthcheck:ui             # same, but headed — the browser is visible on screen
+npm run healthcheck                                 # preflight + login on every product/cell/site
+npm run healthcheck:ui                              # same, browser visible
 
-# Plugin artifacts (pre-warm APVM's cache for the zips under test)
-npm run artifacts:warm             # warm every real cell's requests (CI/local prep)
-npm run artifacts:warm -- --product=backwpup --cell=pro@nginx  # narrow to one unit
+# Plugin artifacts
+npm run artifacts:warm                              # pre-warm APVM's cache for every real cell
+npm run artifacts:warm -- --product=backwpup --cell=pro@nginx
 
 # Quality gates (see "Required workflow after every edit")
-npm run typecheck                  # tsc
-npm run lint                       # eslint .
-npm run lint:fix                   # eslint . --fix
-npm run format                     # prettier --write .
-npm run format:check               # prettier --check .
+npm run typecheck                                   # tsc
+npm run lint                                        # eslint .
+npm run lint:fix
+npm run format                                      # prettier --write .
+npm run format:check
 
-# Orchestrator (runs cells in loops; config in .orchestrator/config.json, from orchestrator/config.example.json)
-npm run orchestrator -- start --dry-run          # check the config, print what would run; runs and writes nothing
-npm run orchestrator -- start --task <id> --once # one run of that task, then exit 0 (passed/flaky), 1, or 130 if stopped
-npm run orchestrator -- start                    # every task, each in its own loop, until stopped
-                                                 # Ctrl-C drains (exit 130); again interrupts; a third kills
-npm run orchestrator -- start --help             # options (--config <file>, --task <id...>), exit codes
-                                                 # options always after "--": npm takes --dry-run itself
-npm run orchestrator:soak                        # the soak: hundreds of runs of the real start over the fake suite
-                                                 # (minutes; ORCHESTRATOR_SOAK_RUNS, default 200)
+# Orchestrator (config in .orchestrator/config.json, from orchestrator/config.example.json)
+npm run orchestrator -- start --dry-run             # check the config, print what would run; writes nothing
+npm run orchestrator -- start --task <id> --once    # one run, then exit 0 (passed/flaky), 1, or 130 if stopped
+npm run orchestrator -- start                       # every task in its own loop until stopped
+                                                    # Ctrl-C drains (130); again interrupts; a third kills
+npm run orchestrator -- start --help                # options always after "--": npm takes --dry-run itself
+npm run orchestrator:soak                           # minutes; ORCHESTRATOR_SOAK_RUNS (default 200)
 
 # Reporting
-npm run report                     # open the newest Playwright HTML report
-npm run report -- wp-rocket apache # open a specific product/cell's newest report
-npm run report:allure              # generate Allure report for the newest run
+npm run report                                      # open the newest Playwright HTML report
+npm run report -- wp-rocket apache                  # a product/cell's newest
+npm run report:allure                               # Allure for the newest run
 npm run report:allure -- wp-rocket apache --open
-npm run report:prune               # dry run of the retention policy over every cell's reports
-npm run report:prune -- --apply    # remove (--keep, --older-than, --keep-newest-for, --product, --cell)
+npm run report:prune                                # dry run of retention over every cell
+npm run report:prune -- --apply                     # remove (--keep, --older-than, --keep-newest-for, --product, --cell)
 
 # Local WordPress (Docker transport)
-npm run env:up                     # start + install Apache(:8100) & Nginx(:8101) sites
-npm run env:down                   # stop & remove (incl. volumes)
+npm run env:up                                      # Apache(:8100) & Nginx(:8101) sites
+npm run env:down                                    # stop & remove, volumes included
 npm run env:logs
 
 # Browsers
-npm run setup                      # playwright install chromium (also runs on postinstall)
+npm run setup                                       # playwright install chromium (also on postinstall)
 ```
 
 ## Configuration
 
-Two surfaces — schema reference in
-**[docs/guides/configuration.md](docs/guides/configuration.md)**:
+Schema: **[configuration.md](docs/guides/configuration.md)**.
 
-- **Sites files** (per product, **git-ignored**, hold credentials) define the cells
-  and their site pools. A product may use any combination of:
-  - `sites.json` — the primary file.
-  - `sites.<name>.json` overlays (e.g. `sites.docker.json`, `sites.local.json`,
-    `sites.ssh.json`) — merged in alphabetically after `sites.json`. Each file owns a
-    disjoint set of cells; a cell name appearing in two files is a hard error.
-  - When **none** of the above exist, the committed `sites.example.json` (placeholder
-    data, `.example.test` hostnames) is used so a fresh checkout still loads and the
-    `@noauth` smoke tests pass.
-    Credentials live only in these files and never enter reports.
-- **`.env`** (copied from `.env.example`, loaded by
-  [`load-env.ts`](src/common/config/load-env.ts)) holds runtime flags and BackWPup
-  storage credentials. Real env vars always win over `.env`; `E2E_LOAD_DOTENV=false` in the
-  environment skips the file (the orchestrator's runs). Access env only through
-  the typed accessors in [`env.ts`](src/common/config/env.ts).
+- **Sites files** (per product, **git-ignored**, hold credentials) define cells and pools: `sites.json`
+  plus `sites.<name>.json` overlays, merged alphabetically, each owning disjoint cells. With none, the
+  committed `sites.example.json` (placeholders) is used, so a fresh checkout passes the `@noauth`
+  smoke. Credentials live only there and never enter reports.
+- **`.env`** (from `.env.example`, loaded by [`load-env.ts`](src/common/config/load-env.ts)):
+  runtime flags and BackWPup storage credentials. Real env vars win; `E2E_LOAD_DOTENV=false` in the
+  environment skips the file. Read env only through the typed accessors in
+  [`env.ts`](src/common/config/env.ts).
 
 ## Fixtures
 
-Import step builders and fixtures from a `fixtures.ts`, **not** from `playwright-bdd`
-directly. Product steps import from **their product's** `fixtures.ts` (which extends the
-shared one with that product's page objects); product-agnostic steps and hooks import from
-[`src/common/fixtures.ts`](src/common/fixtures.ts). playwright-bdd resolves each scenario to
-the most-extended instance its steps use, so the two mix freely — but the product's
-`fixtures.ts` must appear in its `steps` config, or generation fails outright. Available
-shared fixtures:
+Import step builders and fixtures from a `fixtures.ts`, **never** from `playwright-bdd`. Product steps
+use **their product's** `fixtures.ts`; shared steps and hooks use
+[`src/common/fixtures.ts`](src/common/fixtures.ts). playwright-bdd picks the most-extended instance a
+scenario's steps use, so they mix — but the product's `fixtures.ts` must be in its `steps` config, or
+generation fails. Shared fixtures:
 
-| Fixture                   | Scope  | Purpose                                                                                                                       |
-| ------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| `site`                    | test   | The `SiteConfig` bound to this worker; throws if no pool (tag `@noauth` instead).                                             |
-| `edition`                 | test   | The cell's `free`/`pro` edition; throws in editionless cells.                                                                 |
-| `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                                                              |
-| `pluginArtifact`          | test   | `pluginArtifact(role)` → the resolved zip under test; `.slug` addresses the plugin, `.zipPath` feeds `stageAndInstallPlugin`. |
-| `releaseBoundSite`        | worker | Automatic teardown: removes the site's staging area, closes SSH connections. Best-effort — never fails a passing run.         |
-| `drainGate`               | test   | Automatic: once the run's stop file (`E2E_INTERNAL_STOP_FILE`) exists, skips each scenario's first attempt as `stopped`.      |
-| `baseURL` (override)      | —      | Points navigation at the bound site.                                                                                          |
-| `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                              |
-| device options (override) | —      | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else the desktop default.    |
+| Fixture                   | Scope  | Purpose                                                                                                               |
+| ------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------- |
+| `site`                    | test   | The `SiteConfig` bound to this worker; throws if no pool (tag `@noauth` instead).                                     |
+| `edition`                 | test   | The cell's `free`/`pro` edition; throws in editionless cells.                                                         |
+| `boundSite`               | worker | The worker's pinned site (by `parallelIndex`); underpins `site`.                                                      |
+| `pluginArtifact`          | test   | `pluginArtifact(role)` → the resolved zip; `.slug` addresses the plugin, `.zipPath` feeds `stageAndInstallPlugin`.    |
+| `releaseBoundSite`        | worker | Automatic teardown: removes the site's staging area, closes SSH connections. Best-effort — never fails a passing run. |
+| `drainGate`               | test   | Automatic: once the stop file exists, skips each scenario's first attempt as `stopped`.                               |
+| `baseURL` (override)      | —      | Points navigation at the bound site.                                                                                  |
+| `storageState` (override) | —      | The bound site's saved login, or an empty session for `@noauth`.                                                      |
+| device options (override) | —      | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else desktop.        |
 
-BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds `onboarding`, `firstBackup`,
-`dashboard`, `dataSelection`, `frequency`, `storages`, `jobRun`, `backupHistory`, `restore`
-(edition-aware), `plugins`, `cli`, `markers`, `archives`, `privateFolder`, `keys`, `jobExports`, `tablePadding`,
-`changedMarkers` and `cliRestore`. `cli` runs one `wp backwpup …`
-subcommand and remembers the result for the step that asserts on it — for the feature where the
-**command is the system under test**, so a refusal is returned rather than thrown (`support/cli.ts`);
-use `support/backups.ts` when WP-CLI is only arranging or checking a site, since that one throws. A
-command names what the plugin allocates in braces — `{job}`, `{oldest backup}`, `{newest log}`,
-`{path to the newest backup}`, `{private folder}`, `{encryption key}`, `{public key file}` — filled as
-it runs, from the site or from the scenario's own record of what it made there
-(`support/placeholders.ts`); a misspelt one is refused by name, and the text as written may not name
-a path off the site. A `--key=` value never appears in a message naming the command (`commandLine` hides it — `describeCli`, time limits, parse errors).
-`markers` plants a random value in the site's files and another in its database, and removes both
-afterwards, so a scenario can ask an archive what it actually captured. Requesting it _plants_ them,
-so it must be requested before the backup under inspection runs. `archives` records each archive a
-scenario's backups left, with its digest, as it was made — what "byte for byte" and "the oldest
-backup" are measured against; `privateFolder` is the scenario's own folder in the site's staging
-area for the files a command writes or reads — a download, an export, a key — private to the
-transport's user, since the web server serves what it can read there, and removed afterwards only if
-a step used it. `keys` draws the scenario's encryption keys (two hex keys, an RSA pair placed in that
-folder) the first time a placeholder names one; `jobExports` records a digest of the site's jobs as
-each export is arranged, what "as they were" is measured against; `tablePadding` pads the site's
-database with empty tables of its own (`<prefix>e2e_pace_NNN`) so a paced backup, which pauses once
-per table, lasts as long on every site — removed after the `@plugin` teardown, only if a step padded.
-Padding can never pile up (fixed names, and every padding drops the last first), and what a killed run
-left is dropped when the next BackWPup run's worker starts (`leftoverPaddingSweep`, automatic).
-`restore` drives the six-step restore wizard (`strategiesOffered`, `restoreWith`), every wait failing at
-once on the wizard's error line, the decryption prompt, the login screen, or what `WizardWatch` saw in its
-traffic since the page object was made — a stream reconnecting (a PHP failure after its headers) or answered
-with something else, a failed `controller=job` call, an uncaught error in the plugin's scripts;
-`changedMarkers` holds the values the markers were changed to after a backup, which a restore's untouched
-half must still hold. `cliRestore` runs `wp backwpup restore` so the shared cell ends as found — the only way
-to run it, the generic command step refuses it: refused on a database holding what `wp db reset` would
-destroy for good (tables outside the prefix, views, routines, events, triggers) or a relocated
-`wp-content`; `wp-content` copied as root into `<root>/.e2e_content_copy/` (root-only) before a files restore
-and put back exactly (`tar --recursive-unlink`) after the scenario, once no run is still in flight — a copy
-that cannot go back is kept and its way back spelled out, and every BackWPup worker refuses a site still
-holding one (`contentCopyLeftover`, automatic); the database's default collation set back; the scenario's
-own snapshots removed, watched on every run and told from other runs' by either changed marker. A files
-restore overwrites `debug.log`, so the restore steps judge the log so far first, and again just before
-"Start" (`checkDebugLog`, the `@plugin` gate's own rule). See [authoring-tests.md](docs/guides/authoring-tests.md#page-object-model) for
-the pattern, the locator policy, and the locator-contract spec every page object carries.
+BackWPup's [`fixtures.ts`](src/projects/backwpup/fixtures.ts) adds page objects and scenario state —
+what each does: [authoring-tests.md → BackWPup's
+fixtures](docs/guides/authoring-tests.md#backwpups-fixtures). Rules to know before using them:
+
+- `cli` runs `wp backwpup …` where the **command is the system under test** and returns a refusal
+  instead of throwing; when WP-CLI only arranges or checks a site, use `support/backups.ts`
+  (throws). A `--key=` value never appears in a message naming the command: name it through
+  `commandLine` (`support/cli.ts`).
+- Request `markers` **before** the backup under inspection runs: requesting it plants them.
+- `restore` (the six-step wizard: `strategiesOffered`, `restoreWith`) fails each wait at once on the
+  wizard's error line, the decryption prompt, the login screen, or what `WizardWatch` saw (a stream
+  reconnecting or answered with something else, a failed `controller=job` call, an uncaught plugin
+  script error). `changedMarkers` holds the values the markers were changed to after a backup, which
+  a restore's untouched half must still hold.
+- `cliRestore` is the only way to run `wp backwpup restore` (the generic step refuses it). It
+  refuses a database holding what `wp db reset` destroys for good (tables outside the prefix, views,
+  routines, events, triggers) or a relocated `wp-content`. Before a files restore it copies
+  `wp-content` as root into root-only `<root>/.e2e_content_copy/` and puts it back with `tar
+--recursive-unlink` once no run is in flight; a copy that cannot go back is kept with its way back
+  spelled out, and every BackWPup worker refuses a site still holding one (`contentCopyLeftover`).
+  It also restores the default collation and removes the scenario's own snapshots, told from other
+  runs' by either changed marker.
+
+Page-object pattern, locator policy and the locator-contract spec:
+[authoring-tests.md](docs/guides/authoring-tests.md#page-object-model).
 
 ## Shared scenario hooks
 
-[`src/common/hooks/`](src/common/hooks/) holds product-agnostic scenario hooks. Each
-`*.hooks.ts` file is a thin binding to the BDD runtime; its policy lives in a sibling
-module so it is unit-testable without the runtime.
+[`src/common/hooks/`](src/common/hooks/): each `*.hooks.ts` only binds to the BDD runtime; its policy
+lives in a sibling module, unit-testable without it.
 
-**`@plugin`** ([`plugin.hooks.ts`](src/common/hooks/plugin.hooks.ts)) — tag a scenario
-`@plugin` and it gets:
+**`@plugin`** ([`plugin.hooks.ts`](src/common/hooks/plugin.hooks.ts)):
 
-- **Before** — `debug.log` cleared, any **work the plugin is still running** stopped
-  (`ProductConfig.stopRunningWork` — a job a killed run left behind; reported, and a failure only
-  if it would not stop), any existing copy of the plugin uninstalled (so the
-  install is genuinely fresh, DB footprint included) — and anything left at the plugin's **path**
-  removed by path: a folder WordPress no longer lists, or a listed one whose uninstall fails (taken
-  off `active_plugins` first with no plugin loaded, or the next `install --activate` would skip its
-  activation), which is what a removal stopped part-way by a PHP-FPM restart or reboot leaves
-  (`wp/plugin-dir.ts`; reported as a warning and a `leftover-plugin-files` attachment; that copy's
-  uninstall fatal is an earlier run's, so `debug.log` is cleared again) — then the cell's own resolved
-  artifact staged and installed with `--activate`, its files handed back to the ownership the
-  **site** uses (WP-CLI installs as the transport's user, which the web server is not — see
-  `wp/ownership.ts`) — and the plugin's **active state re-asserted**, never inferred from the
-  install's exit code — and, between the removal and the install, the plugin's leftover **database
-  footprint** swept off what is actually on the site (`ProductConfig.siteDbResidue`). That sweep is
-  keyed off the footprint, never off whether the plugin is installed: a site whose plugin
-  directory went without its `uninstall.php` ever running would otherwise be installed straight
-  on top of the last run's rows. The edition is never named:
-  the slug comes from `pluginArtifact("plugin").slug`. Finally the product's declared data
-  directories (`ProductConfig.siteResidue`) are created, opened to **both** users sharing the
-  docroot and handed to the site's ownership — WP-CLI and the web server are different users on a
-  real cell, and whichever writes first would otherwise lock the other out (`prepareSiteDataDirs`).
-  A data directory the plugin names at runtime is resolved from the installed plugin after each
-  install (`ProductConfig.resolveSiteDataDirs`) and prepared the same way — BackWPup's
-  `uploads/backwpup-restore-<20 hex>`, which WP-CLI otherwise creates unwritable by the web server.
-  A step that must reinstall part-way uses `replacePluginUnderTest` — the same install without the
-  log reset, so the teardown still judges the scenario's whole log — with `declaredResidue`.
-- **After** — `debug.log` scanned with the product's preset: a **PHP fatal fails the
-  scenario** (`DebugLogFatalError`) with the log attached; warnings/notices are logged.
-  Then any **work the plugin is still running** is stopped (`ProductConfig.stopRunningWork` — for
-  BackWPup, a backup job a scenario left running, which runs in a web request and would otherwise
-  outlive the uninstall), then the plugin is removed (what is left at its path too, reported as
-  above; an uninstall that fails is healed the same way but **fails the scenario**,
-  `PluginUninstallBrokenError` — the log was judged before it ran), then any **database footprint** that
-  outlived its uninstall is swept, and finally the **files it left behind** are cleared
-  (`ProductConfig.siteResidue`) — a plugin's uninstall keeps the data it wrote, so a suite that
-  reinstalls per scenario would fill the cell's disk. All five duties always run, independently: a
-  sweep is not skipped because the uninstall failed. The log verdict wins when more than one
-  fails, and the others are still logged. Having to stop running work is reported, not failed;
-  work that _would not_ stop is a cleanup failure. Left-over data the transport's user is not
-  _permitted_ to remove is reported, not failed — see
-  [wordpress-automation.md](docs/architecture/wordpress-automation.md). A scenario the drain
-  skipped is left alone: it installed nothing.
-- The Before hook has a budget of its own on top of the shared one for stopping a killed run's
-  work (`LEFT_WORK_ALLOWANCE_MS`, which every `stopRunningWork` must fit). The scenario timeout is
-  extended **additively** to cover both hooks (remote WP-CLI plus
-  an SFTP upload is slow), so a scenario keeps any budget it asked for.
+- **Before**, in order: clear `debug.log`; stop work the plugin still runs (a killed run's job —
+  `ProductConfig.stopRunningWork`; reported, a failure only if it won't stop); uninstall any
+  existing copy (so the install is fresh, DB footprint included) and remove by path what is left
+  there — a folder WordPress no longer lists, or a listed copy whose uninstall fails (taken off
+  `active_plugins` with no plugin loaded first, or `install --activate` skips its activation); a
+  removal cut short leaves these (`wp/plugin-dir.ts`; a warning plus a `leftover-plugin-files`
+  attachment; after a failed uninstall `debug.log` is cleared again, that fatal is an earlier run's); sweep its leftover **database
+  footprint** (`ProductConfig.siteDbResidue` — keyed off what is on the site, never off whether the
+  plugin is installed); stage and install the cell's artifact with `--activate`, its files handed to
+  the **site's** ownership; **re-assert the active state**, never inferred from the exit code;
+  create the declared data directories (`ProductConfig.siteResidue`, and `resolveSiteDataDirs` for
+  names the plugin picks at runtime, e.g. BackWPup's `uploads/backwpup-restore-<20 hex>`), open to
+  **both** WP-CLI's and the web server's user and handed to the site's ownership. The edition is
+  never named: the slug is `pluginArtifact("plugin").slug`. To reinstall part-way, a step calls
+  `replacePluginUnderTest` (no log reset, so the teardown judges the whole log) with
+  `declaredResidue`.
+- **After**: scan `debug.log` with the product's preset — a **PHP fatal fails the scenario**
+  (`DebugLogFatalError`, log attached), warnings/notices are logged; stop running work (a BackWPup
+  job runs in a web request and would outlive the uninstall); remove the plugin, healing what is left at its path as above — a
+  failed uninstall still **fails the scenario** (`PluginUninstallBrokenError`); sweep its database
+  footprint; clear the **files it left** (an uninstall keeps its data, and per-scenario reinstalls
+  would fill the disk). All five always run, independently; the log verdict wins and other failures
+  are logged. Having to stop work is reported; work that _won't_ stop is a failure. Leftovers the
+  transport's user may not remove are reported, not failed
+  ([wordpress-automation.md](docs/architecture/wordpress-automation.md#left-over-plugin-data-wpresiduets)).
+  A drained scenario gets neither hook.
+- The scenario timeout is extended **additively** for both hooks (remote WP-CLI + SFTP is slow),
+  plus `LEFT_WORK_ALLOWANCE_MS` for stopping left work (every `stopRunningWork` must fit it).
 
-**MUST — `src/common/hooks/**/*.hooks.ts` belongs in every product's `steps` globs.**
-Hooks register only when their file is imported, and that glob is the only importer: omit
-it and the lifecycle is _silently absent_ rather than failing.
+**MUST — `src/common/hooks/**/*.hooks.ts` belongs in every product's `steps` globs.** That glob is
+the only importer: omit it and the lifecycle is _silently absent_.
 
-A product declares its `debug.log` scan preset as `ProductConfig.debugLog` (from its
-`support/debug-log.ts`) and how to stop its background work as `ProductConfig.stopRunningWork`;
-the config factory registers both per process, so the shared hooks never import product code — and
-neither RegExp patterns nor functions can ride project metadata anyway.
+A product declares its `debug.log` preset (`ProductConfig.debugLog`) and `stopRunningWork`; the config
+factory registers both per process, so shared hooks never import product code (RegExps and functions
+cannot ride project metadata anyway).
 
 ## Device profiles (desktop & `@mobile`)
 
-Device is a **per-scenario client** concern, so it is tag-driven and never multiplies the
-project matrix ([`config/devices.ts`](src/common/config/devices.ts)):
+Tag-driven, per scenario, never a project dimension
+([`config/devices.ts`](src/common/config/devices.ts)):
 
-- **Default: desktop** — Desktop Chrome at `1600×700`, applied by the config factory.
-- **`@mobile`** — Pixel 5 (a **Chromium** preset, matching the only browser we run) at
-  `389×829`, applied via the `use` overrides above. Taking a real device preset rather
-  than just a narrow viewport is what makes responsive CSS, touch handlers and any
-  server-side `wp_is_mobile()` branch behave as they do for a real visitor. Both viewports
-  are pinned, so a Playwright upgrade cannot shift viewport-sensitive expectations.
+- **Default** — Desktop Chrome at `1600×700`.
+- **`@mobile`** — Pixel 5 (a Chromium preset, our only browser) at `389×829`: the full preset (user
+  agent, touch, scale), not just a narrow viewport, so responsive CSS, touch handlers and
+  user-agent checks see a phone.
+
+Both viewports are pinned, so a Playwright upgrade cannot shift them.
 
 ## Improvement gate (lint)
 
-`eslint.config.js` bans four flaky-by-construction waits across `src/projects/**`,
-`src/common/pages/**`, `src/common/steps/**` and `src/common/hooks/**`: `waitForTimeout`,
-`waitForLoadState("networkidle")`, `waitForSelector`, and `.type()`. Each message names
-the replacement. Each selector matches the member expression in the **call's `.callee`
-field**, so passing a property that merely shares one of those names (`describe(job.type)`)
-is not flagged — a gate that fires on innocent code is one people start disabling. The single deliberate exception is out of scope by design —
-[`visual/stabilize.ts`](src/common/visual/stabilize.ts) uses one timeboxed, already-caught
-`networkidle` attempt to settle lazy media before a screenshot.
+`eslint.config.js` bans `waitForTimeout`, `waitForLoadState("networkidle")`, `waitForSelector` and
+`.type()` in `src/projects/**` and `src/common/{pages,steps,hooks,auth}/**`; each message names the
+replacement. It matches the **called** member only, so `describe(job.type)` passes — a gate that fires
+on innocent code gets disabled. The one exception, outside that scope on purpose:
+[`visual/stabilize.ts`](src/common/visual/stabilize.ts)'s single timeboxed, caught `networkidle` before
+a screenshot.
 
-It also keeps `src/common/**` from importing anything under `src/projects/`: a product hands the
-shared code its policy through `ProductConfig` and the config factory's registries. ESLint
-(`no-restricted-imports`) flags a static import as it is typed. It cannot see a dynamic `import()`
-or a `typeof import()` type, so [`import-boundary.spec.ts`](src/common/import-boundary.spec.ts)
-checks every form with TypeScript's own import scanner. The product list,
-[`src/projects/products.ts`](src/projects/products.ts), is therefore read
-only by the entry points that span products — `playwright.config.ts`, the healthcheck, the
-artifact warm and the orchestrator. Importing it never loads `.env` or stamps `RUN_ID`.
-Its spec fails when it and `src/projects/`, the root `playwright.<product>.config.ts` files or
-the `test:<product>` scripts disagree.
+**`src/common/**` never imports `src/projects/`**; products hand it their policy through
+`ProductConfig` and the config factory's registries. ESLint flags static imports;
+[`import-boundary.spec.ts`](src/common/import-boundary.spec.ts) catches `import()` and
+`typeof import()`. Only cross-product entry points (`playwright.config.ts`, healthcheck, artifact warm,
+orchestrator) read [`products.ts`](src/projects/products.ts), which never loads `.env` or stamps
+`RUN_ID`; its spec fails when it disagrees with `src/projects/`, the `playwright.<product>.config.ts`
+files or the `test:<product>` scripts.
 
-The orchestrator is a long-lived process and must keep the process-wide state it started with, while
-`run-context.ts`, and every module importing it, loads `.env` and stamps `RUN_ID` as it is imported.
-So the orchestrator's code imports from the suite only the modules
-[`orchestrator/suite-imports.json`](orchestrator/suite-imports.json) lists — never test code, never a
-computed `import()` path, nor a URL (`data:`, `file:`, `https:` — a `data:` URL's code imports what it
-likes), nor a builtin or name that loads or runs code no guard reads (`module`,
-`worker_threads`, `vm`, `inspector`, `repl`, `process.getBuiltinModule`, `eval`, `Function`), and
-it is ES modules only — no `.cts`, `.cjs` or `package.json` (CommonJS hands every module a `require`). It loads the
-product list only through `loadProductList` (`orchestrator/config/product-list.ts`): importing it reads
-every product's sites file, so a broken one must be a config error, not a crash. ESLint reads the
-list (`no-restricted-imports`, by spelling; test code exempt); [`orchestrator/import-boundary.spec.ts`](orchestrator/import-boundary.spec.ts) judges every
-import form where it really leads, walks all an admitted module can load (never `load-env.ts` or
-`run-context.ts`, even lazily), and imports the admitted modules and the orchestrator's code but the
-root `cli.ts` in a fresh Node to prove environment, process listeners, working directory, exit
-code, umask, listener limits and `Error.stackTraceLimit` unchanged, and `fetch`, `process.exit`,
-`process.cwd`, `process.chdir`, `fs.close` and `fs.closeSync` not replaced
-(`__fixtures__/import-probe.ts`) — but for graceful-fs's patch, which Playwright's bundle applies and
-the product list reaches: accepted only by its own marks, all four at once (`GRACEFUL_FS_PATCH`).
-Admit a module only once that spec passes with it.
+**The orchestrator imports from the suite only what
+[`orchestrator/suite-imports.json`](orchestrator/suite-imports.json) lists**: it is long-lived and must
+keep its process state, while `run-context.ts` and everything importing it load `.env` and stamp
+`RUN_ID` on import. Never test code, a computed `import()`, a URL (`data:`, `file:`, `https:`), or a
+builtin or name that runs code no guard reads (`module`, `worker_threads`, `vm`, `inspector`, `repl`,
+`process.getBuiltinModule`, `eval`, `Function`); ES modules only (no `.cts`, `.cjs`, `package.json`).
+The product list only through `loadProductList`, so a broken sites file is a config error, not a
+crash. [`orchestrator/import-boundary.spec.ts`](orchestrator/import-boundary.spec.ts) resolves every
+import, walks all an admitted module can load (never `load-env.ts`/`run-context.ts`), and imports it
+all but `cli.ts` in a fresh Node to prove env, listeners, cwd, exit code, umask, listener limits and
+`Error.stackTraceLimit` unchanged and `fetch`, `process.exit`, `process.cwd`, `process.chdir`,
+`fs.close`, `fs.closeSync` not replaced — except graceful-fs's patch (Playwright's bundle), accepted
+only with all four of its marks (`GRACEFUL_FS_PATCH`). Admit a module only once that spec passes.
 
-**Auth fixture / setup:** [`src/common/auth/auth.setup.ts`](src/common/auth/auth.setup.ts)
-is a dependency project that runs before any BDD scenarios. It does three things in order:
+**Auth fixture / setup:** [`auth.setup.ts`](src/common/auth/auth.setup.ts) is a dependency project run
+before the scenarios, in three steps:
 
-1. **Pre-flight transport verification** — for each real site, verifies that its
-   transport is reachable and functional (SSH connectivity + WP-CLI + rootDir access;
-   Docker container running + WP-CLI in container; local rootDir + WP-CLI in PATH) and
-   that a real, installed WordPress answers (`wp core is-installed` — so core files load,
-   the database connects, and the install is complete). A non-zero exit is classified so a
-   WordPress that cannot boot (PHP too old, DB down, a fatal — errors it prints to stdout or
-   stderr) is reported as such and never mislabeled as "not installed". Once those pass, it
-   also asserts the **admin UI is English** (`determine_locale()` for the configured user —
-   the same function WordPress uses to pick an admin request's language, so it accounts for a
-   per-user override, the site option, a `WPLANG` constant and filters alike). Page objects
-   locate controls by their visible English names, so a translated site would otherwise fail
-   as many unrelated locator timeouts instead of once, here. Three further checks are **reports, not
-   gates**: **File ownership** says what will happen to the files this run installs (the same
-   `planOwnership` decision `normalizeOwnership` acts on, taken once and shared, so the report and
-   the action can never disagree), **Elevation** says whether passwordless `sudo` is available, and
-   **Plugin folders** says whether the slug the cell installs as (`resolveIdentity` of its manifest and
-   edition) holds a folder WordPress lists no plugin in, which the cell's next `@plugin` scenario
-   removes.
-   None fails a site for a property of the _host_ — the single exception is a
-   `transport.fileOwner` that cannot be parsed, which is our own configuration being unreadable and
-   fails like any other config error. A failure of any gating check throws a formatted, actionable
-   report and skips the whole BDD project; the reports instead fold into one run-level warning
-   banner ([`setup/elevation-report.ts`](src/common/setup/elevation-report.ts)), printed once per
-   run, silent when every site can elevate or has opted out, and naming the ownership cost only for
-   the sites that actually needed a handover — and a second one naming each leftover plugin folder.
-2. **Authentication** ([`auth/authenticate.ts`](src/common/auth/authenticate.ts)) — per real
-   site, first **ends the session the cell's previous run saved** (`auth/session.ts`: that one
-   token, for that site's host only, through `WP_Session_Tokens`, so no other session of the user is
-   touched), then logs in once through the WordPress UI and saves the session to that site's
-   `storageState`, which the BDD project reuses. A setup that fails ends the sessions it saved before
-   failing — one that times out too, from its `afterEach` (`endSessionsWhenSetupFails`), since a
-   timeout abandons the body. Not at the run's end: the `--no-deps` loop reuses the saved login, and an interrupted run
-   skips its teardown. Best-effort and bounded (`BEST_EFFORT_ALLOWANCE_PER_SITE_MS`, added to the
-   setup's timeout): a session that cannot be ended is a warning, and expires in two days.
-3. **Site versions** — reads Site Health's "Copy site info" text
-   ([`SiteHealthPage`](src/common/pages/site-health.page.ts)), cut down **in the page** to the
-   whitelisted lines (a traced call records what it returns), and keeps that whitelist — WordPress, PHP
-   as the web server runs it, its SAPI, the web server, the database and its extension
-   ([`setup/site-info.ts`](src/common/setup/site-info.ts)) — printed as a `[site]` line and attached
-   as `site-info.json`. Best-effort: a failure is a warning and an `error` entry, never a failed setup.
+1. **Pre-flight** (gating), per real site: the transport works (ssh: connection, WP-CLI, `rootDir`;
+   docker: container up, WP-CLI inside; local: `rootDir`, WP-CLI on `PATH`) and `wp core
+is-installed` passes — a WordPress that cannot boot (old PHP, DB down, a fatal) is reported as
+   that, never as "not installed". Then the **admin UI is English** (`determine_locale()` for the
+   configured user, so per-user setting, site option, `WPLANG` and filters all count): page objects
+   match English names, and a translated site would otherwise fail as many locator timeouts. A gate
+   failure throws a formatted report and skips the scenarios. Three **reports, never gates**: **File
+   ownership** (the same `planOwnership` decision `normalizeOwnership` acts on, so report and action
+   agree), **Elevation** (passwordless `sudo`?) and **Plugin folders** (a folder WordPress lists no
+   plugin in at the slug the cell installs, which its next `@plugin` scenario removes). No report fails a site for a property of
+   the host; the one exception is an unparsable `transport.fileOwner` (our config, unreadable).
+   Reports fold into one banner per run
+   ([`setup/elevation-report.ts`](src/common/setup/elevation-report.ts)), silent when every site can
+   elevate or opted out, naming the ownership cost only where a handover was needed; a second names
+   each leftover plugin folder.
+2. **Authentication** ([`authenticate.ts`](src/common/auth/authenticate.ts)), per real site: end the
+   session the cell's previous run saved (`auth/session.ts`: that token only, that host only, via
+   `WP_Session_Tokens`), log in once through the UI, save `storageState`. A failing or timed-out
+   setup ends the sessions it saved (from `afterEach`, `endSessionsWhenSetupFails` — a timeout
+   abandons the body). Not at run end: the `--no-deps` loop reuses the login and an interrupted run
+   skips teardown. Best-effort, bounded by `BEST_EFFORT_ALLOWANCE_PER_SITE_MS` (added to the setup's
+   timeout): a session left open is a warning and expires in two days.
+3. **Site versions** — Site Health's "Copy site info", cut **in the page** to a whitelist (a traced
+   call records what it returns): WordPress, the web server's PHP and SAPI, web server, database and
+   its extension ([`setup/site-info.ts`](src/common/setup/site-info.ts)); a `[site]` line and
+   `site-info.json`. A failure is a warning and an `error` entry.
 
-The shared login ([`auth/login.ts`](src/common/auth/login.ts)) confirms each credential
-field actually kept its value before submitting. `fill()` writes into whatever element has
-focus at that instant, and WordPress's login page re-focuses the username field, so a
-re-focus landing mid-fill otherwise diverts text into the wrong field and the run
-fails much later as "login never settled". The password goes in through
-[`enterSecret`](src/common/pages/secret-field.ts) and is checked with `holdsSecret`, both in the page.
+The setup is skipped when a cell has only placeholder sites.
 
-> **No site password in a report; traces still need care.** Playwright titles a `fill()`, `type()`
-> or `pressSequentially()` step with its text and has no masking, so **every secret is typed with
-> `enterSecret`** (`StorageSidebar.fillSecret` for a storage key): set in the page, checked in the page,
-> never a step's title, parameter or result. The auth setup traces **without DOM snapshots** (a snapshot
-> records every field's value, and turning them off stops network recording), and turns off, for each
-> of its tests, the failure page snapshot `error-context.md` would print field values into
-> (`keepSecretsOutOfFailureSnapshots`: `PLAYWRIGHT_NO_COPY_PROMPT`, undocumented; back on only after a
-> test that passed, since a setup worker hands its changed variables to the scenarios' workers) —
-> [`secrets.run.spec.ts`](src/common/auth/secrets.run.spec.ts) proves all of this through the real
-> runner and reporters. What remains: a **scenario's** retained trace keeps its DOM snapshots and
-> network, and its `error-context.md` its page snapshot, so they hold the WordPress **session
-> cookies** (trace) — live until the cell's next run ends that session, or WordPress's two-day expiry —
-> and any value a scenario typed or the page showed in a field; BackWPup's restore wizard renders the
-> site's **database** password into its connection step's markup. Pro's restore deep link, and any message naming BackWPup's restore working
-> directory, carry that directory's 20-hex name: on nginx the only thing keeping it, and the database
-> credentials its `restore.dat` holds during a restore, from being served (the teardown removes it
-> after every scenario). Treat `test-results/` and report artifacts as sensitive, exactly like the
-> sites file.
+[`auth/login.ts`](src/common/auth/login.ts) checks each field kept its value before submitting:
+WordPress re-focuses the username field, and a re-focus mid-`fill()` diverts text, failing much later as
+"login never settled". The password goes in with [`enterSecret`](src/common/pages/secret-field.ts) and
+is checked with `holdsSecret`, both in the page.
 
-The entire setup is skipped when only placeholder sites exist. Details:
-[authoring-tests.md](docs/guides/authoring-tests.md#fixtures-srccommonfixturests).
+> **No site password in a report; traces still need care.** Playwright titles `fill()`/`type()`/
+> `pressSequentially()` steps with their text, unmasked, so **every secret is typed with
+> `enterSecret`** (`StorageSidebar.fillSecret` for a storage key). The auth setup traces **without DOM
+> snapshots** (which also stops network recording) and turns off its tests' `error-context.md` page
+> snapshot (`keepSecretsOutOfFailureSnapshots`, via the undocumented `PLAYWRIGHT_NO_COPY_PROMPT`; back on
+> only after a passing test, since a setup worker hands its variables on);
+> [`secrets.run.spec.ts`](src/common/auth/secrets.run.spec.ts) proves it through the real runner.
+> Still exposed: a **scenario's** trace holds the WordPress **session cookies** (live until the next
+> run ends that session, or two days), and its trace and `error-context.md` any value typed or shown in
+> a field;
+> BackWPup's restore wizard renders the **database** password into its markup; Pro's restore deep link
+> and messages naming the restore folder carry its 20-hex name — on nginx the only thing keeping the folder,
+> and the DB credentials its `restore.dat` holds mid-restore, from being served (the teardown removes
+> it). Treat `test-results/` and reports as sensitive as the sites file.
 
-**Fleet health check:** [`healthcheck.ts`](healthcheck.ts) (`npm run healthcheck`) runs
-the same pre-flight + login checks as the auth setup above, but standalone (no
-Playwright test run) and across **every** product × cell × site instead of one
-selected cell. Output is grouped **per product** (wp-rocket / backwpup / future
-imagify never blur together): products run one section at a time, sites within a
-product run concurrently, and each site — pass or fail — lists every individual check
-it ran — including the ownership and elevation reports above, and the same shared warning banner
-(the renderer is shared, so the two entry points cannot drift; the healthcheck prints it to
-**stdout**, since its whole output is the report and `healthcheck > fleet.log` must not drop it).
-Failures add actionable hints. Each site is checked independently — one
-site's failure never aborts another's check — and its result prints as soon as it is
-known; a final summary breaks the fleet down per product. A cell with only placeholder
-sites is reported as skipped, not failed. Exits `0` only if every real site passed;
-exits `1` if any failed. No `storageState` is written. Tune with `HEALTHCHECK_CONCURRENCY`
-and `HEALTHCHECK_LOGIN_TIMEOUT_MS`. Useful as a fleet monitor (cron/CI) independent of
-running the full suite. `npm run healthcheck:ui` runs the exact same checks with the browser
-**headed** (visible on screen) so you can watch each login — the only difference is
-visibility (via `--headed` / `HEALTHCHECK_HEADED=true`).
+**Fleet health check:** [`healthcheck.ts`](healthcheck.ts) runs the pre-flight and login standalone
+(no test run, no `storageState` written) on **every** product × cell × site. Products run one
+section at a time, their sites concurrently; each site prints as soon as it is done, with every
+check it ran (ownership and elevation reports included) and hints on failure; a summary per product
+ends it. The banner is the auth setup's renderer, printed to **stdout** so `healthcheck > fleet.log`
+keeps it. Placeholder cells are skipped. Exit `0` only if every real site passed. Tune with
+`HEALTHCHECK_CONCURRENCY`, `HEALTHCHECK_LOGIN_TIMEOUT_MS`; `healthcheck:ui` is the same, headed
+(`--headed`, or `HEALTHCHECK_HEADED=true`).
 
 ## Plugin artifacts (the zips under test)
 
-Every run resolves **and verifies** the plugin zips it will test before any
-scenario runs. Two **roles** per product: `plugin` (the artifact under test) and
-`previous` (an older artifact some tests compare against, e.g. an update path). The
-whole capability is product-agnostic under
-[`src/common/artifacts/`](src/common/artifacts/); the full design — manifest,
-request model, resolution lifecycle, preflight, pre-warm — is in
-**[docs/architecture/plugin-artifacts.md](docs/architecture/plugin-artifacts.md)**.
+Every run resolves **and verifies** its zips before any scenario, in the `artifacts:<cell>` setup
+project: roles `plugin` (under test) and `previous` (older, for comparisons). Full design:
+**[plugin-artifacts.md](docs/architecture/plugin-artifacts.md)**; overrides (six `E2E_*` vars, ref XOR
+zip): [configuration.md](docs/guides/configuration.md#plugin-artifacts-build--verify).
 
-- **Resolution + preflight** run in the `artifacts:<cell>` setup project (a sibling
-  of the auth setup; the BDD project depends on both). Per role it either **builds**
-  a git ref through APVM or **copies** an operator-provided zip into a wiped
-  `.artifacts/<product>/<cell>/`, then a static identity preflight asserts each zip
-  is the exact plugin **and edition** expected before writing `resolution.json`.
-  Placeholder-only cells skip it — a fresh checkout builds nothing and needs no token.
-- **APVM** ([`apvm-napi`](https://github.com/wp-media/automation-plugin-version-manager))
-  is pinned in `package.json` to `…#cli/v3.0.0` — it commits prebuilt native
-  binaries, so there is no Rust toolchain or build step. BackWPup builds from a
-  **private** source repo, so it needs a GitHub token: set `GITHUB_TOKEN` or run
-  `gh auth login`. WP Rocket / Imagify are public (a token there only raises rate
-  limits).
-  **MUST — APVM is used only through this Node library, never its `apvm` CLI**, anywhere in the
-  repo (suite, scripts, the orchestrator). A capability only the CLI has waits for a library
-  release that exposes it. AI Agents can still use the CLI in a shell if required, but it must never be used in the repo's codebase.
-- **Consumption:** a scenario reads its zip through the `pluginArtifact` fixture —
-  `stageAndInstallPlugin(site.transport, a.zipPath, { activate: true, slug: a.slug })` (where
-  `a = pluginArtifact("plugin")`; the `slug` is what restores the plugin's file ownership).
-  It reads `resolution.json` (or the in-process memo). Requesting a role the product
-  does not support throws (see the MUST below). **`zipPath` is a path on the runner**,
-  so `installPlugin` alone works only on a `local` transport — `ssh`/`docker` need the
-  artifact staged onto the site first (see the WordPress automation layer below).
-- **Overrides:** six `E2E_*` env vars select a git ref **or** a prebuilt zip per role
-  (ref XOR zip) — full table and rules in
-  [configuration.md](docs/guides/configuration.md).
-- **What was tested:** every resolved zip's SHA-256 (`digest.ts`), a build's **full** commit and
-  its `pinRef` (the ref that rebuilds it — for a release, the tag a selector chose) are recorded in
-  `resolution.json` and the setup's report attachment.
-- **Pre-warm:** `npm run artifacts:warm` primes APVM's cache for the cells a run will
-  need, so each `artifacts:<cell>` build becomes a cache copy. It plans through the
-  same request builder the resolver uses (the parity invariant), so a warmed entry is
-  always the one a run looks up. Each warm returns the pin that rebuilds exactly what it cached
-  (`pin.ts`: `release:<tag>`, or `commit:<sha>` with the version built), for a run that must not
-  follow a moving ref; an unpinnable or uncached result is a failed warm. A cached commit pin needs
-  no network; a release pin does (APVM asks GitHub for the release).
+- **APVM** ([`apvm-napi`](https://github.com/wp-media/automation-plugin-version-manager), pinned to
+  `…#cli/v3.0.0`, prebuilt binaries) builds a git ref. BackWPup's source is **private**: set
+  `GITHUB_TOKEN` or run `gh auth login`; for public WP Rocket/Imagify a token only raises rate limits.
+  **MUST — APVM only through this Node library, never its `apvm` CLI**, anywhere in the repo (suite,
+  scripts, orchestrator); a CLI-only capability waits for a library release. Agents may still run the
+  CLI in a shell.
+- **Consumption:** `stageAndInstallPlugin(site.transport, a.zipPath, { activate: true, slug: a.slug })`
+  with `a = pluginArtifact("plugin")` — the `slug` restores file ownership. `zipPath` is on the
+  **runner**, so a bare `installPlugin` works only on `local`.
+- **What was tested:** each zip's SHA-256, a build's full commit and its `pinRef` are recorded in
+  `resolution.json` and the setup's attachment.
+- **Pre-warm** (`npm run artifacts:warm`) plans through the resolver's own request builder (parity),
+  so a warmed entry is the one a run looks up; each warm returns a pin that rebuilds what it cached.
 
-**Identity matrix** (what the preflight asserts — the slug alone pins product +
-edition; the header is a second, exact-equality witness):
-
-| Product / edition | Top-level dir (slug) | `Plugin Name:` header |
-| ----------------- | -------------------- | --------------------- |
-| WP Rocket         | `wp-rocket/`         | `WP Rocket`           |
-| BackWPup Free     | `backwpup/`          | `BackWPup`            |
-| BackWPup Pro      | `backwpup-pro/`      | `BackWPup Pro`        |
-
-**MUST — BackWPup `previous` role (deferred).** BackWPup has **no `previous` role
-yet** (no comparison tests): its manifest declares `plugin` only, so
-`pluginArtifact("previous")` **throws** and any `E2E_PREVIOUS_*` var is
-warned-and-ignored. When comparison tests arrive, add a `previous` default ref
-(`release:latest-stable`) **and** a `previous` default version to
-[`backwpup.config.ts`](src/projects/backwpup/config/backwpup.config.ts). Resolution
-and the preflight are manifest-driven, so declaring the role automatically enables
-the second artifact's verification — which **must not** be skipped (a comparison
-test may never consume an unverified zip). The obligation is mirrored as a comment
-on that manifest.
+**MUST — BackWPup has no `previous` role yet**: `pluginArtifact("previous")` throws and
+`E2E_PREVIOUS_*` is warned and ignored. When comparison tests arrive, add a `previous` default ref
+(`release:latest-stable`) **and** default version to
+[`backwpup.config.ts`](src/projects/backwpup/config/backwpup.config.ts); the preflight then verifies it
+automatically, and that verification **must not** be skipped. Mirrored as a comment on that manifest.
 
 ## WordPress automation layer
 
-`src/common/wp/` drives a site over WP-CLI, **transport-agnostic** (local / docker /
-ssh). Highlights — full reference in
-**[docs/architecture/wordpress-automation.md](docs/architecture/wordpress-automation.md)**:
+`src/common/wp/` drives a site over WP-CLI on any transport (local / docker / ssh). Reference:
+**[wordpress-automation.md](docs/architecture/wordpress-automation.md)**. The rules:
 
-- Commands are file + args arrays (never shell strings) → no injection.
-- **An exec error names the program and the reason, never the arguments** — on every transport,
-  since the argv carries `--key=` values and every value a snippet embeds. Never pass on execa's
-  `message`/`shortMessage`/`command`, nor attach its error as a `cause`; name a BackWPup command
-  through `commandLine` (`support/cli.ts`), which hides a `--key=` value.
-- `exec` / `wpCli` return a structured `ExecResult`; callers branch on `exitCode`.
-  Every command runs with the WordPress root as its working directory (`rootDir` for
-  `local`/`ssh`, the container `WORKDIR` for `docker`), and with no input — nothing is ever typed
-  into one — so a `[y/n]` prompt declines at once, at exit 0 having done nothing, on every
-  transport (measured).
-- **Files must reach the site before `wp` can read them.** `exec.ts` also owns the
-  transfer primitives (`wpRootDir`, `copyIntoTarget` → `fs` copy / `docker cp` /
-  SFTP), and [`wp/staging.ts`](src/common/wp/staging.ts) builds the per-site
-  `.e2e_temp/<category>/` staging area on top: `stageArtifact` (any artifact),
-  `stageAndInstallPlugin` (stage + install a zip), `cleanSiteStaging` (teardown,
-  best-effort). Overridable per site (`transport.stagingDir`) or globally
-  (`E2E_SITE_STAGING_DIR`). [`wp/teardown.ts`](src/common/wp/teardown.ts)
-  (`releaseSite`) composes that removal with closing pooled SSH connections, and runs
-  once per worker via the `releaseBoundSite` fixture.
-- Plugin lifecycle separates idempotent **cleanup** (`ensurePluginAbsent`) from
-  asserted **removal under test** (`uninstallPlugin`); both **deactivate as their own
-  WP-CLI call**, then run plain `wp plugin uninstall` (files + DB footprint) — never
-  `uninstall --deactivate`, which makes a plugin's own cleanup skip itself; typed
-  errors in `wp/errors.ts`. **"Absent" means nothing at the plugin's path**, never "WordPress
-  lists no plugin there": WordPress removes a plugin entry by entry, so a removal a PHP-FPM restart
-  or reboot cuts short leaves part of it, which blocks every later install. Cleanup heals (removes
-  what is left by path, returns it for the hooks to report); removal under test judges (fails
-  naming it, never sweeps).
-- [`wp/plugin-dir.ts`](src/common/wp/plugin-dir.ts) reads a plugin's path as the site has it —
-  `inspectPluginDirs` (`absent` / `recognised` / `orphaned`, one `wp eval` with plugins and themes
-  skipped, a link seen as a link) — and `removePluginDir` removes it by path for cleanup, through
-  `residue.ts`'s `removeEscalating`, verified, `PluginDirRemovalFailedError` otherwise. `recognised`
-  is WordPress's own list (a `<slug>/<file>.php` key of `get_plugins()`); a path under a symlinked
-  `rootDir`'s real path is accepted. Only the cell's own slug is ever inspected.
-- UI plugin actions live in the [`PluginsPage`](src/common/pages/plugins.page.ts) page object; its
-  `delete` reads WordPress's `delete-plugin` answer (a `success: false` or a gateway page fails).
-- [`wp/options.ts`](src/common/wp/options.ts) reads WordPress options (`getOption`,
-  `getOptionJson`) so a scenario can assert what a plugin _persisted_, not just what a
-  screen rendered. A missing option reads as `undefined`; a WordPress that cannot boot
-  throws, so the two can never be confused. `wp/db.ts` adds `tablePrefix` for the same
-  reason — never hard-code `wp_`.
-- [`wp/cron.ts`](src/common/wp/cron.ts) covers WP-Cron: `nextScheduled` proves an event is
-  registered (by hook **and** args — one hook commonly carries an event per job), and
-  `triggerScheduledEvent` brings that one event forward and hands it to WordPress's own
-  `spawn_cron()`, so the work runs in the web context a real schedule would use. **Never
-  `wp cron event run <hook>`**: measured live, it runs _every_ event on the hook, and it runs
-  the work inside the WP-CLI process, whose PHP is configured nothing like the web server's.
-- [`wp/php.ts`](src/common/wp/php.ts) is the PHP bridge, and **every `wp eval` goes through it**:
-  `phpLiteral` embeds a value as base64-encoded JSON, an alphabet with no PHP metacharacter in it, so
-  a value can never end the literal it sits in; `evalPhp` runs a snippet and turns a non-zero exit
-  into a throw carrying the site's own words. **Any value that came from outside this codebase — a
-  site, a scenario, a fixture — goes through `phpLiteral`.** That is the injection boundary and it
-  has no exceptions. (A compile-time constant of our own interpolated into snippet _source_, such as
-  a budget or a destination slug, is not such a value; the two `${…}` sites that do it say so.)
-- [`wp/files.ts`](src/common/wp/files.ts) reads properties of files on the site. `fileChecksum` is the
-  honest proof that a file which travelled arrived intact; size is the tempting substitute and is
-  strictly weaker. `listFiles` lists a directory's files — size, age, whether the transport's user
-  may write each, digests on request — and **refuses a directory that is not there**, which would
-  otherwise list as empty and pass "it was deleted" (`missingAsEmpty` only for one a scenario may
-  never have made); `listLocatedFiles` does the same for a directory only the site can name. `backdateFile` sets a file's age back by the
-  site's own clock. All computed on the site, so nothing large moves to answer the question.
-  `locateFromWorkingDir` / `pathFromWorkingDir` give the path a command run in WP-CLI's working
-  directory reaches a site path by, from the site's own `realpath()` and `getcwd()` — never from the
-  configured paths, which a symlinked root would send somewhere else.
-- [`wp/archive.ts`](src/common/wp/archive.ts) looks **inside** a tar on the site without moving it —
-  `findArchiveEntries` (by name or glob) and `readArchiveEntry`. Naming the member keeps the _output_
-  small, not the work: without `--occurrence` tar scans to the end regardless, and on a compressed
-  archive it decompresses the whole thing (measured: ~1.4 s per 200 MB either way). Neither call
-  declares compression, because GNU tar detects it when reading. "Absent" and "unreadable" share exit
-  status 2 and **cannot be told apart from tar's wording** — a truncated archive prints only
-  `Not found in archive` — so readability is settled by _behaviour_: list the archive with no pattern
-  and believe the exit status. Reading a corrupt archive as "that file is not in it" would make every
-  absence assertion pass. `.zip` is a valid BackWPup archive format and is **out of scope** here; tar
-  refuses it, which is honest rather than wrong.
-- [`wp/ownership.ts`](src/common/wp/ownership.ts) gives files back the ownership the **site** uses,
-  after WP-CLI writes them as the transport's user. On a real cell `wp` runs for example as `ubuntu` and PHP for example as
-  `www-data`, so an installed plugin is unwritable by the web server until this runs. The owner is
-  **detected** from `wp-content` — not assumed to be the web-server user, which is wrong on a docroot
-  deployed over SFTP — then applied as `chmod` **then** `chown` (that order: chowning first would lock
-  the transport user out of its own uninstall). Verified by re-reading, never inferred from an exit
-  code, and it **never throws**: a host that cannot do it is warned about, not failed. Overridable per
-  site with `transport.fileOwner` (`"user:group"` — either half may be a bare numeric id — or `false`
-  to opt out).
-  **MUST — any code that writes into a site's docroot as the transport's user calls
-  `normalizeOwnership` on what it wrote; never `chown`/`chmod` directly, and never elevate `wp`.**
-  `stageAndInstallPlugin` does it for you when given the plugin's `slug` — pass it.
-- [`wp/paths.ts`](src/common/wp/paths.ts) holds the guards that stand between a typo and a
-  privileged command on a real system path — `normaliseSitePath`, `assertSafeElevatedTarget`,
-  `pluginSitePath`, and `isPathSegment`, the one-segment rule every joined name passes — in one
-  place, because a copied guard is a guard that drifts. Every operation
-  that builds an elevated target out of a site's `rootDir` (residue removal, data-directory
-  preparation, ownership normalisation) validates through them. Those guards are **lexical**, so
-  where a path really leads is checked separately: `assertResolvedInsideRoot` resolves the target and
-  the root (`readlink -f`, walking up to the deepest existing ancestor) and refuses anything that
-  lands outside — a symlink in _any_ parent, not just the last component, otherwise redirects a root
-  `chmod`/`mkdir`/`rm -rf` out of the docroot while every string comparison agrees. A path that
-  cannot be resolved is refused too.
-- [`wp/db-residue.ts`](src/common/wp/db-residue.ts) is the mirror image: the rows a plugin leaves
-  when its **files** go without its `uninstall.php` ever running — which is the only time that
-  cleanup cannot run. Declared per product as `ProductConfig.siteDbResidue` (`optionsContaining`
-  fragments, matched **anywhere** in a name so a plugin's transients are caught, plus unprefixed
-  `tables`) and swept off the footprint, never off `is-installed`. Measured on a cell: the forbidden
-  `uninstall --deactivate` leaves 26 options and `wp_bwpup_backups`, and the next run then blames the
-  product for not owing its onboarding. Ordered right after `ensurePluginAbsent` because an installed
-  plugin re-creates its own footprint on `init` (measured). Rows go through `delete_option` so caches
-  invalidate themselves, removal is verified by re-reading, WordPress is loaded `--skip-plugins`, and
-  nothing is ever elevated. Two guards refuse a wrong declaration rather than a hostile one:
-  `PROTECTED_TABLES` at declaration time, `PROTECTED_OPTIONS` against what the query actually matched
-  — and that one refuses the **whole** sweep before deleting anything. Multisite is refused outright.
-- [`wp/residue.ts`](src/common/wp/residue.ts) removes the files a plugin leaves behind after it
-  is uninstalled, from the paths its product declares as `ProductConfig.siteResidue` — a path, or a
-  family for the directories a plugin names at runtime (a parent, and a pattern that bounds the whole
-  name and opens with the plugin's fixed prefix), whose matching directories are found on the site.
-  Validated
-  before removal and **verified afterwards**, never inferred from `rm`'s exit code. Removal runs
-  unprivileged first and **escalates only what survived** (`execElevated`), because a plugin writes
-  as the web-server user and leaves directories nobody else can empty; `prepareSiteDataDirs` opens
-  those same directories to both users up front — `0777` as a floor, then `normalizeOwnership` for
-  the owner and for the subtree a non-recursive mode cannot reach. Refusable per site with `transport.elevate: false`.
-  **`wp` is never elevated** — WP-CLI as root would leave the site's files unwritable by the web
-  server.
-
-### Debug-log feature
-
-[`wp/log.ts`](src/common/wp/log.ts) reads and categorises `wp-content/debug.log` to
-catch PHP errors a UI assertion would miss. `scanDebugLog` returns
-`{ raw, fatals, warnings, notices }`; it reads via `wp eval` and **falls back** to a
-direct file read when WordPress can't boot (exactly when a fatal matters most).
-Per-product presets are in `src/projects/<product>/support/debug-log.ts`
-(`*_LOG_OPTIONS` scans everything; `*_OWN_LOG_OPTIONS` restricts to that plugin).
-Pattern: `clearDebugLog` in a `Before` hook, `scanDebugLog` in an `After` hook.
+- Commands are file + args arrays, never shell strings. **An exec error names the program and the
+  reason, never the arguments** (they carry `--key=` values and snippet values): never pass on execa's
+  `message`/`shortMessage`/`command` or attach its error as a `cause`.
+- `exec`/`wpCli` return an `ExecResult`: branch on `exitCode`. Commands run in the WordPress root with
+  no input, so a `[y/n]` prompt declines at once, exit 0, having done nothing.
+- **Files must reach the site before `wp` reads them**: stage with `stageArtifact` /
+  `stageAndInstallPlugin` (`wp/staging.ts`, `.e2e_temp/<category>/`; `transport.stagingDir`,
+  `E2E_SITE_STAGING_DIR`).
+- Idempotent cleanup (`ensurePluginAbsent`) and asserted removal under test (`uninstallPlugin`) both
+  deactivate as their own call, then plain `wp plugin uninstall` — **never `uninstall --deactivate`**,
+  which makes the plugin's cleanup skip itself. Typed errors in `wp/errors.ts`. **"Absent" means
+  nothing at the plugin's path** (`wp/plugin-dir.ts`), not "WordPress lists none": cleanup removes
+  what is left by path and returns it to report; removal under test fails naming it, never sweeps.
+  Only the cell's own slug is inspected.
+- **Every `wp eval` goes through [`wp/php.ts`](src/common/wp/php.ts)**; **any value from outside this
+  codebase (site, scenario, fixture) is embedded with `phpLiteral`** — the injection boundary, no
+  exceptions.
+- **Never `wp cron event run <hook>`** (it runs every event on the hook, in WP-CLI's PHP): use
+  `triggerScheduledEvent` (`wp/cron.ts`).
+- Read options with `getOption`/`getOptionJson` (missing → `undefined`, unbootable → throws); never
+  hard-code `wp_` — use `tablePrefix`.
+- `listFiles` refuses a missing directory (it would pass "it was deleted"); `missingAsEmpty` only for
+  one a scenario may never have made. Prove a transfer with `fileChecksum`, not size.
+- `wp/archive.ts`: tar's "absent" and "unreadable" share exit 2, so readability is proved by listing
+  the whole archive. `.zip` is out of scope.
+- **MUST — code that writes into a docroot as the transport's user calls `normalizeOwnership` on what
+  it wrote; never `chown`/`chmod` directly, never elevate `wp`** (WP-CLI as root leaves files the web
+  server cannot write). `stageAndInstallPlugin` does it when given the `slug` — pass it. Override per
+  site with `transport.fileOwner` (`"user:group"`, or `false`).
+- An elevated target built from `rootDir` passes the lexical guards in `wp/paths.ts` and
+  `assertResolvedInsideRoot` (`wp/exec.ts`), which refuses a path a symlink in any parent leads out of
+  the docroot, or one it cannot resolve.
+- Leftovers: `ProductConfig.siteResidue` (files, `wp/residue.ts`; unprivileged first, then only what
+  survived elevated; `transport.elevate: false` refuses elevation) and `ProductConfig.siteDbResidue`
+  (rows, `wp/db-residue.ts`; never elevated, multisite refused). Both verified by re-reading.
+- **Debug log** ([`wp/log.ts`](src/common/wp/log.ts)): `clearDebugLog` in a `Before`, `scanDebugLog`
+  (`{ raw, fatals, warnings, notices }`, falls back to a direct read when WordPress can't boot) in an
+  `After`. Presets in `support/debug-log.ts`: `*_LOG_OPTIONS` scans everything, `*_OWN_LOG_OPTIONS` that
+  plugin only.
 
 ## Visual testing (A/B only, for now)
 
-The only visual model currently is the **A/B check**
-([`src/common/visual/ab.ts`](src/common/visual/ab.ts)): assert a page renders the
-**same with optimizations active as with them bypassed** (`?nowprocket`). Both
-renders are captured live in one run and pixel-diffed — there is no committed
-baseline to update. A size difference also fails (a layout change is a regression).
-
-```ts
-import { expectOptimizedToMatchUnoptimized } from "../../../common/visual/ab";
-await expectOptimizedToMatchUnoptimized(page, "/pricing", {
-  maxDiffPixelRatio: 0.02,
-});
-```
-
-Tag such scenarios `@visual` and run them in the Playwright container for
-pixel-deterministic rendering. Tolerances are in
-[`src/common/config/visual.ts`](src/common/config/visual.ts). A committed-baseline
-helper (`screenshot.ts`) exists as wiring but is not the active model. See the
-README's "Visual regression" section for the operational walkthrough.
+The only active model is the A/B check ([`visual/ab.ts`](src/common/visual/ab.ts)): a page renders
+the **same optimized as bypassed** (`?nowprocket`), both captured live and pixel-diffed, no
+baseline; a size difference fails too: `expectOptimizedToMatchUnoptimized(page, path, options)`. Tag
+`@visual`, run in the Playwright container; tolerances in
+[`config/visual.ts`](src/common/config/visual.ts). `screenshot.ts` (committed baselines) is wiring
+only. Walkthrough: README's "Visual regression".
 
 ## Coding conventions
 
-These are requirements, not suggestions:
+Requirements, not suggestions:
 
-- **Handle errors gracefully and explicitly.** Validate at boundaries (env,
-  `sites.json`) and fail fast with actionable messages that name the offending
-  input. Use the typed error classes in `wp/errors.ts` rather than bare `throw`s
-  where a failure mode is meaningful. Distinguish "command outcome" (branch on
-  `exitCode`) from "couldn't run at all" (throw). Best-effort side work (report
-  attachments, page stabilisation) must never mask the real assertion.
-- **Be strict and explicit with types.** No implicit `any`; type function
-  parameters and return types. `tsconfig` is strict with
-  `noUncheckedIndexedAccess`, `noUnusedLocals/Parameters`, etc. Prefer
-  `readonly`/discriminated unions (as the config types do) and narrow `unknown` at
-  boundaries with the guards in [`guards.ts`](src/common/guards.ts).
-- **Document with TSDoc — always, and only TSDoc.** Every function, method, and
-  non-obvious property/constant gets a doc comment, no matter if it is private, public, isolated or not. Write for understanding: say
-  _why_, not just _what_; don't restate the signature or repeat yourself. Use
-  `@param name - description`, `@returns`, `@throws {@link ErrorType}`, `{@link …}`
-  cross-references, and `@example` with fenced ` ```ts ` blocks. **Never** JSDoc
-  type annotations (`@param {type}`, `@type {…}`) in `.ts` files — types come from
-  TypeScript. (The sole exception is the `@type` in `prettier.config.js`, which is
-  load-bearing for type-checking a plain `.js` config.). Do not overexplain, make sure to be understandable, but not too long if not really required.
-- **Code is self-contained — never reference plans/design docs.** No `docs/plans/*`
-  mentions in code — not file paths, not `§` section numbers, not plan phase names —
-  anywhere: comments, TSDoc, or error/log messages. Plans move, rename, and get deleted,
-  and an operator hitting an error must never be pointed at an internal design doc; explain
-  the reasoning inline instead. Markdown docs and `.env.example` may cite plans. **UNLESS**
-  the user explicitly authorizes an exception, which must then be listed right here —
-  _current exceptions: none._
-- **Name every scenario so it stands alone.** A `Scenario:` name is what you `--grep` to run
-  one scenario, what a report row shows and what a CI failure is headlined with — it is read
-  in isolation, never in file order. State the behaviour _and_ its outcome, with no
-  back-reference to a neighbouring scenario (`…just the same`, `…too`, a dangling
-  `them`/`it`). Setup and the reason scenarios resemble each other belong in the `Feature`
-  description or `Background`, not implied by a title. Full rule and examples:
-  [authoring-tests.md → Naming scenarios](docs/guides/authoring-tests.md#naming-scenarios).
-- **Never write to a site's docroot without restoring its ownership.** WP-CLI runs as the
-  transport's user and PHP as the web server, so anything the suite installs is unwritable by the
-  web server until it is handed back. Call `normalizeOwnership` (or pass `slug` to
-  `stageAndInstallPlugin`, which calls it) — never `chown`/`chmod` by hand, and never run `wp`
-  elevated. See [wordpress-automation.md](docs/architecture/wordpress-automation.md#file-ownership-wpownershipts).
-- **Follow best practices.** Keep UI logic in page objects, WP-CLI logic in `wp/`,
-  shared logic in `common/`, product specifics under `src/projects/<product>/`.
-  Match the style of the surrounding code. Add a `*.spec.ts` unit test for
-  non-trivial `common/` modules.
-- **Separate the code correctly.** Do a very well code separation, do not overengineer anything, but separate correctly by concerns. Make sure the functions/methods are not to long.
-- **Reuse code efficiently.** Create small utilities if they can be leveraged by other parts of the code instead of hardcoding everything in one isolated module (You can still isolate anything that doesn't make sense to have as "global" utility, you must assess and take the best decision case by case)
-- **Write unit-testable code.** Design for testability (small, pure, dependency-injected functions) and add a `*.spec.ts` unit test for as much logic as possible. Some code (e.g. thin UI glue, Playwright wiring) may not be testable — that's fine, but it must be the exception, not the default.
-- **Ship production-ready code.** Stable, robust, reliable — handle edge cases, no half-finished paths. Documentation and comments must be dense, not long: clear and understandable over verbose. Same for anything added to this file (CLAUDE.md) and plans — it must be clear and understandable, not verbose. Avoid overengineering, but do not underengineer either. Make sure to assess the best approach case by case.
+- **Handle errors explicitly.** Validate at boundaries (env, `sites.json`) and fail fast with
+  actionable messages naming the offending input. Use the typed errors in `wp/errors.ts`, not bare
+  `throw`s, where a failure mode matters. Branch on `exitCode` for a command's outcome; throw when
+  it couldn't run. Best-effort side work (attachments, page stabilisation) must never mask the real
+  assertion.
+- **Strict, explicit types.** No implicit `any`; typed parameters and returns; `tsconfig` is strict
+  (`noUncheckedIndexedAccess`, `noUnusedLocals/Parameters`, …). Prefer `readonly` and discriminated
+  unions; narrow `unknown` at boundaries with [`guards.ts`](src/common/guards.ts).
+- **TSDoc — always, and only TSDoc.** Every function and method (private, public or isolated) and
+  every non-obvious property/constant. Write for understanding: say _why_; don't restate the
+  signature, repeat yourself or over-explain. Use `@param name - …`, `@returns`, `@throws {@link
+ErrorType}`, `{@link …}`, `@example` with ` ```ts `. **Never** JSDoc type annotations (`@param
+{type}`, `@type {…}`) in `.ts` files — the only exception is the load-bearing `@type` in
+  `prettier.config.js`.
+- **Code never references plans.** No `docs/plans/*` paths, `§` numbers or phase names in comments,
+  TSDoc or messages: plans move, and an operator's error must not point at a design doc — explain
+  inline. Markdown docs and `.env.example` may cite plans. Exceptions only with the user's explicit
+  approval, listed here — _current exceptions: none._
+- **Every scenario name stands alone** — it is what `--grep`, a report row and a CI headline show.
+  It is read in isolation, never in file order: state the behaviour _and_ its outcome, no
+  back-reference (`…just the same`, `…too`, a dangling `it`); shared setup, and why scenarios
+  resemble each other, go in `Feature`/`Background` ([authoring-tests.md → Naming
+  scenarios](docs/guides/authoring-tests.md#naming-scenarios)).
+- **Never write to a docroot without restoring its ownership** — the
+  [MUST in the WordPress layer](#wordpress-automation-layer)
+  ([details](docs/architecture/wordpress-automation.md#file-ownership-wpownershipts)).
+- **Layering:** UI in page objects, WP-CLI in `wp/`, shared code in `common/`, product specifics in
+  `src/projects/<product>/`. Match the surrounding style.
+- **Separate by concern** without overengineering; keep functions short.
+- **Reuse:** extract a small utility when other code can use it; keep it local when it can't —
+  decide case by case.
+- **Unit-testable:** small, pure, dependency-injected functions; cover as much logic as possible
+  with `*.spec.ts` (every non-trivial `common/` module). Untestable glue (thin UI, Playwright
+  wiring) is the exception.
+- **Production-ready:** stable, robust, reliable, edge cases handled, no half-finished paths;
+  neither over- nor under-engineered — assess case by case. Docs, comments, this file and plans:
+  dense and clear, never verbose.
 
 ## Required workflow after every edit
 
-After finishing any code change, run **all** of these and make them pass before
-considering the work done:
+After any code change, run **all** of these and make them pass before calling the work done:
 
 ```bash
-npm run typecheck     # tsc — no type errors
-npm run lint          # eslint . — no lint errors
-npm run format        # prettier --write . (or format:check in review)
-npm run test:unit     # unit/integration specs pass
+npm run typecheck     # tsc
+npm run lint          # eslint .
+npm run format        # prettier --write . (format:check in review)
+npm run test:unit     # unit/integration specs
 ```
 
-For behavioural changes, also verify against a real cell:
-`E2E_CELL=<cell> npm run test:<product>`. Keep the runner awake through it (`caffeinate -i`
-on macOS): a runner that sleeps drops its SSH connections, and the run fails as if the network
-had — hooks far past their timeouts, `ECONNRESET` after each wake.
+For behavioural changes, also run a real cell: `E2E_CELL=<cell> npm run test:<product>`, keeping the
+runner awake (`caffeinate -i` on macOS) — a sleeping runner drops its SSH connections and the run fails
+as if the network had (hooks far past their timeouts, `ECONNRESET` after each wake).
 
 `husky` + `lint-staged` run `eslint --fix` + `prettier --write` on commit, and CI
-([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) enforces typecheck, lint,
-format, and the `@noauth` smoke run on both products. Don't rely on the hook — run
-the gates yourself.
+([`ci.yml`](.github/workflows/ci.yml)) runs typecheck, lint, `format:check`, the unit tests (two
+shards) and the `@noauth` smoke on both products. Don't rely on the hook — run the gates yourself.
 
 ## Documentation map
 
@@ -807,159 +518,117 @@ the gates yourself.
 | You're touching how the plugin zips under test are resolved, built, or verified. | [`docs/architecture/plugin-artifacts.md`](docs/architecture/plugin-artifacts.md)         |
 | You're adding features, steps, fixtures, or page objects.                        | [`docs/guides/authoring-tests.md`](docs/guides/authoring-tests.md)                       |
 | You're editing sites files, transports, editions, or env vars.                   | [`docs/guides/configuration.md`](docs/guides/configuration.md)                           |
-| You want the full design rationale and decisions.                                | [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md)           |
 | You're running or configuring the orchestrator.                                  | [`docs/guides/orchestrator.md`](docs/guides/orchestrator.md)                             |
-| You're changing the orchestrator: its design and decisions.                      | [`docs/plans/orchestrator-phase-0.5-plan.md`](docs/plans/orchestrator-phase-0.5-plan.md) |
 
 ## In-progress plans
 
-Larger initiatives are tracked as living design docs in `docs/plans/`. Check
-these before starting related work — they hold the current plan, not history:
+Living design docs in `docs/plans/` — check them before related work; they hold the current plan, not
+history:
 
-- [`docs/plans/e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md) — full design rationale and decisions; also the finished plugin-artifact and site-file-ownership designs (their facts and open obligations).
-- [`docs/plans/phase-6-feature-porting-plan.md`](docs/plans/phase-6-feature-porting-plan.md) — feature porting (BackWPup first); supersedes the parent plan's Phase 6.
-- [`docs/plans/orchestrator-plan.md`](docs/plans/orchestrator-plan.md) — the orchestrator: a long-running service that runs and manages cells on a server (supersedes the parent plan's Phase 9); includes Phase 0 (done): the run contract and each suite change's decision.
-- [`docs/plans/orchestrator-phase-0.5-plan.md`](docs/plans/orchestrator-phase-0.5-plan.md) — the orchestrator's Phase 0.5: the minimal orchestrator (cycling cells, Slack, Datator) that replaces AutoE2E's BackWPup instances.
+- [`e2e-modernization-plan.md`](docs/plans/e2e-modernization-plan.md) — full design rationale and
+  decisions; also the finished plugin-artifact and site-file-ownership designs (facts, open
+  obligations).
+- [`phase-6-feature-porting-plan.md`](docs/plans/phase-6-feature-porting-plan.md) — feature porting
+  (BackWPup first); supersedes the parent plan's Phase 6.
+- [`orchestrator-plan.md`](docs/plans/orchestrator-plan.md) — the orchestrator, a long-running service
+  running cells on a server (supersedes the parent plan's Phase 9); includes Phase 0 (done): the run
+  contract and each suite change's decision.
+- [`orchestrator-phase-0.5-plan.md`](docs/plans/orchestrator-phase-0.5-plan.md) — the minimal
+  orchestrator (cycling cells, Slack, Datator) replacing AutoE2E's BackWPup instances; its design and
+  decisions.
 
 ## When to update these docs
 
-All files in `docs/`, `CLAUDE.md`, and `README.md` must stay in sync with the code.
-The rule is: whoever makes the code change owns the doc update. Use the table below
-to find the right file.
-
-**Edit vs. create:** edit an existing `docs/architecture/*` or `docs/guides/*` file
-whenever the topic fits one already listed below. Create a new file only for a
-genuinely new subsystem/guide topic (add it to the tables here and in
-[Documentation map](#documentation-map)). Start a new `docs/plans/*` doc only for
-a new initiative/rewrite worth tracking as a living design doc — update the
-existing plan doc for progress on one already in flight.
+`docs/`, `CLAUDE.md` and `README.md` must stay in sync with the code; whoever changes the code updates
+the docs. Edit the existing `docs/architecture/*` or `docs/guides/*` file whose topic fits; create one
+only for a genuinely new subsystem (and add it to the [Documentation map](#documentation-map) and
+below). Start a `docs/plans/*` doc only for a new initiative; record progress in the existing plan.
 
 ### This file (CLAUDE.md)
 
-Update it when you:
-
-- **Change the structure** — add/rename a product (e.g. wiring up Imagify), move
-  directories, or change where features/steps/pages/configs live.
-- **Change technologies** — add, remove, or swap a key dependency, or bump the Node
-  / TypeScript baseline.
-- **Add or rename an NPM script**, or change what an existing one does.
-- **Add or change a fixture**, a shared scenario hook, or the configuration mechanism
-  (`.env` vars, `sites.json` schema, transports, editions, `ProductConfig` fields).
-- **Add a testing capability** — e.g. when the committed-baseline visual model becomes
-  active, a new device profile or tag lands, or a new `wp/` module appears.
-- **Change a convention** stated here (error handling, typing, TSDoc, workflow).
-
-When a change is too detailed for CLAUDE.md, put it in the relevant `docs/` file
-instead and link it from the [Documentation map](#documentation-map).
+When you change the structure (a product added or renamed, directories moved, where
+features/steps/pages/configs live), a key technology or the Node/TypeScript baseline, an NPM script
+(added, renamed or changed), a fixture, a shared hook, the configuration mechanism (`.env` vars,
+`sites.json` schema, transports, editions, `ProductConfig` fields), a testing capability (a new
+visual model, device profile, tag or `wp/` module), or a convention stated here. Detail too fine for
+this file goes in the right `docs/` file, linked from the [Documentation map](#documentation-map).
 
 ### docs/architecture/execution-model.md
 
-Update it when you change anything about:
-
-- How products, cells, pools, or run units are defined or selected — the product list
-  (`src/projects/products.ts`) and its drift guard, the cell pin (`E2E_CELL`, `cell-pin.ts`) and
-  the `[cell]` notice included.
-- The `parallelIndex` invariant or the worker-to-site binding.
-- The config factory (`createProductConfig`) or the project pairs it generates.
-- The metadata/credential registry (`registerPool`, `routingMetadata`), or the per-process
-  registries that carry a product's policy to the shared hooks (`registerDebugLogOptions`,
-  `registerSiteResidue`, `registerSiteDbResidue`, `registerSiteDataDirResolver`,
-  `registerStopRunningWork`).
-- Artifact directories, `RUN_ID` handling, or the `*_ROOT` env vars.
-- Stopping a run: the drain (`config/drain.ts`, `E2E_INTERNAL_STOP_FILE`, the `drainGate` fixture)
-  and the signals that escalate it.
-- The run's own reporters: the `[cell]` notice, the results stream (`results.jsonl`, its schema and
-  reader, `reporting/results.ts`), the run facts (`run-facts.json`, the reports' titles, banner and
-  metadata) and the end-of-run summary; the project names that tell a setup from a scenario
-  (`config/project-names.ts`).
-- Report retention: the policy and its removal (`reporting/retention.ts`, `report-tree.ts`), a run's
-  own pruning (`run-pruning.ts`, `E2E_REPORTS_KEEP`), `npm run report:prune` (`prune-command.ts`), and
-  the RUN_ID format (`config/run-id.ts`).
+- Products, cells, pools, run units and their selection: `products.ts` and its drift guard, the cell pin
+  (`E2E_CELL`, `cell-pin.ts`), the `[cell]` notice.
+- The `parallelIndex` invariant or worker-to-site binding.
+- The config factory (`createProductConfig`) or its project pairs.
+- The metadata/credential registry (`registerPool`, `routingMetadata`) and the per-process policy
+  registries (`registerDebugLogOptions`, `registerSiteResidue`, `registerSiteDbResidue`,
+  `registerSiteDataDirResolver`, `registerStopRunningWork`).
+- Artifact directories, `RUN_ID`, the `*_ROOT` env vars.
+- The drain (`config/drain.ts`, `E2E_INTERNAL_STOP_FILE`, `drainGate`) and its escalation signals.
+- The run's reporters: `[cell]` notice, results stream (`results.jsonl`, schema, reader,
+  `reporting/results.ts`), run facts (`run-facts.json`, report titles, banner, metadata), summary; the
+  setup-vs-scenario project names (`config/project-names.ts`).
+- Report retention (`retention.ts`, `report-tree.ts`, `run-pruning.ts`, `E2E_REPORTS_KEEP`,
+  `prune-command.ts`) and the RUN_ID format (`config/run-id.ts`).
 
 ### docs/architecture/wordpress-automation.md
 
-Update it when you change anything about:
-
-- Transport modes (`local`, `docker`, `ssh`) or the `exec`/`wpCli` API.
-- The file-transfer primitives (`wpRootDir`, `copyIntoTarget`) or the site staging
-  area (`staging.ts`, `E2E_SITE_STAGING_DIR`, `transport.stagingDir`).
-- The plugin lifecycle functions or their error types, or the plugin-folder inspection and removal
-  (`plugin-dir.ts`: `inspectPluginDirs`, `removePluginDir`, `describePluginDir`).
+- Transports (`local`, `docker`, `ssh`), the `exec`/`wpCli` API, the transfer primitives (`wpRootDir`,
+  `copyIntoTarget`), staging (`staging.ts`, `E2E_SITE_STAGING_DIR`, `transport.stagingDir`).
+- Plugin lifecycle functions and their error types; plugin-folder inspection/removal (`plugin-dir.ts`).
 - The debug-log API (`readDebugLog`, `clearDebugLog`, `scanDebugLog`, `ScanDebugLogOptions`).
-- File ownership (`ownership.ts`: `planOwnership`, `normalizeOwnership`, the grant rule,
-  `transport.fileOwner`) or the shared path guards (`paths.ts`, `pathInsideRoot`).
-- Residue declarations (`residue.ts`: `parseResidueDeclaration`, `SiteResidueFamily`,
-  `resolveSiteResidue`, `prepareResolvedDataDirs`, `isDeclaredResidue`).
-- The leftover-footprint sweep (`db-residue.ts`: `SiteDbResidue`, `findSiteDbResidue`,
-  `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`).
-- The WP-Cron helpers (`cron.ts`: `nextScheduled`, `triggerScheduledEvent`).
-- The PHP bridge (`php.ts`: `phpLiteral`, `evalPhp`, `EvalPhpOptions`), the file readers (`files.ts`:
-  `fileChecksum`, `listFiles`, `listLocatedFiles`, `FILE_LIST_PHP`, `backdateFile`, `pathFromWorkingDir`,
-  `locateFromWorkingDir`), or archive inspection (`archive.ts`:
-  `findArchiveEntries`, `readArchiveEntry`).
-- Any other `wp/` module (`cache.ts`, `db.ts`, `errors.ts`, `teardown.ts`).
+- Ownership (`ownership.ts`: `planOwnership`, `normalizeOwnership`, the grant rule,
+  `transport.fileOwner`) and path guards (`paths.ts`, `pathInsideRoot`).
+- Residue (`residue.ts`: `parseResidueDeclaration`, `SiteResidueFamily`, `resolveSiteResidue`,
+  `prepareResolvedDataDirs`, `isDeclaredResidue`) and the footprint sweep (`db-residue.ts`:
+  `SiteDbResidue`, `findSiteDbResidue`, `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`).
+- Cron (`nextScheduled`, `triggerScheduledEvent`), the PHP bridge (`phpLiteral`, `evalPhp`,
+  `EvalPhpOptions`), file readers (`fileChecksum`, `listFiles`, `listLocatedFiles`, `FILE_LIST_PHP`,
+  `backdateFile`, `pathFromWorkingDir`, `locateFromWorkingDir`), archives (`findArchiveEntries`,
+  `readArchiveEntry`), and any other `wp/` module (`cache.ts`, `db.ts`, `errors.ts`, `teardown.ts`).
 
 ### docs/architecture/plugin-artifacts.md
 
-Update it when you change anything about:
-
-- The `ProductArtifacts` manifest (default refs per role, version policy, edition →
-  variant mapping, identity expectations) or a product's copy of it.
-- The request/plan model, override precedence, or what throws vs. warns.
-- Resolution (the artifacts dir lifecycle, `resolution.json`) or the identity preflight.
-- What a resolved artifact records — its full commit, its digest (`digest.ts`: `sha256File`,
-  `isSha256`, `ResolvedArtifact.sha256`).
-- The `pluginArtifact` consumption path, or pre-warming (`warmArtifacts`, `artifacts:warm`) and
-  pinning (`pin.ts`: `fullCommit`, `pinOf`, `requirePin`; `WarmedBuild`, `toWarmedBuild`,
-  `assertCached`, `ResolvedArtifact.pinRef`).
+- The `ProductArtifacts` manifest (default refs, version policy, edition → variant, identity) or a
+  product's copy.
+- The request/plan model, override precedence, what throws vs. warns.
+- Resolution (artifacts dir lifecycle, `resolution.json`), the identity preflight, what an artifact
+  records (full commit, `digest.ts`: `sha256File`, `isSha256`, `ResolvedArtifact.sha256`).
+- `pluginArtifact` consumption, pre-warming (`warmArtifacts`, `artifacts:warm`), pinning (`pin.ts`:
+  `fullCommit`, `pinOf`, `requirePin`; `WarmedBuild`, `toWarmedBuild`, `assertCached`,
+  `ResolvedArtifact.pinRef`).
 - The APVM pin, or which products/editions exist.
 
 ### docs/guides/authoring-tests.md
 
-Update it when you change anything about:
-
-- The BDD pipeline (bddgen, generated specs, how step files are wired).
-- Gherkin authoring conventions (scenario naming, what belongs in `Feature`/`Background`).
-- Fixtures (add/rename/change scope or semantics).
-- Tags and their effects (`@noauth`, `@smoke`, `@visual`, `@free`/`@pro`, new tags).
-- The Page Object Model conventions or page objects in `common/pages/`.
-- The unit-test setup (`playwright.unit.config.ts`, `*.spec.ts` conventions).
+The BDD pipeline (bddgen, generated specs, step wiring); Gherkin conventions (scenario naming, what
+goes in `Feature`/`Background`); fixtures (added, renamed, scope or semantics); tags and their
+effects (`@noauth`, `@smoke`, `@visual`, `@free`/`@pro`, new ones); page-object conventions and
+`common/pages/`; the unit-test setup (`playwright.unit.config.ts`, `*.spec.ts`).
 
 ### The orchestrator (`orchestrator/`)
 
-Its operator's guide is [`docs/guides/orchestrator.md`](docs/guides/orchestrator.md); its design is
-[`docs/plans/orchestrator-phase-0.5-plan.md`](docs/plans/orchestrator-phase-0.5-plan.md) (§4 design, §5
-code layout, §6 running it). Update the guide, the plan and the `orchestrator/` line above when you
-change:
-
-- The command: `start`'s options, its help text, its exit codes, the npm options it refuses.
-- The config file (`config/schema.ts`): a field, a bound, a check, `config.example.json`.
-- What a run is given or keeps: its environment, commands, records (`run.json`'s states), the files
-  beside it, the state directory's layout, the cell locks.
-- Stopping: the signals, the budgets (`runs/shutdown.ts`), the orphan check and its refusals.
-- `run.finished`, the Slack message, the Datator record, or the terminal's and `orchestrator.log`'s lines.
-- `suite-imports.json` (also the boundary spec, which must pass first).
+Update [`docs/guides/orchestrator.md`](docs/guides/orchestrator.md), the
+[Phase 0.5 plan](docs/plans/orchestrator-phase-0.5-plan.md) (§4 design, §5 layout, §6 running it) and
+the `orchestrator/` entry above when you change: `start`'s options, help, exit codes or the npm options
+it refuses; the config file (`config/schema.ts`: fields, bounds, checks, `config.example.json`); what a
+run is given or keeps (environment, commands, `run.json` states, files beside it, state-directory
+layout, site locks); stopping (signals, `runs/shutdown.ts` budgets, the orphan check and its refusals);
+`run.finished`, the Slack message, the Datator record, the terminal's and `orchestrator.log`'s lines;
+`suite-imports.json` (update its boundary spec too, which must pass first).
 
 ### docs/guides/configuration.md
 
-Update it when you change anything about:
-
-- The `sites.json` schema (cell shape, site fields, transport fields, overrides).
-- Editions (all-or-none rule, how the tag filter works).
-- Environment variables (add/rename/change defaults in `.env.example`).
-- The Docker local environment setup or its `sites.example.json`.
+The `sites.json` schema (cell, site and transport fields, overrides); editions (all-or-none, the tag
+filter); env vars (and their defaults in `.env.example`); the Docker environment and its
+`sites.example.json`.
 
 ### README.md
 
-Update it when you change anything about:
-
-- The quick-start steps (install, first run, browser setup).
-- Running commands users invoke directly (test scripts, `--project`, `--grep`).
-- The reporting layer (report types, paths, Allure commands, `REPORT_MODE`).
-- The Docker local environment (`env:up` / `env:down` / `env:logs`, port numbers, credentials).
-- The visual regression walkthrough (the A/B model, how to run `@visual` scenarios).
-- Quality-gate commands (`typecheck`, `lint`, `format:check`) or the CI behaviour.
+Quick-start (install, first run, browsers); commands users run (test scripts, `--project`, `--grep`);
+reporting (report types, paths, Allure, `REPORT_MODE`); the Docker environment (`env:*`, ports,
+credentials); the visual-regression walkthrough; quality gates and CI.
 
 ### All docs and code files
 
-In docs or in code comments, there might be `NOTE FROM DEV:`, they are mostly added for the IA next read to that file, so, you must read it carefuly, becuse there might be instructions for you to fix something in that doc file or the code of that file.
+A `NOTE FROM DEV:` in a doc or code comment is addressed to the next AI reading the file: read it
+carefully — it may ask you to fix something there.

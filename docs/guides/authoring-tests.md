@@ -1,8 +1,7 @@
 # Authoring tests
 
-How scenarios are written and wired. Tests are **BDD**: Gherkin `.feature` files
-describe behaviour, step definitions implement it, and `playwright-bdd` generates
-Playwright specs from the pair.
+Tests are **BDD**: Gherkin `.feature` files describe behaviour, step definitions implement it, and
+`playwright-bdd` generates Playwright specs from the pair.
 
 ## The BDD pipeline
 
@@ -11,8 +10,7 @@ Playwright specs from the pair.
 (Gherkin)    (TypeScript)                     (.features-gen/, git-ignored)
 ```
 
-`bddgen` runs automatically inside the `test:*` scripts. The generated
-`.features-gen/` directory is ephemeral and git-ignored — never edit or commit it.
+The `test:*` scripts run `bddgen`. `.features-gen/` is ephemeral: never edit or commit it.
 
 ## Where things live
 
@@ -38,67 +36,83 @@ src/
                                      #   and the CLI runner for when the command is under test
 ```
 
-A product's `steps` array (in its config) is the exact set of files loaded at runtime:
-`common/fixtures.ts` + that product's `fixtures.ts` + `common/hooks/**/*.hooks.ts` +
-`common/steps/**` + that product's own `steps/**`. So a product-specific step is only
-available to that product — and a **hook file missing from that array never registers**,
-leaving its lifecycle silently absent rather than failing. Add new shared hooks as
-`src/common/hooks/<name>.hooks.ts` so the existing glob picks them up.
+A product's `steps` array (in its config) is exactly what loads at runtime: `common/fixtures.ts` +
+the product's `fixtures.ts` + `common/hooks/**/*.hooks.ts` + `common/steps/**` + the product's
+`steps/**`. So a product step is available to that product only, and **a hook file missing from the
+array never registers** — its lifecycle is silently absent. Add shared hooks as
+`src/common/hooks/<name>.hooks.ts` so the glob picks them up.
 
 ### Adding a product
 
 1. `src/projects/<name>/config/<name>.config.ts` exports its `ProductConfig`: `name: "<name>"`,
-   features and its own steps under `src/projects/<name>/`, its artifact manifest (see
-   [plugin-artifacts.md](../architecture/plugin-artifacts.md)), and a committed `sites.example.json`
+   features and steps under `src/projects/<name>/`, its artifact manifest
+   ([plugin-artifacts.md](../architecture/plugin-artifacts.md)), and a committed `sites.example.json`
    beside it.
 2. List it in `PRODUCTS` ([`src/projects/products.ts`](../../src/projects/products.ts)).
-3. Create `playwright.<name>.config.ts` at the root: `import "./src/common/config/load-env"`, then
+3. Create root `playwright.<name>.config.ts`: `import "./src/common/config/load-env"`, then
    `export default createProductConfig(<its config>)`, importing only that product.
-4. Add the `test:<name>` script, which runs `bddgen` and then `playwright test`, each with
-   `--config playwright.<name>.config.ts`, plus its `:ui` and `:headed` variants.
-5. Add its `@noauth` smoke step to `.github/workflows/ci.yml` once it has a `@noauth` scenario.
-   Without one the step fails with "No tests found". Without the step, CI never runs the product.
+4. Add the `test:<name>` script (`bddgen` then `playwright test`, each with
+   `--config playwright.<name>.config.ts`) and its `:ui` / `:headed` variants.
+5. Add its `@noauth` smoke step to `.github/workflows/ci.yml` once it has a `@noauth` scenario (before
+   that, the step fails "No tests found"; without the step, CI never runs the product).
 
-`products.spec.ts` fails until the folder, the list, the entry config and the script agree. It
-does not check the CI step or the example sites file.
+`products.spec.ts` fails until folder, list, entry config and script agree; it does not check the CI
+step or the example sites file.
 
 ## Fixtures ([`src/common/fixtures.ts`](../../src/common/fixtures.ts))
 
-Import `Given`, `When`, `Then`, `Before`, `After`, etc. from a `fixtures.ts`
-(**not** from `playwright-bdd` directly) — this binds them to the extended test
-instance. Import from **your product's** `fixtures.ts` if it has one (BackWPup does), so
-your steps can also destructure its page objects; import from `common/fixtures.ts` only
-for genuinely product-agnostic steps and hooks.
+Import `Given`, `When`, `Then`, `Before`, `After`, … from a `fixtures.ts`, **never** from
+`playwright-bdd`, so they bind to the extended test instance: your product's `fixtures.ts` if it has one
+(BackWPup does), giving steps its page objects; `common/fixtures.ts` only for product-agnostic steps and
+hooks.
 
-The shared instance provides:
+| Fixture            | Scope      | What it gives you                                                                                                                                                                                                                                                       |
+| ------------------ | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `site`             | test       | The [`SiteConfig`](../../src/common/config/types.ts) bound to this worker. Throws if no pool.                                                                                                                                                                           |
+| `edition`          | test       | The cell's `Edition` (`free`/`pro`). **Throws** in an editionless cell.                                                                                                                                                                                                 |
+| `boundSite`        | worker     | The site pinned to this worker (by `parallelIndex`), or `undefined` with no pool. Underpins `site`.                                                                                                                                                                     |
+| `pluginArtifact`   | test       | `pluginArtifact(role)` → the cell's resolved zip (`"plugin"` under test, `"previous"` to compare against). `.slug` is its plugin directory (no edition branching); `.zipPath` feeds `stageAndInstallPlugin`. **Throws** for an unsupported role or when the artifacts setup did not run ([plugin-artifacts.md](../architecture/plugin-artifacts.md)). |
+| `releaseBoundSite` | worker     | Automatic: after the worker's last scenario, removes the site's staging area and closes SSH connections, best-effort ([teardown](../architecture/wordpress-automation.md#worker-teardown-wpteardownts)).                                                              |
+| `drainGate`        | test       | Automatic: once the run's stop file (`E2E_INTERNAL_STOP_FILE`) exists, skips each scenario's first attempt as `stopped` ([the drain](../architecture/execution-model.md#stopping-a-run-the-drain)).                                                                                               |
+| `baseURL`          | (override) | The bound site, so relative navigations target it.                                                                                                                                                                                                                      |
+| `storageState`     | (override) | The bound site's saved login, **or** an empty session for `@noauth`.                                                                                                                                                                                                    |
+| device options     | (override) | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else the desktop default.                                                                                                                                              |
 
-| Fixture     | Scope    | What it gives you                                                                                              |
-| ----------- | -------- | -------------------------------------------------------------------------------------------------------------- |
-| `site`      | test     | The [`SiteConfig`](../../src/common/config/types.ts) bound to this worker. Throws if no pool.                  |
-| `edition`   | test     | The cell's `Edition` (`free`/`pro`). **Throws** if read in an editionless cell.                                |
-| `boundSite` | worker   | The site pinned to this worker (by `parallelIndex`), or `undefined` when there is no pool. Underpins `site`.   |
-| `pluginArtifact` | test | `pluginArtifact(role)` → the resolved zip for this cell (`"plugin"` = under test, `"previous"` = compare-against). `.slug` is the plugin directory it installs as (no edition branching); `.zipPath` feeds `stageAndInstallPlugin`. **Throws** if the role is unsupported for the product or the artifacts setup did not run — see [plugin-artifacts.md](../architecture/plugin-artifacts.md). |
-| `releaseBoundSite` | worker | Automatic, nothing to call: after the worker's last scenario it removes the site's staging area and closes SSH connections, best-effort ([teardown](../architecture/wordpress-automation.md#worker-teardown-wpteardownts)). |
-| `baseURL`   | (override) | Points at the bound site, so relative navigations target it.                                                  |
-| `storageState` | (override) | The bound site's saved login, **or** an empty session for `@noauth` scenarios.                            |
-| device options | (override) | `viewport` / `userAgent` / `isMobile` / `hasTouch` / `deviceScaleFactor`: the `@mobile` profile, else the project's desktop default. |
+Use `site.transport` for the WordPress automation layer and `page` for the browser. Install the zip
+under test (already built and verified by the artifacts setup) with
+[`stageAndInstallPlugin`](../architecture/wordpress-automation.md#site-staging--file-transfer-wpstagingts):
 
-BackWPup's [`src/projects/backwpup/fixtures.ts`](../../src/projects/backwpup/fixtures.ts) adds its
-page objects on top: `onboarding`, `firstBackup` (the screen onboarding hands over to, where its
-first backup runs), `dashboard`, `dataSelection`, `frequency`, `storages`, `jobRun`,
-`backupHistory`, `restore` (edition-aware — Pro's in-place restore vs Free's forced upload) and the
-shared `plugins`. They are constructed lazily, so a scenario pays only for what it destructures.
+```ts
+const artifact = pluginArtifact("plugin");
+await stageAndInstallPlugin(site.transport, artifact.zipPath, {
+  activate: true,
+  // Always pass the slug: it lets the install hand the plugin's files back to the site's ownership,
+  // so the web server can write them.
+  slug: artifact.slug,
+});
+```
 
-It also adds **`cli`**, which is not a page object either: it runs one `wp backwpup …` subcommand
-and remembers the result, so the assertion in the next step has something to judge
-([`support/cli-session.ts`](../../src/projects/backwpup/support/cli-session.ts)). It is for the
-feature where the **command is the system under test** — there a non-zero exit is an observation,
-not a broken arrangement, so nothing throws for an outcome and a scenario can assert how a command
-refused. Use `support/backups.ts` instead when WP-CLI is only *arranging* or *checking* a site;
-that one does throw, because there a failing command means the setup broke.
+> **`zipPath` is a path on the _runner_.** `installPlugin` alone works only on `local`, which shares the site's
+> filesystem; on
+> `ssh`/`docker` the remote `wp` cannot see it, so it must be copied over first — what
+> `stageAndInstallPlugin` does (`stageArtifact` for other files).
 
-The CLI steps ([`steps/cli.steps.ts`](../../src/projects/backwpup/steps/cli.steps.ts)) are
-deliberately generic, because for that feature the command line *is* the product language:
+### BackWPup's fixtures
+
+[`src/projects/backwpup/fixtures.ts`](../../src/projects/backwpup/fixtures.ts) adds page objects:
+`onboarding`, `firstBackup` (where onboarding hands over and the first backup runs), `dashboard`,
+`dataSelection`, `frequency`, `storages`, `jobRun`, `backupHistory`, `restore` (edition-aware: Pro's
+in-place restore, Free's forced upload) and the shared `plugins`. They are built lazily: a scenario
+pays only for what it destructures.
+
+**`cli`** runs one `wp backwpup …` subcommand and remembers the result for the next step to judge
+([`support/cli-session.ts`](../../src/projects/backwpup/support/cli-session.ts)). It is for the feature
+where the **command is the system under test**: a non-zero exit is an observation, so nothing throws
+for an outcome and a scenario can assert how a command refused. When WP-CLI only _arranges_ or
+_checks_ a site use `support/backups.ts`, which throws (a failing command there means the setup broke).
+
+The CLI steps ([`steps/cli.steps.ts`](../../src/projects/backwpup/steps/cli.steps.ts)) are generic,
+because there the command line _is_ the product language:
 
 ```gherkin
 When I run the BackWPup command "job --format=count"
@@ -106,173 +120,142 @@ Then the command succeeds
 And it prints "1"
 ```
 
-`Then the command fails` and `Then it reports the error "…"` / `the warning "…"` / `the success "…"`
-complete the set; the last three match WP-CLI's own `Success:` / `Warning:` / `Error:` status lines
-by **level**, and
-the given text as a substring of the message — a refusal WP-CLI spreads over several lines on
-stderr (`Parameter errors:`, then the parameter it rejected) is one message. Three rules the step
-text has to respect, each refused rather than run:
+Also `Then the command fails`, and `Then it reports the error "…"` / `the warning "…"` /
+`the success "…"`; these last three match WP-CLI's `Error:` / `Warning:` / `Success:` lines by **level** and the
+text as a substring (a refusal spread over several stderr lines — `Parameter errors:`, then the
+parameter — is one message). Step text rules, each refused rather than run:
 
-- the `wp backwpup` prefix is supplied for you, so it is not repeated;
-- arguments are split on whitespace, so a value that needs quoting or escaping needs a step of its
-  own;
-- WP-CLI globals that decide *where* the command runs (`--path`, `--url`, `--ssh`, `--user`,
-  `--skip-plugins`, `--exec`, …) are left out — WP-CLI honours them anywhere on the line, and the
-  runner already runs the command on the scenario's own site. `--debug`, `--quiet` and
-  `--[no-]color` only change the output, so they are allowed.
+- the `wp backwpup` prefix is supplied, not repeated;
+- arguments split on whitespace, so a value needing quoting or escaping needs its own step;
+- WP-CLI globals deciding _where_ the command runs (`--path`, `--url`, `--ssh`, `--user`,
+  `--skip-plugins`, `--exec`, …) are refused: WP-CLI honours them anywhere on the line, and the runner
+  already targets the scenario's site. Output-only `--debug`, `--quiet`, `--[no-]color` are allowed.
 
-A command cannot spell out what the plugin allocates or names itself — a job's id, an archive's or a
-log's file name — so it names it in braces, and the value is read when the command runs
-([`support/placeholders.ts`](../../src/projects/backwpup/support/placeholders.ts)): `{job}` is the
-scheduled job's id; `{oldest backup}` / `{newest backup}` the archive of the first / latest backup
-the scenario made, fixed as they were made; `{oldest log}` / `{newest log}` the log of the first /
-latest run the backup history records; `{path to the oldest backup}` / `{path to the newest backup}`
-that same archive as a path from the directory WP-CLI runs in (the WordPress root), which is how
-`backup-encrypt` and `backup-decrypt` take one; `{private folder}` a folder of the scenario's own on
-the site, relative to that directory; `{encryption key}` / `{another encryption key}` two hex keys
-drawn for the scenario, and `{public key file}` / `{private key file}` an RSA pair drawn for it and
-placed in the private folder; and `{path from the log folder to the marker file}` a path out of
-BackWPup's log folder to the `markers` fixture's file, proved on the site to lead there. A `--key=`
-value never appears in a message about the command — a failed assertion (`describeCli`), a time
-limit, a JSON parse error: each names it through `commandLine`, and hides it in the output too. So `When I run the BackWPup command "backup-delete {oldest backup} --yes"`
-sends one real file name. Each value is asked for only when a command uses it, and must fit in one
-argument. Whatever sits in braces is read as a placeholder's name, so one no step knows — `{job_id}`
-for `{job}` — is refused, naming the ones it does, and so is a stray brace. And the text as written
-may not name a path off the site, absolute or climbing out with `..`: a slip there would reach
-another site's files, so a path that must reach further comes from a placeholder the suite proves.
-A command that **blocks** on a running job, as `status`
-does, runs through `When I watch the running backup with the BackWPup command "…"`, which gives it a
-backup's length as a budget of its own and fails naming the command if it never answers.
+**Placeholders** ([`support/placeholders.ts`](../../src/projects/backwpup/support/placeholders.ts)): what
+the plugin allocates or names is written in braces and read when the command runs:
 
-A step that needs a second opinion reads it from a source the command has no hand in — the stored
-jobs (`support/job-options.ts`), the plugin's backup history table (`support/history.ts`), or the
-resolved zip — never from the same command in another format.
+| Placeholder                                                    | Value                                                                                           |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `{job}`                                                        | the scheduled job's id                                                                          |
+| `{oldest backup}` / `{newest backup}`                          | the archive of the scenario's first / latest backup, fixed as made                              |
+| `{oldest log}` / `{newest log}`                                | the log of the first / latest run in the backup history                                         |
+| `{path to the oldest backup}` / `{path to the newest backup}`  | that archive as a path from WP-CLI's working directory (the WP root) — how `backup-encrypt` / `backup-decrypt` take one |
+| `{private folder}`                                             | the scenario's own folder on the site, relative to WP-CLI's working directory                               |
+| `{encryption key}` / `{another encryption key}`                | two hex keys drawn for the scenario                                                             |
+| `{public key file}` / `{private key file}`                     | an RSA pair drawn for it, placed in the private folder                                          |
+| `{path from the log folder to the marker file}`                | a path out of BackWPup's log folder to the `markers` file, proved on the site to lead there      |
 
-**`Then the command succeeds` only proves exit 0, and for a command that changes the site that is
-not success.** WP-CLI itself is honest — its refusals and `WP_CLI::error()` exit 1 — but some of
-BackWPup's commands exit 0 after failing: a foreground `run` never reaches its own verdict at all
-(the job ends the WP-CLI process itself, whatever it logged), `run <id> --background` reports success
-for a job id the site does not have, a `restore` that failed midway warns, a `log-delete` refused a
-log it may not write still reports success, and plugin code that stops with PHP's `exit( 'message' )`
-prints no status line at all. A destructive command run **without `--yes`** stops at a `[y/n]`
-prompt nobody answers and ends at exit 0 having done nothing (`Then it asks "…"` asserts the
-prompt). The other direction fails too: after one refused `backup-delete`, the next one deletes its
-archive and still exits 1 with the earlier error. So always pair either step with a check against a
-second source (the history row, the log, the marker, the file on disk), and assert a refusal the
-way the command actually makes it — `Then it reports the warning "…"` where it only warns.
-The cases, and which of them are measured live, are §2.16–§2.19 of the
+So `When I run the BackWPup command "backup-delete {oldest backup} --yes"` sends one real file name.
+Each value is read only when used and must fit one argument. Anything in braces is read as a placeholder name, so an unknown one
+(`{job_id}` for `{job}`) is refused, listing the known ones, and so is a stray brace. The text as written may not name a path off the site
+(absolute, or climbing out with `..`): it could reach another site's files, so a path reaching further
+comes from a placeholder the suite proves. A `--key=` value never appears in a message about the
+command (a failed assertion via `describeCli`, a time limit, a JSON parse error): each names it through
+`commandLine`, and the output hides it too. A command that **blocks** on a running job (`status`)
+uses `When I watch the running backup with the BackWPup command "…"`, given a backup's length as a budget of its
+own and failing with the command's name if it never answers.
+
+A second opinion comes from a source the command has no hand in — the stored jobs
+(`support/job-options.ts`), the backup history table (`support/history.ts`), the resolved zip — never
+the same command in another format.
+
+**`Then the command succeeds` only proves exit 0, which is not success for a command that changes
+the site.** WP-CLI's own refusals and `WP_CLI::error()` exit 1, but some BackWPup commands exit 0 after
+failing: a foreground `run` never reaches its verdict (the job ends the WP-CLI process, whatever it
+logged); `run <id> --background` succeeds for a job id the site lacks; a `restore` failing midway only
+warns; a `log-delete` refused a log it may not write still reports success; plugin code ending in PHP's
+`exit( 'message' )` prints no status line. A destructive command **without `--yes`** stops at a `[y/n]`
+prompt nobody answers and exits 0 having done nothing (`Then it asks "…"` asserts the prompt). The
+reverse too: after one refused `backup-delete`, the next deletes its archive and still exits 1 with the
+earlier error. So always pair either step with a second source (history row, log, marker, file on disk), and
+assert a refusal as the command makes it (`Then it reports the warning "…"` where it only warns). The
+cases, and which are measured live: §2.16–§2.19 of the
 [feature-porting plan](../plans/phase-6-feature-porting-plan.md).
 
-**A job that must still be running when the next command arrives needs arranging.** A database
-backup of the cells finishes in about a second — less than one WP-CLI round trip — so
+**A job still running when the next command arrives needs arranging.** A database backup of the cells
+takes about a second, under one WP-CLI round trip, so
 [`cli-running-job.feature`](../../src/projects/backwpup/features/cli-running-job.feature) sets two
-of BackWPup's own settings first (`Given BackWPup's "…" setting is "…"`, which refuses a value the
-Settings screen does not offer): **Reduce server load** at `maximum` stretches the run to several
-seconds, and a **Maximum number script execution time (in seconds)** — the screen's own words — of
-`0` keeps it in one request, since the plugin otherwise hands a long run to a fresh request midway
-and a command landing in that handover is answered about a job that is briefly not there. The pause
-is paid once per **table**, so the paced run's length is the site's table count — 3.5 s on a site
-with 18, barely longer than a command takes to land. `Given the site's database holds at least 100
-tables` pads the database with empty tables of the scenario's own (`<prefix>e2e_pace_NNN`), which
-makes it about 11 s on every cell; the **`tablePadding`** fixture removes them after the `@plugin`
-teardown, so no backup is still dumping them ([`support/table-padding.ts`](../../src/projects/backwpup/support/table-padding.ts)).
-A run killed before that teardown leaves them behind, so every BackWPup worker drops leftover padding
-before its first scenario (`leftoverPaddingSweep`, an automatic worker fixture) and says how many it
-removed; and since the names are fixed and each padding drops the last one first, a site never holds
-more than one padding's worth. The snippets are run against a fake `$wpdb` in
-[`table-padding.php.spec.ts`](../../src/projects/backwpup/support/table-padding.php.spec.ts),
-which skips where PHP is not installed.
+BackWPup settings (`Given BackWPup's "…" setting is "…"`, refusing values the Settings screen does not
+offer): **Reduce server load** `maximum` stretches the run to several seconds, and **Maximum number script execution time
+(in seconds)** (the screen's own words) `0` keeps it in one request (otherwise the plugin hands a long run to a fresh request
+midway, and a command landing in the handover is answered about a job briefly not
+there). The pause is per **table**, so the paced run's length is the table count: 3.5 s
+on a site with 18 tables, barely longer than a command takes. `Given the site's database holds at least 100
+tables` pads with empty tables of the scenario's own (`<prefix>e2e_pace_NNN`), ~11 s on every cell; the
+**`tablePadding`** fixture drops them after the `@plugin` teardown, so no backup is still dumping them
+([`support/table-padding.ts`](../../src/projects/backwpup/support/table-padding.ts)). A run killed before
+then leaves them, so every BackWPup worker drops leftover padding before its first scenario
+(`leftoverPaddingSweep`, automatic) and says how many; with fixed names and each padding dropping the
+last first, a site never holds more than one padding. The snippets run against a fake `$wpdb` in
+[`table-padding.php.spec.ts`](../../src/projects/backwpup/support/table-padding.php.spec.ts) (skipped
+without PHP).
 
-Two more fixtures serve the commands that act on files. **`archives`** records the digest of every
-archive a scenario's backups left, the moment they were made, so "still on the site, byte for byte"
-compares against the run's own output and "the oldest backup" means one file for the rest of the
-scenario — the steps that make backups (`Given the scheduled job has made 2 backups inside WP-CLI`,
-or `… through the web server`, which decides who owns the files) record into it.
-**`privateFolder`** is a folder of the scenario's own inside the site's staging area, for the files
-a command writes or reads — a download, an export, a key file. It is created private to the
-transport's user, because the web server serves anything it can read there and what lands in it can
-be a whole database, and handed to a command by a path worked out on the site from where the folder
-and WP-CLI really are — so a symlink on the way cannot send a file elsewhere. It costs nothing until
-a step uses it, and is removed after the scenario only if one did. **`keys`** draws the scenario's
-encryption keys when a placeholder first names one, and **`jobExports`** records a digest of the
-site's jobs as each export is arranged, which "the site's backup jobs are as they were" compares
-against ([`support/archive-snapshot.ts`](../../src/projects/backwpup/support/archive-snapshot.ts),
-[`support/private-folder.ts`](../../src/projects/backwpup/support/private-folder.ts),
-[`support/encryption-keys.ts`](../../src/projects/backwpup/support/encryption-keys.ts),
-[`support/job-transfer.ts`](../../src/projects/backwpup/support/job-transfer.ts)).
+Fixtures for commands acting on files:
 
-The last fixture behaves like none of the others: **`markers`** plants a random value in a file
-under the site's content directory and another in a `wp_options` row, so a scenario can ask an
-archive whether a backup really captured the site — or, since the file sits outside every BackWPup
-folder, ask a log command handed a path out of its own folder whether it reached that file
-([`support/markers.ts`](../../src/projects/backwpup/support/markers.ts)). Two things follow from it
-touching the site rather than the page:
+- **`archives`** records each archive's digest as the scenario's backups make it, so "still on the
+  site, byte for byte" compares against the run's own output and "the oldest backup" means one file for
+  the whole scenario. Backup-making steps (`Given the scheduled job has made 2 backups inside WP-CLI`,
+  or `… through the web server`, which decides file ownership) record into it
+  ([`support/archive-snapshot.ts`](../../src/projects/backwpup/support/archive-snapshot.ts)).
+- **`privateFolder`** is the scenario's own folder in the site's staging area, for files a command
+  writes or reads (a download, an export, a key). Private to the transport's user, because the web
+  server serves what it can read there and a file may be a whole database; handed over by a path worked
+  out on the site from where the folder and WP-CLI really are, so a symlink cannot redirect it. Free
+  until used; removed afterwards only if used
+  ([`support/private-folder.ts`](../../src/projects/backwpup/support/private-folder.ts)).
+- **`keys`** draws the scenario's encryption keys when a placeholder first names one
+  ([`support/encryption-keys.ts`](../../src/projects/backwpup/support/encryption-keys.ts)).
+- **`jobExports`** records a digest of the site's jobs as each export is arranged — what "the site's
+  backup jobs are as they were" compares against
+  ([`support/job-transfer.ts`](../../src/projects/backwpup/support/job-transfer.ts)).
 
-- **Requesting it is the side effect.** The values are planted when the fixture is first resolved —
-  which Playwright does before the test body, so they are in place before any step runs — and
-  removed in its teardown, best-effort. "Pays only for what it destructures" therefore means
-  something stronger here: destructuring it *changes the site*.
-- **It must be resolved before the backup under inspection.** A marker planted after a run cannot be
-  in that run's archive, and an assertion looking for it would fail for the wrong reason.
+**`markers`** ([`support/markers.ts`](../../src/projects/backwpup/support/markers.ts)) plants a random
+value in a file under the content directory and another in a `wp_options` row, so a scenario can ask an
+archive whether a backup really captured the site — or, the file being outside every BackWPup folder,
+ask a log command given a path out of its folder whether it reached that file. Because it touches the
+site:
+
+- **Requesting it is the side effect**: the values are planted when it resolves (before the test body,
+  so before any step) and removed best-effort in teardown. Destructuring it _changes the site_.
+- **Resolve it before the backup under inspection**: a marker planted later cannot be in that archive,
+  and the assertion would fail for the wrong reason.
 
 **Restoring** ([`restore.feature`](../../src/projects/backwpup/features/restore.feature),
-[`cli-restore.feature`](../../src/projects/backwpup/features/cli-restore.feature)) is judged by the
-same markers: back up, then `Given the site's marker data has changed since that backup` plants fresh
-values (remembered by **`changedMarkers`**), and after the restore each marker must hold the backed-up
-value where the restore was meant to reach and the changed one where it was not. The wizard is driven by
-the edition's **`restore`** page object (Pro's deep link, Free's upload); the command by
-`When I run the BackWPup restore command "restore {path to the newest backup} --yes --type=…"`, which goes
-through **`cliRestore`**. Three things about restoring a shared cell that the steps already handle, and a
-new restore step must too:
+[`cli-restore.feature`](../../src/projects/backwpup/features/cli-restore.feature)) is judged by the same
+markers: back up, then `Given the site's marker data has changed since that backup` plants fresh values
+(kept by **`changedMarkers`**); after the restore each marker must hold the backed-up value where the
+restore was meant to reach and the changed one elsewhere. The wizard is the edition's **`restore`** page
+object (Pro's deep link, Free's upload); the command is
+`When I run the BackWPup restore command "restore {path to the newest backup} --yes --type=…"`, through
+**`cliRestore`**. What the steps handle on a shared cell, and a new restore step must too:
 
-- A files restore puts back the `debug.log` its archive holds, so the log so far is judged first, by the
-  `@plugin` gate's own rule (`checkDebugLog`) — before the command, and in the wizard again just before
+- A files restore puts back the archive's `debug.log`, so the log so far is judged first by the
+  `@plugin` gate's rule (`checkDebugLog`): before the command, and in the wizard again just before
   "Start" (`restoreWith`'s `beforeStart`).
-- BackWPup's restore working directory must be writable by the web server — `handRestoreWorkingDirToSite`
-  before driving the wizard, since WP-CLI may have written there while the backup was arranged.
-- `wp backwpup restore --type=file|full` replaces `wp-content` wholesale and `--type=db|full` drops and
-  recreates the database, so the command runs only through `cliRestore` (the generic step refuses it). It
-  refuses a database holding anything the backup cannot bring back and a relocated `wp-content`, copies
-  `wp-content` before (as root, into a root-only `<root>/.e2e_content_copy/`; refused without passwordless
-  `sudo` — the command is then not run), puts it back exactly after the scenario, sets the database's default
-  collation back, and removes the scenario's own `--pre-backup` snapshot. A copy that could not go back stays,
-  and BackWPup runs refuse that site until someone settles it — the message says how.
-
-Use `site.transport` to drive the WordPress automation layer, and `page` (the
-standard Playwright fixture) for browser interaction. To install the zip under test,
-pass `pluginArtifact("plugin").zipPath` to
-[`stageAndInstallPlugin`](../architecture/wordpress-automation.md#site-staging--file-transfer-wpstagingts)
-(via `site.transport`); the artifacts setup has already built and verified it.
-
-```ts
-const artifact = pluginArtifact("plugin");
-await stageAndInstallPlugin(site.transport, artifact.zipPath, {
-  activate: true,
-  // Always pass the slug: it is what lets the install hand the plugin's files back to
-  // the ownership the site uses, so the web server can write them.
-  slug: artifact.slug,
-});
-```
-
-> **`zipPath` is a path on the _runner_.** Passing it straight to `installPlugin`
-> works only for a `local` transport, which shares the filesystem with the site. On
-> `ssh`/`docker` the remote `wp` cannot see it, so the artifact must be copied onto
-> the target first — which is exactly what `stageAndInstallPlugin` does (and
-> `stageArtifact` for non-plugin files).
+- The restore working directory must be writable by the web server: `handRestoreWorkingDirToSite`
+  before driving the wizard (WP-CLI may have written there while arranging the backup).
+- `wp backwpup restore --type=file|full` replaces `wp-content` wholesale and `--type=db|full` drops and recreates the
+  database, so the command runs only through `cliRestore` (the generic step refuses it). It refuses a
+  database holding anything the backup cannot bring back and a relocated `wp-content`; copies
+  `wp-content` first (as root, into a root-only `<root>/.e2e_content_copy/`; without passwordless
+  `sudo` it refuses and the command does not run), puts it back exactly after the scenario, resets the
+  database's default collation, and removes the scenario's own `--pre-backup` snapshot. A copy that
+  could not go back stays, and BackWPup runs refuse that site until someone settles it (the message
+  says how).
 
 ## Tags
 
-| Tag         | Effect                                                                                          |
-| ----------- | ----------------------------------------------------------------------------------------------- |
-| `@noauth`   | Scenario starts unauthenticated with an empty session (login/logout flows). The only tag that runs against placeholder sites, so it is what CI's smoke job greps. |
-| `@plugin`   | Before the scenario, any work an earlier (killed) run left the plugin doing is stopped, then the plugin under test is freshly installed + activated, `debug.log` is scoped to it and **a PHP fatal fails it**, and afterwards — once anything it left running has been stopped (`ProductConfig.stopRunningWork`) — the plugin is removed along with *the files and the database rows it left behind*. "Freshly" is load-bearing: a site whose plugin directory went without its `uninstall.php` ever running still carries that plugin's options and tables, and those are swept before the install rather than installed on top of. Needs a real site. A scenario the drain skipped (`E2E_INTERNAL_STOP_FILE`) gets neither hook. |
-| `@mobile`   | Runs under the mobile device profile (viewport + `isMobile` + `hasTouch` + mobile UA + DPR). Untagged scenarios stay desktop. |
-| `@smoke`    | Scaffolding/smoke scenarios; run with `--grep @smoke`.                                           |
-| `@free` / `@pro` | Edition scoping. An edition-ful cell auto-filters: a `pro` cell skips `@free` and vice-versa. |
-| `@visual`   | Visual-regression scenarios; group with `--grep @visual` and run in the Playwright container.    |
-| `@slow`     | Takes minutes by its nature — a real restore, say — so CI can split fast from slow. playwright-bdd triples the scenario's timeout (`test.slow()`). |
+| Tag              | Effect                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@noauth`        | Starts unauthenticated with an empty session (login/logout flows). The only tag that runs on placeholder sites, so CI's smoke job greps it.                                                                                                                                                                                                                                                         |
+| `@plugin` | Before: clears `debug.log`, stops work a killed run left the plugin doing, removes any existing copy, sweeps leftover database rows, then freshly installs + activates the plugin under test. After: **a PHP fatal anywhere in `debug.log` fails it**; leftover work is stopped (`ProductConfig.stopRunningWork`), then the plugin and the files and rows it left are removed. Needs a real site. A scenario the drain skipped gets neither hook. |
+| `@mobile`        | The mobile device profile (viewport + `isMobile` + `hasTouch` + mobile UA + DPR). Untagged stays desktop.                                                                                                                                                                                                                                                                                           |
+| `@smoke`         | Scaffolding/smoke scenarios; `--grep @smoke`.                                                                                                                                                                                                                                                                                                                                                       |
+| `@free` / `@pro` | Edition scoping, automatic in an edition-ful cell: a `pro` cell skips `@free` and vice versa.                                                                                                                                                                                                                                                                                                                                         |
+| `@visual`        | Visual-regression scenarios; `--grep @visual`, run in the Playwright container.                                                                                                                                                                                                                                                                                                                     |
+| `@slow`          | Takes minutes by nature (a real restore), so CI can split fast from slow; playwright-bdd triples its timeout (`test.slow()`).                                                                                                                                                                                                                                                                       |
 
-`@plugin` and `@mobile` are both implemented in shared code, not per product — see
+`@plugin` and `@mobile` live in shared code: see
 [CLAUDE.md → Shared scenario hooks](../../CLAUDE.md#shared-scenario-hooks) and
 [Device profiles](../../CLAUDE.md#device-profiles-desktop--mobile).
 
@@ -284,33 +267,30 @@ Scenario: A backup lands in the history
 
 ## Page Object Model
 
-UI interactions belong in page objects, not inline in steps: cross-product ones under
-`src/common/pages/`, a product's own under `src/projects/<product>/pages/`.
-[`PluginsPage`](../../src/common/pages/plugins.page.ts) is the shared reference: it owns the
-wp-admin Plugins screen and exposes `goto`, `isInstalled`, `isActive`, `activate`,
-`deactivate`, `delete` (the asserted UI flow), and `ensureAbsent` (idempotent cleanup).
-Methods throw the typed errors from [`wp/errors.ts`](../../src/common/wp/errors.ts) on failure.
+UI interactions live in page objects, not steps: cross-product under `src/common/pages/`, a product's
+under `src/projects/<product>/pages/`. [`PluginsPage`](../../src/common/pages/plugins.page.ts) is the
+reference: it owns wp-admin's Plugins screen (`goto`, `isInstalled`, `isActive`, `activate`,
+`deactivate`, `delete` — the asserted flow — and `ensureAbsent`, idempotent cleanup), throwing the typed
+errors of [`wp/errors.ts`](../../src/common/wp/errors.ts).
 [`SiteHealthPage`](../../src/common/pages/site-health.page.ts) reads Site Health's "Copy site info"
-text, which the auth setup turns into the site's versions — only the fields asked for leave the page
-(`siteInfoFields`), since a trace records what a call returns and a locator's wait logs the element
-with its attributes.
+text for the auth setup's site versions; only the requested fields leave the page (`siteInfoFields`),
+since a trace records what a call returns and a locator's wait logs the element with its attributes.
 
 ### Typing a secret
 
-Playwright titles a `fill()`, `type()` or `pressSequentially()` step with the text it enters, so the
-value lands in the HTML report, the Allure results and every retained trace — a boxed step hides
-nothing. Type a password, a key or a token with
-[`enterSecret`](../../src/common/pages/secret-field.ts) and check it with `holdsSecret`: the value is
-set and compared in the page, never a step's title, parameter or result, and the field must be visible
-and editable, as for `fill()`. A page object wraps them for its own fields — `StorageSidebar.fillSecret`
-for a storage provider's key. A **scenario's** trace still records the value in its DOM snapshots, and
-a failed scenario's `error-context.md` in its page snapshot: treat both as credentials. Everything that is not
-a secret keeps `fill()`, whose report entry helps.
+Playwright titles a `fill()`, `type()` or `pressSequentially()` step with its text, so the value lands
+in the HTML report, Allure results and every retained trace (a boxed step hides nothing). Type a
+password, key or token with [`enterSecret`](../../src/common/pages/secret-field.ts) and check it with
+`holdsSecret`: set and compared in the page, never a step's title, parameter or result; the field must
+be visible and editable, as for `fill()`. A page object wraps them for its fields
+(`StorageSidebar.fillSecret` for a storage key). A **scenario's** trace still records the value in its
+DOM snapshots, and a failed scenario's `error-context.md` in its page snapshot: treat both as
+credentials. Non-secrets keep `fill()`, whose report entry helps.
 
 ### Registering a product's page objects as fixtures
 
-A product extends the shared test instance in its own `fixtures.ts`, so steps receive page
-objects by destructuring — and `common/` never imports product code:
+A product extends the shared instance in its own `fixtures.ts`, so steps destructure page objects and
+`common/` never imports product code:
 
 ```ts
 // src/projects/<product>/fixtures.ts
@@ -324,65 +304,54 @@ export const test = base.extend<{ dashboard: DashboardPage }>({
 export const { Given, When, Then, Before, After } = createBdd(test);
 ```
 
-Then list that file in the product's `steps` array and import `Given`/`When`/`Then` from it:
+List that file in the product's `steps` array and import `Given`/`When`/`Then` from it:
 
 ```ts
 When("I start a backup", async ({ dashboard }) => { await dashboard.openBackupNow(); });
 ```
 
-playwright-bdd picks, per scenario, the **most-extended** test instance among those its steps
-were registered against — so product steps and common steps mix freely. If the product's
-`fixtures.ts` is missing from `steps`, generation fails with "Can't guess test instance"
-rather than silently dropping the page objects.
+playwright-bdd picks per scenario the **most-extended** instance among its steps', so product and
+common steps mix freely. If the product's `fixtures.ts` is missing from `steps`, generation fails
+("Can't guess test instance") rather than silently dropping the page objects.
 
 ### Locator policy
 
 1. `getByRole` / `getByLabel` with the visible name — the default.
-2. The application's own **JS contract hooks** (for BackWPup: `js-backwpup-<trigger>`,
-   `data-content`, `data-backup-id`, `data-job-id`, `data-storage`) when there is genuinely no
-   accessible name — e.g. an icon-only button, or a visually-hidden `aria-hidden` checkbox. These
-   are stable by construction: the application's own JavaScript binds to them.
-3. **Never** structural CSS (`td:nth-child`, `header:has(h1) button.…`) or text matching on a
-   whole subtree. The lint gate below and code review enforce this.
+2. The application's own **JS contract hooks** (BackWPup: `js-backwpup-<trigger>`, `data-content`,
+   `data-backup-id`, `data-job-id`, `data-storage`) when there is no accessible name (an icon-only
+   button, a visually-hidden `aria-hidden` checkbox). Stable because the app's own JavaScript binds to
+   them.
+3. **Never** structural CSS (`td:nth-child`, `header:has(h1) button.…`) or text matching on a whole
+   subtree; enforced by lint and review.
 
-Rule 1 assumes an English admin, which the auth pre-flight asserts once per site
-(`determine_locale()`), so a translated site fails with one clear message instead of many
-locator timeouts.
+Rule 1 assumes an English admin, which the auth pre-flight asserts per site (`determine_locale()`), so
+a translated site fails once, clearly, instead of as many locator timeouts.
 
-Every non-trivial page object gets a **locator-contract spec**: capture the real rendered markup,
-replay it, and assert each locator resolves. See
-[`locator-contract.spec.ts`](../../src/projects/backwpup/pages/locator-contract.spec.ts). Capture
-the fixture — never hand-write it — or the fixture drifts along with the page object and the two
-agree with each other while the real page fails.
+Every non-trivial page object has a **locator-contract spec**: capture the real rendered markup,
+replay it, assert each locator resolves
+([`locator-contract.spec.ts`](../../src/projects/backwpup/pages/locator-contract.spec.ts)). Capture
+the fixture, never hand-write it, or fixture and page object drift together while the real page fails.
 
-**Render captured markup through
-[`renderFixture`](../../src/projects/backwpup/pages/__fixtures__/render.ts), not `page.setContent()`
-directly.** A capture is verbatim, so it still references whatever the real page did — WordPress's
-`s.w.org` emoji images, third-party provider links — and `setContent` waits for `load`, meaning _all
-of them_. That makes the spec depend on the public internet and time out when it is slow, which is
-exactly what happened. `renderFixture` aborts every request and waits for `domcontentloaded`, which
-is the honest barrier for a spec asserting on parsed DOM. Hand-written markup with no external
-references can still use `page.setContent()` directly.
+**Render captured markup with [`renderFixture`](../../src/projects/backwpup/pages/__fixtures__/render.ts),
+not `page.setContent()`.** A capture still references what the real page did (WordPress's `s.w.org`
+emoji images, provider links), and `setContent` waits for `load` — all of them — so the spec depended
+on the public internet and timed out when it was slow. `renderFixture` aborts every request and waits
+for `domcontentloaded`, the honest barrier for parsed-DOM assertions. Hand-written markup without
+external references may use `page.setContent()`.
 
 ## Naming scenarios
 
-A `Scenario:` name is read in isolation far more often than in file order: it is what you
-pass to `--grep` to run one scenario, what a report lists, and the headline of a failure in
-CI. So it must describe its own behaviour and outcome completely, assuming no knowledge of
-the scenarios around it.
+A `Scenario:` name is read alone — what `--grep` runs, what a report lists, a CI failure's headline —
+so it must state its own behaviour and outcome, assuming nothing of its neighbours.
 
-- **No back-references.** No `…just the same`, `…too`, `…but with X`, `…same for Y`, and no
-  pronoun (`them`, `it`, `that`) whose antecedent lives in a neighbouring title. If the name
-  only makes sense after reading the scenario above it, rewrite it — a pronoun resolved
-  _inside_ the same sentence is fine.
-- **Name what varies.** When several scenarios cover one rule through different routes, each
-  name states its own route _and_ the outcome, so the set reads as a list rather than a
-  thread.
-- **State the outcome, not the clicks.** The name is the rule being proven
-  (`… splits them into two jobs`), not a summary of the steps.
-- **Shared context goes elsewhere.** Why scenarios resemble each other, and any setup they
-  share, belongs in the `Feature` description or the `Background` — never smuggled into a
-  title as an implied "as above".
+- **No back-references**: no `…just the same`, `…too`, `…but with X`, `…same for Y`, no pronoun
+  (`them`, `it`, `that`) resolved in a neighbouring title. A pronoun resolved inside the same sentence
+  is fine.
+- **Name what varies**: when scenarios cover one rule by different routes, each states its route _and_
+  outcome, so the set reads as a list, not a thread.
+- **State the outcome, not the clicks**: the rule proven (`… splits them into two jobs`), not the steps.
+- **Shared context goes elsewhere**: why scenarios resemble each other, and shared setup, belong in the
+  `Feature` description or `Background`, never implied in a title.
 
 ```gherkin
 # ✗ meaningless on its own: "them" and "just the same" only resolve against the previous scenario
@@ -392,82 +361,71 @@ Scenario: The advanced schedule settings split them just the same
 Scenario: Scheduling files and the database differently in the advanced settings splits them into two jobs
 ```
 
-Length is not a reason to shorten past self-sufficiency — a long name that stands alone beats
-a short one that needs a neighbour.
+A long name that stands alone beats a short one that needs a neighbour.
 
 ## Adding a scenario — checklist
 
-1. Write the `.feature` file under `src/projects/<product>/features/`. Tag it `@plugin` if
-   it needs the plugin under test installed (almost all do), `@noauth` only if it needs no
-   WordPress at all — that is the subset CI can run.
-2. Name each scenario so it reads standalone — see [Naming scenarios](#naming-scenarios).
-3. Implement any new steps in `src/projects/<product>/steps/` (or `common/steps/`
-   if truly generic), importing `Given`/`When`/`Then` from `fixtures.ts`. A `@plugin`
-   scenario's `Background` already runs with the plugin installed and active — hooks run
-   before it.
-4. Put UI logic in a page object under `common/pages/`; use `wp/` modules for
-   WP-CLI work via `site.transport`.
-5. Document every new function/method with TSDoc; type everything explicitly.
-6. Run the quality gates (typecheck, lint, format, unit tests) — see
+1. Write the `.feature` under `src/projects/<product>/features/`. Tag `@plugin` if it needs the plugin
+   under test (almost all do); `@noauth` only if it needs no WordPress at all (what CI can run).
+2. Name each scenario to stand alone ([Naming scenarios](#naming-scenarios)).
+3. New steps go in `src/projects/<product>/steps/` (or `common/steps/` if truly generic), importing
+   `Given`/`When`/`Then` from `fixtures.ts`. A `@plugin` scenario's `Background` already runs with the
+   plugin installed and active (hooks run first).
+4. UI logic in a page object; WP-CLI work through `wp/` modules via `site.transport`.
+5. TSDoc every new function/method; type everything explicitly.
+6. Run the quality gates (typecheck, lint, format, unit tests) —
    [CLAUDE.md](../../CLAUDE.md#required-workflow-after-every-edit).
-7. Verify against a real cell: `E2E_CELL=<cell> npm run test:<product>`.
+7. Verify on a real cell: `E2E_CELL=<cell> npm run test:<product>`.
 
 ## Banned waits (enforced by lint)
 
-`waitForTimeout`, `waitForLoadState("networkidle")`, `waitForSelector` and `.type()` are
-lint errors in features' supporting code (`src/projects/**`, `src/common/{pages,steps,hooks}/**`).
-Each message names the replacement — a web-first `expect()`, a specific
-`page.waitForResponse(…)`, or `fill()`. Only the *called* member matches, so a property that
-happens to share a name (`describe(job.type)`) is fine. See
-[CLAUDE.md → Improvement gate](../../CLAUDE.md#improvement-gate-lint).
+`waitForTimeout`, `waitForLoadState("networkidle")`, `waitForSelector` and `.type()` are lint errors
+in `src/projects/**` and `src/common/{pages,steps,hooks,auth}/**`. Each message names the replacement (a
+web-first `expect()`, a specific `page.waitForResponse(…)`, `fill()`). Only the _called_ member matches,
+so a property sharing a name (`describe(job.type)`) is fine
+([CLAUDE.md → Improvement gate](../../CLAUDE.md#improvement-gate-lint)).
 
 ## Asserting rendered state after an action
 
-A `toHaveCount`/`toBeVisible` assertion carries its own timeout, so pointing one at a screen
-that has not caught up yet does not fail — it **waits**, and then passes or flakes depending on
-the day. That is a banned wait wearing an assertion's clothes, and the lint gate cannot see it.
+A `toHaveCount`/`toBeVisible` assertion carries its own timeout, so aimed at a screen not yet caught
+up it **waits**, then passes or flakes by the day — a banned wait the lint gate cannot see.
 
-So: after an action changes something on the site, assert against DOM the **server** produced,
-not the DOM the action left behind. Re-read it (a reload, or the page object's own `reload()`),
-and wait on a signal that can only mean the new data arrived — a placeholder the server always
-renders and only the fetched rows replace, say. Awaiting the fetch itself is usually weaker than
-it looks: a barrier armed before a navigation can settle on the *previous* page's request, and
-one armed after it can miss the response entirely.
-
-The tell is an assertion whose correctness argument is a measured margin ("the row lands about a
-second before the budget runs out"). That is a race, not a check.
+After an action changes the site, assert on DOM the **server** produced, not what the action left:
+re-read it (a reload, or the page object's `reload()`) and wait on a signal that can only mean the new
+data arrived (a placeholder the server always renders and only fetched rows replace). Awaiting the
+fetch is usually weaker than it looks: armed before a navigation it can settle on the previous page's
+request, armed after it can miss the response. The tell: an assertion justified by a measured margin
+("the row lands about a second before the budget runs out") — a race, not a check.
 
 ## Unit / integration tests
 
-Files matching `*.spec.ts` anywhere under `src/` or `orchestrator/` are unit tests run by
-`npm run test:unit` (config: [`playwright.unit.config.ts`](../../playwright.unit.config.ts), one
-project per folder: `src`, `orchestrator`). That covers the shared `common/` layer, each product's
-own specs — so a product page object's locator contract runs with the same command — and the
-orchestrator's. Select a folder with `--project=orchestrator` (the `=` matters: `--project` takes
-several values and would swallow a file filter after it); a file filter is a regex on the absolute
-path. UI mode ticks only the first project until a choice is saved. They run with **no external
-environment**: the WP-CLI layer is exercised through a stub `wp` on `PATH`, and page
-objects against `page.setContent()` fixtures. They are kept separate from the BDD product
-configs, whose generated specs live in `.features-gen/` (outside `src/`). Add a
-`*.spec.ts` next to any non-trivial module you add. A snippet whose PHP must be run to be trusted —
-one that drops tables, say — can be driven against a fake `$wpdb` with the local `php`
-([`table-padding.php.spec.ts`](../../src/projects/backwpup/support/table-padding.php.spec.ts));
-such a spec skips where PHP is not installed, as in CI.
+`*.spec.ts` files under `src/` or `orchestrator/` are unit tests: `npm run test:unit`
+([`playwright.unit.config.ts`](../../playwright.unit.config.ts), one project per folder: `src`,
+`orchestrator`), covering `common/`, each product's specs (locator contracts included) and the
+orchestrator. Select a folder with `--project=orchestrator` (the `=` matters: `--project` takes several
+values and would swallow a following file filter); a file filter is a regex on the absolute path. UI
+mode ticks only the first project until a choice is saved. They need **no external environment**: the
+WP-CLI layer runs against a stub `wp` on `PATH`, page objects against `page.setContent()` fixtures. They
+are separate from the BDD configs, whose specs live in `.features-gen/` (outside `src/`). Add a
+`*.spec.ts` beside any non-trivial module you add. PHP that must run to be trusted (dropping tables, say) can
+be driven against a fake `$wpdb` with the local `php`
+([`table-padding.php.spec.ts`](../../src/projects/backwpup/support/table-padding.php.spec.ts)); such a
+spec skips without PHP, as in CI.
 
-Some things can only be measured in a process nothing else has touched: what importing a
-module does to the process, or how a config builds under a given `--project`.
-[`runInChildNode`](../../src/common/__fixtures__/child-node.ts) runs such code in a fresh Node
-under tsx, with only `PATH` and `HOME` and a 15 s limit, and returns the JSON it prints
-(`project.spec.ts`, `products.spec.ts`). [`probeImports`](../../src/common/__fixtures__/import-probe.ts)
-uses the same child: it imports files one after another, from a folder whose `.env` sets a sentinel,
-and reports what each import changed — variables, process listeners, the working directory, the exit
-code — then what changed once the process went idle; it reads that from a file, not stdout, so
-nothing a module prints can forge or garble it. That is
-how a module is proved to leave the process as it was (`products.spec.ts`,
-`orchestrator/import-boundary.spec.ts`). An import boundary is checked with
-[`import-scan.ts`](../../src/common/__fixtures__/import-scan.ts): `importsIn` reads every module a
-file loads from TypeScript's syntax tree — a dynamic `import()` and a `typeof import()` included,
-which ESLint does not see, and a computed path reported as such — `createResolver` resolves it as
-the repository's TypeScript does, and `localClosure` walks everything a module can load. Unit runs
-write their output to `<OUTPUT_ROOT>/_unit`, a folder of their own, so running them never empties a
-cell run's output.
+Some things need a process nothing else touched (what importing a module does, how a config builds
+under a given `--project`):
+
+- [`runInChildNode`](../../src/common/__fixtures__/child-node.ts) runs code in a fresh Node under tsx,
+  with only `PATH` and `HOME` and a 15 s limit, and returns the JSON it prints (`project.spec.ts`,
+  `products.spec.ts`).
+- [`probeImports`](../../src/common/__fixtures__/import-probe.ts) uses that child to import files one
+  after another, from a folder whose `.env` sets a sentinel, and reports what each import changed
+  (variables, process listeners, working directory, exit code, and more — see CLAUDE.md), then what changed once idle — read from
+  a file, not stdout, so nothing a module prints can forge or garble it. It proves a module leaves the process as
+  it was (`products.spec.ts`, `orchestrator/import-boundary.spec.ts`).
+- [`import-scan.ts`](../../src/common/__fixtures__/import-scan.ts) checks import boundaries: `importsIn`
+  reads every module a file loads from TypeScript's syntax tree (dynamic `import()` and
+  `typeof import()` included, which ESLint misses; a computed path reported as such), `createResolver`
+  resolves as the repository's TypeScript does, `localClosure` walks all a module can load.
+
+Unit runs write to `<OUTPUT_ROOT>/_unit`, so they never empty a cell run's output.
