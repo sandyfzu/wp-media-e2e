@@ -1,5 +1,5 @@
 {
-  "instance": "AutoE2E nginx",
+  "instance": "E2E Orchestrator",
   "tasks": [
     {
       "id": "bpng",

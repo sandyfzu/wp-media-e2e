@@ -40,7 +40,7 @@ file, and with it another state directory. It must be yours and closed to other 
 
 ```json
 {
-  "instance": "AutoE2E nginx",
+  "instance": "E2E Orchestrator",
   "tasks": [
     {
       "id": "bpng",
@@ -68,7 +68,7 @@ file, and with it another state directory. It must be yours and closed to other 
 
 | Field                            | Rule                                                                                                                                                                         |
 | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `instance`                       | Optional, ≤ 100 characters. Prefixes Slack messages (`*[AutoE2E nginx]*`)                                                                                                    |
+| `instance`                       | Optional, ≤ 100 characters. Prefixes Slack messages (`*[E2E Orchestrator]*`)                                                                                                  |
 | `tasks[]`                        | At least one; every task loops at once                                                                                                                                       |
 | `.id`                            | 4 characters: a lowercase letter, then lowercase letters or digits, never `0 o 1 l i`. Unique                                                                                |
 | `.name`                          | Optional, ≤ 100. The run's name in its reports                                                                                                                               |
@@ -110,7 +110,7 @@ bpng · BackWPup Pro on nginx
   site https://bwu2.qa.test · qa-lnmp
 servers: qa-lnmp (bpng)
 runs: retries 2 · reports kept 20
-notifications: slack ("AutoE2E nginx", scp from auto-e2e) · datator
+notifications: slack ("E2E Orchestrator", scp from auto-e2e) · datator
 secrets for the runs: GITHUB_TOKEN, BWP_S3_ACCESS_KEY_ID
 no warnings
 ```

@@ -252,7 +252,7 @@ test.describe("dryRunReport", () => {
       "  site https://bwu4.qa.test · qa-apache",
       "servers: QA-LNMP (bpng), qa-apache (bfap)",
       "runs: retries 2 · reports kept 20",
-      'notifications: slack ("AutoE2E nginx", scp from auto-e2e) · datator',
+      'notifications: slack ("E2E Orchestrator", scp from auto-e2e) · datator',
       "secrets for the runs: GITHUB_TOKEN, BWP_S3_ACCESS_KEY_ID, BWP_S3_SECRET_ACCESS_KEY",
       "no warnings",
     ]);

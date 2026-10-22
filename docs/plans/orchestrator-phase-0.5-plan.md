@@ -195,7 +195,7 @@ As built. Module names are under `orchestrator/` (§5).
     site https://bwu4.qa.test · qa-apache
   servers: QA-LNMP (bpng), qa-apache (bfap)
   runs: retries 2 · reports kept 20
-  notifications: slack ("AutoE2E nginx", scp from auto-e2e) · datator
+  notifications: slack ("E2E Orchestrator", scp from auto-e2e) · datator
   secrets for the runs: GITHUB_TOKEN, BWP_S3_ACCESS_KEY_ID, BWP_S3_SECRET_ACCESS_KEY
   no warnings
   ```
@@ -227,7 +227,7 @@ config file's folder (§4.9), so `--config` is the one switch. The committed
 
 ```json
 {
-  "instance": "AutoE2E nginx",
+  "instance": "E2E Orchestrator",
   "tasks": [
     { "id": "bpng", "name": "BackWPup Pro on nginx", "type": "loop", "product": "backwpup",
       "cell": "pro@nginx", "plugin": { "ref": "develop", "version": "9.99.99" }, "cooldownMinutes": 5 },
@@ -250,7 +250,7 @@ reaches the placeholder check, not "no cell".
 
 | Field | Rule |
 | --- | --- |
-| `instance` | Optional, one line, ≤ 100 characters; prefixes Slack messages (`*[AutoE2E nginx]*`), as `AUTO_E2E_INSTANCE_NAME` did |
+| `instance` | Optional, one line, ≤ 100 characters; prefixes Slack messages (`*[E2E Orchestrator]*`), as `AUTO_E2E_INSTANCE_NAME` did |
 | `tasks[]` | At least one. The parent's task fields (parent §2), so Phase 1 imports them as they are |
 | `.id` | The parent's 4-character rule: a lowercase letter, then lowercase letters or digits, without `0`, `o`, `1`, `l`, `i`; unique |
 | `.name` | Optional, ≤ 100; the run's name (`E2E_RUN_NAME`) |
@@ -613,7 +613,7 @@ results. `bddgen` exiting changes nothing: its group's kill still keeps the runn
   reach past its line.
 
   ```text
-  *[AutoE2E nginx]* ❌ FAILED — BackWPup Pro · pro@nginx
+  *[E2E Orchestrator]* ❌ FAILED — BackWPup Pro · pro@nginx
   52 scenarios: 49 passed · 1 flaky · 2 failed, in 54m 10s
   Plugin: BackWPup Pro 9.99.99 · develop @ f1ebfd0
   Site: https://simple.e2e.rocketlabsqa.ovh · WordPress 7.1.2 · PHP 8.5.10
