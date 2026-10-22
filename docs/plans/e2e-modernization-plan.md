@@ -170,6 +170,9 @@ As built: configuration.md (but the merge above).
   UI differences: one untagged scenario and an edition-aware page object (an interface, one class
   per edition, a small factory selected by the `edition` fixture). Pro-only storages need no config
   split; their scenarios are `@pro`.
+- Restore parity is 6I.1 in the phase-6 plan: Free's upload journey gets the same five UI strategies
+  as Pro; CLI restore remains Pro-only by product design, and the shared 6K extractor remains a
+  recorded Free-format decision.
 - Absent edition: an editionless product declares none (no filter, one package). An edition-ful
   product must declare it on every cell — all-or-none, failing at load — rather than install an
   undefined package or run both editions' scenarios.

@@ -26,17 +26,19 @@ in [authoring-tests.md](../guides/authoring-tests.md) and `CLAUDE.md`.
   costs one scenario, never all later ones.
 - Next: modernization Phase 7 — terminal output for the suite and the orchestrator — then Phase 11 —
   shared SSH server profiles — before 6H (decided 2026-10-22). Neither touches the port.
-- Open: 6H (storage config and skip gate), 6I (Free upsell scenario, parity gate), 6J (shared: keep the
-  staging area off the web), 6K (restore `.zip` and `.tar.gz`). 6H.2, the storage round-trips, waits
-  for credentials and blocks nothing.
-- Order: 6A → 6B → 6C → 6D → 6E → 6F (6F.0 → 6F.4) → 6G.0 → 6G (with 6G.1) → 6H.0 → 6H → 6I → 6J →
-  6K → later 6H.2. 6J depends on nothing and may be pulled forward. 6K needs only 6G. Modernization
+- Open: 6H (storage config and skip gate), 6I (Free upsell scenario, parity gate) and **6I.1 restore
+  parity** (Free upload counterparts to Pro's five UI restores), 6J (shared: keep the staging area off
+  the web), 6K (restore `.zip` and `.tar.gz`). 6H.2, the storage round-trips, waits for credentials and
+  blocks nothing.
+- Order: 6A → 6B → 6C → 6D → 6E → 6F (6F.0 → 6F.4) → 6G.0 → 6G (with 6G.1) → 6H.0 → 6H → 6I (with
+  6I.1) → 6J → 6K → later 6H.2. 6I.1 depends only on 6G. 6J depends on nothing and may be pulled
+  forward. 6K needs only 6G, but lands after 6I.1 because both edit the restore feature. Modernization
   Phase 11 runs before 6H and touches configuration, not the port.
 - Editions: Free and Pro ship byte-identical UI templates (V1), so one page-object set serves both;
   five of the six baseline storage suites are not Pro-only (V2), so they run on both editions; the
   restore entry path diverges (V13) — Pro restores from the archive already on the server, Free
   forces a re-upload of it. That is the one place needing per-edition scenarios and an edition-aware
-  page object.
+  page object; 6I.1 gives Free the same five UI strategies through that upload journey.
 
 ## 1. Method — Understand → Improve → Adapt → Port
 
@@ -669,9 +671,10 @@ As in [authoring-tests.md → Tags](../guides/authoring-tests.md#tags). Phase de
 
 Each ships on its own and ends with the four gates plus a green real-cell run (`E2E_RETRIES=0`,
 runner kept awake). Dependencies: 6A before everything, 6B before every feature phase, 6G.0 before
-6G, 6G before 6K, 6H before 6H.2. Among the open sub-phases the order is priority, not dependency:
-6H, 6I, 6J and 6K need nothing from each other; 6H.0 goes first by decision (TL;DR). 6H.2 is outside
-the sequence: nothing waits on it.
+6G, 6G before 6I.1; 6I.1 before 6K (both edit the restore feature); 6H before 6H.2. Among the open
+phases the order is priority, not dependency: 6H, 6I and 6J need nothing from each other; 6K needs
+only 6G, but follows 6I.1. 6H.0 goes first by decision (TL;DR). 6H.2 is outside the sequence:
+nothing waits on it.
 
 ### 6A — Shared rails (done, 2026-07)
 
@@ -974,8 +977,9 @@ Design (6K reuses it):
   folder and a copy slot in the restore directory, fetched by the server, no upload offered (V197).
   `@free` asserts the inverse — the bare restore page, no `restore_file` — so Pro silently falling
   back to Free's journey fails.
-- Strategy ("Full Restore" / "Database Only" / "Files Only") is orthogonal to the entry path:
-  covered once, on the `@pro` path, from a mixed backup.
+- Strategy ("Full Restore" / "Database Only" / "Files Only") is orthogonal to the entry path.
+  6G covered it once on the `@pro` path from a mixed backup; **6I.1 adds the Free upload
+  counterparts**, so the strategy data path is tested on both journeys.
 - A backup made files-only or database-only is offered exactly one strategy (V189, V199); its
   scenario fails on any other.
 - The markers change on both sides before every restore; the restored side must hold the backed-up
@@ -986,7 +990,8 @@ Design (6K reuses it):
 
 Coverage: five `@pro` history restores (the three strategies on a mixed backup; a database-only and
 a files-only backup), the `@free` upload (mixed, "Full Restore"), and the CLI with
-`--type=full|db|file` and `--pre-backup`.
+`--type=full|db|file` and `--pre-backup`. 6G's Free coverage is the upload entry only; 6I.1 adds
+the other Free strategies.
 
 Decisions:
 
@@ -1120,9 +1125,56 @@ Remaining:
 - The `@free` locked-storage upsell scenario (V2); `StorageSidebar.expectStorageLocked` exists.
 - Parity review against §2.1: every baseline intent is covered or has a written, deliberate
   reason not to be — a checklist in the PR, not a claim.
+- **6I.1, restore parity** — the concrete restoration slice of that review.
 
-Acceptance — `pro@nginx` and `free@nginx` green; the parity checklist complete; no scenario is a
-transliteration of its baseline ancestor.
+Acceptance — `pro@nginx` and `free@nginx` green; the parity checklist complete; 6I.1 green; no
+scenario is a transliteration of its baseline ancestor.
+
+#### 6I.1 — Restore parity (Free/Pro)
+
+Goal: the Free upload journey proves the same restore strategies and archive shapes as Pro's UI
+history journey, without pretending the CLI is shared. 6G left the strategy matrix on Pro and gave
+Free only the mixed full upload; this sub-phase closes that specific parity gap.
+
+Depends on 6G (steps, page object, marker fixtures); it lands with 6I. It can run in parallel with
+6J; it must land before 6K because both edit `restore.feature` and its steps. **Effort: 1–2 days;
+difficulty: medium** — four new slow upload scenarios on one Free worker, no new product code.
+
+Scope:
+
+- Measure first: a Free upload of a mixed, a database-only and a files-only backup; confirm the
+  screen offers the strategies 6G/V189 saw and the uploaded archive reaches the same wizard. Record
+  the result in §2; if the Free upload path differs, fix the page object/steps before writing tests.
+- Add four `@free` scenarios to `restore.feature` (the feature-level `@plugin @slow` applies),
+  sharing the existing Background:
+  - database-only restore of a mixed backup by upload;
+  - files-only restore of a mixed backup by upload;
+  - a database-only backup offers only Database Only by upload;
+  - a files-only backup offers only Files Only by upload.
+  The existing mixed **Full Restore** upload stays; the five Free UI scenarios then mirror the five
+  Pro UI scenarios. Each asserts its own download/upload journey and that the Pro-only deep link is
+  not offered, as 6G does.
+- Keep the CLI restore Pro-only. Free ships no `restore` command (V4, V11, V94); the existing Free
+  CLI registration scenario proves it is unknown. Do **not** add a Free `cli-restore.feature`
+  duplicate. Record this in the 6I parity checklist as a product difference, not a missing test.
+- 6K: keep the four format scenarios Pro-only by the existing V191 extractor decision. During 6I.1
+  verify the Free upload path reaches the same extractor; if it proves format-sensitive, add the
+  matching `@free` format scenarios to 6K. Otherwise the parity checklist records the measured
+  reason.
+- Update `authoring-tests.md` (Restoring) and `CLAUDE.md` if the Free restore steps/page object gain
+  a parameter or a new upload helper; no new page object unless the measurement requires it.
+
+Acceptance:
+
+- `free@nginx` runs five UI restore scenarios: mixed full, mixed database-only, mixed files-only,
+  database-only backup (only Database Only), files-only backup (only Files Only); each restores the
+  right half and leaves the other changed.
+- `pro@nginx`'s five UI + four CLI restore scenarios are unchanged and green.
+- The 6I parity checklist marks CLI restore as Pro-only by product design (V4/V11/V94) and records
+  the 6K Free-format decision; no Free CLI restore test is expected.
+- The Free run's added time is measured and the `@slow` budget is acceptable (6G's mixed upload
+  measured 27.6 s download + 168 s upload for a 411 MB archive; two new scenarios upload that mixed
+  archive, the two backup-only scenarios upload smaller ones).
 
 ### 6J — Staging area web guard
 
@@ -1298,7 +1350,8 @@ Phase 6, not deferred. 6G restores `.tar`, the default; BackWPup also writes `.z
 | Restore a `.tar.gz` backup over WP-CLI | `.tar.gz` | `wp backwpup restore` |
 
 - No `@free` format scenarios: Free's upload journey ends in the same, byte-identical extractor
-  (V191). Revisit only if the measurement shows the upload step treats a format differently.
+  (V191). 6I.1 verifies this from the upload side; add the matching `@free` scenarios here only if
+  the upload step treats a format differently.
 - Out of scope: `.tar.bz2` — no longer offered, and the restore refuses it (V190). Archive
   inspection (`wp/archive.ts`) stays tar-only: these scenarios read the restored markers, never the
   archive.
@@ -1315,6 +1368,8 @@ format switch.
   nothing structural. 6K is no deferral: Phase 6 closes only once a backup in every archive format
   the plugin writes (V190) has been restored.
 - `pro@nginx` and `free@nginx` green; `@pro`/`@free` scenarios run only on their edition's cells.
+- Restore parity (6I.1): Free's upload journey covers the five Pro UI strategies; CLI restore is
+  Pro-only by product design (V4/V11/V94); the 6K Free-format decision is recorded.
 - The lint gate green (`CLAUDE.md` → Improvement gate).
 - Every page object has a locator-contract spec; `npm run test:unit` green.
 - Docs updated by whoever changed the code: authoring-tests.md (fixtures, page objects, tags),
