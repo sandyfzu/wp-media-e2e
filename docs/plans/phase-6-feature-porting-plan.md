@@ -1,7 +1,7 @@
 # Phase 6 — Feature porting: BackWPup first
 
-Status: in progress. Done: 6A–6F, 6G.0, 6G and 6G.1 (shipped inside 6G, 2026-10-05). Next: 6H.0
-(order: TL;DR). Deferred: 6H.2 (needs storage credentials).
+Status: in progress. Done: 6A–6F, 6G.0, 6G and 6G.1 (shipped inside 6G, 2026-10-05), 6H.0
+(2026-10-21). Next: 6H (order: TL;DR). Deferred: 6H.2 (needs storage credentials).
 
 Parent: [e2e-modernization-plan.md](e2e-modernization-plan.md), Phase 6 — this plan supersedes that
 phase's summary. WP Rocket's port comes after Phase 10 (§6).
@@ -21,15 +21,13 @@ in [authoring-tests.md](../guides/authoring-tests.md) and `CLAUDE.md`.
 - Done: 6A shared rails (`@plugin` lifecycle, debug-log gate, `@mobile`, lint gate); 6B page
   objects; 6C onboarding; 6D backups and history (6D.1: what an archive holds); 6E plugin deletion
   (6E.0: the leftover-footprint sweep); 6F the WP-CLI surface (6F.0–6F.4); 6G.0 errors that never
-  quote an argv; 6G restore (6G.1: hashed restore directories).
-- Open: 6H.0 (shared: a half-removed plugin folder costs one scenario, never all later ones), 6H
-  (storage config and skip gate), 6I (Free upsell scenario, parity gate), 6J (shared: keep the
+  quote an argv; 6G restore (6G.1: hashed restore directories); 6H.0 a half-removed plugin folder
+  costs one scenario, never all later ones.
+- Open: 6H (storage config and skip gate), 6I (Free upsell scenario, parity gate), 6J (shared: keep the
   staging area off the web), 6K (restore `.zip` and `.tar.gz`). 6H.2, the storage round-trips, waits
   for credentials and blocks nothing.
 - Order: 6A → 6B → 6C → 6D → 6E → 6F (6F.0 → 6F.4) → 6G.0 → 6G (with 6G.1) → 6H.0 → 6H → 6I → 6J →
-  6K → later 6H.2. 6H.0 goes before everything else open (decided 2026-10-06: it keeps a
-  continuously running cell from failing for good). 6J depends on nothing and may be pulled forward,
-  but not ahead of 6H.0. 6K needs only 6G.
+  6K → later 6H.2. 6J depends on nothing and may be pulled forward. 6K needs only 6G.
 - Editions: Free and Pro ship byte-identical UI templates (V1), so one page-object set serves both;
   five of the six baseline storage suites are not Pro-only (V2), so they run on both editions; the
   restore entry path diverges (V13) — Pro restores from the archive already on the server, Free
@@ -577,6 +575,39 @@ a shared-resource change) is part of 6H.0's verification.
 | V233 | This suite would pass such a folder as removed, in three places: `ensurePluginAbsent` and `uninstallPlugin` verify with `is-installed`; `PluginsPage.delete` ignores the AJAX body (a `{"success":false,…"Could not fully remove the plugin…"}` or a killed request's 502 page reads as delivered) and checks only that the row's action links are gone; the step "BackWPup is no longer installed on the site" says "the plugin's files should be gone" yet asks `is-installed` | `wp/plugin.ts`, `pages/plugins.page.ts`, `steps/plugin-deletion.steps.ts:64` (unchanged on 2026-10-18); V229 | A half-failed removal under test passes today. 6H.0 makes removal mean nothing at the plugin's path. |
 | V234 | V61 refined: a kill of the runner never cuts a removal short (the remote `wp` runs on to its end); a kill of the site's own process does, leaving a third shape V61 did not see — files partly gone, no rows to sweep (`uninstall.php` already ran). `pro@apache` sits on the twice-daily rebooting server, and the orchestrator will run cells continuously, as AutoE2E does | V229, V231 | 6E.0's database sweep cannot see this shape; 6H.0 is its file-side counterpart. |
 
+### 2.32 Building 6H.0 (live, 2026-10-21, `ab4a2e2` measured, `cd26255` run)
+
+Both shapes reproduced by SIGTERM-ing core's own `delete_plugins()` (`timeout -s TERM <s> wp eval`),
+then the full suite run on each dirty cell with `E2E_RETRIES=0`.
+
+| # | Fact | Evidence | Consequence |
+| --- | --- | --- | --- |
+| V270 | The nginx server lists `backwpup.php` **1st** of 18 top-level entries. `delete_plugins()` of the Pro build takes 0.40 s (boot 0.48 s); SIGTERM at 0.7 s left `assets config inc pro src vendor`, 3 830 entries, no main file. `is-installed` 1, `plugin list` omits it, `uninstall` 1 "could not be found", `delete` 0 "already deleted", folder untouched. The old Before hook: `install … failed (exit 1): Warning: Destination folder already exists.` | `pro@nginx` (`simple`) | V229/V230 confirmed live: here every interruption leaves the main-file-gone shape. |
+| V271 | The apache server lists `backwpup.php` **15th**, after `vendor` (11th). `delete_plugins()` takes 0.56 s (boot 0.62 s); SIGTERM at 0.9 s left `backwpup.php` and part of `vendor` (4 283 entries). WordPress lists it (inactive); this time `wp plugin uninstall` exit 0 removed it all — what `uninstall.php` needs had survived | `pro@apache` | The main-file-survives shape is real, on the twice-daily rebooting server. Whether its uninstall works depends on how far the delete got. |
+| V272 | With `vendor/berlindb` gone and the main file kept: `wp plugin uninstall` exit 1, `PHP Fatal error: … Failed opening required '…/vendor/berlindb/core/src/Database/Base.php'` at `uninstall.php:20`, folder kept; `wp plugin delete` removes it. The old Before hook: `PluginUninstallFailedError` | `pro@apache` | V229's open case measured: cleanup must remove such a copy by path once its uninstall failed. |
+| V273 | After the change, the dirty `pro@nginx` run: the pre-flight banner named the folder; the first scenario's Before hook removed it (`3830 entries (assets, config, inc, pro, src, vendor); owner www-data`) and installed. The dirty `pro@apache` run: the Before hook tried the uninstall, quoted its fatal, removed the copy by path, installed; that run went on to 69 passed, 1 failed (its first scenario, V274), in 1.8 h. Both cells were left clean | `reports/backwpup/{pro@nginx,pro@apache}/2026-10-21T20-52-13-534Z-*` | Recovery costs nothing more than one scenario's Before hook. |
+| V274 | Defect found by V273 and fixed: the healed copy's uninstall fatal lands in the `debug.log` the Before hook had just cleared, so the teardown failed that first scenario (`DebugLogFatalError`). The Before hook now clears the log again after healing a failed uninstall, before the install. Re-proven: `pro@apache` broken the same way again (main file kept, `vendor/berlindb` gone), the same scenario now heals, quotes the fatal and **passes**; site left clean | `pro@apache` first scenario; `reports/backwpup/pro@apache/2026-10-21T22-39-57-879Z-51378`; `plugin-lifecycle.spec.ts` (mutation-proven) | A leftover's fatal belongs to the run that left it. |
+| V275 | A wp-admin deletion WordPress cannot finish (a root-owned folder planted in the plugin): `delete-plugin` answers `success: false`, "Could not fully remove the plugin backwpup-pro/backwpup.php."; the screen no longer lists the plugin, so the old page object and step passed it. Now `PluginsPage.delete` fails in 0.86 s with WordPress's words, the step's check names `zz-locked`, and cleanup removes it with elevation | `pro@nginx`, the real page object and step check from a scratch script | Removal under test judges the path. |
+| V276 | On a clean site cleanup sends one `wp --skip-plugins --skip-themes eval` (the inspection) and the existing `wp cache flush` — nothing written, nothing elevated | node-ssh's `exec` counted, `pro@nginx` and `free@nginx` | A clean site pays one read. |
+| V277 | Out of scope, found by the run: BackWPup `develop@cd26255`'s `ensure_uploads_folder_protected()` calls `backwpup_wpfilesystem()->mkdir()` from WP-CLI; on `simple` (no `FS_METHOD`) WordPress picks `ftpext` with no connection — `ftp_mkdir(): Argument #1 … null` — then `Undefined constant "FS_CHMOD_FILE"`; 11 of 12 scenarios failed before the run was stopped. `pro@apache` defines `FS_METHOD` `direct` and passes | `pro@nginx` run, `src/Infrastructure/Restore/commons.php:126` | A product defect at that ref (or a cell needing `FS_METHOD`); to report, not 6H.0's. |
+
+### 2.33 6H.0 audit (2026-10-21)
+
+Three auditors, then fixed in place; each fix has a spec that fails without it (36 mutations, all caught).
+
+| # | Fact | Evidence | Consequence |
+| --- | --- | --- | --- |
+| V278 | An **active** copy that cannot boot (`vendor/berlindb` gone) makes `wp plugin is-active` die on its fatal at exit **1**, read as inactive, so the deactivation is skipped; the folder removed by path leaves `backwpup-pro/backwpup.php` in `active_plugins` (protected from the sweep), and the next `install --activate` never runs the activation: 0 options, no `backwpup_activation_time`. Fixed: after a failed uninstall, `wp --skip-plugins plugin deactivate` then `--skip-plugins plugin is-active` must exit 1, else `PluginDeactivationFailedError` and nothing removed. Re-run: "Plugin 'backwpup-pro' activated.", `backwpup_activation_time` set | `pro@apache` live, before and after; `plugin.spec.ts` (`WP_STUB_BROKEN`) | A healed active copy now reinstalls really activated. The ordinary deactivation still loads the plugin, so its own hook runs. |
+| V279 | A symlinked `rootDir`: the site names `WP_PLUGIN_DIR` from WP-CLI's resolved working directory, so every folder failed "does not lie inside the WordPress root". Now the path is also accepted under `readlink -f` of the root (resolved only then), with the parent and elevated-target guards on whichever root matched | `plugin-dir.spec.ts` (link root, real-path reply) | Removal by path works on a symlinked docroot. |
+| V280 | A dangling link at the slug in a folder the transport's user cannot write read as removed (`test -e` follows links): never escalated, then "something re-created it". Survivors are now `test -e p -o -L p` (one command; GNU/dash/sudo on the cell and BSD checked), in `removeSiteResidue` too | `plugin-dir.spec.ts`, `residue.spec.ts`; `pro@apache` user and `sudo -n` | Survivors are named with the right advice. |
+| V281 | After the scenario a failed uninstall of the artifact under test was only a warning, so a product whose `uninstall.php` fatals passed every `@plugin` scenario. The teardown still heals, then throws `PluginUninstallBrokenError` with the uninstall's first error line (a cleanup failure: later duties run, the log verdict outranks it); the Before hook only reports (an earlier run's copy) | `plugin-lifecycle.spec.ts` | The uninstall is judged on every `@plugin` scenario, not only by the deletion feature. |
+| V282 | Pre-flight and the healthcheck inspected every edition's slug, so another edition's orphan (`backwpup` on a pro cell) was reported every run with "the next @plugin scenario removes it" — never true. Now only the cell's slug (`resolveIdentity(manifest, edition)`); `pluginSlugs` removed | `pro@apache` (auditor), source | The banner's promise holds. |
+| V283 | `recognised` used `get_plugins( '/<slug>' )`, which also finds a header one folder deeper: such a folder read `recognised` while `is-installed` said no and `uninstall` "No plugins uninstalled". Now a `<slug>/<file>.php` key of `get_plugins()` (core's walk read from the cell); the PHP harness models it | `pro@apache`: header in `backwpup-pro/sub/` → `orphaned`, `is-installed` 1, removed by path; `plugin-dir.php.spec.ts` | The kinds match WordPress's own list. |
+| V284 | `uninstallPlugin` on an orphaned folder said "is absent". `PluginNotInstalledError` now names what is at the path | `plugin.spec.ts` | Truthful failure. |
+| V285 | What the uninstall just run left (listed → uninstall → orphaned) was reported as "a removal stopped part-way". `ClearedPluginDir` now carries `cause` (`unlisted` / `uninstall-left` / `uninstall-failed`), each worded | `plugin.spec.ts`, `plugin-lifecycle.spec.ts` | The report's cause is right. |
+| V286 | Nits: `capped` meant "exactly the cap" (now strictly more; `pluginDirPhp(slugs, cap)` tests it under PHP); a name with a newline or escape broke the one-line description (now `plain`); `readlink` without `@` could print into the JSON reply; `reinstallPlugin` passed no report (now `scenarioReport`) | specs | — |
+| V287 | Test gaps the auditors' mutants survived, closed: `formatAge` days, owner type, reply bounds, PHP owner name, `firstError` anchoring/order/trim/300, `existingDestination` variants, every `PluginDestinationExistsError` verdict, the log cleared once over an orphan, an attachment fault, `delete-plugin` truthy/blank/non-text answers, `evalPhp`'s exact argv, the re-created wording, an elevated pass leaving survivors (a `sudo` shim), hook-level `PluginDirRemovalFailedError`. The stub sorts like `scandir` and counts a readable-not-enterable folder as PHP does. Equivalent mutant: `destinationVerdict`'s segment check (the inspection refuses the name itself) | specs | — |
+
 ## 3. Coverage & tagging decisions
 
 ### 3.1 Editions
@@ -974,121 +1005,38 @@ Plugin bug to report: no files backup excludes the restore directory, so an aban
 `restore.dat` / `restore.dat.bkp` — database credentials in clear — lands in the next archive
 (V226). The suite's backups each precede any restore in their install, so none holds credentials.
 
-### 6H.0 — Plugin folders WordPress cannot see
+### 6H.0 — Plugin folders WordPress cannot see (done, 2026-10-21)
 
-Product-agnostic; before 6H; critical. Facts: §2.31 (V228–V234).
+Product-agnostic. Facts: §2.31 (V228–V234), §2.32 (V270–V277), audit §2.33 (V278–V287). A removal a PHP-FPM restart or a
+reboot cuts short leaves part of a plugin at its path, which blocked every later install (V229–V230,
+V270) or uninstall (V272).
 
-The gap. A removal cut short — the QA servers restart PHP-FPM or reboot several times a week
-(V231) — leaves `wp-content/plugins/<slug>/` holding part of the plugin:
+Rules, as built: "absent" means nothing at the plugin's path; cleanup heals, removal under test
+judges; only the cell's own slug is inspected; a clean site pays one read; `recognised` is
+WordPress's own list.
 
-- Without its main file, WordPress lists nothing there, every "is it installed?" check says no, and
-  every install aborts on "Destination folder already exists" (V229, V230): one interruption fails
-  every later scenario, every cycle, until someone removes the folder by hand.
-- With its main file but not the rest, the plugin is listed and its `uninstall.php` cannot load what
-  it needs (V229, unmeasured): the same dead end, through a failing uninstall.
-- This suite's own removal checks would call either folder removed (V233).
+What shipped (detail: `wordpress-automation.md`, plugin lifecycle and plugin folders):
 
-Rules.
+- `wp/plugin-dir.ts`: `inspectPluginDirs` (`absent`/`recognised`/`orphaned`, one `wp eval`, plugins
+  and themes skipped, a link seen as a link) and `removePluginDir` (cleanup only; the parent held
+  inside the root; `residue.ts`'s shared `removeEscalating`; verified; `PluginDirRemovalFailedError`).
+- `ensurePluginAbsent` decides from the path, removes a folder WordPress does not list, and removes a
+  listed one by path once its uninstall failed — first taken off `active_plugins` with no plugin
+  loaded (V278); it returns what it removed and why (`cause`). `uninstallPlugin`, the deletion step
+  and `PluginsPage.delete` (reads the `delete-plugin` answer) fail on what is left.
+- The `@plugin` hooks report a cleared folder (warning + `leftover-plugin-files`), before the install
+  and after the scenario; after healing a failed uninstall the Before hook clears `debug.log` again
+  (V274) and the teardown fails (`PluginUninstallBrokenError`, V281). `installPlugin` turns
+  "Destination folder already exists" into `PluginDestinationExistsError`.
+- Pre-flight and the healthcheck report a leftover folder at the cell's slug as a passing "Plugin
+  folders" check and a run-level banner.
 
-- "Absent" means nothing at the plugin's path, not "WordPress lists no plugin there".
-- A half-removed plugin costs at most the scenario that left it, never the ones after.
-- Cleanup heals, removal under test judges: the lifecycle hooks remove what is left and say so; a
-  scenario that tests removal fails on what is left and never sweeps it.
-- Keyed on the slug under test only. The shared QA sites hold other teams' folders WordPress does
-  not list either (`revslidertest*`, `td-composer` on several); nothing outside the artifact's own
-  slug is ever inspected for removal.
+Verification: steps 1–2 V270–V272; recovery V273 (V274 fixed, re-proven on `pro@apache`); the
+deletion feature V275; no-op V276; audit V278–V287 (V278 live on `pro@apache`); the four gates and
+the specs (14 + 36 mutations, all caught).
 
-What ships.
-
-- `common/wp/plugin-dir.ts` — the plugin's folder as the site has it.
-  - `inspectPluginDir(transport, slug)` → `absent` | `recognised` | `orphaned`; `orphaned` carries
-    an entry count, a bounded sample of top-level names, owner and modification time. One `evalPhp`
-    with plugins and themes skipped. The folder is `WP_PLUGIN_DIR/<slug>` as the site defines it
-    (never an assumed `wp-content/plugins`), held inside the root by `assertResolvedInsideRoot`.
-    "Recognised" is `get_plugins( '/<slug>' )` non-empty — the test `wp plugin is-installed` rests
-    on. A link at the slug is reported as a link.
-  - `removeOrphanedPluginDir(transport, slug)` — acts only on a folder inspected as `orphaned`
-    immediately before; the slug through `isPathSegment` / `pluginSitePath`, the target through
-    `assertSafeElevatedTarget`; a link is removed as a link, never followed. Unprivileged first,
-    then `execElevated` for what survived, through the removal `wp/residue.ts` already uses (shared,
-    not copied). Verified by inspecting again: anything but `absent` throws a new
-    `PluginDirRemovalFailedError` naming what is left — thrown, unlike data residue, because the
-    next install cannot succeed with it there.
-- `ensurePluginAbsent` (cleanup) becomes path-aware and returns what it had to clear, for the
-  hooks to report. After the WordPress removal it inspects the folder and removes an `orphaned` one.
-  For the other shape — a `recognised` plugin whose uninstall fails — it removes the folder without
-  the uninstall (the plugin is already deactivated) and lets the database sweep take the footprint,
-  keeping the uninstall's failure in the report; this part ships only once V229's main-file-survives
-  shape is measured. `uninstallPlugin` does not do this.
-- Removal under test is path-aware and never sweeps.
-  - `uninstallPlugin`: anything at the path after the uninstall fails `PluginUninstallFailedError`,
-    naming what survived.
-  - `PluginsPage.delete` reads the `delete-plugin` answer: `success: false` fails
-    `PluginDeletionFailedError` with WordPress's own `errorMessage` ("Could not fully remove the
-    plugin …"); a non-JSON or non-200 answer (a killed request's gateway page) fails naming its
-    status.
-  - The step "BackWPup is no longer installed on the site" (`steps/plugin-deletion.steps.ts`)
-    asserts `inspectPluginDir` is `absent`, which its message already claims.
-- The `@plugin` hooks report it. Before the install and after the scenario, a cleared folder is
-  a `console.warn` plus a `leftover-plugin-files` attachment — count, sample, owner, age and the
-  likely cause in one sentence (a removal stopped part-way, e.g. by a PHP-FPM restart or a reboot) —
-  in the shape `sweepDbResidue` prints. Order: `ensurePluginAbsent` (folder included) → database
-  sweep → install, so a folder left by a cut-short install (no rows, maybe no main file) is covered
-  too.
-- An install that still meets a folder says what it is. `installPlugin` turns WP-CLI's
-  "Destination folder already exists" into a new `PluginDestinationExistsError`, naming the path and
-  whether WordPress sees a plugin there — for something re-creating the folder between sweep and
-  install.
-- Pre-flight and the healthcheck report, never gate. For each real site, an `orphaned` folder at
-  a slug the product's manifest maps its editions to (`wp-rocket`, `backwpup`, `backwpup-pro`) is
-  one line in the run-level warning banner (`setup/elevation-report.ts`) and a check in the
-  healthcheck's per-site list, saying the next `@plugin` scenario will remove it. That is how a
-  fleet monitor would have shown the AutoE2E incident before a cycle failed.
-
-Unit specs, each new assertion proven by a mutation that removes it:
-
-- `plugin-dir.spec.ts`, against real directories over the `local` transport: the three states; a
-  link at the slug (inspected, removed as a link, its target untouched); a folder only elevation can
-  empty; verification after removal; the slug and root guards.
-- `plugin.spec.ts`: `ensurePluginAbsent` removes the folder only after WordPress's removal, and
-  never a `recognised` one before the uninstall was tried; `uninstallPlugin` fails on a remnant and
-  does not remove it.
-- `plugins.page.spec.ts`: a `success: false` body; a 502 HTML body.
-- `plugin-lifecycle.spec.ts`: the report and the order.
-
-Verification, all part of this sub-phase:
-
-1. Reproduce first, on a cell. On `pro@nginx`, with the user's go-ahead for a destructive
-   measurement, interrupt core's own `delete_plugins()` (`timeout -s TERM` around a `wp eval`) until
-   the folder is left without its main file; record the cell's readdir order and the Before hook's
-   failure verbatim, before the change.
-2. Measure what is open: the wp-admin deletion time of the Pro build on both servers (the window
-   V231's kills land in); what `wp plugin uninstall` does when the main file survives and `vendor`
-   does not (V229).
-3. Recovery: after the change, the same dirty cell runs the full BackWPup suite with
-   `E2E_RETRIES=0`, the first scenario reporting the cleared folder; then the main-file-survives
-   shape the same way.
-4. The deletion feature catches it: a `plugin-deletion` scenario whose deletion is cut short
-   fails on the step that asks the site, not on a timeout.
-5. No-op on a clean site: one read, no write, nothing elevated, on both nginx cells.
-6. The four gates. Docs: wordpress-automation.md (plugin lifecycle: what "absent" means, the new
-   module and errors), `CLAUDE.md` (the `@plugin` Before/After bullets, the `wp/` module list),
-   authoring-tests.md if it describes the deletion step's contract.
-
-Acceptance — a folder at the slug that WordPress does not list, or lists but cannot uninstall,
-costs at most one scenario and is reported every time it is cleared; a removal under test that
-leaves anything at the path fails, naming what is left; a clean site pays one read; nothing outside
-the artifact's slug is ever touched.
-
-Not covered:
-
-- The cause on the servers: the twice-daily reboot and `needrestart`'s PHP-FPM restarts are operator
-  settings (V231). This sub-phase makes the suite survive them. Pausing a cell across a known
-  maintenance window is a later orchestrator feature, not planned yet.
-- The old suite: `wp-rocket-e2e` (AutoE2E) needs the same check in its own BackWPup hooks — a
-  separate change to that repository.
-- Other half-finished writes a kill can leave (an interrupted restore, a half-copied upload): each
-  has its own guard or none; this sub-phase does not widen to them.
+Not covered: the cause on the servers (V231, operator settings); the old suite (`wp-rocket-e2e`, a
+separate change); other half-finished writes a kill can leave.
 
 ### 6H — Storage credential surface
 
@@ -1158,7 +1106,7 @@ transliteration of its baseline ancestor.
 
 ### 6J — Staging area web guard
 
-Product-agnostic; depends on nothing (may be pulled forward, not ahead of 6H.0). Facts: §2.21
+Product-agnostic; depends on nothing (may be pulled forward). Facts: §2.21
 (V142–V145).
 
 The gap. The staging area is in the docroot, and the web server serves whatever it can read
@@ -1378,7 +1326,7 @@ here.
 | A restore rewrites the site under test | 6G's markers judge each half; `cliRestore` guards the command-line restore (V205–V207); every scenario reinstalls and ends as found. 6K reuses both. |
 | Backup jobs are slow | `@slow` for CI splitting; real barriers instead of long fixed timeouts; database-only jobs where contents do not matter. |
 | A fresh install that is not fresh | BackWPup's activation runs in whichever request reaches `init` first, and a racing second request deletes the onboarding flag (V46, V122): `finishActivation()` detects a lost race and redoes the install — up to three installs, each reported. A lost race can also fatal in the plugin's migration (V174): the debug-log gate fails that scenario and the retry absorbs it. A leftover table blocking the install (V47) is swept by 6E.0. Report upstream: activation should not be re-entrant; uninstall should be the last word on its own table. |
-| A removal cut short blocks every later install | Seen in AutoE2E (V229–V231); 6H.0. The kills are the operator's to schedule. |
+| A removal cut short blocks every later install | Seen in AutoE2E (V229–V231); this suite survives it since 6H.0 (V270–V277). The kills are the operator's to schedule. |
 | Staged files served by the web server | 6J. The `.htaccess` guard fails closed wherever it cannot apply (V143); nginx needs the include in the vhost — an operator change the suite reports every run but never makes. |
 | Scope creep from "improve" | The improvement budget is §1.1 plus the V-facts; anything else is a follow-up issue. |
 

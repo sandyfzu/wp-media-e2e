@@ -47,8 +47,8 @@ src/
 │   ├── pages/              # cross-product Page Object Model (plugins.page.ts, site-health.page.ts) + secret-field.ts (typing a secret no report records)
 │   ├── visual/             # visual-regression helpers (A/B, compare, stabilize)
 │   ├── artifacts/          # the plugin zips under test (resolve, digest, verify, consume, pre-warm, pin)
-│   ├── __fixtures__/       # spec helpers (temp-dir.ts: removeTempDir — a spec's temporary folder removed only when it is one; child-node.ts: run code in a fresh Node; import-probe.ts: what importing a module does to the process; import-scan.ts: every module a file loads, resolved, and what that reaches; report-tree.ts: fake report trees; drain/: the drain spec's scenarios; secret-scan.ts + secrets/: the no-credential canary; mock-wordpress.ts: wp-login and Site Health served locally)
-│   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
+│   ├── __fixtures__/       # spec helpers (temp-dir.ts: removeTempDir — a spec's temporary folder removed only when it is one; child-node.ts: run code in a fresh Node; import-probe.ts: what importing a module does to the process; import-scan.ts: every module a file loads, resolved, and what that reaches; report-tree.ts: fake report trees; drain/: the drain spec's scenarios; secret-scan.ts + secrets/: the no-credential canary; mock-wordpress.ts: wp-login and Site Health served locally; plugin-dir-stub.ts: a stub `wp`'s plugin-folder inspection, answered from a real folder)
+│   └── wp/                 # WordPress automation over WP-CLI (exec, php, staging, plugin, plugin-dir, log, options, cron, files, archive, residue, db-residue, ownership, paths, cache, db, teardown, errors)
 └── projects/
     ├── products.ts         # the one product list (PRODUCTS, productByName, productFromEnv, playwrightConfigFor); products.spec.ts guards it
     └── <product>/
@@ -300,15 +300,20 @@ module so it is unit-testable without the runtime.
 - **Before** — `debug.log` cleared, any **work the plugin is still running** stopped
   (`ProductConfig.stopRunningWork` — a job a killed run left behind; reported, and a failure only
   if it would not stop), any existing copy of the plugin uninstalled (so the
-  install is genuinely fresh, DB footprint included), then the cell's own resolved
+  install is genuinely fresh, DB footprint included) — and anything left at the plugin's **path**
+  removed by path: a folder WordPress no longer lists, or a listed one whose uninstall fails (taken
+  off `active_plugins` first with no plugin loaded, or the next `install --activate` would skip its
+  activation), which is what a removal stopped part-way by a PHP-FPM restart or reboot leaves
+  (`wp/plugin-dir.ts`; reported as a warning and a `leftover-plugin-files` attachment; that copy's
+  uninstall fatal is an earlier run's, so `debug.log` is cleared again) — then the cell's own resolved
   artifact staged and installed with `--activate`, its files handed back to the ownership the
   **site** uses (WP-CLI installs as the transport's user, which the web server is not — see
   `wp/ownership.ts`) — and the plugin's **active state re-asserted**, never inferred from the
   install's exit code — and, between the removal and the install, the plugin's leftover **database
   footprint** swept off what is actually on the site (`ProductConfig.siteDbResidue`). That sweep is
-  keyed off the footprint, never off `is-installed`, which is a _file_ test: a site whose plugin
-  directory went without its `uninstall.php` ever running looks clean and would otherwise be
-  installed straight on top of the last run's rows. The edition is never named:
+  keyed off the footprint, never off whether the plugin is installed: a site whose plugin
+  directory went without its `uninstall.php` ever running would otherwise be installed straight
+  on top of the last run's rows. The edition is never named:
   the slug comes from `pluginArtifact("plugin").slug`. Finally the product's declared data
   directories (`ProductConfig.siteResidue`) are created, opened to **both** users sharing the
   docroot and handed to the site's ownership — WP-CLI and the web server are different users on a
@@ -322,7 +327,9 @@ module so it is unit-testable without the runtime.
   scenario** (`DebugLogFatalError`) with the log attached; warnings/notices are logged.
   Then any **work the plugin is still running** is stopped (`ProductConfig.stopRunningWork` — for
   BackWPup, a backup job a scenario left running, which runs in a web request and would otherwise
-  outlive the uninstall), then the plugin is removed, then any **database footprint** that
+  outlive the uninstall), then the plugin is removed (what is left at its path too, reported as
+  above; an uninstall that fails is healed the same way but **fails the scenario**,
+  `PluginUninstallBrokenError` — the log was judged before it ran), then any **database footprint** that
   outlived its uninstall is swept, and finally the **files it left behind** are cleared
   (`ProductConfig.siteResidue`) — a plugin's uninstall keeps the data it wrote, so a suite that
   reinstalls per scenario would fill the cell's disk. All five duties always run, independently: a
@@ -414,17 +421,20 @@ is a dependency project that runs before any BDD scenarios. It does three things
    the same function WordPress uses to pick an admin request's language, so it accounts for a
    per-user override, the site option, a `WPLANG` constant and filters alike). Page objects
    locate controls by their visible English names, so a translated site would otherwise fail
-   as many unrelated locator timeouts instead of once, here. Two further checks are **reports, not
+   as many unrelated locator timeouts instead of once, here. Three further checks are **reports, not
    gates**: **File ownership** says what will happen to the files this run installs (the same
    `planOwnership` decision `normalizeOwnership` acts on, taken once and shared, so the report and
-   the action can never disagree), and **Elevation** says whether passwordless `sudo` is available.
-   Neither fails a site for a property of the _host_ — the single exception is a
+   the action can never disagree), **Elevation** says whether passwordless `sudo` is available, and
+   **Plugin folders** says whether the slug the cell installs as (`resolveIdentity` of its manifest and
+   edition) holds a folder WordPress lists no plugin in, which the cell's next `@plugin` scenario
+   removes.
+   None fails a site for a property of the _host_ — the single exception is a
    `transport.fileOwner` that cannot be parsed, which is our own configuration being unreadable and
    fails like any other config error. A failure of any gating check throws a formatted, actionable
    report and skips the whole BDD project; the reports instead fold into one run-level warning
    banner ([`setup/elevation-report.ts`](src/common/setup/elevation-report.ts)), printed once per
    run, silent when every site can elevate or has opted out, and naming the ownership cost only for
-   the sites that actually needed a handover.
+   the sites that actually needed a handover — and a second one naming each leftover plugin folder.
 2. **Authentication** ([`auth/authenticate.ts`](src/common/auth/authenticate.ts)) — per real
    site, first **ends the session the cell's previous run saved** (`auth/session.ts`: that one
    token, for that site's host only, through `WP_Session_Tokens`, so no other session of the user is
@@ -584,8 +594,19 @@ ssh). Highlights — full reference in
   asserted **removal under test** (`uninstallPlugin`); both **deactivate as their own
   WP-CLI call**, then run plain `wp plugin uninstall` (files + DB footprint) — never
   `uninstall --deactivate`, which makes a plugin's own cleanup skip itself; typed
-  errors in `wp/errors.ts`.
-- UI plugin actions live in the [`PluginsPage`](src/common/pages/plugins.page.ts) page object.
+  errors in `wp/errors.ts`. **"Absent" means nothing at the plugin's path**, never "WordPress
+  lists no plugin there": WordPress removes a plugin entry by entry, so a removal a PHP-FPM restart
+  or reboot cuts short leaves part of it, which blocks every later install. Cleanup heals (removes
+  what is left by path, returns it for the hooks to report); removal under test judges (fails
+  naming it, never sweeps).
+- [`wp/plugin-dir.ts`](src/common/wp/plugin-dir.ts) reads a plugin's path as the site has it —
+  `inspectPluginDirs` (`absent` / `recognised` / `orphaned`, one `wp eval` with plugins and themes
+  skipped, a link seen as a link) — and `removePluginDir` removes it by path for cleanup, through
+  `residue.ts`'s `removeEscalating`, verified, `PluginDirRemovalFailedError` otherwise. `recognised`
+  is WordPress's own list (a `<slug>/<file>.php` key of `get_plugins()`); a path under a symlinked
+  `rootDir`'s real path is accepted. Only the cell's own slug is ever inspected.
+- UI plugin actions live in the [`PluginsPage`](src/common/pages/plugins.page.ts) page object; its
+  `delete` reads WordPress's `delete-plugin` answer (a `success: false` or a gateway page fails).
 - [`wp/options.ts`](src/common/wp/options.ts) reads WordPress options (`getOption`,
   `getOptionJson`) so a scenario can assert what a plugin _persisted_, not just what a
   screen rendered. A missing option reads as `undefined`; a WordPress that cannot boot
@@ -862,7 +883,8 @@ Update it when you change anything about:
 - Transport modes (`local`, `docker`, `ssh`) or the `exec`/`wpCli` API.
 - The file-transfer primitives (`wpRootDir`, `copyIntoTarget`) or the site staging
   area (`staging.ts`, `E2E_SITE_STAGING_DIR`, `transport.stagingDir`).
-- The plugin lifecycle functions or their error types.
+- The plugin lifecycle functions or their error types, or the plugin-folder inspection and removal
+  (`plugin-dir.ts`: `inspectPluginDirs`, `removePluginDir`, `describePluginDir`).
 - The debug-log API (`readDebugLog`, `clearDebugLog`, `scanDebugLog`, `ScanDebugLogOptions`).
 - File ownership (`ownership.ts`: `planOwnership`, `normalizeOwnership`, the grant rule,
   `transport.fileOwner`) or the shared path guards (`paths.ts`, `pathInsideRoot`).

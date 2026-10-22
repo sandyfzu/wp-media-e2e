@@ -250,21 +250,78 @@ correctness semantics:
 | `uninstallPlugin(transport, slug)`     | **Removal under test**           | Throws `PluginNotInstalledError`. |
 
 `wp plugin uninstall` exits non-zero for *both* "not found" and a genuine failure,
-so its exit code is not trusted — removal is always re-verified with `is-installed`
-(exit `0` = installed, `1` = not); a plugin that survives throws
-`PluginUninstallFailedError`. Other helpers:
+so its exit code is not trusted. **"Absent" means nothing at the plugin's path**, never "WordPress
+lists no plugin there" — all `is-installed` can say — so both intents judge removal by the path
+([below](#plugin-folders-wordpress-cannot-see-wpplugin-dirts)):
 
-- `isPluginInstalled` / `isPluginActive` — boolean state checks.
+- `ensurePluginAbsent` (cleanup) **heals**. It decides from the path: a plugin WordPress lists is
+  deactivated and uninstalled through WordPress; if that uninstall fails, the plugin is taken off
+  `active_plugins` with **no plugin loaded** (`wp --skip-plugins plugin deactivate`, verified by
+  `--skip-plugins plugin is-active` exiting 1, else `PluginDeactivationFailedError` and nothing
+  removed) — a copy that cannot boot makes the ordinary `is-active` die at exit 1, read as inactive,
+  and left listed the next `install --activate` finds it "already active" and skips its activation
+  (measured) — then its folder is removed by path and the database sweep after it takes the
+  footprint; a folder WordPress does not list is removed by path. It returns what it removed by path
+  (`ClearedPluginDir`, whose `cause` is `unlisted`, `uninstall-left` — the uninstall ran but left
+  part of it — or `uninstall-failed` with its first error line), for the hooks to report. A clean
+  site pays one read.
+- `uninstallPlugin` (removal under test) **judges**: anything left at the path throws
+  `PluginUninstallFailedError` naming it, and is left for the cleanup after it. A plugin WordPress
+  does not list throws `PluginNotInstalledError`, naming what is at the path when something is.
+
+Other helpers:
+
+- `isPluginInstalled` / `isPluginActive` — boolean state checks (WordPress's view).
 - `ensurePluginDeactivated(transport, slug)` — idempotent deactivation.
 - `installPlugin(transport, source, opts?)` — install from slug, a zip path **on the
   site**, or URL; [`InstallPluginOptions`](../../src/common/wp/plugin.ts)
   `{ activate?, force? }`. For a zip that lives on the runner, use
-  `stageAndInstallPlugin` (above) so it reaches the site first.
+  `stageAndInstallPlugin` (above) so it reaches the site first. WP-CLI's "Destination folder
+  already exists" becomes `PluginDestinationExistsError`, naming the folder and whether WordPress
+  lists a plugin in it.
 - `activatePlugin(transport, slug)`.
 
 UI-driven plugin actions (the asserted, user-facing flow through wp-admin) live in
 the [`PluginsPage`](../../src/common/pages/plugins.page.ts) page object instead —
-see [authoring-tests.md](../guides/authoring-tests.md).
+see [authoring-tests.md](../guides/authoring-tests.md). Its `delete` reads WordPress's answer to
+`delete-plugin`: `success: false` fails `PluginDeletionFailedError` with WordPress's own
+`errorMessage` ("Could not fully remove the plugin(s) …"), and a non-JSON answer (a killed
+request's gateway page) fails naming its status.
+
+## Plugin folders WordPress cannot see ([`wp/plugin-dir.ts`](../../src/common/wp/plugin-dir.ts))
+
+WordPress removes a plugin **entry by entry**, never atomically (`WP_Filesystem_Direct::delete`, or
+WP-CLI's `rm -rf`). A removal stopped part-way — the QA servers restart PHP-FPM and reboot several
+times a week — leaves part of the plugin at `<WP_PLUGIN_DIR>/<slug>`, and which part follows the
+filesystem's directory order. Both shapes were reproduced on the QA servers by SIGTERM-ing core's
+own `delete_plugins()`:
+
+| Shape | Seen on | WordPress | What it blocked before this module |
+| --- | --- | --- | --- |
+| Main file gone, the rest kept | nginx server (`backwpup.php` 1st in directory order) | Lists nothing; `is-installed` 1; `delete` "already deleted" and leaves it | Every install: "Destination folder already exists" |
+| Main file kept, `vendor` half gone | apache server (`backwpup.php` 15th, after `vendor`) | Lists the plugin; `uninstall.php` dies on a `require_once` of what is gone | Every uninstall: `PluginUninstallFailedError` |
+
+- `inspectPluginDirs(transport, slugs)` / `inspectPluginDir` — one `wp eval` (plugins and themes
+  skipped, so a broken copy cannot stop it) per call, for any number of slugs: `absent`,
+  `recognised` (a `<slug>/<file>.php` key of `get_plugins()` — WordPress's own list, the one
+  `is-installed` reads; not `get_plugins( '/<slug>' )`, which also finds a header one folder deeper)
+  or `orphaned`, with the type (`lstat`: a link is reported as one, never walked), an entry count
+  (`capped` past `ENTRY_COUNT_CAP`), the first top-level names, owner and age by the site's clock.
+- `removePluginDir(transport, slug, { recognised? })` — cleanup only. Inspects first; refuses a
+  plugin WordPress lists unless told its uninstall failed. The path is the site's own
+  (`WP_PLUGIN_DIR`, named from WP-CLI's resolved working directory, so under a symlinked `rootDir`
+  it is accepted under the root's real path), held inside the root lexically (`normaliseSitePath`,
+  named by the slug) and
+  where its **parent** really leads (`assertResolvedInsideRoot` — the parent, since a link at the
+  slug is removed as a link). Removed through `residue.ts`'s shared `removeEscalating` (unprivileged,
+  then elevated for survivors; a survivor is `test -e p -o -L p`, so a dangling link is one), then
+  verified by inspecting again: anything left throws
+  `PluginDirRemovalFailedError` — thrown, unlike data residue, since the next install cannot succeed.
+- `describePluginDir` — the one-line, plain-text description reports, errors and the pre-flight
+  check share.
+- Only the slug the cell installs is ever inspected (pre-flight: `resolveIdentity` of the manifest
+  and the cell's edition): shared sites hold other teams' folders WordPress does not list either, and
+  another edition's folder is not the cell's to clear.
 
 ## Error types ([`wp/errors.ts`](../../src/common/wp/errors.ts))
 
@@ -272,10 +329,19 @@ Distinct classes so steps and reports can tell failure modes apart — including
 two that WP-CLI's ambiguous plugin-removal exit codes cannot, and the UI-only
 activation/deactivation cases:
 
-- `PluginNotInstalledError` — expected-present plugin is absent.
-- `PluginActivationFailedError` / `PluginDeactivationFailedError` — UI action failed.
-- `PluginUninstallFailedError` — plugin still installed after a WP-CLI `plugin uninstall`.
-- `PluginDeletionFailedError` — plugin still installed after the admin-UI Delete action.
+- `PluginNotInstalledError` — expected-present plugin is not one WordPress lists; names what is at
+  its path, if anything.
+- `PluginActivationFailedError` / `PluginDeactivationFailedError` — UI or WP-CLI action failed.
+- `PluginUninstallBrokenError` — the plugin's own uninstall failed and cleanup removed it by path;
+  the `@plugin` teardown fails the scenario with it.
+- `PluginUninstallFailedError` — something still at the plugin's path after a WP-CLI
+  `plugin uninstall` (removal under test), named.
+- `PluginDeletionFailedError` — the admin-UI Delete action failed: WordPress's own refusal, no
+  answer from WordPress, or the plugin still listed afterwards.
+- `PluginDirRemovalFailedError` — cleanup could not remove what is at a plugin's path, named, with
+  the advice for the site's elevation state.
+- `PluginDestinationExistsError` — an install met a folder at the plugin's path; says whether
+  WordPress lists a plugin in it.
 - `DebugLogFatalError` — PHP wrote a fatal to `debug.log` during a scenario. Not a plugin
   action at all: it carries every matched fatal and quotes the first few in its message,
   so the failure is diagnosable from the reporter alone.
@@ -376,14 +442,18 @@ itself per scenario (measured on the QA cell before this existed: **6.8 GB acros
   data still ends up clean. Before a privileged `rm -rf`, the site's `rootDir` must itself be
   plausible (absolute, not a top-level directory, and the target must resolve inside it): the
   relative half is already constrained by `normaliseResiduePath`, and this is the half it cannot see.
+  The two passes are exported as `removeEscalating(transport, root, paths)` — `removed`, or the
+  survivors with the elevation that could not clear them — for any removal of what the web server
+  wrote (the plugin folders above), its caller having checked containment first.
 - **Its cost does not grow with what it finds.** Every command is a round-trip (~0.8 s over SSH,
   measured), and removing leftovers one at a time — ~6 commands each — once took the `@plugin`
   teardown past its 120 s budget on a site holding 28. So the root is resolved once
   (`assertAllResolvedInsideRoot`), a family is checked once through its parent (its members are
   directories the parent's listing found, never links, so they lie inside the root exactly when the
   parent does), and each pass removes everything in one `rm -rf` (chunked at 200 paths) and re-reads
-  it in one listing per family plus a `test -e` per declared path. A re-listing that fails while the
-  parent is still there counts every member as a survivor: "could not look" never reads as "gone".
+  it in one listing per family plus a `test -e p -o -L p` per declared path (a dangling link
+  counts). A re-listing that fails while the parent is still there counts every member as a
+  survivor: "could not look" never reads as "gone".
 - `normaliseResiduePath` rejects anything that is not a path below the root — absolute, escaping,
   naming a directory WordPress itself owns (`wp-content/uploads` and friends) or lying inside core's
   `wp-admin`/`wp-includes`. It guards against a typo in a config file, not against a hostile one.
@@ -453,9 +523,10 @@ The mirror image of the section above. A plugin's uninstall keeps the *files* it
 it clears its *database* footprint properly — but that cleanup lives in the plugin's own
 `uninstall.php`, so it only ever runs **while the plugin's files are still there**.
 
-`ensurePluginAbsent` is gated on `wp plugin is-installed`, which is a **file** test. So a site whose
-plugin directory has gone while its rows remain looks already-clean, the uninstall block is skipped,
-and the next install lands on top of the previous run's state. Measured on `pro@apache` with
+`ensurePluginAbsent` can only ask WordPress to uninstall a plugin whose files are there. So a site
+whose plugin directory has gone while its rows remain has no uninstall left to run — nor does one
+whose uninstall failed and whose folder cleanup removed by path — and the next install lands on top
+of the previous run's state. Measured on `pro@apache` with
 BackWPup: `wp plugin uninstall <slug> --deactivate` — the one call [the plugin
 lifecycle](#plugin-lifecycle-wpplugints) forbids, precisely because the plugin's own guard then
 skips its cleanup — deletes the files and leaves **26 options and `wp_bwpup_backups`** behind. The
@@ -474,7 +545,7 @@ So the sweep keys off the **footprint**, never off whether the plugin is install
   matched *literally* — `%` and `_` are escaped with `esc_like` — so a fragment can only ever mean
   itself.
 - **Ordering is the guarantee, and it is not cosmetic.** Both callers sweep immediately after
-  `ensurePluginAbsent`, which throws rather than return with the plugin still installed. Measured on
+  `ensurePluginAbsent`, which throws rather than return with anything still at the plugin's path. Measured on
   a cell: sweeping while the plugin is active *does* delete the rows, and the very next WordPress
   request puts all 26 options and the table straight back, because the plugin re-creates its own
   footprint on `init`.
