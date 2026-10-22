@@ -276,6 +276,10 @@ Per-project knobs:
   setups never retry.
 - Edition-ful cells generate only their edition's scenarios, via a Cucumber tag filter (`pro` → `not @free`, `free` → `not @pro`).
 - `workers` per project is a defensive cap; correctness rests on the global single-cell `workers`.
+- `navigationTimeout: 60_000` run-wide (`NAVIGATION_TIMEOUT_MS`): `goto`, `reload`, `waitForURL`, … are
+  otherwise unbounded, and a page whose document was lost waits out the whole scenario (16 min measured).
+  Measured worst navigation it bounds: 5.6 s (a cell's whole run); a call's own `timeout` still wins
+  (measured), so the restore wizard's minutes-long waits keep theirs.
 
 ## Credential handling: the in-memory pool registry
 

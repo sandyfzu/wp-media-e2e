@@ -76,6 +76,10 @@ interface Built {
   readonly runTrace: unknown;
   /** The config's `captureGitInfo`; `null` when unset. */
   readonly captureGitInfo: unknown;
+  /** The run's own `navigationTimeout`. */
+  readonly navigationTimeout: unknown;
+  /** Project name → the `navigationTimeout` it sets itself (absent: the run's own). */
+  readonly projectNavigationTimeouts: Record<string, unknown>;
 }
 
 /** A working directory that is not the repository's. */
@@ -120,6 +124,9 @@ async function build(
       traces: Object.fromEntries(config.projects.map((p) => [p.name, p.use?.trace ?? null])),
       runTrace: config.use.trace,
       captureGitInfo: config.captureGitInfo ?? null,
+      navigationTimeout: config.use.navigationTimeout ?? null,
+      projectNavigationTimeouts: Object.fromEntries(
+        config.projects.map((p) => [p.name, p.use?.navigationTimeout ?? null])),
     }));
     `,
     { cwd: elsewhere, env: { RUN_ID: "run-1", ...env } },
@@ -245,6 +252,18 @@ test.describe("createProductConfig — traces", () => {
       "artifacts:b": null,
       b: null,
     });
+  });
+});
+
+test.describe("createProductConfig — navigations", () => {
+  test("every project bounds a navigation at a minute, not Playwright's unlimited default", async () => {
+    // A page that lost its document never fires `load`; unbounded, its navigation waits out the
+    // scenario's whole budget. No project may lift the bound for itself.
+    const built = await build(["--project=a"]);
+    expect(built.navigationTimeout).toBe(60_000);
+    expect(Object.values(built.projectNavigationTimeouts)).toEqual(
+      Array.from({ length: 6 }, () => null),
+    );
   });
 });
 

@@ -79,6 +79,19 @@ const isCI = process.env.CI !== undefined && process.env.CI !== "";
 const RETRIES = intEnv(RETRIES_ENV, 2, 0, 10);
 
 /**
+ * How long a navigation may take — `goto`, `reload`, `waitForURL`, `waitForNavigation`, `goBack`,
+ * `goForward`, `setContent` — unless the call passes its own `timeout`, which wins.
+ *
+ * Playwright's default is **no limit**: a page whose document was lost mid-load never fires `load`,
+ * and the navigation then waits out the scenario's whole budget (measured: 16 minutes on one
+ * attempt) before failing as a bare test timeout. Measured over a whole cell's run (58 navigations)
+ * and a run's failing attempts, the slowest navigation bound by this took 5.6 s (the dashboard's
+ * `goto`); the restore wizard's waits, which last minutes, pass their own timeouts. So a minute is a
+ * margin of 10× that still fails a stuck page within one.
+ */
+export const NAVIGATION_TIMEOUT_MS = 60_000;
+
+/**
  * How many reports the run's report folder keeps as the run ends (`reporting/run-pruning.ts`):
  * `E2E_REPORTS_KEEP`, 20 by default, `0` for no cap — the age rules still apply. Read here, as the
  * config is built, so a bad value fails the run at its start, naming the variable.
@@ -337,6 +350,7 @@ export function createProductConfig(
     expect: VISUAL_EXPECT,
     snapshotPathTemplate: snapshotPathTemplateFor(product.name),
     use: {
+      navigationTimeout: NAVIGATION_TIMEOUT_MS,
       trace: "retain-on-failure",
       screenshot: "only-on-failure",
       video: "retain-on-failure",
