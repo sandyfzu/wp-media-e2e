@@ -639,6 +639,29 @@ results. `bddgen` exiting changes nothing: its group's kill still keeps the runn
   shell would split them — quoting for the local shell only: scp's default SFTP mode globs `*`, `?`
   and `[` at the far end, and legacy `-O` hands the path to a remote shell unquoted (V390). The
   paths are the checkout's and the state directory's.
+- **Next run in the message — the user's idea, 2026-10-22, not a decision.** Append, at the end of
+  every Slack notification, when the next run starts — e.g. `Next Run in 60 minutes @ 19:53:23 UTC`
+  for a 60-minute cooldown. The implementing agent must first assess whether this is the best
+  presentation and data flow, and record the decision here. Position it last, after `Report:`/`Log:`,
+  escaped like every other text.
+  - The line is true only when another run is certain: never under `--once`, after a stop, in a
+    `failed` loop (processes not watched to their end, cell lost, timers) or — in Phase 1 — when a
+    backoff replaces the cooldown. `cycle.ts` builds and publishes `run.finished` in `conclude`
+    before `loop.ts` decides to cool down or ends; `slack.ts` sees only the event and
+    `instance`/`sshHost`. Do not guess `endedAt + cooldown` in Slack: it ignores prune time, the
+    clamp, stops and backoff. Assess moving publication after the loop's decision, adding a schedule
+    field to `run.finished`, or another flow; no second message.
+  - The armed timer is `now + cooldownDelay(endedAt, now, cooldown)`, not always `endedAt +
+    cooldown`: a prune longer than the cooldown waits nothing, a clock stepped back waits from now.
+    `nextRunLine` (terminal) shows local `HH:MM:SS`; Slack needs the same instant. Decide between
+    UTC (unambiguous, as in the example), the reader's local time (verify Slack's date markup), or
+    both; relative time goes stale after sending, absolute does not. State the cooldown separately
+    only if it adds value.
+  - When there is no next run, omit the line or say why (`--once`, stopped, loop failed); never
+    show a time that will not happen.
+  - Tests must compare the line with the timer actually armed: a normal loop, `--once`, a stop
+    during and after the run, an unwatched or otherwise failed loop, a clamped/stepped clock, a
+    future backoff, UTC/DST, and the message limit. One spec must fail if the time is off.
 - Node's `fetch` honours proxy variables only with `NODE_USE_ENV_PROXY`, the operator's choice (5J
   used it to reach local stand-ins).
 
@@ -921,8 +944,9 @@ Which machine is D4. On it:
 ### 7.1 Left after this phase
 
 For later phases or the deployment: §8's changes and §4.11; a systemd unit (§4.1); backoff after
-errors; a switch turning the suite's end-of-run pruning off (§8); on the runner, §6 end to end and
-V121/V122 there (§9, D4); the first production Slack and Datator posts (D5, D6).
+errors; a switch turning the suite's end-of-run pruning off (§8); the Slack next-run line (user's
+idea, §4.7); on the runner, §6 end to end and V121/V122 there (§9, D4); the first production Slack
+and Datator posts (D5, D6).
 
 ### 7.2 Traps
 
