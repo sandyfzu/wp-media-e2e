@@ -235,8 +235,9 @@ lives in a sibling module, unit-testable without it.
   `active_plugins` with no plugin loaded first, or `install --activate` skips its activation); a
   removal cut short leaves these (`wp/plugin-dir.ts`; a warning plus a `leftover-plugin-files`
   attachment; after a failed uninstall `debug.log` is cleared again, that fatal is an earlier run's); sweep its leftover **database
-  footprint** (`ProductConfig.siteDbResidue` — keyed off what is on the site, never off whether the
-  plugin is installed); stage and install the cell's artifact with `--activate`, its files handed to
+  footprint** (`ProductConfig.siteDbResidue`: options, tables, roles, capabilities — keyed off what is
+  on the site, never off whether the plugin is installed; activation's `add_role()` keeps a leftover
+  role as it is); stage and install the cell's artifact with `--activate`, its files handed to
   the **site's** ownership; **re-assert the active state**, never inferred from the exit code;
   create the declared data directories (`ProductConfig.siteResidue`, and `resolveSiteDataDirs` for
   names the plugin picks at runtime, e.g. BackWPup's `uploads/backwpup-restore-<20 hex>`), open to
@@ -438,7 +439,8 @@ automatically, and that verification **must not** be skipped. Mirrored as a comm
   the docroot, or one it cannot resolve.
 - Leftovers: `ProductConfig.siteResidue` (files, `wp/residue.ts`; unprivileged first, then only what
   survived elevated; `transport.elevate: false` refuses elevation) and `ProductConfig.siteDbResidue`
-  (rows, `wp/db-residue.ts`; never elevated, multisite refused). Both verified by re-reading.
+  (options, tables, roles, capabilities, `wp/db-residue.ts`; never elevated, multisite refused). Both
+  verified by re-reading.
 - **Debug log** ([`wp/log.ts`](src/common/wp/log.ts)): `clearDebugLog` in a `Before`, `scanDebugLog`
   (`{ raw, fatals, warnings, notices }`; WordPress booted with no plugin or theme, so a broken one
   cannot write into the log it reads; a direct read when even that fails) in an
@@ -587,7 +589,8 @@ this file goes in the right `docs/` file, linked from the [Documentation map](#d
   `transport.fileOwner`) and path guards (`paths.ts`, `pathInsideRoot`).
 - Residue (`residue.ts`: `parseResidueDeclaration`, `SiteResidueFamily`, `resolveSiteResidue`,
   `prepareResolvedDataDirs`, `isDeclaredResidue`) and the footprint sweep (`db-residue.ts`:
-  `SiteDbResidue`, `findSiteDbResidue`, `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`).
+  `SiteDbResidue`, `findSiteDbResidue`, `removeSiteDbResidue`, `PROTECTED_OPTIONS`, `PROTECTED_TABLES`,
+  `PROTECTED_ROLES`, `PROTECTED_CAPABILITIES`).
 - Cron (`nextScheduled`, `triggerScheduledEvent`), the PHP bridge (`phpLiteral`, `evalPhp`,
   `EvalPhpOptions`), file readers (`fileChecksum`, `listFiles`, `listLocatedFiles`, `FILE_LIST_PHP`,
   `backdateFile`, `pathFromWorkingDir`, `locateFromWorkingDir`), archives (`findArchiveEntries`,

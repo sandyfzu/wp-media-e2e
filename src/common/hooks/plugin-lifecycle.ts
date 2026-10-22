@@ -525,8 +525,31 @@ export function dbResidueMessage(
   return (
     `[hooks] ${when === "before" ? "before installing" : "after the scenario"}, cleared a leftover ` +
     `plugin footprint from the site: ${String(removed.options.length)} option(s), ` +
-    `${String(removed.tables.length)} table(s). ${cause}`
+    `${String(removed.tables.length)} table(s)${describeRemovedRoles(removed)}. ${cause}`
   );
+}
+
+/**
+ * The roles part of {@link dbResidueMessage}, empty when the sweep removed none: the roles by name,
+ * and how many capabilities on which roles — a stale role is what makes a fresh install test
+ * capabilities the product no longer defines, so it is named.
+ *
+ * @param removed - what the sweep removed.
+ */
+function describeRemovedRoles(removed: FoundDbResidue): string {
+  const parts: string[] = [];
+  if (removed.roles.length > 0) {
+    parts.push(
+      `${String(removed.roles.length)} role(s) (${removed.roles.join(", ")})`,
+    );
+  }
+  if (removed.capabilities.length > 0) {
+    const holders = [...new Set(removed.capabilities.map(({ role }) => role))];
+    parts.push(
+      `${String(removed.capabilities.length)} capability grant(s) on ${holders.join(", ")}`,
+    );
+  }
+  return parts.map((part) => `, ${part}`).join("");
 }
 
 /**

@@ -23,6 +23,12 @@ import type { Transport } from "../config/types";
  * So this sweep keys off the **footprint**, never off the plugin being installed. A product declares
  * what its footprint looks like and the shared scenario hooks clear it whenever they find it.
  *
+ * Roles count too, for a subtler reason: WordPress's `add_role()` returns without a change when the
+ * role already exists, so a plugin's "add/overwrite roles" activation keeps whatever capabilities a
+ * leftover role carries. Measured on a cell: a stale `backwpup_check` survived a fresh install with
+ * the capabilities planted in it, not the ones the artifact defines — the scenario would test a role
+ * the product never defines.
+ *
  * **It only makes sense with the plugin absent, and the hooks guarantee that by ordering.** Measured
  * on a cell: sweeping while the plugin is active does work, and the very next WordPress request puts
  * all 26 options and the table straight back — the plugin re-creates its own footprint on `init`.
@@ -34,12 +40,11 @@ import type { Transport } from "../config/types";
 /**
  * What a product leaves in a site's database, as the product declares it.
  *
- * Deliberately only two kinds. They are the two that **block a fresh install**: the options are what
- * a plugin reads to decide it has been installed before, and the table is what its installer tries
- * to create again. The rest of a footprint — roles, capabilities, user meta — is re-established
- * idempotently by activation and removed by the next real uninstall, so it neither blocks a run nor
- * accumulates across them, and reproducing the plugin's own role handling here would be a second
- * implementation to keep in step with it.
+ * The kinds that make an install land on old state: the options a plugin reads to decide it has been
+ * installed before, the table its installer tries to create again, and the roles and capabilities
+ * activation does not overwrite (`add_role()` keeps an existing role as it is). User meta is left
+ * out: a plugin's notices re-create it, nothing reads it to decide what to install, and the next real
+ * uninstall removes it.
  */
 export interface SiteDbResidue {
   /**
@@ -53,7 +58,8 @@ export interface SiteDbResidue {
    * Matched literally: `%` and `_` are escaped before the query, so a fragment can only ever mean
    * itself. Each must be at least {@link MIN_FRAGMENT_LENGTH} characters and drawn from
    * `[A-Za-z0-9_-]`, and a fragment broad enough to hit an option WordPress itself owns is refused
-   * outright — see {@link PROTECTED_OPTIONS}.
+   * outright — see {@link PROTECTED_OPTIONS}. They are also the product's **names**: every declared
+   * role and capability must carry one.
    */
   readonly optionsContaining?: readonly string[];
   /**
@@ -62,6 +68,31 @@ export interface SiteDbResidue {
    * swept just as correctly.
    */
   readonly tables?: readonly string[];
+  /**
+   * Roles the product registers, by exact name, removed whole (`remove_role`). List every name a
+   * version ever registered: one only an older version used is a leftover too.
+   *
+   * Each must carry one of {@link SiteDbResidue.optionsContaining}'s fragments and may never be one
+   * of WordPress's own ({@link PROTECTED_ROLES}).
+   */
+  readonly roles?: readonly string[];
+  /**
+   * Capabilities the product grants to roles it does not own (BackWPup's to `administrator`), by
+   * exact name, removed from **every** role holding one, granted or denied. A role in
+   * {@link SiteDbResidue.roles} goes whole instead.
+   *
+   * Each must carry one of {@link SiteDbResidue.optionsContaining}'s fragments and may never be one
+   * of WordPress's own ({@link PROTECTED_CAPABILITIES}).
+   */
+  readonly capabilities?: readonly string[];
+}
+
+/** One capability a role carries in the site's roles option, granted or denied. */
+export interface CapabilityGrant {
+  /** The role holding it. */
+  readonly role: string;
+  /** The capability. */
+  readonly capability: string;
 }
 
 /** What a sweep found — or removed — on a site, with tables at their full prefixed names. */
@@ -70,11 +101,28 @@ export interface FoundDbResidue {
   readonly options: readonly string[];
   /** Matching tables, prefixed as they exist on the site. */
   readonly tables: readonly string[];
+  /** Declared roles present on the site, in name order. */
+  readonly roles: readonly string[];
+  /** Declared capabilities held by roles that are not declared, in role then capability order. */
+  readonly capabilities: readonly CapabilityGrant[];
 }
+
+/** A sweep that found nothing — what declaring nothing, or a clean site, returns. */
+const NOTHING_FOUND: FoundDbResidue = {
+  options: [],
+  tables: [],
+  roles: [],
+  capabilities: [],
+};
 
 /** True when a sweep found nothing at all, so callers can skip the work and the logging. */
 export function isEmptyDbResidue(found: FoundDbResidue): boolean {
-  return found.options.length === 0 && found.tables.length === 0;
+  return (
+    found.options.length === 0 &&
+    found.tables.length === 0 &&
+    found.roles.length === 0 &&
+    found.capabilities.length === 0
+  );
 }
 
 /**
@@ -162,6 +210,91 @@ export const PROTECTED_TABLES: readonly string[] = [
 ];
 
 /**
+ * WordPress's own roles (`populate_roles()`), which no product may declare: removing one strands
+ * every user holding it — `administrator` locks the site out of `wp-admin`.
+ */
+export const PROTECTED_ROLES: readonly string[] = [
+  "administrator",
+  "author",
+  "contributor",
+  "editor",
+  "subscriber",
+];
+
+/**
+ * The capabilities WordPress's own roles are created with (`populate_roles()`, WordPress 7.2), which
+ * no product may declare: removing one from every role takes it from the administrator too —
+ * `manage_options` or `activate_plugins` gone is a site nobody can administer.
+ *
+ * Exact names guarded here; the fragment rule ({@link normaliseResidueCapability}) is what keeps out
+ * another plugin's capabilities and core names this list does not hold.
+ */
+export const PROTECTED_CAPABILITIES: readonly string[] = [
+  "activate_plugins",
+  "create_users",
+  "delete_others_pages",
+  "delete_others_posts",
+  "delete_pages",
+  "delete_plugins",
+  "delete_posts",
+  "delete_private_pages",
+  "delete_private_posts",
+  "delete_published_pages",
+  "delete_published_posts",
+  "delete_themes",
+  "delete_users",
+  "edit_dashboard",
+  "edit_files",
+  "edit_others_pages",
+  "edit_others_posts",
+  "edit_pages",
+  "edit_plugins",
+  "edit_posts",
+  "edit_private_pages",
+  "edit_private_posts",
+  "edit_published_pages",
+  "edit_published_posts",
+  "edit_theme_options",
+  "edit_themes",
+  "edit_users",
+  "export",
+  "import",
+  "install_plugins",
+  "install_themes",
+  "level_0",
+  "level_1",
+  "level_2",
+  "level_3",
+  "level_4",
+  "level_5",
+  "level_6",
+  "level_7",
+  "level_8",
+  "level_9",
+  "level_10",
+  "list_users",
+  "manage_categories",
+  "manage_links",
+  "manage_options",
+  "manage_secrets",
+  "moderate_comments",
+  "promote_users",
+  "publish_pages",
+  "publish_posts",
+  "read",
+  "read_private_pages",
+  "read_private_posts",
+  "remove_users",
+  "switch_themes",
+  "unfiltered_html",
+  "unfiltered_upload",
+  "update_core",
+  "update_plugins",
+  "update_themes",
+  "upload_files",
+];
+
+/**
  * Validates one declared option fragment and returns it trimmed.
  *
  * @param declared - the fragment as the product declared it.
@@ -218,24 +351,129 @@ export function normaliseResidueTable(declared: string): string {
   return table;
 }
 
-/** A declaration with every fragment and table validated, and the empty case already collapsed. */
+/**
+ * Validates one declared role or capability name and returns it trimmed — the rules both share.
+ *
+ * @param kind - `"role"` or `"capability"`, for the message.
+ * @param declared - the name as the product declared it.
+ * @param fragments - the declaration's validated option fragments: the product's own names.
+ * @param protectedNames - WordPress's own names of this kind.
+ * @returns the name, trimmed.
+ * @throws {@link Error} naming the entry and the rule it broke.
+ */
+function normaliseOwnedName(
+  kind: "role" | "capability",
+  declared: string,
+  fragments: readonly string[],
+  protectedNames: readonly string[],
+): string {
+  const name = declared.trim();
+  const refuse = (reason: string): never => {
+    throw new Error(
+      `[wp/db-residue] "${declared}" cannot be removed as a leftover ${kind}: ${reason}. ` +
+        `Declare the exact name of a ${kind} the product itself creates, e.g. "myplugin_manage".`,
+    );
+  };
+  if (!/^[a-z0-9_-]+$/.test(name)) {
+    return refuse(
+      "a name may hold only lowercase letters, digits, underscore and hyphen — the shape of every " +
+        `${kind} WordPress and its plugins create, so anything else is a typo`,
+    );
+  }
+  if (protectedNames.includes(name)) {
+    return refuse(
+      `it is one of WordPress's own ${kind === "role" ? "roles" : "capabilities"}`,
+    );
+  }
+  if (!fragments.some((fragment) => name.includes(fragment))) {
+    return refuse(
+      fragments.length === 0
+        ? "the declaration names no `optionsContaining` fragment, and a role or capability must " +
+            "carry one of the product's own names"
+        : `it carries none of the product's names (${fragments.join(", ")}), so it may belong to ` +
+            "the site or to another plugin",
+    );
+  }
+  return name;
+}
+
+/**
+ * Validates one declared role and returns it trimmed.
+ *
+ * @param declared - the role as the product declared it.
+ * @param fragments - the declaration's validated option fragments, one of which the role must carry.
+ * @returns the role, trimmed.
+ * @throws {@link Error} naming the role and the rule it broke.
+ */
+export function normaliseResidueRole(
+  declared: string,
+  fragments: readonly string[],
+): string {
+  return normaliseOwnedName("role", declared, fragments, PROTECTED_ROLES);
+}
+
+/**
+ * Validates one declared capability and returns it trimmed.
+ *
+ * @param declared - the capability as the product declared it.
+ * @param fragments - the declaration's validated option fragments, one of which it must carry.
+ * @returns the capability, trimmed.
+ * @throws {@link Error} naming the capability and the rule it broke.
+ */
+export function normaliseResidueCapability(
+  declared: string,
+  fragments: readonly string[],
+): string {
+  return normaliseOwnedName(
+    "capability",
+    declared,
+    fragments,
+    PROTECTED_CAPABILITIES,
+  );
+}
+
+/** A declaration with every entry validated, and the empty case already collapsed. */
 interface CheckedDbResidue {
   readonly fragments: readonly string[];
   readonly tables: readonly string[];
+  readonly roles: readonly string[];
+  readonly capabilities: readonly string[];
 }
 
 /**
  * Validates a whole declaration up front, so a typo in one entry cannot leave a site half-swept.
  *
  * @param residue - the product's declaration.
- * @returns the validated fragments and tables.
+ * @returns the validated fragments, tables, roles and capabilities.
  * @throws {@link Error} for the first entry that is not usable.
  */
 function check(residue: SiteDbResidue): CheckedDbResidue {
+  const fragments = (residue.optionsContaining ?? []).map(
+    normaliseOptionFragment,
+  );
   return {
-    fragments: (residue.optionsContaining ?? []).map(normaliseOptionFragment),
+    fragments,
     tables: (residue.tables ?? []).map(normaliseResidueTable),
+    roles: (residue.roles ?? []).map((role) =>
+      normaliseResidueRole(role, fragments),
+    ),
+    capabilities: (residue.capabilities ?? []).map((capability) =>
+      normaliseResidueCapability(capability, fragments),
+    ),
   };
+}
+
+/**
+ * True when a validated declaration names nothing, so the site need not be asked. Every kind counts,
+ * though roles and capabilities cannot be declared without a fragment today.
+ */
+function declaresNothing(checked: CheckedDbResidue): boolean {
+  return (
+    checked.fragments.length === 0 &&
+    checked.tables.length === 0 &&
+    checked.roles.length === 0 &&
+    checked.capabilities.length === 0
+  );
 }
 
 /**
@@ -263,7 +501,7 @@ export function assertNoProtectedOptions(
 }
 
 /**
- * The PHP that finds the footprint, leaving it in `$options` and `$tables`.
+ * The PHP that finds the footprint, leaving it in `$options`, `$tables`, `$roles` and `$grants`.
  *
  * Shared by the scan and the removal so there is exactly one definition of what "matching" means —
  * a removal that matched differently from the scan that verified it would be worse than either.
@@ -271,6 +509,11 @@ export function assertNoProtectedOptions(
  * `esc_like` is what makes a fragment literal: it escapes `%` and `_`, so `bwpup_backups` cannot
  * also match `bwpupXbackups`. `prepare` then quotes the value. The prefix is validated rather than
  * escaped, because it is spliced into a table identifier, which no placeholder can carry.
+ *
+ * Roles are read from the roles option's **row**, not through `wp_roles()`, so the verifying re-read
+ * sees the database rather than a cache. A site whose roles live in code (`$wp_user_roles`) or whose
+ * row is missing is refused: neither can be swept, and an unreadable row must not read as clean. The
+ * row is only read when roles or capabilities are declared.
  */
 function matchPhp(checked: CheckedDbResidue): string {
   return `
@@ -281,8 +524,10 @@ if ( is_multisite() ) {
 if ( ! preg_match( '/^[A-Za-z0-9_]+$/', $wpdb->prefix ) ) {
   WP_CLI::error( 'this site reports a table prefix that cannot be used as an identifier: ' . $wpdb->prefix );
 }
-$fragments = ${phpLiteral(checked.fragments)};
-$declared  = ${phpLiteral(checked.tables)};
+$fragments      = ${phpLiteral(checked.fragments)};
+$declared       = ${phpLiteral(checked.tables)};
+$declared_roles = ${phpLiteral(checked.roles)};
+$declared_caps  = ${phpLiteral(checked.capabilities)};
 $options   = [];
 if ( $fragments ) {
   $where = [];
@@ -298,12 +543,63 @@ foreach ( $declared as $name ) {
     $tables[] = $full;
   }
 }
+$roles  = [];
+$grants = [];
+if ( $declared_roles || $declared_caps ) {
+  if ( ! empty( $GLOBALS['wp_user_roles'] ) ) {
+    WP_CLI::error( 'this site defines its roles in code ($wp_user_roles), which the leftover-footprint sweep cannot change' );
+  }
+  $role_key = $wpdb->get_blog_prefix() . 'user_roles';
+  $stored   = maybe_unserialize( $wpdb->get_var( $wpdb->prepare( 'SELECT option_value FROM ' . $wpdb->options . ' WHERE option_name = %s', $role_key ) ) );
+  if ( ! is_array( $stored ) || ! $stored ) {
+    WP_CLI::error( 'the roles option ' . $role_key . ' is missing or unreadable, so the leftover-footprint sweep cannot tell which roles the site holds' );
+  }
+  foreach ( $stored as $role => $data ) {
+    $role = (string) $role;
+    if ( in_array( $role, $declared_roles, true ) ) {
+      $roles[] = $role;
+      continue;
+    }
+    $caps = ( is_array( $data ) && isset( $data['capabilities'] ) && is_array( $data['capabilities'] ) ) ? $data['capabilities'] : [];
+    foreach ( array_keys( $caps ) as $cap ) {
+      if ( in_array( (string) $cap, $declared_caps, true ) ) {
+        $grants[] = [ 'role' => $role, 'capability' => (string) $cap ];
+      }
+    }
+  }
+  sort( $roles );
+  usort( $grants, function ( $a, $b ) {
+    return strcmp( $a['role'], $b['role'] ) ?: strcmp( $a['capability'], $b['capability'] );
+  } );
+}
 `;
 }
 
 /** The PHP that reports what {@link matchPhp} found, as JSON. */
 const REPORT_PHP = `
-echo wp_json_encode( [ 'prefix' => $wpdb->prefix, 'options' => array_values( $options ), 'tables' => $tables ] );
+echo wp_json_encode( [ 'prefix' => $wpdb->prefix, 'options' => array_values( $options ), 'tables' => $tables, 'roles' => $roles, 'capabilities' => $grants ] );
+`;
+
+/**
+ * The PHP that removes what {@link matchPhp} found. Roles and capabilities go through the role API
+ * (`remove_role`, `WP_Role::remove_cap`), which rewrites the roles option and its cache.
+ */
+const REMOVE_PHP = `
+foreach ( $options as $name ) {
+  delete_option( $name );
+}
+foreach ( $tables as $table ) {
+  $wpdb->query( 'DROP TABLE IF EXISTS \`' . $table . '\`' );
+}
+foreach ( $roles as $role ) {
+  remove_role( $role );
+}
+foreach ( $grants as $grant ) {
+  $holder = get_role( $grant['role'] );
+  if ( $holder ) {
+    $holder->remove_cap( $grant['capability'] );
+  }
+}
 `;
 
 /** A scan's parsed reply: what was found, plus the prefix the protected-option check needs. */
@@ -317,12 +613,29 @@ function stringArray(value: unknown): string[] | undefined {
   return value.every((item) => typeof item === "string") ? value : undefined;
 }
 
+/** Narrows an unknown JSON value to a list of {@link CapabilityGrant}s. */
+function grantArray(value: unknown): CapabilityGrant[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const grants: CapabilityGrant[] = [];
+  for (const item of value) {
+    if (
+      !isObject(item) ||
+      typeof item.role !== "string" ||
+      typeof item.capability !== "string"
+    ) {
+      return undefined;
+    }
+    grants.push({ role: item.role, capability: item.capability });
+  }
+  return grants;
+}
+
 /**
  * Parses a scan's reply.
  *
  * Validated rather than cast: the reply crosses a transport as text, and a site that printed a
  * notice before the JSON would otherwise be read as "nothing found" — the one answer that makes a
- * sweep silently do nothing.
+ * sweep silently do nothing. Every kind is required, so a missing one cannot read as empty either.
  *
  * @param raw - the snippet's trimmed output.
  * @returns the scan result.
@@ -337,19 +650,30 @@ function parseScan(raw: string): ScanResult {
       `[wp/db-residue] the site's reply was not JSON: ${raw || "(no output)"}`,
     );
   }
-  const prefix = isObject(value) ? value.prefix : undefined;
-  const options = isObject(value) ? stringArray(value.options) : undefined;
-  const tables = isObject(value) ? stringArray(value.tables) : undefined;
+  const fields = isObject(value) ? value : {};
+  const prefix = fields.prefix;
+  const options = stringArray(fields.options);
+  const tables = stringArray(fields.tables);
+  const roles = stringArray(fields.roles);
+  const capabilities = grantArray(fields.capabilities);
   if (
     typeof prefix !== "string" ||
     options === undefined ||
-    tables === undefined
+    tables === undefined ||
+    roles === undefined ||
+    capabilities === undefined
   ) {
     throw new Error(
       `[wp/db-residue] the site's reply did not describe a footprint: ${raw || "(no output)"}`,
     );
   }
-  return { prefix, options, tables };
+  return { prefix, options, tables, roles, capabilities };
+}
+
+/** A scan result without the prefix, as the public functions report it. */
+function foundOf(scan: ScanResult): FoundDbResidue {
+  const { options, tables, roles, capabilities } = scan;
+  return { options, tables, roles, capabilities };
 }
 
 /**
@@ -378,23 +702,21 @@ async function runFootprintPhp(
  * @param transport - the site to ask.
  * @param residue - the product's declaration. Declaring nothing costs no round-trip at all.
  * @returns what is present, with tables at their full prefixed names.
- * @throws {@link Error} if a declared fragment or table is unusable, if the site is multisite, or
- * if WordPress could not answer.
+ * @throws {@link Error} if a declared entry is unusable, if the site is multisite or keeps its roles
+ * where they cannot be read, or if WordPress could not answer.
  */
 export async function findSiteDbResidue(
   transport: Transport,
   residue: SiteDbResidue,
 ): Promise<FoundDbResidue> {
   const checked = check(residue);
-  if (checked.fragments.length === 0 && checked.tables.length === 0) {
-    return { options: [], tables: [] };
-  }
-  const { options, tables } = await runFootprintPhp(
+  if (declaresNothing(checked)) return NOTHING_FOUND;
+  const scan = await runFootprintPhp(
     transport,
     matchPhp(checked) + REPORT_PHP,
     "looking for a leftover plugin footprint",
   );
-  return { options, tables };
+  return foundOf(scan);
 }
 
 /**
@@ -402,7 +724,8 @@ export async function findSiteDbResidue(
  *
  * Rows go through `delete_option` rather than a `DELETE`, so WordPress invalidates its own caches as
  * it would for any other deletion — which is why no cache flush follows. Tables are dropped with
- * `IF EXISTS`, so a table that vanished between the scan and the drop is not an error.
+ * `IF EXISTS`, so a table that vanished between the scan and the drop is not an error. Roles and
+ * capabilities go through the role API, which does the same for the roles option.
  *
  * Removal is **verified by re-reading**, in a second process, straight from the database rather than
  * from any cache — the same discipline the rest of this layer applies to WP-CLI's exit codes. A
@@ -412,18 +735,17 @@ export async function findSiteDbResidue(
  * @param transport - the site to clean.
  * @param residue - the product's declaration. Declaring nothing does nothing at all.
  * @returns what was removed, so a caller can say what it found rather than that it ran.
- * @throws {@link Error} if a declared fragment or table is unusable, if a matched option belongs to
- * WordPress itself (nothing is removed), if the site is multisite, or if WordPress could not answer;
- * or {@link SiteDbResidueRemovalFailedError} naming whatever survived the removal.
+ * @throws {@link Error} if a declared entry is unusable, if a matched option belongs to WordPress
+ * itself (nothing is removed), if the site is multisite or keeps its roles where they cannot be
+ * read, or if WordPress could not answer; or {@link SiteDbResidueRemovalFailedError} naming
+ * whatever survived the removal.
  */
 export async function removeSiteDbResidue(
   transport: Transport,
   residue: SiteDbResidue,
 ): Promise<FoundDbResidue> {
   const checked = check(residue);
-  if (checked.fragments.length === 0 && checked.tables.length === 0) {
-    return { options: [], tables: [] };
-  }
+  if (declaresNothing(checked)) return NOTHING_FOUND;
 
   // Scanned before anything is removed, so the protected-option guard can refuse the whole sweep
   // rather than stop it half-way — and so a clean site pays one read and no write.
@@ -432,19 +754,12 @@ export async function removeSiteDbResidue(
     matchPhp(checked) + REPORT_PHP,
     "looking for a leftover plugin footprint",
   );
-  if (isEmptyDbResidue(scan)) return { options: [], tables: [] };
+  if (isEmptyDbResidue(scan)) return NOTHING_FOUND;
   assertNoProtectedOptions(scan.options, scan.prefix);
 
   await runFootprintPhp(
     transport,
-    `${matchPhp(checked)}
-foreach ( $options as $name ) {
-  delete_option( $name );
-}
-foreach ( $tables as $table ) {
-  $wpdb->query( 'DROP TABLE IF EXISTS \`' . $table . '\`' );
-}
-${REPORT_PHP}`,
+    matchPhp(checked) + REMOVE_PHP + REPORT_PHP,
     "removing a leftover plugin footprint",
   );
 
@@ -454,7 +769,7 @@ ${REPORT_PHP}`,
     "confirming the leftover plugin footprint is gone",
   );
   if (!isEmptyDbResidue(after)) {
-    throw new SiteDbResidueRemovalFailedError(after.options, after.tables);
+    throw new SiteDbResidueRemovalFailedError(foundOf(after));
   }
-  return { options: scan.options, tables: scan.tables };
+  return foundOf(scan);
 }
