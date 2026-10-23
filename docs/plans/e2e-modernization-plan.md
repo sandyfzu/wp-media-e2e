@@ -388,7 +388,9 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
     the HTML hint and the summary) and on every stop path. The suite makes its TTY stdout
     non-blocking while live is on (`unblockTerminal`, moved into `terminal/stream.ts`), bounds the
     queue and drains before exit: a paused terminal costs the drain bound, never a frozen event
-    loop. SIGTERM/SIGKILL can leave it; the guide says so.
+    loop. A write that fails (`EPIPE`, `EIO`, a destroyed stream) turns the region off for good and
+    is never thrown: a throwing reporter fails a run that passed. SIGTERM/SIGKILL can leave it; the
+    guide says so.
   - One writer: `terminal.reporter.ts` implements `onStdOut`/`onStdErr` (buffer to lines, flush at
     the attempt's end, strip VT codes, mask, cap, print as permanent indented lines) and every suite
     reporter that writes during a run goes through its sink (`cell-notice`, `results-stream`'s
