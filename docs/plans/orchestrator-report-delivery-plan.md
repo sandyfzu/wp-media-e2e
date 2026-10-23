@@ -131,7 +131,8 @@ Goal: every completed run with a folder prepares its bundle; `run.finished.repor
 Slack, CLI, config, dry run and docs.
 
 - Call after the reporters, bounded; fallback to the raw path; no bundle for a run refused before
-  its folder; retention untouched.
+  its folder; retention untouched. The end summary and the landing page reuse modernization Phase
+  7's renderer (`src/common/terminal`), never a second one.
 - Tests: integration with the fake suite; Slack's one-file message; archive failure → raw hint;
   `none`; killed run; event schema; dry run.
 - Done: a real or fake run's Slack says one `scp`; the file unzips and opens.

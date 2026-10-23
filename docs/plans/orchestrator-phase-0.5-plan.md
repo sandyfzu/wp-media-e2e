@@ -754,7 +754,8 @@ $XDG_STATE_HOME/wp-media-e2e/site-locks/   (else ~/.local/state/…) both 0700, 
   wider mode tightened to `0600` and said; one write queue; a half line after `ENOSPC` never merges
   with the next. It stays open for the process's life, so a `logrotate` that renames it leaves the
   orchestrator writing to the renamed file: rotate with `copytruncate` (the copy may lose the lines
-  written during it), or not at all. The terminal's lines are `HH:MM:SS <scope>  <text>`.
+  written during it), or not at all. The terminal's lines are `HH:MM:SS <scope>  <text>`, styled on a
+  TTY by modernization Phase 7; the words and the file's line are unchanged.
 - The orchestrator never reads `E2E_*` variables (parent §1); only its config and flags.
 
 ### 4.10 Secrets in output
@@ -795,9 +796,9 @@ $XDG_STATE_HOME/wp-media-e2e/site-locks/   (else ~/.local/state/…) both 0700, 
 
 ### 4.11 Not planned here, on purpose
 
-The disk warning (0A.3) needs a remote `df` per run; per-run progress in the terminal needs the
-stream read live; a Slack test message, `status`, `logs` and `stop` commands need the API. All
-belong with Phase 1's service.
+The disk warning (0A.3) needs a remote `df` per run; a Slack test message, `status`, `logs` and
+`stop` commands need the API. All belong with Phase 1's service. Per-run terminal progress arrives
+earlier, from modernization Phase 7: a table tailing each run's `results.jsonl`.
 
 ## 5. Code layout
 
@@ -946,7 +947,8 @@ Which machine is D4. On it:
 For later phases or the deployment: §8's changes and §4.11; a systemd unit (§4.1); backoff after
 errors; a switch turning the suite's end-of-run pruning off (§8); the Slack next-run line (user's
 idea, §4.7); on the runner, §6 end to end and V121/V122 there (§9, D4); the first production Slack
-and Datator posts (D5, D6).
+and Datator posts (D5, D6). Terminal rendering and the live table are modernization Phase 7, not
+Phase 1's service (§4.11).
 
 ### 7.2 Traps
 
