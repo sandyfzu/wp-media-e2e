@@ -299,7 +299,7 @@ edition's appears).
 
 **Most scenarios need none of this**: a product declares its preset as `ProductConfig.debugLog` and
 the `@plugin` hooks clear the log before a scenario and fail it on a fatal, log attached (see
-[CLAUDE.md → Shared scenario hooks](../../CLAUDE.md#shared-scenario-hooks)). Call `scanDebugLog` only
+[AGENTS.md → Shared scenario hooks](../../AGENTS.md#shared-scenario-hooks)). Call `scanDebugLog` only
 when a step asserts on the log:
 
 ```ts

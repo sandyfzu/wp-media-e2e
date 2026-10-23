@@ -243,7 +243,7 @@ healthcheck, the artifact warm and the orchestrator (`productByName`, `playwrigh
   `orchestrator/suite-imports.json` admits (the list among them). ESLint refuses the rest by spelling;
   `orchestrator/import-boundary.spec.ts` judges each import where it really leads, walks all an admitted
   module can load (never `load-env.ts` or `run-context.ts`, even lazily) and imports the code in a fresh
-  Node to prove the process unchanged (`probeImports`: environment, listeners, working directory, exit code, and more — see [CLAUDE.md → Improvement gate](../../CLAUDE.md#improvement-gate-lint)). Both refuse the builtins and names that load or run code no guard reads (`module`,
+  Node to prove the process unchanged (`probeImports`: environment, listeners, working directory, exit code, and more — see [AGENTS.md → Improvement gate](../../AGENTS.md#improvement-gate-lint)). Both refuse the builtins and names that load or run code no guard reads (`module`,
   `worker_threads`, `vm`, `inspector`, `repl`, `process.getBuiltinModule`, `eval`, `Function`), and the
   spec keeps it ES modules only (no `.cts`, `.cjs` or `package.json`): CommonJS hands every module a
   `require`.

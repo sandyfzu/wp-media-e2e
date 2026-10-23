@@ -938,7 +938,7 @@ Which machine is D4. On it:
 | 5F–5I | One run (`tasks/cycle.ts`), the loop, the process (`start.ts`), `--dry-run` (`dry-run.ts`, `state/inspect.ts`), the command and its script | 2026-10-14 |
 | 5J | Live checks on `bwu2`/`bwu3` (V486, V489, V491–V493) | 2026-10-14 |
 | 5K | Final audit: site locks held for a loop's life, an `unwatched` run ending its loop, cut-tail masking, `runs/` checked, stuck groups said; a quality and documentation pass; the site locks' live smoke (V534–V536) | 2026-10-15 |
-| 6 | The docs: the operator's guide (`docs/guides/orchestrator.md`), README's quick start, CLAUDE.md's pointers; the soak (`soak.spec.ts`, `npm run orchestrator:soak`, V537) | 2026-10-19 |
+| 6 | The docs: the operator's guide (`docs/guides/orchestrator.md`), README's quick start, AGENTS.md's pointers; the soak (`soak.spec.ts`, `npm run orchestrator:soak`, V537) | 2026-10-19 |
 | 7 | Full audit (V539): the parent's PID read at boot; a stop once the runner exited on its own not taken (`lingering`); a process that cannot start keeps its cause; proxy, CA and browser-path variables reach a run; an unreadable run record refuses the start, a run from an earlier boot is `lost`; the site locks' parent folder judged; credential-shaped keys, a sites file's values and a split `baseURL` password never shown; overlapping secrets masked as one; `data:` imports refused; Slack code fences broken; Datator's `website_url` without credentials; stderr drained at the exit; live on `bwu3` (V540); the soak (V541) | 2026-10-19 |
 
 ### 7.1 Left after this phase

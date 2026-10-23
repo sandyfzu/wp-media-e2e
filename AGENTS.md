@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 Operating guide for AI agents (and humans) in this repository. Read it first, then follow the links into
 [`docs/`](docs/). Keep it accurate — see [When to update these docs](#when-to-update-these-docs).
@@ -548,12 +548,12 @@ history:
 
 ## When to update these docs
 
-`docs/`, `CLAUDE.md` and `README.md` must stay in sync with the code; whoever changes the code updates
+`docs/`, `AGENTS.md` and `README.md` must stay in sync with the code; whoever changes the code updates
 the docs. Edit the existing `docs/architecture/*` or `docs/guides/*` file whose topic fits; create one
 only for a genuinely new subsystem (and add it to the [Documentation map](#documentation-map) and
 below). Start a `docs/plans/*` doc only for a new initiative; record progress in the existing plan.
 
-### This file (CLAUDE.md)
+### This file (AGENTS.md)
 
 When you change the structure (a product added or renamed, directories moved, where
 features/steps/pages/configs live), a key technology or the Node/TypeScript baseline, an NPM script

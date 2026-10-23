@@ -9,7 +9,7 @@
 - Baseline (reference only): `wp-rocket-e2e`, the legacy suite being superseded. Target: this repo.
 - Scope: decisions, their reasons, verified external facts, limits and open work. The as-built
   description is in `docs/architecture/` (execution-model, plugin-artifacts, wordpress-automation),
-  `docs/guides/` (configuration, authoring-tests), README and CLAUDE.md.
+  `docs/guides/` (configuration, authoring-tests), README and AGENTS.md.
 
 ## TL;DR
 
@@ -95,7 +95,7 @@ the `E2E_CELL` pin that later made two cells of one product safe side by side.
   own pool locally; `metadata` carries only `{ product, cell, edition? }`.
 - The pool never reached a report. The login's `fill()` put the site password into every real run's
   reports until the orchestrator plan's 0D.4 (secrets now typed through `enterSecret`); a scenario's
-  retained trace still holds session cookies (CLAUDE.md).
+  retained trace still holds session cookies (AGENTS.md).
 
 As built: execution-model.md, "Credential handling".
 
@@ -191,7 +191,7 @@ skipped, so a fresh checkout stays green); `@noauth` scenarios start unauthentic
 Not built: multi-user, which the baseline supports (`admin` vs `admin2`) — a second per-site state
 file plus a step `Given I am logged in as {string}` → `context.setStorageState(path)`.
 
-As built: CLAUDE.md, "Auth fixture / setup".
+As built: AGENTS.md, "Auth fixture / setup".
 
 ### 2.8 Reporting
 
@@ -277,7 +277,7 @@ and unit-testable). A committed-baseline helper (`screenshot.ts`, `toHaveScreens
 wiring only; if it is ever activated, generate baselines in the CI image or container, commit them
 per project and mask dynamic regions.
 
-As built: README, "Visual regression"; CLAUDE.md, "Visual testing". The `@visual` scenarios land
+As built: README, "Visual regression"; AGENTS.md, "Visual testing". The `@visual` scenarios land
 with WP Rocket's port.
 
 ### 2.13 Device profiles
@@ -288,7 +288,7 @@ baseline: desktop 1600×700, mobile 389×829. `@mobile` applies a full `devices[
 `isMobile`, `hasTouch`, mobile user agent, `deviceScaleFactor`) as a `use` override at context
 creation — declarative, where standalone Cucumber forced imperative `setViewportSize` calls.
 
-As built: `src/common/config/devices.ts`; CLAUDE.md, "Device profiles".
+As built: `src/common/config/devices.ts`; AGENTS.md, "Device profiles".
 
 Open, for WP Rocket's port:
 
@@ -450,7 +450,7 @@ Phase 7 — Terminal output (next; decided 2026-10-22). The suite and the orches
   | 7.1 | `src/common/terminal/`: capability detection (env, stream, width, locale), palette, ANSI-aware layout, `LiveRegion`; allowlist + boundary; unit specs. No output changes. | —        | —        | S, 1 d | Every capability branch tested against fake streams; `styleText` precedence measured; `import-boundary` green; no visible change.                                                                                                |
   | 7.2 | Suite reporter: header, live block, per-scenario line, failure block, summary restyle; plain mode.                              | 7.1      | 7.3      | M, 2–3 d | A real `@noauth` run shows the expected screen on a TTY; `\| cat`, `NO_COLOR=1`, `CI=1`, `TERM=dumb` and `COLUMNS=40` are plain and complete; `results.jsonl` schema unchanged; a failing scenario names its step when it fails. |
   | 7.3 | Orchestrator renderer: styled permanent lines, task blocks, live table from the results tail; plain logs.                      | 7.1      | 7.2      | M, 2–3 d | `--dry-run`, `--once` and a loop on the fake suite render correctly on a TTY and as a pipe; `orchestrator.log` and `run.log` contain no `\x1b`; the table is cleared on SIGINT/stop; no event or exit-code change.                |
-  | 7.4 | Compatibility pass, docs, screenshots, regression tests.                                                                       | 7.2, 7.3 | —        | S/M, 1–2 d | The matrix above is covered by tests; README/CLAUDE/the orchestrator guide document `E2E_OUTPUT` and the plain guarantees; lint, typecheck, format and unit tests green.                                                          |
+  | 7.4 | Compatibility pass, docs, screenshots, regression tests.                                                                       | 7.2, 7.3 | —        | S/M, 1–2 d | The matrix above is covered by tests; README/AGENTS/the orchestrator guide document `E2E_OUTPUT` and the plain guarantees; lint, typecheck, format and unit tests green.                                                          |
 - Tests: pure unit specs for capabilities (TTY/non-TTY, `NO_COLOR`, `FORCE_COLOR`, `NODE_DISABLE_COLORS`,
   `TERM=dumb`, `CI`, `COLUMNS`, `LANG`), layout (wide/emoji/combining/ANSI input, truncation, wrapping,
   no split escapes) and the reporters with fake Playwright events; byte-level assertions that file
@@ -472,7 +472,7 @@ Phase 10 — Cleanup & validation (open).
 - A `deps:check` script (e.g. `depcheck`) catching unused dependencies.
 - No dependency on §5's drop list reappears.
 - `lint`, `typecheck` and `format:check` green; the reports generate.
-- Remove every mention of plan phases from code comments (CLAUDE.md forbids citing plans in code).
+- Remove every mention of plan phases from code comments (AGENTS.md forbids citing plans in code).
 
 Phase 11 — Shared SSH server profiles (open; scheduled after Phase 7). Configuration and transport;
 depends on nothing (independent of Phase 6 and Phase 10; may run beside 7.2–7.4 or 6H). Stack:
@@ -571,7 +571,7 @@ existing TypeScript on Node 24, `node-ssh` as already used, the repo's Playwrigh
 - Docs: [configuration.md](../guides/configuration.md) (new "SSH server profiles" section,
   precedence table, env fallback, `rootDir` stays per site),
   [wordpress-automation.md](../architecture/wordpress-automation.md) (transport fields, port,
-  cache), `.env.example`, `ssh.servers.example.json`, README's sites-files paragraph, CLAUDE.md's
+  cache), `.env.example`, `ssh.servers.example.json`, README's sites-files paragraph, AGENTS.md's
   configuration mechanism, the [orchestrator guide](../guides/orchestrator.md) (profiles on the
   runner; `.env` still not reaching runs). Keep `sites.example.json` self-contained (full
   transports) so a fresh checkout loads without a global file; document profile-only sites in
@@ -668,7 +668,7 @@ viewer, no trends. Most other libraries have modern, often built-in replacements
 ## 6. Live risks
 
 - Shared WordPress state under parallelism: each worker owns one site (§2.1) and a cell takes one
-  run at a time (the orchestrator's site locks; manual runs are not covered — CLAUDE.md). The
+  run at a time (the orchestrator's site locks; manual runs are not covered — AGENTS.md). The
   remaining gate is provisioning isolated sites, not code.
 - Lost SSH/Docker/UI nuance in WP Rocket's port: characterise each mode with a smoke test first,
   then re-implement idiomatically.
@@ -677,7 +677,7 @@ viewer, no trends. Most other libraries have modern, often built-in replacements
 - WP Rocket's "delete data" confirmation page: handle when porting (§2.10).
 - Credentials in shared artifacts: reports carry none (§2.2). Retained traces, `error-context.md`
   and `test-results/` still hold session cookies and typed values — treat them as sensitive
-  (CLAUDE.md).
+  (AGENTS.md).
 
 ## 7. Plugin artifacts (done)
 
@@ -832,7 +832,7 @@ Transports' file access (2026-07-16):
   `E2E_PREVIOUS_REF` is ever pointed at a build ref) to `backwpup.config.ts`. Declaring the role
   enables resolution and the identity preflight for the second artifact, which must not be skipped;
   the only exemption is a test that builds inside its own scenario and owns its verification. Until
-  then the fixture hard-errors. Mirrored on the manifest and in CLAUDE.md.
+  then the fixture hard-errors. Mirrored on the manifest and in AGENTS.md.
 - Imagify: a manifest, and its identity row verified from its build definition, when it is wired.
   Planned defaults: `plugin` `develop`, `previous` `tag:latest-stable`, version embedded.
 - Version-aware tests: `resolution.json` exposes each role's verified version and commit; BackWPup's
@@ -851,7 +851,7 @@ fixture).
 
 Phases 0–6.5 done (2026-08-26) after five audit rounds; the full BackWPup suite passed on both cells
 with it (2026-08-28). As built: wordpress-automation.md ("File ownership", "Path guards", "Left-over
-plugin data"), configuration.md (`fileOwner`, `elevate`), CLAUDE.md (the MUST and the pre-flight
+plugin data"), configuration.md (`fileOwner`, `elevate`), AGENTS.md (the MUST and the pre-flight
 reports), `src/common/wp/ownership.ts` (BusyBox and `id` parsing in its TSDoc). Kept here: cell
 facts, decisions and rejected alternatives, limits, open obligations.
 

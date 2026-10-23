@@ -58,10 +58,10 @@ share this repo.
   jobs.
 - Not configured by the suite's env. The orchestrator never reads `E2E_*` vars; a run's plugin
   settings come only from its task (§2), its environment only from an allowlist (§6.2).
-- APVM through its Node library only, never its CLI — a rule for the whole repo (CLAUDE.md).
+- APVM through its Node library only, never its CLI — a rule for the whole repo (AGENTS.md).
 - Lives in `orchestrator/` at the repo root, apart from the test projects. It reuses suite
   modules (`warmArtifacts`, sites loading, the identity check) only through the import boundary
-  (`orchestrator/suite-imports.json`, CLAUDE.md).
+  (`orchestrator/suite-imports.json`, AGENTS.md).
 
 ## 2. Tasks and runs
 
@@ -337,7 +337,7 @@ commander 15, croner 10, pino 10, react 19.3, vite 8.3, tailwindcss 4.3).
 - APVM cache retention (deferred until APVM's Node library can clean, Q1c). The orchestrator
   will periodically remove cache entries unused for longer than X — configurable, default 10 days
   — and log what it removed. Every cache hit refreshes an entry's last use (V18), so anything a task
-  still builds stays. APVM's CLI can already clean, but this project never uses the CLI (CLAUDE.md).
+  still builds stays. APVM's CLI can already clean, but this project never uses the CLI (AGENTS.md).
 - Later optimization — one APVM build for Free and Pro. When a Free and a Pro cell resolve the
   same ref and version (the default: both `develop`), warm both in one call instead of cloning and
   installing the same commit twice: group the warm's deduped requests on
@@ -357,7 +357,7 @@ commander 15, croner 10, pino 10, react 19.3, vite 8.3, tailwindcss 4.3).
 - Mark a site as in use across machines (e.g. with a support plugin), checked by the preflight.
   Needs an atomic take, an owner, an expiry (a crashed run must not lock a site forever), a release,
   and a preflight message naming the owner. Phase 0.5's site locks cover one user on one machine
-  only (CLAUDE.md, "One cell, one orchestrator run").
+  only (AGENTS.md, "One cell, one orchestrator run").
 - Pause a cell across a host's maintenance window instead of failing every run there: the QA
   servers kill PHP by design — the apache server reboots twice a day, `qa-lnmp` restarts PHP-FPM a
   few times a week — and a removal in flight then leaves a half-removed plugin (phase-6 V231; the
@@ -559,7 +559,7 @@ Phase 0.5 built it in `orchestrator/runs/` (`commands.ts`, `environment.ts`, `la
     statically. Resolving SSH hosts (`dns.lookup`) also serves 0A.3's per-server count.
 - Phase 0.5 built the URL key (`orchestrator/config/site-key.ts`), compared over the selected tasks
   (two tasks on one site refused), and a lock per site shared by every orchestrator of the user on
-  the machine (CLAUDE.md, "One cell, one orchestrator run"). Still to do: the location key, the
+  the machine (AGENTS.md, "One cell, one orchestrator run"). Still to do: the location key, the
   check over every cell of every product, the re-check when a sites file changes, and the optional
   loader check.
 
@@ -650,7 +650,7 @@ orchestrator's).
   `orchestrator/suite-imports.json` admits, and the product list only through `loadProductList`.
 - Rejected: lazy `import()` loaders (every consumer imports both products; async loading complicates
   Playwright's and `bddgen`'s config for no gain at two or three products).
-- As built: execution-model.md "The product list"; CLAUDE.md "Improvement gate".
+- As built: execution-model.md "The product list"; AGENTS.md "Improvement gate".
 - Left manual, on purpose: CI's per-product smoke steps in `ci.yml` (a new product may have no
   `@noauth` scenario yet, and its step would fail "No tests found"); reminders in authoring-tests.md
   ("Adding a product") and above the steps in `ci.yml`.
@@ -675,7 +675,7 @@ orchestrator's first version in Phase 0.5.
   internal `PWTEST_*` timeouts (not public API); the test server's `stopTests` (the same interrupt);
   gating `@plugin` scenarios only (misses the others); `KillMode=process` or a systemd scope per run
   (a restarted orchestrator cannot wait on processes that are not its children).
-- As built: execution-model.md "Stopping a run: the drain"; CLAUDE.md "Core concepts";
+- As built: execution-model.md "Stopping a run: the drain"; AGENTS.md "Core concepts";
   `orchestrator/runs/stop.ts`, `shutdown.ts`.
 - The orchestrator, recommended (Phase 0.5 built 1–6; 7 and 8 are Phase 1+):
   1. Spawn directly (§6.2).
@@ -732,7 +732,7 @@ orchestrator's first version in Phase 0.5.
 - Decision: record the full commit (40 hex, else omitted: a release is named by its `pinRef`) and a
   SHA-256 of every resolved zip — the copy installed. The orchestrator, which stores a provided zip
   by its SHA-256, compares the two; no suite input needed.
-- As built: plugin-artifacts.md; CLAUDE.md "Plugin artifacts" ("What was tested").
+- As built: plugin-artifacts.md; AGENTS.md "Plugin artifacts" ("What was tested").
 
 0D.3 — the site's own versions (done 2026-10-09).
 
@@ -742,7 +742,7 @@ orchestrator's first version in Phase 0.5.
 - Decision: read it in the auth setup after the login, cut down in the page to whitelisted lines (a
   traced call records what it returns, V313); best-effort, a failure is a warning, never a failed
   setup.
-- As built: CLAUDE.md (the auth setup's step 3); `src/common/setup/site-info.ts`.
+- As built: AGENTS.md (the auth setup's step 3); `src/common/setup/site-info.ts`.
 
 0D.4 — no credential in a report (done 2026-10-09).
 
@@ -762,9 +762,9 @@ orchestrator's first version in Phase 0.5.
   attempt, the HTML report embeds zips, a missed format leaks); traces off everywhere (no
   diagnostics for the failures that need them); DOM snapshots off for the orchestrator's scenario
   traces (no live cookie, but no DOM or network to debug with) — ending the session won instead.
-- As built: CLAUDE.md ("No site password in a report; traces still need care"); authoring-tests.md
+- As built: AGENTS.md ("No site password in a report; traces still need care"); authoring-tests.md
   ("Typing a secret"); the canary `src/common/auth/secrets.run.spec.ts`.
-- Accepted: what CLAUDE.md lists under "No site password in a report"; also a basic-auth `baseURL`
+- Accepted: what AGENTS.md lists under "No site password in a report"; also a basic-auth `baseURL`
   in every trace's context options; the site username, typed by `fill()`, in every report (the auth
   setup's `Fill "<user>"` step in the HTML report's data and Allure's results); and the
   healthcheck's logins, never ended (they expire). Open, the user's choice: turning scenarios'

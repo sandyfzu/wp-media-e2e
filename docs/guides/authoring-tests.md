@@ -257,8 +257,8 @@ object (Pro's deep link, Free's upload); the command is
 | `@slow`          | Takes minutes by nature (a real restore), so CI can split fast from slow; playwright-bdd triples its timeout (`test.slow()`).                                                                                                                                                                                                                                                                       |
 
 `@plugin` and `@mobile` live in shared code: see
-[CLAUDE.md → Shared scenario hooks](../../CLAUDE.md#shared-scenario-hooks) and
-[Device profiles](../../CLAUDE.md#device-profiles-desktop--mobile).
+[AGENTS.md → Shared scenario hooks](../../AGENTS.md#shared-scenario-hooks) and
+[Device profiles](../../AGENTS.md#device-profiles-desktop--mobile).
 
 ```gherkin
 @plugin
@@ -375,7 +375,7 @@ A long name that stands alone beats a short one that needs a neighbour.
 4. UI logic in a page object; WP-CLI work through `wp/` modules via `site.transport`.
 5. TSDoc every new function/method; type everything explicitly.
 6. Run the quality gates (typecheck, lint, format, unit tests) —
-   [CLAUDE.md](../../CLAUDE.md#required-workflow-after-every-edit).
+   [AGENTS.md](../../AGENTS.md#required-workflow-after-every-edit).
 7. Verify on a real cell: `E2E_CELL=<cell> npm run test:<product>`.
 
 ## Banned waits (enforced by lint)
@@ -384,7 +384,7 @@ A long name that stands alone beats a short one that needs a neighbour.
 in `src/projects/**` and `src/common/{pages,steps,hooks,auth}/**`. Each message names the replacement (a
 web-first `expect()`, a specific `page.waitForResponse(…)`, `fill()`). Only the _called_ member matches,
 so a property sharing a name (`describe(job.type)`) is fine
-([CLAUDE.md → Improvement gate](../../CLAUDE.md#improvement-gate-lint)).
+([AGENTS.md → Improvement gate](../../AGENTS.md#improvement-gate-lint)).
 
 ## Asserting rendered state after an action
 
@@ -421,7 +421,7 @@ under a given `--project`):
   `products.spec.ts`).
 - [`probeImports`](../../src/common/__fixtures__/import-probe.ts) uses that child to import files one
   after another, from a folder whose `.env` sets a sentinel, and reports what each import changed
-  (variables, process listeners, working directory, exit code, and more — see CLAUDE.md), then what changed once idle — read from
+  (variables, process listeners, working directory, exit code, and more — see AGENTS.md), then what changed once idle — read from
   a file, not stdout, so nothing a module prints can forge or garble it. It proves a module leaves the process as
   it was (`products.spec.ts`, `orchestrator/import-boundary.spec.ts`).
 - [`import-scan.ts`](../../src/common/__fixtures__/import-scan.ts) checks import boundaries: `importsIn`

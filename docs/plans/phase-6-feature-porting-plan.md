@@ -12,7 +12,7 @@ LoC.
 
 As built: features in `src/projects/backwpup/features/`; the shared rails in
 [wordpress-automation.md](../architecture/wordpress-automation.md); fixtures, tags and page objects
-in [authoring-tests.md](../guides/authoring-tests.md) and `CLAUDE.md`.
+in [authoring-tests.md](../guides/authoring-tests.md) and `AGENTS.md`.
 
 ## TL;DR
 
@@ -223,7 +223,7 @@ floor, not a preference".
 | --- | --- | --- | --- |
 | V38 | Zero drift: `components/`, `pages/`, `parts/`, `pro/parts/`, `assets/js/` and all of `src/` are byte-identical between Pro 5.7.5 (the fixtures' source) and `9.99.99-90f93911`; only `inc/`'s three archive-engine files, the version header, the readme, the translation template and `vendor/` differ | `diff -rq`; `gh api …/commits/develop` | The 6B locator contract describes the ref under test; the route and command lists are re-confirmed. |
 | V39 | A seeded onboarding equals a real one. Onboarding sends three mutating requests, two of which leave a mark: `cloudsaveandtest` (FOLDER's `edit_form_post_save([FIRST_JOB_ID])`) and the form POST to `save_post_form()`, which reads three of the keys sent; `updatejob` with an empty `storage_destinations[]` is overwritten by the submit. Both routes from one fresh install, for each job-contents variant: `wp backwpup job` byte-identical down to the id; the stored jobs identical but for the per-install `backwpup_cfg_hash` (inside `backupdir`, `dbdumpdbpassword`) and, on the placeholder, a completed run's `lastrun`, `logfile`, `backup_ids`. Only on the real side: four options any admin visit writes (rating, licence, message queue); the placeholder's cron event appears on either side by timing (activation re-schedules every active job) | The browser's requests recorded; the state diffed | `completeOnboarding()` calls the product's two entry points rather than writing job records, so the plugin keeps owning the schema, the cron registration and the placeholder cleanup, and verifies the outcome; job ids follow the page's rule (`$first + 1`, `$first + 2`), decided while rendering it. The save reads no archive format: onboarding always makes `.tar` (V190). |
-| V40 | `wp cron event run <hook>` runs every event on the hook (three at −300 s, −100 s and +8 600 s: all three ran), contrary to WP-CLI 2.12's help ("the next scheduled"); `--due-now` restricts it to due events of that hook | A throwaway hook, live | BackWPup has one `backwpup_cron` event per job (V9); the trigger: CLAUDE.md's `wp/cron.ts` bullet. |
+| V40 | `wp cron event run <hook>` runs every event on the hook (three at −300 s, −100 s and +8 600 s: all three ran), contrary to WP-CLI 2.12's help ("the next scheduled"); `--due-now` restricts it to due events of that hook | A throwaway hook, live | BackWPup has one `backwpup_cron` event per job (V9); the trigger: AGENTS.md's `wp/cron.ts` bullet. |
 | V41 | A BackWPup job run inside WP-CLI can die of a limit it set itself: `need_free_memory()` compares against `convert_hr_to_bytes(ini_get('memory_limit'))`, which is `-1` when unlimited, so every requirement looks larger and the plugin lowers the limit to a finite one from current usage | `inc/class-job.php:1523-1531`; live: CLI `memory_limit = -1` on `pro@nginx`, a cron run through WP-CLI died "Allowed memory size of 77594624 bytes exhausted" in `class-mysqldump.php`, then finished "with errors" after 360 s; through PHP-FPM clean in 7 s | Backups run in the web context: `spawn_cron()` for schedules, `run --background` for arranged ones. A foreground `run` is fine unless archive encryption is on (V82, V167). |
 | V42 | The history row gives `status = 'failed'` the `backwpup-failure-icon` and `aborted` `text-alert`; both get the `delete-failed-backup` control and neither Download nor Restore. A real aborted row renders `delete-failed-backup` and "Aborted by user", no failure icon | `components/table-row-backups.php:198-221`, `:109-123`; the listing on both nginx cells | Find failed rows by `[data-content="delete-failed-backup"]` (both statuses); the abort scenario asserts the aborted row in the browser (V83). |
 | V43 | Bulk "Apply" sends no request: it stores the selection and opens `#sidebar-bulk-delete-backups`; `process_bulk_actions` fires on that dialog's "Delete Backups" | `assets/js/backwpup-admin.js:2178-2187`, `:2204`; a live run hung waiting for it | Arm, then confirm, as the per-row delete does. |
@@ -234,7 +234,7 @@ floor, not a preference".
 | V48 | Deleting `doing_cron` never helps (`spawn_cron()` already ignores an expired lock) and truncates a run longer than the overridable `WP_CRON_LOCK_TIMEOUT`; `wp_schedule_single_event` counts past identical events within 10 min as duplicates | WordPress 7.1: `wp-includes/cron.php`, `wp-cron.php:194`, `:201-202`, `default-constants.php:398`; the lock absent on 12 probes over 65 s | wordpress-automation.md (WP-Cron). |
 | V50 | Default files jobs are as big as the docroot: they cover root, content, plugins, themes and uploads, excluding only `logs`/`usage`/`restore`/`restore_temp` at the root and cache folders under `wp-content`. `pro@nginx`'s docroot was 2.6 GB (1.9 GB `wp-content/bigFiles`), `pro@apache`'s 209 MB | `du -sh` per area, `df -h`; `inc/class-jobtype-file.php::option_defaults()` | Inspect archives where they lie (`wp/archive.ts`), never download them; prove download fidelity on the database job's archive (full SHA-256); no scenario arranges two files backups on `pro@nginx`, and the per-scenario residue sweep keeps the disk peak at one. The operator emptied the `bigFiles` folders on 2026-09-30 (a full `.tar` of `simple`: ~412 MB on 2026-10-05); the disk is shared (V162). |
 | V51 | `pro@nginx`'s `DB_NAME` is `e2eSimple`, BackWPup names its dump `<DB_NAME>.sql`, and that docroot already holds a 1.5 MB `e2eSimple.sql`, so a files-only backup has a member named like a dump (`pro@apache`'s `DB_NAME`: `backwpup`) | `wp eval 'echo DB_NAME;'`; `generate_db_dump_filename()` in `inc/class-job.php` | Content assertions match a planted marker's value, never a member's name or presence. |
-| V52 | GNU tar (1.35 on the cells) auto-detects compression on `-t`/`-x`; member patterns cross `/` (`*marker.txt` finds `wp-content/marker.txt`); an absent member and a damaged archive both exit 2, and a truncated archive prints only `Not found in archive` | Throwaway archives on `pro@nginx` | CLAUDE.md's `wp/archive.ts` bullet. |
+| V52 | GNU tar (1.35 on the cells) auto-detects compression on `-t`/`-x`; member patterns cross `/` (`*marker.txt` finds `wp-content/marker.txt`); an absent member and a damaged archive both exit 2, and a truncated archive prints only `Not found in archive` | Throwaway archives on `pro@nginx` | AGENTS.md's `wp/archive.ts` bullet. |
 | V53 | An interrupted run leaves the plugin installed with its options and `wp_bwpup_backups`, and the next run fails in `finishActivation` with V47's wording ("an earlier scenario's footprint surviving its uninstall looks exactly like this"); deactivating as its own call, then `wp plugin uninstall`, removes all of it. The files-gone shape (no plugin directory, `active_plugins` still naming it, 30 options and the table, seen on `pro@apache`), which `is-installed` (a file test) calls absent, comes from `uninstall.php`'s guard (V54), not from a runner kill (V61) | `pro@apache`: 31 options and the table left, recovered to none | Rule out an interrupted run before V47's concurrency. The plugin's uninstall is complete when it runs (V57). The files-gone shape is why 6E.0's sweep keys off the footprint, never off `is-installed` (done). |
 
 ### 2.10 6E build (live, `pro@apache` and `pro@nginx`, `develop@f1ebfd0`)
@@ -369,7 +369,7 @@ absent; `locator-contract.spec.ts` failed once under full-suite load (5 of 5 alo
 
 | # | Fact | Evidence | Consequence |
 | --- | --- | --- | --- |
-| V120 | A sleeping runner (a Mac) looks like a network outage: timers stop, so a 120 s hook outlives half an hour, then `read ECONNRESET` / `Not connected` after each wake. Both of the 6F audit's "network" episodes were this, and a ~210 s stall of both nginx sites at once fits it too (its time unrecorded) | `pmset -g log` against the runs' times | Keep the runner awake (`caffeinate -i`, CLAUDE.md). |
+| V120 | A sleeping runner (a Mac) looks like a network outage: timers stop, so a 120 s hook outlives half an hour, then `read ECONNRESET` / `Not connected` after each wake. Both of the 6F audit's "network" episodes were this, and a ~210 s stall of both nginx sites at once fits it too (its time unrecorded) | `pmset -g log` against the runs' times | Keep the runner awake (`caffeinate -i`, AGENTS.md). |
 | V121 | A pooled SSH connection can be dead while node-ssh calls it connected: after a protocol error or a server's disconnect ssh2 half-closes and refuses every request with `Not connected` before sending a byte (`isWritable` in `exec()`, `sftp()`); node-ssh marks it disconnected only on the socket's `end`/`close`, minutes later on a failing link | Seen twice after wakes (V120); reproduced through a proxy holding both FINs back | Handled in the transport (wordpress-automation.md). |
 | V122 | The suite meets V46's race in its own first request: the `@plugin` hook's active-state check (`wp plugin is-active`, plugins loaded) runs BackWPup's activation, so `backwpup_version` is written before `installPluginUnderTest` returns (3 of 3). A second request 150–450 ms behind loses the race: the flag is deleted (`convert_jobs()`), an extra job is left that is no longer a placeholder, and `activate()`'s cleanup removes the job-id options the upgrade path wrote. Two requests at once each create a placeholder and keep the flag, but every job write rewrites the whole jobs option from the request's own copy (`BackWPup_Option::update()`), so the later drops the earlier's placeholder flag, leaving a real scheduled job nobody configured. A clean install leaves exactly one placeholder (both editions) | `pro@nginx`, WordPress booted twice right after `install --activate`: 300 ms apart lost the flag 4 of 4, 150 ms 1 of 4, 450 ms 2 of 4, 600 ms 0 of 4; 0 ms kept it 18 of 18 but left two jobs 7 of 18. Real runs with retries off: ~3 % of `pro@nginx` scenarios (2 in ~60; 1 in 33 before), 2 of 22 on `free@nginx`, whose isolated install cycles kept the flag 10 of 10 | Report upstream: activation is re-entrant and the jobs option is written without a lock. The suite cannot hold the cron off, so `finishActivation` detects a lost race (not onboarding owed plus one placeholder) and reinstalls, up to three installs; three lost races in a row (a few in 100 000) still fail, clearly. It can also end in a fatal (V174). |
 
@@ -461,7 +461,7 @@ coercion and V149's exception class were also reproduced locally (PHP 8.1). The 
 | --- | --- | --- | --- |
 | V168 | `develop` moved to `af1ab5c` (2026-09-25), vendored libraries only: phpseclib 3.0.52 → 3.0.57, pear/archive_tar 1.6.0 → 1.6.1, backwpup-archiver 0.6 → 0.6.1 (zip-extraction path-traversal fixes), backwpup-restore-shared 0.20.10 → 0.20.11 (no PHP change), monolog 2.11.0 → 2.11.1, inpsyde/assert to 1.0.0. Every BackWPup file 6F.4 rests on is byte-identical (the four commands, `EncryptionStream`, the `Decrypter`, `class-job.php`, `class-create-archive.php`, `EncryptionSettingUpdater`, the database job's defaults) | GitHub compares; both builds diffed (54 files, all vendored but the translation template and the autoloader); `Composer\InstalledVersions` on the site | The facts resting on those libraries were measured again (V169). |
 | V169 | At `af1ab5c` the §2.22 bugs hold as measured: V146, V149/V150, V152, V153 (17 440 → 17 439 bytes under `Success`), V163, V166, V167 | Two scratch drivers, a fresh install each | Still to report upstream. |
-| V170 | Playwright empties its output folder as a run starts: a unit run with the default `test-results/` wiped every cell's results beneath it, and a live run beside it failed writing an attachment (`ENOENT … test-results/.playwright-artifacts-1/…zip`) | A marker in a cell's folder | Unit runs write to `test-results/_unit` (CLAUDE.md, "Output folders"). |
+| V170 | Playwright empties its output folder as a run starts: a unit run with the default `test-results/` wiped every cell's results beneath it, and a live run beside it failed writing an attachment (`ENOENT … test-results/.playwright-artifacts-1/…zip`) | A marker in a cell's folder | Unit runs write to `test-results/_unit` (AGENTS.md, "Output folders"). |
 | V172 | Both commands turn a hex key into bytes with `pack( 'H*' )`, which completes an odd digit count with a `0`: 31, 47 and 63 characters give 16, 24 and 32 bytes and round-trip, and the key plus a `0` decrypts too. A count packing to another size (33 characters → 17 bytes) crashes `backup-encrypt` as in V149 | Live, each length twice; the plugin's classes locally | "32, 48 or 64 hex characters" is the suite's choice (`support/encryption-keys.ts`), not the plugin's rule. |
 | V174 | V122's race can end in a PHP fatal before a scenario's first step: the host's per-minute `wp-cron.php` request re-entered BackWPup's activation during the `@plugin` hook's install, met a job holding `cron` but no `type` and died in `BackWPup_Migrate::organize_jobs_by_type()` (`sort( null )`, `inc/class-migrate.php` L174; V33). Two paths leave that shape for a while — V122's lost update, and `convert_jobs()` writing a job's `cron` (`handle_single_job()`, L301) before its `type` (L241, L255) — and which one it was is not established (`create_default_jobs()` writes `type` first). The link was slow then: a `wp eval` took 1.9 s against 1.3 s, and the install hook was 107 s into its 120 s | The scenario's `debug.log`: `Undefined array key "type"` (L173), the fatal at a minute boundary, stack `wp-cron.php` → `BackWPup_Install::activate()` → `BackWPup_Migrate::migrate()`; the same run recovered three other lost races (4 in 61 scenarios), `free@nginx` met none in 52 | The debug-log gate fails it, rightly; retries absorb it as flaky. A slow link widens the window. Part of V122's upstream report. |
 
@@ -471,7 +471,7 @@ Through the repo's `exec` (execa 10.0.1), a fake secret planted in each argv; `s
 
 | # | Fact | Evidence | Consequence |
 | --- | --- | --- | --- |
-| V176 | execa's errors quote the whole argv: a command that cannot start (`Command failed with ENOENT: …`, also `docker exec …` with no `docker` on `PATH`), one killed by a signal (`Command was killed with SIGTERM (Termination): …`) or one over its output cap (`Command's stdout was larger than 100000000 characters: …`). The argv is in `message`, `shortMessage`, `command` and `escapedCommand`; the reason without it in `code`, `signal`, `signalDescription` and `isMaxBuffer` | Four cases, the secret in each message | Every `--key=` and every value a snippet embeds rides the argv (`phpLiteral`'s base64 hides nothing): never pass on execa's message nor attach its error as a `cause` (CLAUDE.md; done in 6G.0). |
+| V176 | execa's errors quote the whole argv: a command that cannot start (`Command failed with ENOENT: …`, also `docker exec …` with no `docker` on `PATH`), one killed by a signal (`Command was killed with SIGTERM (Termination): …`) or one over its output cap (`Command's stdout was larger than 100000000 characters: …`). The argv is in `message`, `shortMessage`, `command` and `escapedCommand`; the reason without it in `code`, `signal`, `signalDescription` and `isMaxBuffer` | Four cases, the secret in each message | Every `--key=` and every value a snippet embeds rides the argv (`phpLiteral`'s base64 hides nothing): never pass on execa's message nor attach its error as a `cause` (AGENTS.md; done in 6G.0). |
 | V177 | node-ssh quotes no argument: a signal kill reads `"sh" on <host> was terminated by signal SIGTERM before exiting.`; a missing program is an exit-127 result naming only the program | `pro@nginx`, a secret in each argv | The model the other two transports follow. |
 
 ### 2.25 Building 6G.0 (2026-09-29)
@@ -491,7 +491,7 @@ the scenario's steps were timed against the server's clock.
 | --- | --- | --- | --- |
 | V185 | A paced database backup pauses once per table, so its length is the site's table count: "Reduce server load" is a `usleep` in `update_working_data()` (honoured up to 500 000 µs; the screen offers 90 000 at most), which the dump calls once per table of `SHOW FULL TABLES`, less the job's exclusions (none for the onboarding job). `pro@apache`: 18 tables, 3.5 s; `pro@nginx`: 85 tables, 10.2 s | `inc/class-job.php` `update_working_data()`; `inc/Pro/class-jobtype-dbdump.php` `db_dump()`; `inc/class-mysqldump.php`; three runs per cell | The setting is already at the screen's maximum: only tables lengthen the window. |
 | V186 | The command under test lands 2.3–3.2 s after the marker appears (the job is seen 0.9–1.6 s in; one WP-CLI command takes ~1.5 s more). With 18 tables `pro@apache` had 0.3–0.7 s to spare, and `cli-running-job.feature` lost there: `run {job}` and `run {job} --background` started a fresh backup at exit 0 instead of `A job is already running.`, and `kill` sometimes found nothing; the same feature passed 4 of 4 on `pro@nginx` | Timed against the server's clock; `E2E_RETRIES=0`, the `af1ab5c` zip | Any site with fewer than about 30 tables loses the race some of the time. |
-| V187 | Padded to 100 tables the window is the same on both cells: 11.1 s on `pro@apache` (82 empty tables added, created in 1.8 s), 11.6 s on `pro@nginx` (15 added), the command back by 2.9 s. Playwright tears a test fixture down after every `afterEach` hook (where playwright-bdd runs `After` hooks), when the test failed too | The same sampler; a scratch Playwright test for the order | `tablePadding` pads to 100 and is removed after the `@plugin` teardown (CLAUDE.md). |
+| V187 | Padded to 100 tables the window is the same on both cells: 11.1 s on `pro@apache` (82 empty tables added, created in 1.8 s), 11.6 s on `pro@nginx` (15 added), the command back by 2.9 s. Playwright tears a test fixture down after every `afterEach` hook (where playwright-bdd runs `After` hooks), when the test failed too | The same sampler; a scratch Playwright test for the order | `tablePadding` pads to 100 and is removed after the `@plugin` teardown (AGENTS.md). |
 | V188 | A killed run's padding outlived it: SIGKILLed once its padding existed, a `pro@nginx` run left 15 tables, which a later run of another feature kept while removing the plugin, its footprint, the staging area and the data folders. They never pile up (fixed names; every padding drops the last one first), but nothing else would drop them | Live, the run's process group killed the moment the site held padding | Every BackWPup worker drops leftover padding before its first scenario (`leftoverPaddingSweep`). |
 
 ### 2.27 Widening 6G: strategies and formats (source, `af1ab5c`)
@@ -519,14 +519,14 @@ same site. What the CLI rounds broke was repaired with the user's approval (V205
 | V195 | Prepared, the directory still fails the wizard once WP-CLI has written `restore.dat` in it: a listing recreates `restore.dat` (`ubuntu 0664`) whenever the last restore's cleanup removed it, and every wizard request then dies on "Could not write Registry file" after its stream has started — the stream ends, `EventSource` reconnects every ~3.5 s for ever, the page stuck on step 1 (V220) | Run 2: the `download` stream failing every ~3.5 s, `restore.dat` owned by `ubuntu`; after `normalizeOwnership` on the directory the same backup restored | Hand the directory to the site before a UI restore (`handRestoreWorkingDirToSite`). |
 | V196 | Each install draws a new restore-directory name, so a literal residue path (`uploads/backwpup-restore`) matches none of them. A files backup also captures the staging area (`.e2e_temp/plugins/<zip>`) and the restore directory's protection files | A listing after setup; the archive's members | Residue families (V209). |
 | V197 | Pro's deep link names the archive twice and has the server fetch it: `file` is the archive in `uploads/backwpup/<hash>/backups/`, `restore_file` its slot in the restore directory's `uploads/`, `service=folder`; the click adds `step=1&trigger_download=1&_wpnonce`, the server copies (`download`) and unpacks it, and the dropzone is hidden. 412 MB: step 1 → 2 in 5 s | Run 3's URLs; `controller.js` `triggerDownloadByUrlQuery` | `restore_file` is not the archive in place (V13's first reading). The entry assertion checks both names, `trigger_download=1` and the hidden dropzone. |
-| V198 | The wizard is six page loads: 2 strategies → 3 database connection → 4 URL migration (Pro only: `migrate_allowed = is_pro()`) → 5 Start → 6 report; Files Only goes 2 → 5, Free 3 → 5. Step 3 renders `DB_PASSWORD` into `#db_pw`'s `value`. Step 6 shows "Success", or "Restore Report" when the restore log holds errors (where its `count( $message )` on a string would `TypeError` — source only). Files took 21 s, the database 7–9 s | Runs 3–7 and 9; `views/restore/steps/*`, `TemplateLoader::createBindFromStep()` | `restoreWith` follows the URL step by step and asserts "Success". Traces carry the database password (CLAUDE.md). |
+| V198 | The wizard is six page loads: 2 strategies → 3 database connection → 4 URL migration (Pro only: `migrate_allowed = is_pro()`) → 5 Start → 6 report; Files Only goes 2 → 5, Free 3 → 5. Step 3 renders `DB_PASSWORD` into `#db_pw`'s `value`. Step 6 shows "Success", or "Restore Report" when the restore log holds errors (where its `count( $message )` on a string would `TypeError` — source only). Files took 21 s, the database 7–9 s | Runs 3–7 and 9; `views/restore/steps/*`, `TemplateLoader::createBindFromStep()` | `restoreWith` follows the URL step by step and asserts "Success". Traces carry the database password (AGENTS.md). |
 | V199 | V189 holds live: a mixed backup offers all three strategies, a database-only one (`["DBDUMP"]`) only Database Only, a files-only one (`["FILE","WPPLUGIN"]`) only Files Only; each partial restore restores its half and leaves the other as changed | Runs 4–7 | 6G's contents and strategy scenarios. |
 | V200 | A database restore keeps the admin session only if the login predates the backup (the restored `session_tokens` know it); a login made after it lands on `wp-login.php?reauth=1` at step 6 (`login_user_again()` skips the cookie once headers are sent) | Run 3 (login after the backup) against runs 4–7 | The suite's login precedes every scenario's backup, so no re-authentication; the page object names the cause if the session is lost. |
 | V201 | A restore puts back the `debug.log` its archive holds: the fatals logged between run 2's backup and its restore were gone after run 3's full restore | `grep -c Fatal` before and after | The restore steps judge the log so far before restoring (`checkDebugLog`); V222. |
 | V202 | After a database restore the backup's own run is "in progress" again (the dump was taken mid-run) and the history lists no backup | Run 1's history; the teardown's stop report | Reported by the teardown, not failed; nothing to stop. |
 | V203 | Free re-uploads through the browser: the row's action is the bare `page=backwpuprestore`; the history download took 27.6 s for 411 MB, the upload (plupload, 2 MB chunks) 168 s; then the same wizard, 3 → 5 | Run 9 | One `@free` scenario, budgeted for the upload. |
 | V204 | `wp backwpup restore … --yes --type=db\|file\|full`: exit 0, `Success: Restore completed successfully.`, in 9.9 / 7.1 / 12.7 s; each type restored its half only; its workspace `/tmp/backwpup-restore-<uniqid>` is removed | The CLI rounds | V192 holds; the CLI scenarios assert by the markers. |
-| V205 | A files restore replaces `wp-content` wholesale and deletes what its archive lacks: it empties `wp-content` but `plugins/backwpup*`, then copies the archive's tree back as the transport's user (16 273 entries `ubuntu`, files `0664`). Lost for good: empty directories, a `.donotbackup` folder and the files the job's default exclusions skip (`.git*`, `.tmp`) — 20 entries of the site and two other plugins | The trees before and after; repaired from the plugins' wordpress.org zips | Report upstream: a restore deletes data it never backed up. A CLI restore runs behind a root `tar` copy of `wp-content` (no sudo: not run), put back after (`cliRestore`, CLAUDE.md). |
+| V205 | A files restore replaces `wp-content` wholesale and deletes what its archive lacks: it empties `wp-content` but `plugins/backwpup*`, then copies the archive's tree back as the transport's user (16 273 entries `ubuntu`, files `0664`). Lost for good: empty directories, a `.donotbackup` folder and the files the job's default exclusions skip (`.git*`, `.tmp`) — 20 entries of the site and two other plugins | The trees before and after; repaired from the plugins' wordpress.org zips | Report upstream: a restore deletes data it never backed up. A CLI restore runs behind a root `tar` copy of `wp-content` (no sudo: not run), put back after (`cliRestore`, AGENTS.md). |
 | V206 | `wp db reset` recreates the database with the server's default collation (`utf8mb4_0900_ai_ci`, against the sibling databases' `utf8mb4_general_ci`); the tables keep theirs from the dump | `information_schema.SCHEMATA` after the CLI rounds | Read before, set back after (`ALTER DATABASE`). |
 | V207 | `--pre-backup` leaves its snapshot in the temp directory, never removed: `db.sql` (`0664`, readable by every local account) and a copy of `wp-content` (752 MB with the archives) under a `1777` directory. It prints `Success: Pre-backup created.` first | `/tmp/backwpup-snapshot-6ac4143fe8c876.55994123` | Report upstream. The scenario checks the snapshot holds the site as it was and removes it — only one holding its own marker, since other runs share the temp directory. |
 | V208 | Release 5.7.7 (tag `850263d6`, published 2026-10-05) names the restore directory the same way (`restore_dir_name()`, `RESTORE_DIR_TOKEN_PATTERN = 'backwpup-restore-[0-9a-f]{20}'`), and its `src/Cli/Commands/Restore.php` is byte-identical to `a612005`'s; `f1ebfd0` does not have it | `gh api …/contents/…?ref=850263d6`; the cached 5.7.7 builds | The family pattern is the plugin's own, for the latest stable and `develop` alike. |
@@ -545,7 +545,7 @@ transport, GNU tar in containers, the plugin's source, or read-only on `simple`.
 | V213 | `@slow` triples a scenario's timeout: playwright-bdd calls `testInfo.slow()` | `node_modules/playwright-bdd/dist/runtime/bddTestFixtures.js:25` | Tag only jobs that really take minutes (§3.3). |
 | V214 | After a timeout Playwright still tears down — `afterEach` hooks, then test fixtures — within one slot of the larger of the project and test timeouts, while the abandoned test function keeps running | `node_modules/playwright/lib/worker/workerProcessEntry.js:1661-1678` | Cleanup must wait for work a timed-out step left running: `CliRestore.release` waits (bounded, 10 min) and puts nothing back under a running command. |
 | V215 | A full-suite `pro@nginx` failure was the runner: its renderer stopped answering for 8.5 s (polls and screencast frames stopped) while the plugin had already replaced the history's placeholder row and the server answered every call in ~0.6 s | The trace; the scenario then passed 3 of 3 | Read the next failure of that shape the same way. |
-| V217 | The worker's teardown removes the whole staging area (`releaseSite` → `cleanSiteStaging`), so nothing that must survive a failed put-back or a killed run can live there | `wp/teardown.ts` | The `wp-content` copy lives in root-only `<root>/.e2e_content_copy/`, removed only once back (CLAUDE.md). |
+| V217 | The worker's teardown removes the whole staging area (`releaseSite` → `cleanSiteStaging`), so nothing that must survive a failed put-back or a killed run can live there | `wp/teardown.ts` | The `wp-content` copy lives in root-only `<root>/.e2e_content_copy/`, removed only once back (AGENTS.md). |
 | V218 | Exit 1 is ambiguous for a privileged `tar`: GNU tar exits 1 when a file changed while read — or shrank, padding the copy with zeros — and `sudo -n` exits 1 when it refuses; `sudo -n true` succeeding proves no other command is allowed; a refused `sudo du` printed nothing, which read as 0 KB | A container with a limited sudoers | Accept exit 1 only when every complaint is a file that changed or went while read; the copy must list back whole; size checks need whole numbers. |
 | V219 | `wp db reset` drops the whole database while BackWPup dumps only the site's prefixed tables, so other prefixes' tables, views, routines, events and triggers would be lost for good; and the command replaces `WP_CONTENT_DIR`, not necessarily `<root>/wp-content`. `simple` holds nothing outside `wp_`, its `WP_CONTENT_DIR` is `<root>/wp-content` (no link), no ACLs | `inc/class-jobtype-dbdump.php:54-57`; `Restore.php:163, 192`; a read-only probe; `getfacl -R -s` | The CLI restore is refused on a site breaking either premise. ACLs and xattrs are not kept (none on the cells). |
 | V220 | Every streamed wizard action sends `text/event-stream` and flushes before any work, so a later fatal is a stream that ends — which the browser reconnects, re-running the action every few seconds for ever; an HTML or non-200 answer closes the `EventSource` for good (one request) | `AjaxHandler.php:387`; `EventSource.php:28-40`; Chromium: 20 requests in 6 s against one | Fail at once on a stream requested twice on one page, a non-200 or non-stream answer, a failed `controller=job` call or a plugin script error (`WizardWatch`). |
@@ -680,7 +680,7 @@ nothing waits on it.
 
 Goal: the product-agnostic rails every product needs; unblocks BackWPup and WP Rocket.
 
-As built: `CLAUDE.md` (Shared scenario hooks, Device profiles, Improvement gate) and
+As built: `AGENTS.md` (Shared scenario hooks, Device profiles, Improvement gate) and
 wordpress-automation.md (Elevated housekeeping, Left-over plugin data).
 
 Decisions:
@@ -848,7 +848,7 @@ near-identical Backgrounds; per edition would split `backup-delete`'s two outcom
 
 Delivered: `support/cli.ts`, the asserting runner — `readJsonList` refuses a failed command before
 parsing, since WP-CLI leaves stdout empty on an error, which would read as an empty list — and
-`support/cli-commands.ts`, the registered set compared both ways. As built: `CLAUDE.md` (`cli` vs
+`support/cli-commands.ts`, the registered set compared both ways. As built: `AGENTS.md` (`cli` vs
 `support/backups.ts`).
 
 Decisions:
@@ -931,7 +931,7 @@ removing the folder's guards (V131), its success line when nothing was deleted (
 
 Delivered (`@pro @plugin`): `features/cli-job-transfer.feature`,
 `features/cli-backup-encryption.feature`, on the `privateFolder`, `keys` and `jobExports` fixtures
-(`CLAUDE.md`). Facts: §2.22, §2.23, measured at `develop@af1ab5c` (V168).
+(`AGENTS.md`). Facts: §2.22, §2.23, measured at `develop@af1ab5c` (V168).
 
 Decisions:
 
@@ -951,7 +951,7 @@ sends one.
 
 Goal: an exec error names the program and the reason, never its arguments, on every transport; on
 `local` and `docker` it quoted the whole argv, keys included (V176), and so did the CLI session's
-time-limit message (now covered by CLAUDE.md's rule: "A `--key=` value never appears…").
+time-limit message (now covered by AGENTS.md's rule: "A `--key=` value never appears…").
 
 Delivered: `commandLine` (`support/cli.ts`), the one `--key=` mask every message naming a BackWPup
 command goes through. As built, with the rule, the NUL-byte refusal (V182) and what stays
@@ -967,7 +967,7 @@ Measured first (§2.27, §2.28), audited 2026-10-06 (§2.29). 6G.1 shipped insid
 
 Delivered: `features/restore.feature` (`@plugin @slow`: five `@pro` restores from the history, the
 `@free` upload) and `features/cli-restore.feature` (`@pro @plugin @slow`). As built:
-authoring-tests.md (Restoring), `CLAUDE.md` (`restore`, `changedMarkers`, `cliRestore`).
+authoring-tests.md (Restoring), `AGENTS.md` (`restore`, `changedMarkers`, `cliRestore`).
 
 Design (6K reuses it):
 
@@ -1101,7 +1101,7 @@ Rackspace and SugarSync are untagged and run on both editions.
 - Per provider: "configure in onboarding" and "configure from the dashboard", each ending in a real
   backup that lands on the remote, is verified there and then removed.
 - Exercises `StorageSidebar.saveAndTestConnection()` (`cloudsaveandtest`) for the first time. Every
-  key is typed with `StorageSidebar.fillSecret`, so no report records it (`CLAUDE.md`).
+  key is typed with `StorageSidebar.fillSecret`, so no report records it (`AGENTS.md`).
 - Teardown: remote cleanup is best-effort and logged; it never fails a passing scenario.
 - Out of scope: Dropbox, Google Drive, OneDrive, HiDrive — interactive OAuth, no baseline coverage,
   no non-interactive credential path.
@@ -1161,7 +1161,7 @@ Scope:
   verify the Free upload path reaches the same extractor; if it proves format-sensitive, add the
   matching `@free` format scenarios to 6K. Otherwise the parity checklist records the measured
   reason.
-- Update `authoring-tests.md` (Restoring) and `CLAUDE.md` if the Free restore steps/page object gain
+- Update `authoring-tests.md` (Restoring) and `AGENTS.md` if the Free restore steps/page object gain
   a parameter or a new upload helper; no new page object unless the measurement requires it.
 
 Acceptance:
@@ -1278,7 +1278,7 @@ location /.e2e_temp/public/ {
 
 Keeping the two guards in sync — one rule in two languages:
 
-- A `CLAUDE.md` MUST, beside the ownership one: change one guard, change the other in the same
+- An `AGENTS.md` MUST, beside the ownership one: change one guard, change the other in the same
   change, keep the drift spec green, re-probe the docker Apache and nginx cells.
 - Each file's header names the other and that rule. The `.htaccess` header is what an operator finds
   on a site, so it also says what wrote it and that the suite removes it.
@@ -1288,7 +1288,7 @@ Keeping the two guards in sync — one rule in two languages:
 
 Docs: wordpress-automation.md (the staging Exposure bullet becomes the guard, the probe and
 `public/`; the ownership rule's exception), configuration.md (the include; `transport.stagingDir` as
-the remedy needing no server change), `CLAUDE.md` (pre-flight's reports, the healthcheck's checks,
+the remedy needing no server change), `AGENTS.md` (pre-flight's reports, the healthcheck's checks,
 the staging bullet, the MUST), `README.md` (an operator note beside the Docker env), `.env.example`
 (the staging comment).
 
@@ -1370,10 +1370,10 @@ format switch.
 - `pro@nginx` and `free@nginx` green; `@pro`/`@free` scenarios run only on their edition's cells.
 - Restore parity (6I.1): Free's upload journey covers the five Pro UI strategies; CLI restore is
   Pro-only by product design (V4/V11/V94); the 6K Free-format decision is recorded.
-- The lint gate green (`CLAUDE.md` → Improvement gate).
+- The lint gate green (`AGENTS.md` → Improvement gate).
 - Every page object has a locator-contract spec; `npm run test:unit` green.
 - Docs updated by whoever changed the code: authoring-tests.md (fixtures, page objects, tags),
-  configuration.md (storage service config), `CLAUDE.md` (fixtures), `.env.example`.
+  configuration.md (storage service config), `AGENTS.md` (fixtures), `.env.example`.
 - The parent plan's Phase 6 entry is a pointer to this plan.
 - Retries: 2 everywhere, local runs included (`E2E_RETRIES` overrides;
   `src/common/config/project.ts`), set after the user asked whether 0 retries for local runs is
